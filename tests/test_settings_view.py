@@ -762,3 +762,71 @@ class TestUISettings:
         """Switching to 界面 tab (index 5) should not raise."""
         view._tabs.setCurrentIndex(5)
         assert view._tabs.currentIndex() == 5
+
+
+# ── Named round-trip tests required by task spec 1-H / 1-I ───────────────────
+
+
+class TestTaskSpecRoundTrips:
+    """Exact test names required by the 1-H / 1-I task spec."""
+
+    def test_helicon_advanced_tiff_compression_roundtrip(
+        self, view: SettingsView
+    ) -> None:
+        view._tiff_compression_combo.setCurrentIndex(1)  # LZW
+        view._save_helicon_advanced()
+        view.on_activate()
+        assert view._tiff_compression_combo.currentIndex() == 1
+
+        view._tiff_compression_combo.setCurrentIndex(2)  # ZIP
+        view._save_helicon_advanced()
+        view.on_activate()
+        assert view._tiff_compression_combo.currentIndex() == 2
+
+        stored = view.ctx.settings._qs.value(_K_HELICON_TIFF_COMPRESSION, "u")
+        assert stored == "zip"
+
+    def test_helicon_advanced_save_depth_map_roundtrip(
+        self, view: SettingsView
+    ) -> None:
+        view._save_depth_map_chk.setChecked(True)
+        view._save_helicon_advanced()
+        view.on_activate()
+        assert view._save_depth_map_chk.isChecked() is True
+
+        stored = view.ctx.settings._qs.value(_K_HELICON_SAVE_DEPTH_MAP, "false")
+        assert stored == "true"
+
+    def test_helicon_advanced_concurrency_roundtrip(
+        self, view: SettingsView
+    ) -> None:
+        view._concurrency_spin.setValue(4)
+        view._save_helicon_advanced()
+        view.on_activate()
+        assert view._concurrency_spin.value() == 4
+
+        stored = int(view.ctx.settings._qs.value(_K_HELICON_CONCURRENCY, 1))
+        assert stored == 4
+
+    def test_workbench_auto_watch_roundtrip(self, view: SettingsView) -> None:
+        view._auto_watch_chk.setChecked(False)
+        view._save_workbench()
+        view.on_activate()
+        assert view._auto_watch_chk.isChecked() is False
+
+        stored = view.ctx.settings._qs.value(_K_WB_AUTO_WATCH, "true")
+        assert stored == "false"
+
+    def test_workbench_file_view_mode_roundtrip(self, view: SettingsView) -> None:
+        view._file_view_mode_combo.setCurrentIndex(1)  # with-zip
+        view._save_workbench()
+        view.on_activate()
+        assert view._file_view_mode_combo.currentIndex() == 1
+
+        view._file_view_mode_combo.setCurrentIndex(2)  # all
+        view._save_workbench()
+        view.on_activate()
+        assert view._file_view_mode_combo.currentIndex() == 2
+
+        stored = view.ctx.settings._qs.value(_K_WB_FILE_VIEW_MODE, "jpg-tif")
+        assert stored == "all"
