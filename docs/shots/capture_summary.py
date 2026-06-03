@@ -68,7 +68,7 @@ ctx.settings = MagicMock()
 from app.views.summary_view import SummaryView
 
 view = SummaryView(ctx)
-view.resize(1280, 720)
+view.resize(1920, 1080)
 view.on_activate()
 
 out = Path(__file__).parent / "page_summary.png"

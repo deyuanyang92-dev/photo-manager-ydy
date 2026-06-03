@@ -7,12 +7,13 @@ Oracle:
 功能：
   - 顶部控制栏：标题 + 项目筛选下拉 + "⚙ 字段"按钮 + Excel/CSV 导出 + 保存到目录
   - 可折叠字段选择面板（全选 / 重置默认 / 清空）
-  - 多列标本汇总表（sticky 首列）：25 默认列，全量 32 列可切换
+  - 多列标本汇总表（sticky 首列）：26 默认列，全量 34 列可切换
   - 空状态提示、行数 + 列数计数标签
   - 状态列彩色（已合成=青 / 部分合成=黄 / 待合成=红）
   - taxoOk / RNA 标记列彩色
   - 导出 Excel（通过 export_service.export_excel）
   - 导出 CSV（客户端按当前可见列 + 项目筛选）
+  - 控制区套 QScrollArea 防窗口挤压；汇总表独立滚动 stretch=1
 """
 from __future__ import annotations
 
@@ -111,6 +112,7 @@ def _build_all_cols() -> list[dict]:
         return "".join(parts)
 
     return [
+        {"key": "projCode",     "label": "项目编号",      "get": lambda s, g: g.get("projCode", "")},
         {"key": "uid",          "label": "标本唯一编号",  "get": lambda s, g: s.uid or ""},
         {"key": "spId",         "label": "物种拼音编号",  "get": lambda s, g: s.id or ""},
         {"key": "nameCn",       "label": "物种中名",      "get": lambda s, g: s.scientific_name_cn or ""},
@@ -143,6 +145,7 @@ def _build_all_cols() -> list[dict]:
         {"key": "rna",          "label": "RNA",           "get": lambda s, g: "✓" if _is_rna(s.storage) else "✗"},
         {"key": "meta",         "label": "Meta%",         "get": lambda s, g: _meta_score(s)},
         {"key": "notes",        "label": "备注",          "get": lambda s, g: s.notes or ""},
+        {"key": "photoNotes",   "label": "拍照备注",      "get": lambda s, g: s.photo_notes or ""},
     ]
 
 
@@ -150,7 +153,7 @@ ALL_COLS = _build_all_cols()
 
 # Default visible column keys (mirrors SUMMARY_DEFAULT_COLS in app.js)
 _DEFAULT_KEYS = [
-    "uid", "spId", "nameCn", "nameLat",
+    "projCode", "uid", "spId", "nameCn", "nameLat",
     "taxonGrpCn", "orderCn", "familyCn", "genusCn",
     "province", "site", "station", "geoArea",
     "lon", "lat", "storage", "collDate", "photoDate",
@@ -295,9 +298,9 @@ class SummaryView(BaseView):
     def __init__(self, ctx: "AppContext") -> None:
         self._visible_keys: list[str] = list(_DEFAULT_KEYS)
         self._specimens: list[Specimen] = []
-        self._grouping: dict[str, dict] = {}          # uid → {count, status}
+        self._grouping: dict[str, dict] = {}          # uid → {count, status, projCode}
         self._project_filter: str = ""                # "" = all
-        self._projects: list[dict] = []               # list of {id, name, directory}
+        self._projects: list[dict] = []               # list of {id, name, directory, projectCode?}
         self._picker_open: bool = False
         self._model: Optional[QStandardItemModel] = None
         self._proxy: Optional[QSortFilterProxyModel] = None
@@ -327,21 +330,35 @@ class SummaryView(BaseView):
             f"alternate-background-color:{_C_ALT_ROW};selection-background-color:#143038;}}"
             f"QHeaderView::section{{background:{_C_HDR_BG};color:{_C_HDR_FG};"
             f"font-weight:600;padding:5px 8px;border:none;border-right:1px solid {_C_BORDER};}}"
+            # Transparent scrollarea background so controls region blends in
+            f"QScrollArea{{background:transparent;border:none;}}"
+            f"QScrollArea > QWidget > QWidget{{background:transparent;}}"
         )
 
+        # ── Outer layout: controls region (fixed-height scroll) + table (stretch) ──
         root = QVBoxLayout(self)
-        root.setContentsMargins(20, 16, 20, 16)
-        root.setSpacing(10)
+        root.setContentsMargins(20, 18, 20, 16)
+        root.setSpacing(0)
 
-        # ── Top control bar ────────────────────────────────────────────────────
+        # ── Controls region wrapped in QScrollArea (prevents overlap when narrow) ──
+        controls_widget = QWidget()
+        controls_widget.setStyleSheet(f"background:{_C_BG};")
+        controls_layout = QVBoxLayout(controls_widget)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.setSpacing(10)
+
+        # Top control bar
         bar = QHBoxLayout()
-        bar.setSpacing(8)
+        bar.setSpacing(12)
 
         title = QLabel("项目汇总")
         title.setStyleSheet(
             f"font-size:16px;color:#e6eee8;font-weight:600;"
         )
         bar.addWidget(title)
+
+        # Separator spacing between title and controls
+        bar.addSpacing(8)
 
         # Project filter combo
         self._filter_combo = QComboBox()
@@ -355,6 +372,8 @@ class SummaryView(BaseView):
         self._btn_cols.clicked.connect(self._toggle_picker)
         bar.addWidget(self._btn_cols)
 
+        bar.addSpacing(4)
+
         # Export buttons
         self._btn_excel = QPushButton("⬇ Excel")
         self._btn_excel.setObjectName("Primary")
@@ -366,6 +385,8 @@ class SummaryView(BaseView):
         self._btn_csv.setToolTip("导出当前可见字段为 CSV")
         self._btn_csv.clicked.connect(self._export_csv)
         bar.addWidget(self._btn_csv)
+
+        bar.addSpacing(8)
 
         # Save to directory
         self._dir_input = QLineEdit()
@@ -388,18 +409,39 @@ class SummaryView(BaseView):
         self._count_lbl.setStyleSheet(f"font-size:12px;color:{_C_MUTED};")
         bar.addWidget(self._count_lbl)
 
-        root.addLayout(bar)
+        controls_layout.addLayout(bar)
 
         # ── Field picker panel (initially hidden) ──────────────────────────────
         self._picker = _FieldPicker(
             self._visible_keys,
             on_change=self._on_keys_changed,
-            parent=self,
+            parent=controls_widget,
         )
         self._picker.setVisible(False)
-        root.addWidget(self._picker)
+        controls_layout.addWidget(self._picker)
 
-        # ── Table ──────────────────────────────────────────────────────────────
+        # Bottom border under controls area
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet(f"background:{_C_BORDER};max-height:1px;border:none;")
+        controls_layout.addWidget(sep)
+
+        # Wrap controls in a scroll area so they never overlap the table
+        controls_scroll = QScrollArea()
+        controls_scroll.setWidget(controls_widget)
+        controls_scroll.setWidgetResizable(True)
+        controls_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        controls_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        controls_scroll.setFixedHeight(54)   # bar-only height; expands when picker opens
+        controls_scroll.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed,
+        )
+        self._controls_scroll = controls_scroll
+        root.addWidget(controls_scroll)
+
+        root.addSpacing(12)
+
+        # ── Table (takes all remaining space) ─────────────────────────────────
         self._table = QTableView()
         self._table.setAlternatingRowColors(True)
         self._table.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
@@ -419,6 +461,7 @@ class SummaryView(BaseView):
         """Load specimens + grouping data from the current project DB."""
         self._specimens = []
         self._grouping = {}
+        self._projects = []
 
         db: Optional[sqlite3.Connection] = self.ctx.get_db()
         if db is None:
@@ -434,6 +477,21 @@ class SummaryView(BaseView):
             self._specimens = [Specimen.from_row(r) for r in rows]
         except Exception:
             self._specimens = []
+
+        # Load projects (name, projectCode) from projects table if present
+        # Maps directory → project code string for projCode column
+        dir_to_proj: dict[str, dict] = {}
+        try:
+            p_rows = db.execute(
+                "SELECT directory, name, project_code FROM projects"
+            ).fetchall()
+            for pr in p_rows:
+                d = dict(pr)
+                if d.get("directory"):
+                    dir_to_proj[d["directory"]] = d
+                    self._projects.append(d)
+        except Exception:
+            pass  # projects table absent — projCode will be empty
 
         # Load grouping compact: count + status per uid
         try:
@@ -457,21 +515,43 @@ class SummaryView(BaseView):
         except Exception:
             self._grouping = {}
 
+        # Inject projCode into grouping records from owner_project_dir lookup
+        for sp in self._specimens:
+            uid = sp.uid or ""
+            proj_info = dir_to_proj.get(sp.owner_project_dir or "")
+            code = (proj_info or {}).get("project_code") or ""
+            if uid not in self._grouping:
+                self._grouping[uid] = {"count": 0, "status": "无成果"}
+            self._grouping[uid]["projCode"] = code
+
         self._rebuild_filter_combo()
         self._rebuild_table()
 
     def _rebuild_filter_combo(self) -> None:
-        """Rebuild the project filter combo from current specimens."""
+        """Rebuild the project filter combo from current specimens.
+
+        Prefers project name from the projects table (if loaded);
+        falls back to the last path component of owner_project_dir.
+        """
         self._filter_combo.blockSignals(True)
         self._filter_combo.clear()
         self._filter_combo.addItem("全部项目", "")
 
-        # Collect unique project dirs from specimens
+        # Build dir → display-name map (projects table wins, then path fallback)
+        dir_to_name: dict[str, str] = {}
+        for p in self._projects:
+            if p.get("directory"):
+                label = p.get("name") or Path(p["directory"]).name or p["directory"]
+                dir_to_name[p["directory"]] = label
+
+        # Collect unique project dirs from specimens (preserves encounter order)
         seen: dict[str, str] = {}
         for sp in self._specimens:
             if sp.owner_project_dir and sp.owner_project_dir not in seen:
-                # Use the last path component as project name fallback
-                name = Path(sp.owner_project_dir).name or sp.owner_project_dir
+                name = dir_to_name.get(
+                    sp.owner_project_dir,
+                    Path(sp.owner_project_dir).name or sp.owner_project_dir,
+                )
                 seen[sp.owner_project_dir] = name
 
         for proj_dir, name in seen.items():
@@ -518,7 +598,7 @@ class SummaryView(BaseView):
         text_brush   = QBrush(QColor(_C_TEXT))
 
         for row_idx, sp in enumerate(specs):
-            g = self._grouping.get(sp.uid or "", {"count": 0, "status": "无成果"})
+            g = self._grouping.get(sp.uid or "", {"count": 0, "status": "无成果", "projCode": ""})
             for col_idx, col in enumerate(vis_cols):
                 try:
                     val = col["get"](sp, g)
@@ -568,6 +648,9 @@ class SummaryView(BaseView):
     def _toggle_picker(self, checked: bool) -> None:
         self._picker_open = checked
         self._picker.setVisible(checked)
+        # Expand/contract the controls scroll area height to accommodate the picker
+        # Bar-only ≈ 54 px; bar + picker ≈ 200 px (picker has max-height:120 + header)
+        self._controls_scroll.setFixedHeight(200 if checked else 54)
 
     def _on_keys_changed(self, new_keys: list[str]) -> None:
         self._visible_keys = new_keys
