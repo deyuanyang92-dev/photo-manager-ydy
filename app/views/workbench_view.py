@@ -67,14 +67,15 @@ class WorkbenchView(BaseView):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # ── Topbar: brand + project switcher + global actions ──────────────
-        root.addWidget(self._build_topbar())
+        # NOTE: brand / project-switcher / global-action chrome now lives in
+        # MainWindow's TopBar + ContextBar.  This view renders only the
+        # three-column workbench content with generous whitespace.
 
         # ── Body container (header + dir-strip + splitter) ─────────────────
         body = QWidget()
         body_lay = QVBoxLayout(body)
-        body_lay.setContentsMargins(18, 16, 18, 16)
-        body_lay.setSpacing(12)
+        body_lay.setContentsMargins(28, 22, 28, 18)
+        body_lay.setSpacing(18)
         root.addWidget(body, stretch=1)
 
         # ── Workspace header: title + project tag + helicon status ─────────
@@ -88,7 +89,7 @@ class WorkbenchView(BaseView):
         outer = QSplitter(Qt.Orientation.Horizontal)
         outer.setObjectName("WorkbenchSplitter")
         outer.setChildrenCollapsible(False)
-        outer.setHandleWidth(12)
+        outer.setHandleWidth(18)
 
         # ── Left: specimen sidebar ─────────────────────────────────────────
         self._sidebar = SpecimenSidebar(self.ctx)
@@ -102,6 +103,7 @@ class WorkbenchView(BaseView):
         # ── Centre: vertical splitter (monitor top, grouping bottom) ───────
         centre = QSplitter(Qt.Orientation.Vertical)
         centre.setChildrenCollapsible(False)
+        centre.setHandleWidth(18)
 
         self._monitor = MonitorPanel(self.ctx)
         self._monitor.refresh_requested.connect(self._refresh_monitor)
@@ -124,7 +126,7 @@ class WorkbenchView(BaseView):
         right.setMinimumWidth(220)
         right_lay = QVBoxLayout(right)
         right_lay.setContentsMargins(0, 0, 0, 0)
-        right_lay.setSpacing(12)
+        right_lay.setSpacing(18)
 
         self._naming = NamingPanel(self.ctx)
         self._naming.save_requested.connect(self._on_naming_save)
@@ -161,44 +163,12 @@ class WorkbenchView(BaseView):
 
     # ── Header chrome builders ─────────────────────────────────────────────────
 
-    def _build_topbar(self) -> QFrame:
-        """Brand + project switcher + global actions (web renderTopbar)."""
-        bar = QFrame()
-        bar.setObjectName("TopBar")
-        bar.setFixedHeight(54)
-        lay = QHBoxLayout(bar)
-        lay.setContentsMargins(18, 8, 18, 8)
-        lay.setSpacing(12)
-
-        mark = QLabel("SP")
-        mark.setObjectName("BrandMark")
-        lay.addWidget(mark)
-        brand = QLabel("标本影像管理")
-        brand.setObjectName("BrandText")
-        lay.addWidget(brand)
-
-        lay.addSpacing(8)
-        self._project_switcher = QPushButton("当前项目 （未选） ▾")
-        self._project_switcher.setObjectName("ProjectSwitcher")
-        self._project_switcher.setToolTip("当前工作区项目")
-        lay.addWidget(self._project_switcher)
-
-        lay.addStretch()
-        for label, tip in (
-            ("+ 新建项目", "新建一个工作区项目"),
-            ("+ 打开工作区", "打开一个已有项目目录"),
-            ("智能压缩", "JPG→JXL 无损压缩 + ZIP 归档"),
-            ("🎬 Helicon", "Helicon Focus 路径配置"),
-            ("⚙", "全局设置"),
-        ):
-            btn = QPushButton(label)
-            btn.setObjectName("Outline")
-            btn.setToolTip(tip)
-            lay.addWidget(btn)
-        return bar
-
     def _build_header(self) -> QHBoxLayout:
-        """Workspace title + project tag + Helicon status tag."""
+        """Workspace title + project tag + Helicon status tag.
+
+        Slim content-level header.  Global chrome (brand / project switcher /
+        quick actions) lives in MainWindow's TopBar + ContextBar.
+        """
         row = QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(12)
@@ -241,8 +211,15 @@ class WorkbenchView(BaseView):
         """Update header tags + dir-strip + monitor batch from current state."""
         project_dir = self.ctx.current_project_dir
         name = Path(project_dir).name if project_dir else "（未选）"
-        self._project_switcher.setText(f"当前项目  {name}  ▾")
         self._project_tag.setText(name)
+
+        # Keep MainWindow's context bar (project + active badge) in sync.
+        win = self.window()
+        if hasattr(win, "refresh_context_bar"):
+            try:
+                win.refresh_context_bar()
+            except Exception:
+                pass
 
         # Helicon status tag
         installed = False

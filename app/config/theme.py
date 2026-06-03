@@ -60,8 +60,11 @@ TOKENS: dict[str, str] = {
     "nav_bg": "#091e24",
     "nav_selected_bg": "#12313a",
     "nav_selected_border": "#29b9ab",
-    "topbar_bg": "#0a2128",
-    "topbar_border": "rgba(145, 182, 181, 0.16)",
+    "topbar_bg": "#081a20",
+    "topbar_border": "rgba(145, 182, 181, 0.10)",
+    "contextbar_bg": "#0a1f25",
+    "nav_segment_text": "#9fbab8",
+    "nav_segment_hover_bg": "rgba(41,185,171,0.08)",
 
     # Status bar
     "statusbar_bg": "#091e24",
@@ -185,64 +188,103 @@ QToolTip {{
     font-size: {t["font_sm"]};
 }}
 
-/* ── Topbar (brand + project switcher + global actions) ─────────── */
+/* ── Top bar (brand + segmented nav + global actions) ───────────── */
 QFrame#TopBar {{
     background-color: {t["topbar_bg"]};
     border: none;
     border-bottom: 1px solid {t["topbar_border"]};
 }}
-QLabel#BrandMark {{
-    background-color: {t["accent"]};
-    color: {t["bg"]};
-    font-weight: 800;
-    font-size: {t["font_body"]};
-    border-radius: {t["radius_sm"]};
-    padding: 4px 8px;
-    letter-spacing: 0.5px;
-}}
-QLabel#BrandText {{
+QLabel#BrandWord {{
     font-family: {serif};
     font-size: {t["font_lg"]};
     font-weight: 600;
     color: {t["text"]};
+    letter-spacing: 1.2px;
+}}
+
+/* Segmented navigation — flat buttons, 2px accent underline when active */
+QPushButton#NavSegment {{
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: {t["nav_segment_text"]};
+    font-size: {t["font_md"]};
+    font-weight: 500;
+    padding: 9px 16px 7px 16px;
+    margin: 0;
+    border-radius: 0;
     letter-spacing: 0.5px;
+}}
+QPushButton#NavSegment:hover {{
+    color: {t["text"]};
+    background-color: {t["nav_segment_hover_bg"]};
+    border-top-left-radius: {t["radius_sm"]};
+    border-top-right-radius: {t["radius_sm"]};
+}}
+QPushButton#NavSegment:checked {{
+    color: {t["accent_hover"]};
+    border-bottom: 2px solid {t["accent"]};
+    font-weight: 600;
+}}
+
+/* Icon-only ghost buttons (theme toggle / settings cog) */
+QPushButton#IconGhost {{
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: {t["radius_sm"]};
+    color: {t["muted"]};
+    font-size: {t["font_lg"]};
+    padding: 0;
+}}
+QPushButton#IconGhost:hover {{
+    color: {t["accent_hover"]};
+    background-color: {t["nav_segment_hover_bg"]};
+    border-color: {t["border"]};
+}}
+
+/* ── Context bar (project switcher + active badge + quick actions) ─ */
+QFrame#ContextBar {{
+    background-color: {t["contextbar_bg"]};
+    border: none;
+    border-bottom: 1px solid {t["topbar_border"]};
+}}
+QLabel#ContextLabel {{
+    color: {t["muted_dim"]};
+    font-size: {t["font_sm"]};
+    letter-spacing: 0.6px;
 }}
 QPushButton#ProjectSwitcher {{
     background-color: {t["panel_2"]};
-    border: 1px solid {t["border_medium"]};
+    border: 1px solid {t["border"]};
     border-radius: {t["radius"]};
-    padding: 6px 14px;
-    color: {t["text_soft"]};
+    padding: 6px 16px;
+    color: {t["text"]};
     font-size: {t["font_body"]};
+    font-weight: 600;
     text-align: left;
 }}
 QPushButton#ProjectSwitcher:hover {{
     border-color: {t["accent"]};
     background-color: {t["modal_surface"]};
 }}
-
-/* ── Navigation sidebar ──────────────────────────────────────────── */
-QListWidget#NavList {{
-    background-color: {t["nav_bg"]};
-    border: none;
-    border-right: 1px solid {t["border"]};
-    outline: none;
-    padding: 10px 0;
+QLabel#ActiveBadgeOn {{
+    background-color: {t["accent"]};
+    color: {t["bg"]};
+    border-radius: {t["radius_sm"]};
+    padding: 4px 12px;
+    font-family: {mono};
+    font-size: {t["font_sm"]};
+    font-weight: 700;
+    letter-spacing: 0.5px;
 }}
-QListWidget#NavList::item {{
-    color: {t["muted"]};
-    padding: 11px 18px;
-    border-left: 3px solid transparent;
-    font-size: {t["font_body"]};
-}}
-QListWidget#NavList::item:hover {{
-    background-color: {t["nav_selected_bg"]};
-    color: {t["text"]};
-}}
-QListWidget#NavList::item:selected {{
-    background-color: {t["nav_selected_bg"]};
-    color: {t["accent"]};
-    border-left: 3px solid {t["nav_selected_border"]};
+QLabel#ActiveBadgeOff {{
+    background-color: {t["panel_inset"]};
+    color: {t["muted_dim"]};
+    border: 1px solid {t["border"]};
+    border-radius: {t["radius_sm"]};
+    padding: 3px 12px;
+    font-family: {mono};
+    font-size: {t["font_sm"]};
     font-weight: 600;
 }}
 
@@ -528,11 +570,12 @@ QScrollBar::handle:horizontal {{ background: {t["scrollbar_handle"]}; border-rad
 QScrollBar::handle:horizontal:hover {{ background: {t["scrollbar_handle_hover"]}; }}
 QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}
 
-/* ── Splitter ────────────────────────────────────────────────────── */
-QSplitter::handle {{ background-color: {t["border"]}; }}
-QSplitter::handle:hover {{ background-color: {t["accent_soft"]}; }}
-QSplitter::handle:horizontal {{ width: 2px; }}
-QSplitter::handle:vertical {{ height: 2px; }}
+/* ── Splitter (handles are pure whitespace for an airy, card-gap feel) ─ */
+QSplitter#WorkbenchSplitter::handle {{ background: transparent; }}
+QSplitter::handle {{ background-color: transparent; }}
+QSplitter::handle:hover {{ background-color: {t["accent_soft"]}; border-radius: 2px; }}
+QSplitter::handle:horizontal {{ width: 18px; }}
+QSplitter::handle:vertical {{ height: 18px; }}
 
 /* ── Specimen list ───────────────────────────────────────────────── */
 QListWidget#SpecimenList {{
