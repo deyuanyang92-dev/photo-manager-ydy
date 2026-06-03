@@ -793,7 +793,7 @@ class TestQrEccQ:
         from qrcode.constants import ERROR_CORRECT_Q  # type: ignore
         assert ERROR_CORRECT_Q is not None
 
-    def test_generate_qr_pixmap_with_ecc_q(self):
+    def test_generate_qr_pixmap_with_ecc_q(self, qt_app):
         """_generate_qr_pixmap must produce a non-null pixmap at ECC Q."""
         pytest.importorskip("qrcode")
         from app.widgets.label_editor import _generate_qr_pixmap

@@ -305,12 +305,12 @@ class TestExportCsv:
         })
         view.on_activate()
 
-        # Patch QFileDialog to return our temp path
+        # Patch QFileDialog and QMessageBox to avoid blocking dialogs in offscreen
         import unittest.mock as mock
         with mock.patch(
             "app.views.taxonomy_view.QFileDialog.getSaveFileName",
             return_value=(str(out), "CSV 文件 (*.csv)"),
-        ):
+        ), mock.patch("app.views.taxonomy_view.QMessageBox.information"):
             view._export_csv(
                 view._svc.all_records(page=0, page_size=99999)[0]
             )
@@ -335,7 +335,7 @@ class TestExportCsv:
         with mock.patch(
             "app.views.taxonomy_view.QFileDialog.getSaveFileName",
             return_value=(str(out), ""),
-        ):
+        ), mock.patch("app.views.taxonomy_view.QMessageBox.information"):
             view._export_csv(recs)
 
         content = out.read_text(encoding="utf-8-sig")
