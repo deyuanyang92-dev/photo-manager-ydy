@@ -297,6 +297,38 @@ QPushButton#Danger:disabled { color: #5f7d7a; border-color: rgba(145, 182, 181, 
 
 QPushButton#Tiny { padding: 3px 11px; font-size: 11px; border-radius: 8px; }
 
+/* ── Sidebar collab-status strip ────────────────────────────────────── */
+QFrame#CollabStrip {
+    background-color: #0b2025;
+    border: 1px solid rgba(145, 182, 181, 0.10);
+    border-top: 1px solid rgba(255,255,255,0.03);
+    border-radius: 8px;
+    margin-top: 8px;
+}
+
+/* ── Storage-mode button group (保存方式 pills) ─────────────────────── */
+QPushButton#StorageBtn {
+    background-color: #0a1e24;
+    color: #87a2a1;
+    border: 1px solid rgba(145, 182, 181, 0.10);
+    border-radius: 999px;
+    padding: 3px 10px;
+    font-size: 11px;
+    font-weight: 600;
+    font-family: "JetBrains Mono", "Cascadia Code", "SF Mono", Consolas, "DejaVu Sans Mono", monospace;
+}
+QPushButton#StorageBtn:hover {
+    border-color: #29b9ab;
+    color: #eef3ef;
+    background-color: rgba(41,185,171,0.08);
+}
+QPushButton#StorageBtn:checked {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #33c8ba, stop:1 #23a99c);
+    color: #08161b;
+    border-color: #23a99c;
+    font-weight: 700;
+}
+
 /* ── Drop target (process selected JPG+TIFF) ─────────────────────── */
 QPushButton#DropTarget {
     background-color: #0a1e24;
