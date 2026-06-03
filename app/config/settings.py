@@ -58,6 +58,18 @@ class AppSettings:
     def last_nav_index(self, idx: int) -> None:
         self._qs.setValue("nav/last_index", idx)
 
+    # ── Workbench behaviour ───────────────────────────────────────────────
+
+    @property
+    def auto_activate_on_new_specimen(self) -> bool:
+        return self._qs.value(
+            "workbench/auto_activate_on_new_specimen", False, type=bool
+        )
+
+    @auto_activate_on_new_specimen.setter
+    def auto_activate_on_new_specimen(self, val: bool) -> None:
+        self._qs.setValue("workbench/auto_activate_on_new_specimen", val)
+
     # ── Sync ──────────────────────────────────────────────────────────
 
     def sync(self) -> None:
