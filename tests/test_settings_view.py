@@ -47,6 +47,16 @@ from app.views.settings_view import (
     _K_WB_GROUPING_AUTO_WATCH,
     _K_WB_GROUPING_AUTO_WATCH_MODE,
     _K_WB_FILE_VIEW_MODE,
+    _K_UI_FONT_SCALE,
+    _K_UI_ICON_GPS,
+    _K_UI_ICON_MAP,
+    _K_UI_ICON_FOLDER,
+    _K_UI_ICON_SEARCH,
+    _K_DEBUG_USE_REAL_COMPRESSION,
+    _K_SHORTCUT_MONITOR_ACTIVATE,
+    _K_SHORTCUT_MONITOR_DEACTIVATE,
+    _K_SHORTCUT_LABELS_PRINT,
+    _K_SHORTCUT_LABELS_NEXT,
 )
 
 
@@ -105,11 +115,11 @@ class TestInstantiation:
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 
 class TestTabs:
-    def test_has_six_tabs(self, view: SettingsView) -> None:
-        assert view._tabs.count() == 6
+    def test_has_seven_tabs(self, view: SettingsView) -> None:
+        assert view._tabs.count() == 7
 
     def test_tab_titles(self, view: SettingsView) -> None:
-        expected = ["项目", "Helicon", "归档", "工作台", "操作人", "关于"]
+        expected = ["项目", "Helicon", "归档", "工作台", "操作人", "界面", "关于"]
         actual = [view._tabs.tabText(i) for i in range(view._tabs.count())]
         assert actual == expected
 
@@ -253,9 +263,9 @@ class TestAboutTab:
         assert APP_VERSION != ""
 
     def test_about_tab_accessible(self, view: SettingsView) -> None:
-        # Switch to "关于" tab (index 4) — should not raise
-        view._tabs.setCurrentIndex(4)
-        assert view._tabs.currentIndex() == 4
+        # Switch to "关于" tab (now index 6) — should not raise
+        view._tabs.setCurrentIndex(6)
+        assert view._tabs.currentIndex() == 6
 
 
 # ── QSettings key namespaces ─────────────────────────────────────────────────
@@ -622,3 +632,133 @@ class TestWorkbenchToggles:
         view._save_workbench()
         stored = view.ctx.settings._qs.value(_K_WB_FILE_VIEW_MODE, "jpg-tif")
         assert stored == "all"
+
+
+# ── 界面 tab: Global UI settings ─────────────────────────────────────────────
+
+
+class TestUISettings:
+    """Round-trip and key tests for renderGlobalSettings() equivalent (界面 tab).
+
+    Covers: fontScale slider, icon emoji fields, useRealCompression debug switch,
+    and keyboard shortcut QKeySequenceEdit recording.
+    """
+
+    def test_ui_font_scale_key(self) -> None:
+        assert _K_UI_FONT_SCALE == "ui/font_scale"
+
+    def test_ui_icon_gps_key(self) -> None:
+        assert _K_UI_ICON_GPS == "ui/icon_gps"
+
+    def test_ui_icon_map_key(self) -> None:
+        assert _K_UI_ICON_MAP == "ui/icon_map"
+
+    def test_ui_icon_folder_key(self) -> None:
+        assert _K_UI_ICON_FOLDER == "ui/icon_folder"
+
+    def test_ui_icon_search_key(self) -> None:
+        assert _K_UI_ICON_SEARCH == "ui/icon_search"
+
+    def test_debug_use_real_compression_key(self) -> None:
+        assert _K_DEBUG_USE_REAL_COMPRESSION == "debug/use_real_compression"
+
+    def test_shortcut_monitor_activate_key(self) -> None:
+        assert _K_SHORTCUT_MONITOR_ACTIVATE == "shortcuts/monitor_activate"
+
+    def test_shortcut_labels_print_key(self) -> None:
+        assert _K_SHORTCUT_LABELS_PRINT == "shortcuts/labels_print"
+
+    def test_font_scale_default_1(self, view: SettingsView) -> None:
+        """Fresh settings → fontScale defaults to 1.0."""
+        assert view._font_scale_spin.value() == pytest.approx(1.0, abs=0.01)
+
+    def test_font_scale_round_trip(self, view: SettingsView) -> None:
+        view._font_scale_spin.setValue(1.2)
+        view._save_ui()
+        view.on_activate()
+        assert view._font_scale_spin.value() == pytest.approx(1.2, abs=0.01)
+
+    def test_font_scale_min_clamp(self, view: SettingsView) -> None:
+        """Values below 0.7 are clamped on load."""
+        view.ctx.settings._qs.setValue(_K_UI_FONT_SCALE, 0.3)
+        view.on_activate()
+        assert view._font_scale_spin.value() >= 0.7
+
+    def test_font_scale_max_clamp(self, view: SettingsView) -> None:
+        view.ctx.settings._qs.setValue(_K_UI_FONT_SCALE, 9.9)
+        view.on_activate()
+        assert view._font_scale_spin.value() <= 1.5
+
+    def test_font_scale_pct_label_updates(self, view: SettingsView) -> None:
+        """Percentage label shows rounded integer."""
+        view._font_scale_spin.setValue(1.1)
+        view._on_font_scale_changed(1.1)
+        assert "110%" in view._font_scale_pct_label.text()
+
+    def test_icon_gps_round_trip(self, view: SettingsView) -> None:
+        view._icon_gps_edit.setText("🛰")
+        view._save_ui()
+        view.on_activate()
+        assert view._icon_gps_edit.text() == "🛰"
+
+    def test_icon_map_round_trip(self, view: SettingsView) -> None:
+        view._icon_map_edit.setText("🗺")
+        view._save_ui()
+        view.on_activate()
+        assert view._icon_map_edit.text() == "🗺"
+
+    def test_icon_folder_round_trip(self, view: SettingsView) -> None:
+        view._icon_folder_edit.setText("🗂")
+        view._save_ui()
+        view.on_activate()
+        assert view._icon_folder_edit.text() == "🗂"
+
+    def test_icon_search_round_trip(self, view: SettingsView) -> None:
+        view._icon_search_edit.setText("🔎")
+        view._save_ui()
+        view.on_activate()
+        assert view._icon_search_edit.text() == "🔎"
+
+    def test_use_real_compression_default_false(self, view: SettingsView) -> None:
+        """useRealCompression defaults to False — debug switch off by default."""
+        assert view._use_real_compression_chk.isChecked() is False
+
+    def test_use_real_compression_round_trip_true(self, view: SettingsView) -> None:
+        view._use_real_compression_chk.setChecked(True)
+        view._save_ui()
+        view.on_activate()
+        assert view._use_real_compression_chk.isChecked() is True
+
+    def test_use_real_compression_round_trip_false(self, view: SettingsView) -> None:
+        view._use_real_compression_chk.setChecked(True)
+        view._save_ui()
+        view._use_real_compression_chk.setChecked(False)
+        view._save_ui()
+        view.on_activate()
+        assert view._use_real_compression_chk.isChecked() is False
+
+    def test_qsettings_stores_use_real_compression_true(
+        self, view: SettingsView
+    ) -> None:
+        view._use_real_compression_chk.setChecked(True)
+        view._save_ui()
+        stored = view.ctx.settings._qs.value(_K_DEBUG_USE_REAL_COMPRESSION, "false")
+        assert stored == "true"
+
+    def test_shortcut_monitor_activate_round_trip(self, view: SettingsView) -> None:
+        from PyQt6.QtGui import QKeySequence
+        view._sc_monitor_activate.setKeySequence(QKeySequence("Ctrl+A"))
+        view._save_ui()
+        view.on_activate()
+        ks = view._sc_monitor_activate.keySequence()
+        assert ks.toString() == "Ctrl+A"
+
+    def test_shortcut_empty_on_fresh_settings(self, view: SettingsView) -> None:
+        """Fresh settings → all shortcut widgets start empty."""
+        assert view._sc_monitor_activate.keySequence().isEmpty()
+        assert view._sc_labels_print.keySequence().isEmpty()
+
+    def test_ui_tab_accessible(self, view: SettingsView) -> None:
+        """Switching to 界面 tab (index 5) should not raise."""
+        view._tabs.setCurrentIndex(5)
+        assert view._tabs.currentIndex() == 5

@@ -18,8 +18,8 @@ Source: `prototype-photo-gui/app.js` (12 config functions) vs `app/views/setting
 | 操作人设置 (app.js:~9418 project drawer / v4Settings) | ✓ | `_build_tab_user()` — currentUser 字段 |
 | 子目录名 + 最近项目 (projectPathConfig app.js:1707) | ✓ | `_build_tab_project()` — incoming/results subdirs + recent list CRUD |
 | About 页 (版本/环境/配置文件路径) | ✓ | `_build_tab_about()` |
-| `renderHeliconConfigModal()` 高级参数 (app.js:7029) | ◐ | **Helicon tab 已有 method/radius/smoothing/jpegQuality；缺 tiffCompression / outputFormat / saveDepthMap / runMode / concurrency（"高级" 折叠块）** |
-| `saveV4Settings()` / `loadV4Settings()` (app.js:2593–2614) | ✗ | **autoWatch、groupingAutoWatch、groupingAutoWatchMode、fileViewMode、autoActivateOnNewSpecimen — 五个工作台持久化开关，settings_view 无对应项** |
+| `renderHeliconConfigModal()` 高级参数 (app.js:7029) | ✓ | `_build_tab_helicon()` 末尾 `QGroupBox("高级输出选项")` 折叠块：outputFormat/tiffCompression/runMode QComboBox×3 + concurrency QSpinBox + saveDepthMap QCheckBox |
+| `saveV4Settings()` / `loadV4Settings()` (app.js:2593–2614) | ✓ | `_build_tab_workbench()` — autoWatch/autoActivateNew/groupingAutoWatch/groupingAutoWatchMode/fileViewMode 五项全覆盖 |
 | `renderGlobalSettings()` (app.js:4463) | ✓ | `_build_tab_ui()` — 界面 tab：fontScale QDoubleSpinBox(0.7–1.5)、四项 icon emoji 输入框、useRealCompression QCheckBox、四个 QKeySequenceEdit 快捷键录制 |
 | `renderProjectSettingsDrawer()` 概要/保存方式/人员预设/命名规则/TIFF元数据 (app.js:9418) | ✗ | **项目级面板（非全局配置）；Qt 中归属 WorkbenchView 抽屉，不在 settings_view。属于已知范围外缺口** |
 | `renderSettingsSection()` 工作台压缩折叠 (app.js:17716) | ✗ | **autoNaming / autoStart 仅在工作台压缩面板出现，属 WorkbenchView 不属 settings_view。不应迁入此文件** |

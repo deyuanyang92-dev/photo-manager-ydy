@@ -27,14 +27,17 @@ import platform
 from typing import TYPE_CHECKING
 
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QKeySequence
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
     QFrame,
     QGroupBox,
     QHBoxLayout,
+    QKeySequenceEdit,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -88,6 +91,22 @@ _K_WB_AUTO_ACTIVATE_NEW = "workbench/auto_activate_new"
 _K_WB_GROUPING_AUTO_WATCH = "workbench/grouping_auto_watch"
 _K_WB_GROUPING_AUTO_WATCH_MODE = "workbench/grouping_auto_watch_mode"
 _K_WB_FILE_VIEW_MODE = "workbench/file_view_mode"
+
+# ── Global UI settings (mirrors renderGlobalSettings) ────────────────────────
+
+_K_UI_FONT_SCALE = "ui/font_scale"          # float 0.7–1.5, default 1.0
+_K_UI_ICON_GPS = "ui/icon_gps"             # default "📡"
+_K_UI_ICON_MAP = "ui/icon_map"             # default "📍"
+_K_UI_ICON_FOLDER = "ui/icon_folder"       # default "📁"
+_K_UI_ICON_SEARCH = "ui/icon_search"       # default "🔍"
+_K_DEBUG_USE_REAL_COMPRESSION = "debug/use_real_compression"  # default False
+
+# ── Keyboard shortcuts (mirrors ensureShortcutsSettings) ─────────────────────
+
+_K_SHORTCUT_MONITOR_ACTIVATE = "shortcuts/monitor_activate"
+_K_SHORTCUT_MONITOR_DEACTIVATE = "shortcuts/monitor_deactivate"
+_K_SHORTCUT_LABELS_PRINT = "shortcuts/labels_print"
+_K_SHORTCUT_LABELS_NEXT = "shortcuts/labels_next"
 
 _RECENT_MAX = 10
 
@@ -187,6 +206,7 @@ class SettingsView(BaseView):
         self._build_tab_archive()
         self._build_tab_workbench()
         self._build_tab_user()
+        self._build_tab_ui()
         self._build_tab_about()
 
     def on_activate(self) -> None:
@@ -750,6 +770,143 @@ class SettingsView(BaseView):
         tab.body.addStretch()
         self._tabs.addTab(tab, "操作人")
 
+    def _build_tab_ui(self) -> None:
+        """界面 tab — mirrors renderGlobalSettings():
+        fontScale slider, icon emoji fields, useRealCompression debug switch,
+        and keyboard shortcut recording (QKeySequenceEdit, Qt-native equivalent
+        of web's ensureShortcutsSettings / renderShortcutScope).
+        """
+        tab = _ScrollTab()
+
+        # ── 字体缩放 ──────────────────────────────────────────────────────────
+        font_box = QGroupBox("字体缩放")
+        font_v = QVBoxLayout(font_box)
+        font_v.setSpacing(8)
+
+        font_row = QHBoxLayout()
+        font_row.setContentsMargins(0, 0, 0, 0)
+        font_row.setSpacing(10)
+
+        self._font_scale_spin = QDoubleSpinBox()
+        self._font_scale_spin.setRange(0.7, 1.5)
+        self._font_scale_spin.setSingleStep(0.05)
+        self._font_scale_spin.setDecimals(2)
+        self._font_scale_spin.setValue(1.0)
+        self._font_scale_spin.setFixedWidth(80)
+        self._font_scale_spin.setToolTip(
+            "全局字体缩放，0.7–1.5；改变后重启生效（对应 CSS --font-scale）"
+        )
+        font_row.addWidget(self._font_scale_spin)
+
+        self._font_scale_pct_label = QLabel("100%")
+        self._font_scale_pct_label.setObjectName("Muted")
+        font_row.addWidget(self._font_scale_pct_label)
+        font_row.addStretch()
+        font_v.addLayout(font_row)
+
+        self._font_scale_spin.valueChanged.connect(self._on_font_scale_changed)
+
+        note = QLabel("修改后下次启动生效（Qt 全局字体缩放）")
+        note.setObjectName("MutedSmall")
+        note.setWordWrap(True)
+        font_v.addWidget(note)
+
+        tab.body.addWidget(font_box)
+        tab.body.addSpacing(12)
+
+        # ── 图标自定义 ────────────────────────────────────────────────────────
+        icon_box = QGroupBox("图标自定义（emoji 替换）")
+        icon_form = QFormLayout(icon_box)
+        icon_form.setHorizontalSpacing(16)
+        icon_form.setVerticalSpacing(8)
+
+        self._icon_gps_edit = QLineEdit()
+        self._icon_gps_edit.setPlaceholderText("📡")
+        self._icon_gps_edit.setMaxLength(8)
+        self._icon_gps_edit.setToolTip("GPS / 定位 图标（默认 📡）")
+        self._icon_gps_edit.editingFinished.connect(self._save_ui)
+        icon_form.addRow("GPS / 定位", self._icon_gps_edit)
+
+        self._icon_map_edit = QLineEdit()
+        self._icon_map_edit.setPlaceholderText("📍")
+        self._icon_map_edit.setMaxLength(8)
+        self._icon_map_edit.setToolTip("地图选点 图标（默认 📍）")
+        self._icon_map_edit.editingFinished.connect(self._save_ui)
+        icon_form.addRow("地图选点", self._icon_map_edit)
+
+        self._icon_folder_edit = QLineEdit()
+        self._icon_folder_edit.setPlaceholderText("📁")
+        self._icon_folder_edit.setMaxLength(8)
+        self._icon_folder_edit.setToolTip("文件夹 图标（默认 📁）")
+        self._icon_folder_edit.editingFinished.connect(self._save_ui)
+        icon_form.addRow("文件夹", self._icon_folder_edit)
+
+        self._icon_search_edit = QLineEdit()
+        self._icon_search_edit.setPlaceholderText("🔍")
+        self._icon_search_edit.setMaxLength(8)
+        self._icon_search_edit.setToolTip("搜索 图标（默认 🔍）")
+        self._icon_search_edit.editingFinished.connect(self._save_ui)
+        icon_form.addRow("搜索", self._icon_search_edit)
+
+        tab.body.addWidget(icon_box)
+        tab.body.addSpacing(12)
+
+        # ── 键盘快捷键 (mirrors ensureShortcutsSettings / renderShortcutScope) ──
+        shortcut_box = QGroupBox("键盘快捷键")
+        shortcut_form = QFormLayout(shortcut_box)
+        shortcut_form.setHorizontalSpacing(16)
+        shortcut_form.setVerticalSpacing(8)
+
+        # monitor scope
+        self._sc_monitor_activate = QKeySequenceEdit()
+        self._sc_monitor_activate.setToolTip("工作台：激活标本（monitor/activate）")
+        self._sc_monitor_activate.editingFinished.connect(self._save_ui)
+        shortcut_form.addRow("激活标本（监控）", self._sc_monitor_activate)
+
+        self._sc_monitor_deactivate = QKeySequenceEdit()
+        self._sc_monitor_deactivate.setToolTip("工作台：去激活（monitor/deactivate）")
+        self._sc_monitor_deactivate.editingFinished.connect(self._save_ui)
+        shortcut_form.addRow("去激活（监控）", self._sc_monitor_deactivate)
+
+        # labels scope
+        self._sc_labels_print = QKeySequenceEdit()
+        self._sc_labels_print.setToolTip("标签打印：打印（labels/print）")
+        self._sc_labels_print.editingFinished.connect(self._save_ui)
+        shortcut_form.addRow("打印标签", self._sc_labels_print)
+
+        self._sc_labels_next = QKeySequenceEdit()
+        self._sc_labels_next.setToolTip("标签打印：下一个（labels/next）")
+        self._sc_labels_next.editingFinished.connect(self._save_ui)
+        shortcut_form.addRow("下一个标签", self._sc_labels_next)
+
+        sc_note = QLabel("录制快捷键：点击输入框后按下组合键。留空使用默认值。")
+        sc_note.setObjectName("MutedSmall")
+        sc_note.setWordWrap(True)
+        shortcut_box.layout().addRow("", sc_note)  # type: ignore[union-attr]
+
+        tab.body.addWidget(shortcut_box)
+        tab.body.addSpacing(12)
+
+        # ── 调试：真实压缩 ────────────────────────────────────────────────────
+        debug_box = QGroupBox("调试选项")
+        debug_v = QVBoxLayout(debug_box)
+
+        self._use_real_compression_chk = QCheckBox(
+            "使用后端真实压缩（文件需实际存在于项目目录）"
+        )
+        self._use_real_compression_chk.setChecked(False)
+        self._use_real_compression_chk.setToolTip(
+            "对应 web useRealCompression 调试开关。"
+            "关闭时系统只模拟压缩结果状态，不调用 cjxl / archiver。"
+        )
+        self._use_real_compression_chk.stateChanged.connect(self._save_ui)
+        debug_v.addWidget(self._use_real_compression_chk)
+
+        tab.body.addWidget(debug_box)
+        tab.body.addStretch()
+
+        self._tabs.addTab(tab, "界面")
+
     def _build_tab_about(self) -> None:
         """关于 tab — version, log dir."""
         tab = _ScrollTab()
@@ -870,6 +1027,33 @@ class SettingsView(BaseView):
         fv_val = str(qs.value(_K_WB_FILE_VIEW_MODE, "jpg-tif"))
         self._file_view_mode_combo.setCurrentIndex(fv_map.get(fv_val, 0))
 
+        # UI / 界面 tab
+        try:
+            font_scale = float(qs.value(_K_UI_FONT_SCALE, 1.0))
+        except (TypeError, ValueError):
+            font_scale = 1.0
+        font_scale = max(0.7, min(1.5, font_scale))
+        self._font_scale_spin.setValue(font_scale)
+        self._font_scale_pct_label.setText(f"{round(font_scale * 100)}%")
+
+        self._icon_gps_edit.setText(qs.value(_K_UI_ICON_GPS, ""))
+        self._icon_map_edit.setText(qs.value(_K_UI_ICON_MAP, ""))
+        self._icon_folder_edit.setText(qs.value(_K_UI_ICON_FOLDER, ""))
+        self._icon_search_edit.setText(qs.value(_K_UI_ICON_SEARCH, ""))
+
+        raw_real = qs.value(_K_DEBUG_USE_REAL_COMPRESSION, "false")
+        self._use_real_compression_chk.setChecked(str(raw_real).lower() == "true")
+
+        # Shortcuts
+        sc_ma = qs.value(_K_SHORTCUT_MONITOR_ACTIVATE, "")
+        self._sc_monitor_activate.setKeySequence(QKeySequence(str(sc_ma)))
+        sc_md = qs.value(_K_SHORTCUT_MONITOR_DEACTIVATE, "")
+        self._sc_monitor_deactivate.setKeySequence(QKeySequence(str(sc_md)))
+        sc_lp = qs.value(_K_SHORTCUT_LABELS_PRINT, "")
+        self._sc_labels_print.setKeySequence(QKeySequence(str(sc_lp)))
+        sc_ln = qs.value(_K_SHORTCUT_LABELS_NEXT, "")
+        self._sc_labels_next.setKeySequence(QKeySequence(str(sc_ln)))
+
         # Preset list widget
         self._refresh_preset_list_widget()
 
@@ -982,6 +1166,42 @@ class SettingsView(BaseView):
         qs = self.ctx.settings._qs
         name = self._current_user_edit.text().strip()
         qs.setValue(_K_CURRENT_USER, name)
+        self.ctx.settings.sync()
+
+    def _on_font_scale_changed(self, value: float) -> None:
+        """Realtime: update percentage label and persist (mirrors web fontSlider input)."""
+        self._font_scale_pct_label.setText(f"{round(value * 100)}%")
+        self._save_ui()
+
+    def _save_ui(self) -> None:
+        """Persist 界面 tab settings (fontScale / icons / shortcuts / useRealCompression)."""
+        qs = self.ctx.settings._qs
+        qs.setValue(_K_UI_FONT_SCALE, self._font_scale_spin.value())
+        qs.setValue(_K_UI_ICON_GPS, self._icon_gps_edit.text())
+        qs.setValue(_K_UI_ICON_MAP, self._icon_map_edit.text())
+        qs.setValue(_K_UI_ICON_FOLDER, self._icon_folder_edit.text())
+        qs.setValue(_K_UI_ICON_SEARCH, self._icon_search_edit.text())
+        qs.setValue(
+            _K_DEBUG_USE_REAL_COMPRESSION,
+            "true" if self._use_real_compression_chk.isChecked() else "false",
+        )
+        # Shortcuts — store as portable string (QKeySequence.toString)
+        qs.setValue(
+            _K_SHORTCUT_MONITOR_ACTIVATE,
+            self._sc_monitor_activate.keySequence().toString(),
+        )
+        qs.setValue(
+            _K_SHORTCUT_MONITOR_DEACTIVATE,
+            self._sc_monitor_deactivate.keySequence().toString(),
+        )
+        qs.setValue(
+            _K_SHORTCUT_LABELS_PRINT,
+            self._sc_labels_print.keySequence().toString(),
+        )
+        qs.setValue(
+            _K_SHORTCUT_LABELS_NEXT,
+            self._sc_labels_next.keySequence().toString(),
+        )
         self.ctx.settings.sync()
 
     # ── Helicon preset CRUD ───────────────────────────────────────────────────
