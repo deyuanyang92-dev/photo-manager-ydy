@@ -45,6 +45,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from app.config import icons
+
 if TYPE_CHECKING:
     from app.app_context import AppContext
     from app.services.monitor_service import ScanResult
@@ -52,34 +54,31 @@ if TYPE_CHECKING:
 
 # ── Gradient preview tiles (QSS can't do radial gradients cleanly) ────────────
 _JPG_PREVIEW = (
-    "border:none; border-top-left-radius:9px; border-bottom-left-radius:9px;"
-    "background: qradialgradient(cx:0.48, cy:0.5, radius:0.5,"
-    " fx:0.48, fy:0.5, stop:0 rgba(220,145,76,0.55),"
-    " stop:0.3 rgba(220,145,76,0.0), stop:1 #0a1d23);"
+    "border:none; border-top-left-radius:12px; border-bottom-left-radius:12px;"
+    "background: qradialgradient(cx:0.46, cy:0.42, radius:0.62,"
+    " fx:0.46, fy:0.42, stop:0 rgba(232,170,96,0.45),"
+    " stop:0.4 rgba(220,145,76,0.10), stop:1 #0a1d23);"
 )
 _TIFF_PREVIEW = (
-    "border:none; border-top-left-radius:9px; border-bottom-left-radius:9px;"
-    "background: qradialgradient(cx:0.48, cy:0.5, radius:0.5,"
-    " fx:0.48, fy:0.5, stop:0 rgba(54,201,143,0.55),"
-    " stop:0.3 rgba(54,201,143,0.0), stop:1 #091b20);"
+    "border:none; border-top-left-radius:12px; border-bottom-left-radius:12px;"
+    "background: qradialgradient(cx:0.46, cy:0.42, radius:0.62,"
+    " fx:0.46, fy:0.42, stop:0 rgba(66,212,160,0.48),"
+    " stop:0.4 rgba(54,201,143,0.10), stop:1 #091b20);"
 )
 
-_PILL = "border-radius:9px; font-size:9px; font-weight:700; padding:1px 6px;"
+# Corner status pill: low-saturation chip, mapped to a theme object name.
 _CORNER = {
-    "raw":      ("未关联",   "background:#f1bd57; color:#1a1408;"),
-    "tiff":     ("TIFF 成片", "background:#36c98f; color:#062019;"),
-    "archived": ("已归档",   "background:#87a2a1; color:#08161b;"),
-    "composed": ("已合成",   "background:#4a90d9; color:#fff;"),
+    "raw":      ("未关联",   "ChipRaw"),
+    "tiff":     ("TIFF 成片", "ChipTiff"),
+    "archived": ("已归档",   "ChipArchived"),
+    "composed": ("已合成",   "ChipComposed"),
 }
 _ATTR = {
-    "attributed": "background:#d4edda; color:#155724;",
-    "active":     "background:#155724; color:#d4edda;",
-    "unattributed": "background:#f8d7da; color:#721c24;",
-    "readonly":   "background:#1a3138; color:#87a2a1;",
+    "attributed":   "ChipAttributed",
+    "active":       "ChipAttributed",
+    "unattributed": "ChipUnattributed",
+    "readonly":     "ChipArchived",
 }
-_ATTR_PILL = (
-    "border-radius:3px; font-size:10px; font-weight:600; padding:1px 6px;"
-)
 
 
 class _FileCard(QFrame):
@@ -98,7 +97,7 @@ class _FileCard(QFrame):
         self._setup_ui()
 
     def _setup_ui(self) -> None:
-        self.setFixedHeight(64)
+        self.setFixedHeight(68)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         lay = QHBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -118,50 +117,54 @@ class _FileCard(QFrame):
         else:
             corner_state = "raw"
 
-        # ── Preview tile with corner pill ──
+        # ── Preview tile with corner chip ──
         preview = QWidget()
-        preview.setFixedWidth(60)
+        preview.setFixedWidth(64)
         preview.setStyleSheet(_TIFF_PREVIEW if kind == "tiff" else _JPG_PREVIEW)
         pv_lay = QVBoxLayout(preview)
-        pv_lay.setContentsMargins(5, 5, 5, 5)
+        pv_lay.setContentsMargins(6, 6, 6, 6)
         pv_lay.setSpacing(0)
-        c_text, c_color = _CORNER.get(corner_state, _CORNER["raw"])
+        c_text, c_obj = _CORNER.get(corner_state, _CORNER["raw"])
         corner = QLabel(c_text)
-        corner.setStyleSheet(c_color + _PILL)
+        corner.setObjectName(c_obj)
         corner.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         pv_lay.addWidget(corner, alignment=Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        pv_lay.addStretch()
+        # central format glyph, faint, for a "thumbnail" read
+        glyph = QLabel()
+        glyph_name = "mdi6.image-outline" if kind == "jpg" else "mdi6.file-image-outline"
+        glyph.setPixmap(icons.icon(glyph_name, color="#1f4148").pixmap(20, 20))
+        glyph.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        pv_lay.addWidget(glyph, alignment=Qt.AlignmentFlag.AlignHCenter)
         pv_lay.addStretch()
         lay.addWidget(preview)
 
         # ── Caption + attribution column ──
         body = QWidget()
         body_lay = QVBoxLayout(body)
-        body_lay.setContentsMargins(9, 6, 8, 6)
-        body_lay.setSpacing(3)
+        body_lay.setContentsMargins(12, 8, 8, 8)
+        body_lay.setSpacing(5)
 
         name = getattr(self._entry, "name", None) or Path(getattr(self._entry, "path", "")).name
         name_lbl = QLabel(name)
-        name_lbl.setStyleSheet("font-family:'JetBrains Mono','Consolas',monospace; font-size:11px;")
+        name_lbl.setObjectName("Mono")
         name_lbl.setToolTip(getattr(self._entry, "path", name))
         body_lay.addWidget(name_lbl)
 
-        # attribution pill row
+        # attribution chip row
         attr_row = QHBoxLayout()
         attr_row.setContentsMargins(0, 0, 0, 0)
         attr_row.setSpacing(6)
         if kind == "jpg":
-            if uid and uid == self._active_uid:
+            if uid:
                 attr_lbl = QLabel(uid)
-                attr_lbl.setStyleSheet(_ATTR["active"] + _ATTR_PILL)
-            elif uid:
-                attr_lbl = QLabel(uid)
-                attr_lbl.setStyleSheet(_ATTR["attributed"] + _ATTR_PILL)
+                attr_lbl.setObjectName(_ATTR["active" if uid == self._active_uid else "attributed"])
             else:
                 attr_lbl = QLabel("未归属")
-                attr_lbl.setStyleSheet(_ATTR["unattributed"] + _ATTR_PILL)
+                attr_lbl.setObjectName(_ATTR["unattributed"])
         else:
             attr_lbl = QLabel(uid or "只读")
-            attr_lbl.setStyleSheet(_ATTR["readonly"] + _ATTR_PILL)
+            attr_lbl.setObjectName(_ATTR["readonly"])
         attr_lbl.setToolTip(uid or "")
         attr_lbl.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         attr_row.addWidget(attr_lbl)
@@ -169,24 +172,29 @@ class _FileCard(QFrame):
         body_lay.addLayout(attr_row)
         lay.addWidget(body, stretch=1)
 
-        # ── Action column (JPG only) ──
+        # ── Action column (JPG only) — vector icon buttons ──
         if kind == "jpg":
             act_col = QVBoxLayout()
-            act_col.setContentsMargins(0, 6, 8, 6)
-            act_col.setSpacing(3)
+            act_col.setContentsMargins(0, 8, 10, 8)
+            act_col.setSpacing(5)
             act_btn = QPushButton("归属")
             act_btn.setObjectName("Tiny")
-            act_btn.setFixedHeight(22)
+            act_btn.setFixedHeight(24)
+            icons.set_button_icon(act_btn, "mdi6.link-variant", color=icons.TONE_ACCENT, size=13)
             act_btn.setToolTip("手动归属到当前激活标本")
             act_btn.clicked.connect(lambda: self.assign_requested.emit(getattr(self._entry, "path", "")))
             act_col.addWidget(act_btn)
             deact_btn = QPushButton("撤销")
             deact_btn.setObjectName("Tiny")
-            deact_btn.setFixedHeight(22)
+            deact_btn.setFixedHeight(24)
+            icons.set_button_icon(deact_btn, "mdi6.link-variant-off", color=icons.TONE_MUTED, size=13)
             deact_btn.setToolTip("撤销此 JPG 的归属（变回无主）")
             deact_btn.clicked.connect(lambda: self.deactivate_requested.emit(getattr(self._entry, "path", "")))
             act_col.addWidget(deact_btn)
             lay.addLayout(act_col)
+
+        from app.config.effects import apply_card_shadow
+        apply_card_shadow(self, blur=16, y=3, alpha=55)
 
 
 class MonitorPanel(QWidget):
@@ -220,15 +228,17 @@ class MonitorPanel(QWidget):
         section = QFrame()
         section.setObjectName("WorkbenchSection")
         sec = QVBoxLayout(section)
-        sec.setContentsMargins(16, 14, 16, 14)
-        sec.setSpacing(11)
+        sec.setContentsMargins(20, 16, 20, 16)
+        sec.setSpacing(12)
         root.addWidget(section)
+        from app.config.effects import apply_card_shadow
+        apply_card_shadow(section)
 
         # ── Batch-ident bar ──
         batch = QFrame()
         batch.setObjectName("BatchIdentBar")
         b_lay = QHBoxLayout(batch)
-        b_lay.setContentsMargins(12, 8, 12, 8)
+        b_lay.setContentsMargins(14, 10, 14, 10)
         b_lay.setSpacing(10)
         b_title = QLabel("当前照片批次")
         b_title.setObjectName("Section")
@@ -260,19 +270,21 @@ class MonitorPanel(QWidget):
         controls = QHBoxLayout()
         controls.setContentsMargins(0, 0, 0, 0)
         controls.setSpacing(8)
-        self._auto_toggle = QPushButton("◻ 新 TIFF 自动压缩")
+        self._auto_toggle = QPushButton("新 TIFF 自动压缩")
         self._auto_toggle.setObjectName("Outline")
         self._auto_toggle.setCheckable(True)
-        self._auto_toggle.toggled.connect(
-            lambda on: self._auto_toggle.setText(("◼ " if on else "◻ ") + "新 TIFF 自动压缩")
-        )
+        icons.set_button_icon(self._auto_toggle, "mdi6.checkbox-blank-outline",
+                              color=icons.TONE_MUTED, size=15)
+        self._auto_toggle.toggled.connect(self._on_auto_toggled)
         controls.addWidget(self._auto_toggle)
-        refresh_btn = QPushButton("↻ 刷新目录")
+        refresh_btn = QPushButton("刷新目录")
         refresh_btn.setObjectName("Outline")
+        icons.set_button_icon(refresh_btn, "mdi6.refresh", color=icons.TONE_MUTED, size=15)
         refresh_btn.clicked.connect(self._on_refresh)
         controls.addWidget(refresh_btn)
-        add_btn = QPushButton("+ 添加照片")
+        add_btn = QPushButton("添加照片")
         add_btn.setObjectName("Outline")
+        icons.set_button_icon(add_btn, "mdi6.image-plus-outline", color=icons.TONE_MUTED, size=15)
         add_btn.setToolTip("把已有照片添加进来（导入 incoming-jpg/）")
         controls.addWidget(add_btn)
         self._raw_count = QLabel("本组原片 0 张")
@@ -302,10 +314,11 @@ class MonitorPanel(QWidget):
             btn.setObjectName(obj)
             btn.setFixedHeight(22)
             sh.addWidget(btn)
-        del_btn = QPushButton("🗑 删除")
+        del_btn = QPushButton("删除")
         del_btn.setObjectName("Danger")
-        del_btn.setFixedHeight(22)
+        del_btn.setFixedHeight(24)
         del_btn.setEnabled(False)
+        icons.set_button_icon(del_btn, "mdi6.delete-outline", color=icons.TONE_DANGER, size=14)
         del_btn.setToolTip("删除选中的 JPG（TIFF 成片不可删）")
         sh.addWidget(del_btn)
         sec.addLayout(sh)
@@ -426,7 +439,7 @@ class MonitorPanel(QWidget):
             and not getattr(f, "composed_tiff", None)
         ]
         if unattr:
-            self._unattr_warning.setText(f"⚠️  {len(unattr)} 张 JPG 尚未归入任何编号")
+            self._unattr_warning.setText(f"{len(unattr)} 张 JPG 尚未归入任何编号")
             self._unattr_warning.show()
         else:
             self._unattr_warning.hide()
@@ -441,6 +454,12 @@ class MonitorPanel(QWidget):
 
     def _on_refresh(self) -> None:
         self.refresh_requested.emit()
+
+    def _on_auto_toggled(self, on: bool) -> None:
+        """Swap the auto-compress toggle glyph between checked / unchecked."""
+        glyph = "mdi6.checkbox-marked" if on else "mdi6.checkbox-blank-outline"
+        tone = icons.TONE_ACCENT if on else icons.TONE_MUTED
+        icons.set_button_icon(self._auto_toggle, glyph, color=tone, size=15)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

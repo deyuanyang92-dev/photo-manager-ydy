@@ -33,7 +33,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Optional
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QSize, Qt
 from PyQt6.QtGui import QCloseEvent
 from PyQt6.QtWidgets import (
     QButtonGroup,
@@ -48,6 +48,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from app.config import icons
 from app.views.base_view import BaseView
 
 if TYPE_CHECKING:
@@ -109,12 +110,19 @@ class MainWindow(QMainWindow):
         lay.setContentsMargins(22, 0, 18, 0)
         lay.setSpacing(0)
 
-        # Brand: diamond mark + serif wordmark
-        brand = QLabel("◆  标本影像")
+        # Brand: vector microscope mark + serif wordmark
+        brand_mark = QLabel()
+        brand_mark.setObjectName("BrandMark")
+        brand_mark.setPixmap(
+            icons.icon("mdi6.microscope", color=icons.TONE_ACCENT).pixmap(20, 20)
+        )
+        lay.addWidget(brand_mark)
+        lay.addSpacing(8)
+        brand = QLabel("标本影像")
         brand.setObjectName("BrandWord")
         lay.addWidget(brand)
 
-        lay.addSpacing(34)
+        lay.addSpacing(32)
 
         # Segmented nav row (buttons added by register_view)
         self._nav_row = QHBoxLayout()
@@ -126,17 +134,29 @@ class MainWindow(QMainWindow):
 
         lay.addStretch()
 
-        # Right side: theme toggle + settings cog
-        self._theme_btn = QPushButton("◑")
+        # Right side: theme toggle + settings cog (vector glyphs)
+        self._theme_btn = QPushButton()
         self._theme_btn.setObjectName("IconGhost")
         self._theme_btn.setToolTip("切换主题")
         self._theme_btn.setFixedSize(34, 34)
+        self._theme_btn.setIcon(
+            icons.icon("mdi6.weather-night", color=icons.TONE_MUTED,
+                       color_active=icons.TONE_ACCENT_HOVER)
+        )
+        self._theme_btn.setIconSize(QSize(18, 18))
+        self._theme_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         lay.addWidget(self._theme_btn)
 
-        self._settings_btn = QPushButton("⚙")
+        self._settings_btn = QPushButton()
         self._settings_btn.setObjectName("IconGhost")
         self._settings_btn.setToolTip("全局设置")
         self._settings_btn.setFixedSize(34, 34)
+        self._settings_btn.setIcon(
+            icons.icon("mdi6.cog-outline", color=icons.TONE_MUTED,
+                       color_active=icons.TONE_ACCENT_HOVER)
+        )
+        self._settings_btn.setIconSize(QSize(18, 18))
+        self._settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._settings_btn.clicked.connect(lambda: self.navigate_to("settings"))
         lay.addWidget(self._settings_btn)
 
@@ -154,10 +174,14 @@ class MainWindow(QMainWindow):
         proj_label.setObjectName("ContextLabel")
         lay.addWidget(proj_label)
 
-        self._project_switcher = QPushButton("（未选） ▾")
+        self._project_switcher = QPushButton("（未选）")
         self._project_switcher.setObjectName("ProjectSwitcher")
         self._project_switcher.setToolTip("切换当前工作区项目")
+        icons.set_button_icon(self._project_switcher, "mdi6.folder-outline",
+                              color=icons.TONE_MUTED, size=15)
+        self._project_switcher.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
         self._project_switcher.clicked.connect(lambda: self.navigate_to("overview"))
+        self._project_switcher.setCursor(Qt.CursorShape.PointingHandCursor)
         lay.addWidget(self._project_switcher)
 
         lay.addSpacing(8)
@@ -166,28 +190,33 @@ class MainWindow(QMainWindow):
         active_label.setObjectName("ContextLabel")
         lay.addWidget(active_label)
 
-        self._active_badge = QLabel("无 ⚡")
+        self._active_badge = QLabel("无")
         self._active_badge.setObjectName("ActiveBadgeOff")
         lay.addWidget(self._active_badge)
 
         lay.addStretch()
 
         # Quick actions — wired to the workbench view's handlers when present.
-        self._btn_new = QPushButton("+ 新建标本")
+        self._btn_new = QPushButton("新建标本")
         self._btn_new.setObjectName("Outline")
         self._btn_new.setToolTip("新建一个标本草稿")
+        icons.set_button_icon(self._btn_new, "mdi6.plus", color=icons.TONE_ACCENT, size=15)
         self._btn_new.clicked.connect(self._quick_new_specimen)
         lay.addWidget(self._btn_new)
 
-        self._btn_compose = QPushButton("🎬 合成")
+        self._btn_compose = QPushButton("合成")
         self._btn_compose.setObjectName("Primary")
         self._btn_compose.setToolTip("Helicon 景深合成")
+        icons.set_button_icon(self._btn_compose, "fa5s.layer-group",
+                              color=icons.TONE_ON_ACCENT, size=14)
         self._btn_compose.clicked.connect(lambda: self.navigate_to("workbench"))
         lay.addWidget(self._btn_compose)
 
-        self._btn_organize = QPushButton("📦 整理")
+        self._btn_organize = QPushButton("整理")
         self._btn_organize.setObjectName("Outline")
         self._btn_organize.setToolTip("整理归档（JPG→JXL→ZIP）")
+        icons.set_button_icon(self._btn_organize, "mdi6.archive-outline",
+                              color=icons.TONE_MUTED, size=15)
         self._btn_organize.clicked.connect(lambda: self.navigate_to("workbench"))
         lay.addWidget(self._btn_organize)
 
@@ -236,12 +265,18 @@ class MainWindow(QMainWindow):
         idx = len(self._view_classes)
         self._view_classes.append(view_cls)
 
-        # Top-nav segment button
+        # Top-nav segment button — vector glyph + title, accent when active.
         btn = QPushButton(view_cls.nav_title)
         btn.setObjectName("NavSegment")
         btn.setCheckable(True)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn.setToolTip(f"{view_cls.nav_icon}  {view_cls.nav_title}")
+        btn.setToolTip(view_cls.nav_title)
+        glyph = _NAV_GLYPHS.get(view_cls.view_id, "mdi6.circle-outline")
+        btn.setIcon(
+            icons.icon(glyph, color=icons.TONE_MUTED,
+                       color_active=icons.TONE_ACCENT_HOVER)
+        )
+        btn.setIconSize(QSize(16, 16))
         btn.setProperty("view_id", view_cls.view_id)
         btn.clicked.connect(lambda _=False, i=idx: self._activate_index(i))
         self._nav_group.addButton(btn, idx)
@@ -252,6 +287,15 @@ class MainWindow(QMainWindow):
         view = view_cls(self.ctx)
         self._views[view_cls.view_id] = view
         self._stack.addWidget(view)
+
+    def _recolor_nav_icons(self, active_idx: int) -> None:
+        """Tint the active segment's glyph accent; others stay muted."""
+        for i, b in enumerate(self._nav_buttons):
+            vid = b.property("view_id")
+            glyph = _NAV_GLYPHS.get(vid, "mdi6.circle-outline")
+            tone = icons.TONE_ACCENT_HOVER if i == active_idx else icons.TONE_MUTED
+            b.setIcon(icons.icon(glyph, color=tone,
+                                 color_active=icons.TONE_ACCENT_HOVER))
 
     def navigate_to(self, view_id: str) -> None:
         """Programmatically switch to the view with the given view_id."""
@@ -266,6 +310,7 @@ class MainWindow(QMainWindow):
         btn = self._nav_buttons[idx]
         if not btn.isChecked():
             btn.setChecked(True)
+        self._recolor_nav_icons(idx)
         view_cls = self._view_classes[idx]
         view = self._views.get(view_cls.view_id)
         if view:
@@ -287,11 +332,11 @@ class MainWindow(QMainWindow):
         active_uid = self._lookup_active_uid()
         if active_uid:
             short = active_uid.split("-")[3] if active_uid.count("-") >= 3 else active_uid
-            self._active_badge.setText(f"{short} ⚡")
+            self._active_badge.setText(short)
             self._active_badge.setObjectName("ActiveBadgeOn")
             self.set_status_specimen(f"激活: {active_uid}")
         else:
-            self._active_badge.setText("无 ⚡")
+            self._active_badge.setText("无")
             self._active_badge.setObjectName("ActiveBadgeOff")
             self.set_status_specimen("未激活标本")
         self._active_badge.style().unpolish(self._active_badge)
@@ -353,6 +398,20 @@ class MainWindow(QMainWindow):
         self.ctx.settings.save_window_state(self.saveState())
         self.ctx.settings.sync()
         super().closeEvent(event)
+
+
+# ── Nav glyphs (view_id → qtawesome Material Design Icon) ───────────────────
+
+_NAV_GLYPHS: dict[str, str] = {
+    "workbench": "mdi6.microscope",
+    "overview":  "mdi6.view-dashboard-outline",
+    "taxonomy":  "mdi6.dna",
+    "worms":     "mdi6.waves",
+    "coords":    "mdi6.map-marker-outline",
+    "labels":    "mdi6.tag-outline",
+    "collab":    "mdi6.account-group-outline",
+    "settings":  "mdi6.cog-outline",
+}
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────

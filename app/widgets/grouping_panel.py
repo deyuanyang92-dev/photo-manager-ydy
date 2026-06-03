@@ -40,6 +40,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from app.config import icons
+
 if TYPE_CHECKING:
     from app.app_context import AppContext
     from app.services.grouping_service import Group, SpecimenGrouping
@@ -61,14 +63,13 @@ class _ComposedRow(QFrame):
 
     def _setup_ui(self) -> None:
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(8, 4, 8, 4)
-        lay.setSpacing(8)
+        lay.setContentsMargins(12, 8, 12, 8)
+        lay.setSpacing(10)
 
-        # Angle label badge
-        angle_lbl = QLabel(self._group.angle_label or f"组{self._group.group_index}")
-        angle_lbl.setObjectName("Muted")
-        angle_lbl.setFixedWidth(60)
-        lay.addWidget(angle_lbl)
+        # Composed-state chip + angle label
+        chip = QLabel(self._group.angle_label or f"组 {self._group.group_index}")
+        chip.setObjectName("ChipTiff")
+        lay.addWidget(chip)
 
         # TIFF basename
         tiff_path = self._group.composed_tiff_path or ""
@@ -82,21 +83,24 @@ class _ComposedRow(QFrame):
         # JPG count badge
         jpg_count = len(self._group.jpg_paths)
         count_lbl = QLabel(f"{jpg_count} JPG")
-        count_lbl.setObjectName("Muted")
-        count_lbl.setFixedWidth(50)
+        count_lbl.setObjectName("MutedSmall")
         lay.addWidget(count_lbl)
 
         # Organise button
-        org_btn = QPushButton("📦 整理")
+        org_btn = QPushButton("整理")
         org_btn.setObjectName("Primary")
-        org_btn.setFixedHeight(26)
+        org_btn.setFixedHeight(28)
+        icons.set_button_icon(org_btn, "mdi6.archive-arrow-down-outline",
+                              color=icons.TONE_ON_ACCENT, size=14)
         org_btn.setToolTip("归档 JPG → ZIP，按设置删除 JPG")
         org_btn.clicked.connect(lambda: self.organise_clicked.emit(self._group.group_index))
         lay.addWidget(org_btn)
 
         # Undo button
-        undo_btn = QPushButton("↩ 撤销")
-        undo_btn.setFixedHeight(26)
+        undo_btn = QPushButton()
+        undo_btn.setObjectName("Ghost")
+        undo_btn.setFixedSize(30, 28)
+        icons.set_button_icon(undo_btn, "mdi6.undo-variant", color=icons.TONE_MUTED, size=15)
         undo_btn.setToolTip("解除合成关联（TIFF 移到 _retired-tiff/，不删除）")
         undo_btn.clicked.connect(lambda: self.undo_clicked.emit(self._group.group_index))
         lay.addWidget(undo_btn)
@@ -119,27 +123,30 @@ class _DraftGroupRow(QFrame):
 
     def _setup_ui(self) -> None:
         root = QVBoxLayout(self)
-        root.setContentsMargins(8, 8, 8, 8)
-        root.setSpacing(4)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(8)
 
-        # Header row: angle label edit + compose button
+        # Header row: group chip + angle label edit + compose button
         header = QHBoxLayout()
+        header.setSpacing(8)
 
-        lbl_prefix = QLabel(f"组 {self._group.group_index}  ")
-        lbl_prefix.setObjectName("Muted")
-        header.addWidget(lbl_prefix)
+        chip = QLabel(f"组 {self._group.group_index}")
+        chip.setObjectName("ChipArchived")
+        header.addWidget(chip)
 
         self._label_edit = QLineEdit(self._group.angle_label or "")
         self._label_edit.setPlaceholderText("角度标签（如：正面、背面）")
-        self._label_edit.setFixedHeight(26)
+        self._label_edit.setFixedHeight(30)
         self._label_edit.textEdited.connect(
             lambda t: self.label_changed.emit(self._group.group_index, t)
         )
         header.addWidget(self._label_edit)
 
-        compose_btn = QPushButton("⚡ 合成")
+        compose_btn = QPushButton("合成")
         compose_btn.setObjectName("Primary")
-        compose_btn.setFixedHeight(26)
+        compose_btn.setFixedHeight(30)
+        icons.set_button_icon(compose_btn, "fa5s.layer-group",
+                              color=icons.TONE_ON_ACCENT, size=13)
         compose_btn.setToolTip("调用 Helicon Focus CLI 合成该组 JPG")
         compose_btn.clicked.connect(lambda: self.compose_clicked.emit(self._group.group_index))
         header.addWidget(compose_btn)
@@ -148,7 +155,7 @@ class _DraftGroupRow(QFrame):
         # JPG list (drag-reorderable)
         self._jpg_list = QListWidget()
         self._jpg_list.setDragDropMode(QListWidget.DragDropMode.InternalMove)
-        self._jpg_list.setMaximumHeight(100)
+        self._jpg_list.setMaximumHeight(104)
         self._jpg_list.setToolTip("拖拽可重新排序；双击删除（暂不支持，用右键）")
         for p in self._group.jpg_paths:
             item = QListWidgetItem(Path(p).name)
@@ -157,7 +164,7 @@ class _DraftGroupRow(QFrame):
             self._jpg_list.addItem(item)
 
         if not self._group.jpg_paths:
-            empty = QListWidgetItem("（空组 — 从监控区拖入 JPG）")
+            empty = QListWidgetItem("空组 — 从监控区拖入 JPG")
             empty.setFlags(Qt.ItemFlag.NoItemFlags)
             self._jpg_list.addItem(empty)
 
@@ -165,7 +172,7 @@ class _DraftGroupRow(QFrame):
 
         # JPG count line
         count_lbl = QLabel(f"{len(self._group.jpg_paths)} 张 JPG")
-        count_lbl.setObjectName("Muted")
+        count_lbl.setObjectName("MutedSmall")
         root.addWidget(count_lbl)
 
 
@@ -202,10 +209,12 @@ class GroupingPanel(QWidget):
         section = QFrame()
         section.setObjectName("WorkbenchSection")
         outer.addWidget(section)
+        from app.config.effects import apply_card_shadow
+        apply_card_shadow(section)
 
         root = QVBoxLayout(section)
-        root.setContentsMargins(16, 14, 16, 14)
-        root.setSpacing(10)
+        root.setContentsMargins(20, 16, 20, 16)
+        root.setSpacing(12)
 
         # Toolbar
         toolbar = QHBoxLayout()
@@ -216,13 +225,14 @@ class GroupingPanel(QWidget):
         toolbar.addWidget(title)
         toolbar.addStretch()
 
-        self._uid_label = QLabel("— 无激活标本 —")
+        self._uid_label = QLabel("无激活标本")
         self._uid_label.setObjectName("Mono")
         toolbar.addWidget(self._uid_label)
 
-        add_btn = QPushButton("+ 新组")
+        add_btn = QPushButton("新组")
         add_btn.setObjectName("Outline")
-        add_btn.setFixedHeight(26)
+        add_btn.setFixedHeight(28)
+        icons.set_button_icon(add_btn, "mdi6.plus", color=icons.TONE_ACCENT, size=14)
         add_btn.clicked.connect(self._add_group)
         toolbar.addWidget(add_btn)
         root.addLayout(toolbar)
@@ -280,8 +290,8 @@ class GroupingPanel(QWidget):
         composed = [g for g in groups if g.composed_tiff_path]
 
         if draft:
-            sec_lbl = QLabel("📋  未合成组")
-            sec_lbl.setObjectName("Muted")
+            sec_lbl = QLabel("未合成组")
+            sec_lbl.setObjectName("Section")
             self._content_lay.addWidget(sec_lbl)
             for g in draft:
                 row = _DraftGroupRow(g, self)
@@ -291,11 +301,11 @@ class GroupingPanel(QWidget):
 
         if composed:
             sep = QFrame()
-            sep.setFrameShape(QFrame.Shape.HLine)
-            sep.setStyleSheet("color: rgba(145,182,181,0.13);")
+            sep.setObjectName("Divider")
+            sep.setFixedHeight(1)
             self._content_lay.addWidget(sep)
-            sec_lbl2 = QLabel("✅  已合成")
-            sec_lbl2.setObjectName("Muted")
+            sec_lbl2 = QLabel("已合成")
+            sec_lbl2.setObjectName("Section")
             self._content_lay.addWidget(sec_lbl2)
             for g in composed:
                 row2 = _ComposedRow(g, self)

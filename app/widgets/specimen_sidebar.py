@@ -23,6 +23,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from app.config import icons
+
 if TYPE_CHECKING:
     from app.app_context import AppContext
 
@@ -65,23 +67,37 @@ class SpecimenSidebar(QWidget):
     # ── UI ────────────────────────────────────────────────────────────────────
 
     def _setup_ui(self) -> None:
-        root = QVBoxLayout(self)
-        root.setContentsMargins(10, 12, 10, 12)
-        root.setSpacing(8)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        card = QFrame()
+        card.setObjectName("PanelCard")
+        outer.addWidget(card)
+        from app.config.effects import apply_card_shadow
+        apply_card_shadow(card)
 
-        # New-specimen entry (web: 🧬 + 新增标本唯一编号)
-        self._new_btn = QPushButton("🧬  + 新增标本唯一编号")
+        root = QVBoxLayout(card)
+        root.setContentsMargins(16, 16, 16, 16)
+        root.setSpacing(12)
+
+        # New-specimen entry — vector + glyph
+        self._new_btn = QPushButton("新增标本唯一编号")
         self._new_btn.setObjectName("Outline")
         self._new_btn.setFixedHeight(34)
+        icons.set_button_icon(self._new_btn, "mdi6.plus", color=icons.TONE_ACCENT, size=15)
         self._new_btn.setToolTip("开始一个新的标本唯一编号（右侧填写）")
         self._new_btn.clicked.connect(self.new_specimen_requested.emit)
         root.addWidget(self._new_btn)
 
-        # Search box (web: 🔍 搜索标本唯一编号)
+        # Search box with a leading magnifier action.
         self._search = QLineEdit()
-        self._search.setPlaceholderText("🔍  搜索标本唯一编号")
+        self._search.setPlaceholderText("搜索标本唯一编号")
         self._search.setClearButtonEnabled(True)
         self._search.setFixedHeight(32)
+        if icons.available():
+            self._search.addAction(
+                icons.icon("mdi6.magnify", color=icons.TONE_MUTED),
+                QLineEdit.ActionPosition.LeadingPosition,
+            )
         self._search.textChanged.connect(self._on_search)
         root.addWidget(self._search)
 
@@ -107,26 +123,30 @@ class SpecimenSidebar(QWidget):
 
         # Activate / Deactivate + Refresh buttons
         btn_row = QHBoxLayout()
-        btn_row.setContentsMargins(0, 2, 0, 0)
-        btn_row.setSpacing(6)
+        btn_row.setContentsMargins(0, 4, 0, 0)
+        btn_row.setSpacing(8)
 
         self._activate_btn = QPushButton("激活")
-        self._activate_btn.setFixedHeight(28)
+        self._activate_btn.setFixedHeight(32)
         self._activate_btn.setObjectName("Primary")
+        icons.set_button_icon(self._activate_btn, "mdi6.lightning-bolt",
+                              color=icons.TONE_ON_ACCENT, size=14)
         self._activate_btn.setToolTip("激活选中标本（全局互斥）")
         self._activate_btn.clicked.connect(self._on_activate_clicked)
         btn_row.addWidget(self._activate_btn)
 
         self._deactivate_btn = QPushButton("去激活")
         self._deactivate_btn.setObjectName("Outline")
-        self._deactivate_btn.setFixedHeight(28)
+        self._deactivate_btn.setFixedHeight(32)
         self._deactivate_btn.setToolTip("取消当前激活标本")
         self._deactivate_btn.clicked.connect(self._on_deactivate_clicked)
         btn_row.addWidget(self._deactivate_btn)
 
-        self._refresh_btn = QPushButton("刷新")
+        self._refresh_btn = QPushButton()
         self._refresh_btn.setObjectName("Ghost")
-        self._refresh_btn.setFixedHeight(28)
+        self._refresh_btn.setFixedSize(32, 32)
+        icons.set_button_icon(self._refresh_btn, "mdi6.refresh", color=icons.TONE_MUTED, size=16)
+        self._refresh_btn.setToolTip("刷新标本列表")
         self._refresh_btn.clicked.connect(self.refresh)
         btn_row.addWidget(self._refresh_btn)
         root.addLayout(btn_row)

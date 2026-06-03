@@ -2,6 +2,7 @@
 PyQt6>=6.6.0
 PyQt6-Qt6>=6.6.0
 PyQt6-WebEngine>=6.6.0        # 仅坐标交互地图视图用
+qtawesome>=1.3               # 矢量图标（Material Design Icons / Feather），替代 emoji
 
 # 图像 / 二维码 / 导出
 Pillow>=10.3.0

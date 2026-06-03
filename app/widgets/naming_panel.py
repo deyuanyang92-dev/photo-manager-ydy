@@ -31,6 +31,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from app.config import icons
 from app.utils.naming import build_result_id, build_uid, specimen_date_seg
 
 if TYPE_CHECKING:
@@ -63,45 +64,58 @@ class NamingPanel(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(card)
+        from app.config.effects import apply_card_shadow
+        apply_card_shadow(card)
 
         root = QVBoxLayout(card)
-        root.setContentsMargins(16, 14, 16, 14)
-        root.setSpacing(10)
+        root.setContentsMargins(20, 16, 20, 16)
+        root.setSpacing(12)
 
-        # Card header: title + save button (web: 「照片编号」+「💾 保存」)
+        # Card header: title + save button
         hdr_row = QHBoxLayout()
         hdr_row.setContentsMargins(0, 0, 0, 0)
         hdr = QLabel("照片编号")
         hdr.setObjectName("CardTitle")
         hdr_row.addWidget(hdr)
         hdr_row.addStretch()
-        save_btn = QPushButton("💾 保存")
+        save_btn = QPushButton("保存")
         save_btn.setObjectName("Outline")
-        save_btn.setFixedHeight(26)
+        save_btn.setFixedHeight(28)
+        icons.set_button_icon(save_btn, "mdi6.content-save-outline",
+                              color=icons.TONE_MUTED, size=14)
         save_btn.setToolTip("把当前输入存到本地，刷新不丢")
         save_btn.clicked.connect(self.save_requested.emit)
         hdr_row.addWidget(save_btn)
         root.addLayout(hdr_row)
 
-        # Form grid: 2-column compact label-over-field rows (web naming-fields)
+        # Form grid: 2-column label-over-field rows.  Each cell is a self-sized
+        # QWidget (not a bare nested layout) so the grid reserves correct row
+        # heights — bare nested layouts under-report their hint and overlap.
         grid = QGridLayout()
-        grid.setHorizontalSpacing(10)
-        grid.setVerticalSpacing(9)
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(12)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+
+        def _cell(label: str, field: QWidget) -> QWidget:
+            cell = QWidget()
+            wrap = QVBoxLayout(cell)
+            wrap.setContentsMargins(0, 0, 0, 0)
+            wrap.setSpacing(5)
+            lbl = QLabel(label)
+            lbl.setObjectName("MutedSmall")
+            wrap.addWidget(lbl)
+            wrap.addWidget(field)
+            return cell
 
         def _field(row: int, col: int, label: str, placeholder: str,
                    *, auto: bool = False) -> QLineEdit:
-            wrap = QVBoxLayout()
-            wrap.setSpacing(4)
-            lbl = QLabel(label)
-            lbl.setObjectName("MutedSmall")
             edit = QLineEdit()
             edit.setPlaceholderText(placeholder)
-            edit.setFixedHeight(30)
+            edit.setFixedHeight(32)
             if auto:
                 edit.setObjectName("AutoField")
-            wrap.addWidget(lbl)
-            wrap.addWidget(edit)
-            grid.addLayout(wrap, row, col)
+            grid.addWidget(_cell(label, edit), row, col)
             return edit
 
         # Auto-derived fields shown dashed (web: .auto class)
@@ -114,21 +128,16 @@ class NamingPanel(QWidget):
         self._photo_date = _field(3, 0, "拍摄日期", "YYYYMMDD（选填）")
 
         # Sequence number (right of photo date)
-        seq_wrap = QVBoxLayout()
-        seq_wrap.setSpacing(4)
-        seq_lbl = QLabel("成果序号")
-        seq_lbl.setObjectName("MutedSmall")
         self._seq = QSpinBox()
         self._seq.setMinimum(1)
         self._seq.setMaximum(999)
         self._seq.setValue(1)
-        self._seq.setFixedHeight(30)
-        seq_wrap.addWidget(seq_lbl)
-        seq_wrap.addWidget(self._seq)
-        grid.addLayout(seq_wrap, 3, 1)
+        self._seq.setFixedHeight(32)
+        grid.addWidget(_cell("成果序号", self._seq), 3, 1)
         root.addLayout(grid)
 
         # ── Live preview blocks ──
+        root.addSpacing(4)
         preview_lbl = QLabel("标本唯一编号")
         preview_lbl.setObjectName("MutedSmall")
         root.addWidget(preview_lbl)
@@ -149,7 +158,7 @@ class NamingPanel(QWidget):
 
         # R-prefix dual-label warning (hidden by default)
         self._rna_warning = QLabel(
-            "⚠️  R 前缀（已取 RNA）— 需额外生成 RNAlater 组织管标签"
+            "R 前缀（已取 RNA）— 需额外生成 RNAlater 组织管标签"
         )
         self._rna_warning.setObjectName("RnaWarning")
         self._rna_warning.setWordWrap(True)
@@ -158,13 +167,16 @@ class NamingPanel(QWidget):
 
         # Copy buttons
         btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
         copy_uid_btn = QPushButton("复制 UID")
-        copy_uid_btn.setFixedHeight(28)
+        copy_uid_btn.setFixedHeight(32)
+        icons.set_button_icon(copy_uid_btn, "mdi6.content-copy", color=icons.TONE_MUTED, size=14)
         copy_uid_btn.clicked.connect(self._copy_uid)
         btn_row.addWidget(copy_uid_btn)
 
         copy_rid_btn = QPushButton("复制成果编号")
-        copy_rid_btn.setFixedHeight(28)
+        copy_rid_btn.setFixedHeight(32)
+        icons.set_button_icon(copy_rid_btn, "mdi6.content-copy", color=icons.TONE_MUTED, size=14)
         copy_rid_btn.clicked.connect(self._copy_result_id)
         btn_row.addWidget(copy_rid_btn)
         root.addLayout(btn_row)

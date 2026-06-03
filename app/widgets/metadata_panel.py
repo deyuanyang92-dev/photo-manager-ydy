@@ -70,10 +70,12 @@ class MetadataPanel(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(card)
+        from app.config.effects import apply_card_shadow
+        apply_card_shadow(card)
 
         root = QVBoxLayout(card)
-        root.setContentsMargins(16, 14, 16, 14)
-        root.setSpacing(8)
+        root.setContentsMargins(20, 16, 20, 16)
+        root.setSpacing(12)
 
         # Header
         header = QHBoxLayout()
@@ -200,7 +202,10 @@ class MetadataPanel(QWidget):
         btn_row.setContentsMargins(8, 6, 8, 8)
         self._save_btn = QPushButton("保存元数据")
         self._save_btn.setObjectName("Primary")
-        self._save_btn.setFixedHeight(30)
+        self._save_btn.setFixedHeight(34)
+        from app.config import icons as _icons
+        _icons.set_button_icon(self._save_btn, "mdi6.content-save-outline",
+                               color=_icons.TONE_ON_ACCENT, size=15)
         self._save_btn.clicked.connect(self._on_save)
         self._save_btn.setEnabled(False)
         btn_row.addWidget(self._save_btn)
@@ -333,10 +338,10 @@ class MetadataPanel(QWidget):
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _section_label(text: str) -> QLabel:
-    """Return a styled section separator label for the form."""
-    lbl = QLabel(f"— {text} —")
-    lbl.setObjectName("Muted")
-    lbl.setStyleSheet("font-size:11px; letter-spacing:1px; padding-top:8px;")
+    """Return a styled section header for the metadata form."""
+    lbl = QLabel(text)
+    lbl.setObjectName("Section")
+    lbl.setStyleSheet("padding-top:10px;")
     return lbl
 
 
