@@ -7,6 +7,12 @@ Covers:
   - TaxonomyView._import_rows: column alias mapping, skip incomplete rows, count
   - TaxonomyView._export_csv: CSV output format
   - TaxonomyView on_activate loads records into table
+  - _TaxonFacetPanel: value counts, predicate modes, signals
+  - TaxonomyView facet filter integration in _load_page
+  - _WormsMatchDialog: dialog construction, no-match result
+  - _TaxonReviewDialog: dialog construction, use/no-match result
+  - Job panel: progress text update
+  - Row context menu: no-crash smoke test
 """
 from __future__ import annotations
 
@@ -372,3 +378,382 @@ class TestViewOnActivate:
     def test_total_equals_seed_count_initially(self, view, qapp):
         view.on_activate()
         assert view._total == len(SEED)
+
+
+# ── Taxonomy chart ────────────────────────────────────────────────────────────
+
+class TestTaxonomyChart:
+    def test_chart_entries_count_orders(self, view, qapp):
+        view.on_activate()
+        entries = dict(view._chart_entries())
+        assert entries["叶须虫目"] == 1
+        assert entries["十足目"] == 1
+
+    def test_chart_entries_respect_current_filter(self, view, qapp):
+        view.on_activate()
+        view._filter_text = "叶须虫"
+        entries = dict(view._chart_entries())
+        assert entries == {"叶须虫目": 1}
+
+    def test_chart_toggle_opens_nonblocking_dialog(self, view, qapp):
+        view.on_activate()
+        view._btn_chart.setChecked(True)
+        view._on_chart_toggle()
+
+        assert view._show_chart is True
+        assert view._chart_dialog is not None
+        assert view._chart_dialog.isVisible()
+
+        view._chart_dialog.close()
+        qapp.processEvents()
+        assert view._show_chart is False
+        assert view._chart_dialog is None
+
+
+# ── WoRMS update (startTaxonomyWormsJob) ──────────────────────────────────────
+
+class TestTaxonomyWormsUpdate:
+    def test_worms_update_ids_from_filter(self, view, qapp):
+        view.on_activate()
+        view._filter_text = "叶须虫"
+
+        ids = view._worms_update_record_ids(selected_only=False)
+
+        assert len(ids) == 1
+        assert ids[0].startswith("seed:")
+
+    def test_worms_update_creates_project_job(self, view, tmp_path, qapp):
+        view.ctx.current_project_dir = str(tmp_path)
+        view.on_activate()
+        view._filter_text = "叶须虫"
+
+        import unittest.mock as mock
+        with mock.patch("app.views.taxonomy_view.QMessageBox.information"):
+            view._on_worms_update(selected_only=False)
+
+        jobs_path = tmp_path / "_data" / "worms_jobs.json"
+        data = json.loads(jobs_path.read_text(encoding="utf-8"))
+        assert len(data["jobs"]) == 1
+        assert data["jobs"][0]["source"] == "filtered"
+        assert len(data["jobs"][0]["record_ids"]) == 1
+        assert view.ctx.pending_worms_job_id == data["jobs"][0]["id"]
+
+
+# ── _TaxonFacetPanel ──────────────────────────────────────────────────────────
+
+class TestTaxonFacetPanel:
+    """Tests for the per-column facet filter panel.
+
+    Mirrors fetchTaxonFacetValues / taxonFacetValueChecked /
+    toggleTaxonFacetValue / renderTaxonFacetMenu logic in app.js.
+    """
+
+    @pytest.fixture
+    def panel(self, qapp):
+        from app.views.taxonomy_view import _TaxonFacetPanel
+        recs = [
+            {"class": "Polychaeta",   "classCn": "多毛纲"},
+            {"class": "Polychaeta",   "classCn": "多毛纲"},
+            {"class": "Malacostraca", "classCn": "软甲纲"},
+            {"class": "",             "classCn": ""},
+        ]
+        return _TaxonFacetPanel("class", "纲(拉丁)", recs)
+
+    def test_constructs(self, panel):
+        assert panel is not None
+
+    def test_unique_values_counts(self, panel):
+        items = panel._unique_values()
+        d = dict(items)
+        assert d.get("Polychaeta") == 2
+        assert d.get("Malacostraca") == 1
+
+    def test_value_checked_all_mode(self, panel):
+        panel._draft = {"mode": "all"}
+        assert panel._value_checked("Polychaeta") is True
+        assert panel._value_checked("") is True
+
+    def test_value_checked_include_mode(self, panel):
+        panel._draft = {"mode": "include", "values": ["Polychaeta"]}
+        assert panel._value_checked("Polychaeta") is True
+        assert panel._value_checked("Malacostraca") is False
+
+    def test_value_checked_exclude_mode(self, panel):
+        panel._draft = {"mode": "exclude", "excluded": ["Malacostraca"]}
+        assert panel._value_checked("Polychaeta") is True
+        assert panel._value_checked("Malacostraca") is False
+
+    def test_value_checked_search_mode(self, panel):
+        panel._draft = {"mode": "search", "search": "Poly", "excluded": []}
+        assert panel._value_checked("Polychaeta") is True
+        assert panel._value_checked("Malacostraca") is False
+
+    def test_filter_applied_signal_none_on_clear(self, qapp):
+        from app.views.taxonomy_view import _TaxonFacetPanel
+        recs = [{"class": "Polychaeta"}]
+        panel = _TaxonFacetPanel(
+            "class", "纲", recs,
+            current_predicate={"mode": "include", "values": ["Polychaeta"]}
+        )
+        results = []
+        panel.filter_applied.connect(lambda k, p: results.append((k, p)))
+        panel._on_clear()
+        assert len(results) == 1
+        assert results[0] == ("class", None)
+
+    def test_filter_applied_signal_include_on_ok(self, qapp):
+        from app.views.taxonomy_view import _TaxonFacetPanel
+        recs = [{"class": "Polychaeta"}]
+        pred = {"mode": "include", "values": ["Polychaeta"]}
+        panel = _TaxonFacetPanel("class", "纲", recs, current_predicate=pred)
+        results = []
+        panel.filter_applied.connect(lambda k, p: results.append((k, p)))
+        panel._on_apply()
+        assert len(results) == 1
+        col_key, returned_pred = results[0]
+        assert col_key == "class"
+        assert returned_pred is not None
+        assert returned_pred.get("mode") == "include"
+
+    def test_sort_requested_signal(self, panel, qapp):
+        signals = []
+        panel.sort_requested.connect(lambda col, d: signals.append((col, d)))
+        panel.sort_requested.emit("class", "asc")
+        assert signals == [("class", "asc")]
+
+
+# ── TaxonomyView facet filter integration ────────────────────────────────────
+
+class TestFacetFilterIntegration:
+    """Test that _col_filters is applied during _load_page."""
+
+    def test_include_filter_restricts_rows(self, view, qapp):
+        view.on_activate()
+        total_before = view._total
+
+        view._col_filters["class"] = {"mode": "include", "values": ["Polychaeta"]}
+        view._page = 1
+        view._load_page()
+
+        assert view._total < total_before
+        for row in range(view._model.rowCount()):
+            rec = view._model.record_at(row)
+            assert rec is not None
+            assert rec.get("class") == "Polychaeta"
+
+    def test_exclude_filter_hides_rows(self, view, qapp):
+        view.on_activate()
+
+        view._col_filters["class"] = {"mode": "exclude", "excluded": ["Polychaeta"]}
+        view._page = 1
+        view._load_page()
+
+        for row in range(view._model.rowCount()):
+            rec = view._model.record_at(row)
+            assert rec is not None
+            assert rec.get("class") != "Polychaeta"
+
+    def test_facet_filter_applied_clears_on_none(self, view, qapp):
+        view.on_activate()
+        view._col_filters["class"] = {"mode": "include", "values": ["Polychaeta"]}
+        view._load_page()
+        filtered_total = view._total
+
+        view._on_facet_filter_applied("class", None)
+        assert "class" not in view._col_filters
+        assert view._total >= filtered_total
+
+    def test_sort_asc_orders_records(self, view, qapp):
+        view.on_activate()
+        view._sort_col = "class"
+        view._sort_dir = "asc"
+        view._load_page()
+
+        first_rec = view._model.record_at(0)
+        last_rec  = view._model.record_at(view._model.rowCount() - 1)
+        assert first_rec is not None and last_rec is not None
+        assert first_rec.get("class", "") <= last_rec.get("class", "")
+
+    def test_sort_desc_reverses_order(self, view, qapp):
+        view.on_activate()
+        view._sort_col = "class"
+        view._sort_dir = "desc"
+        view._load_page()
+
+        first_rec = view._model.record_at(0)
+        last_rec  = view._model.record_at(view._model.rowCount() - 1)
+        assert first_rec is not None and last_rec is not None
+        assert first_rec.get("class", "") >= last_rec.get("class", "")
+
+
+# ── _WormsMatchDialog smoke tests ─────────────────────────────────────────────
+
+class TestWormsMatchDialog:
+    """Smoke tests for _WormsMatchDialog (no network — mock WormsService)."""
+
+    @pytest.fixture
+    def worms_svc(self):
+        svc = MagicMock()
+        svc.search.return_value = [
+            {
+                "scientificname": "Halosydna brevisetosa",
+                "valid_name": "Halosydna brevisetosa",
+                "AphiaID": 12345,
+                "valid_AphiaID": 12345,
+                "status": "accepted",
+            }
+        ]
+        svc.classification.return_value = None
+        svc.flatten_classification.return_value = []
+        return svc
+
+    def test_dialog_constructs(self, qapp, worms_svc):
+        from app.views.taxonomy_view import _WormsMatchDialog, _WormsSearchWorker
+        row = {"species": "Halosydna brevisetosa", "recordId": "seed:0"}
+        import unittest.mock as mock
+        with mock.patch.object(_WormsSearchWorker, "start"):
+            dlg = _WormsMatchDialog(row, worms_svc)
+        assert dlg is not None
+        assert dlg.windowTitle() == "WoRMS 匹配物种"
+
+    def test_dialog_get_result_none_before_accept(self, qapp, worms_svc):
+        from app.views.taxonomy_view import _WormsMatchDialog, _WormsSearchWorker
+        row = {"species": "X sp", "recordId": "seed:1"}
+        import unittest.mock as mock
+        with mock.patch.object(_WormsSearchWorker, "start"):
+            dlg = _WormsMatchDialog(row, worms_svc)
+        assert dlg.get_result() is None
+
+    def test_on_no_match_sets_result(self, qapp, worms_svc):
+        from app.views.taxonomy_view import _WormsMatchDialog, _WormsSearchWorker
+        row = {"species": "X sp", "recordId": "seed:1"}
+        import unittest.mock as mock
+        with mock.patch.object(_WormsSearchWorker, "start"):
+            dlg = _WormsMatchDialog(row, worms_svc)
+        dlg._on_no_match()
+        result = dlg.get_result()
+        assert result is not None
+        assert result.get("no_match") is True
+
+
+# ── _TaxonReviewDialog smoke tests ────────────────────────────────────────────
+
+class TestTaxonReviewDialog:
+    def test_dialog_no_candidates(self, qapp):
+        from app.views.taxonomy_view import _TaxonReviewDialog
+        row = {"species": "Unknown sp", "recordId": "seed:0", "mappingCandidates": []}
+        dlg = _TaxonReviewDialog(row)
+        assert dlg.windowTitle() == "审核 WoRMS 匹配"
+        assert dlg.get_result() is None
+
+    def test_dialog_with_candidates(self, qapp):
+        from app.views.taxonomy_view import _TaxonReviewDialog
+        row = {
+            "species": "Halosydna brevisetosa",
+            "recordId": "seed:0",
+            "mappingCandidates": [
+                {"valid_name": "Halosydna brevisetosa", "AphiaID": 12345}
+            ],
+        }
+        dlg = _TaxonReviewDialog(row)
+        assert dlg is not None
+
+    def test_on_no_match_returns_no_match(self, qapp):
+        from app.views.taxonomy_view import _TaxonReviewDialog
+        row = {"species": "X sp", "recordId": "seed:0", "mappingCandidates": []}
+        dlg = _TaxonReviewDialog(row)
+        dlg._on_no_match()
+        result = dlg.get_result()
+        assert result is not None
+        assert result.get("no_match") is True
+
+    def test_on_use_returns_aphia_id(self, qapp):
+        from app.views.taxonomy_view import _TaxonReviewDialog
+        row = {"species": "X sp", "recordId": "seed:0", "mappingCandidates": []}
+        dlg = _TaxonReviewDialog(row)
+        dlg._on_use({"AphiaID": 99999, "valid_AphiaID": 99999})
+        result = dlg.get_result()
+        assert result is not None
+        assert result.get("aphia_id") == 99999
+
+
+# ── Job panel (renderTaxonJobPanel) ───────────────────────────────────────────
+
+class TestJobPanel:
+    def test_panel_hidden_when_no_jobs(self, view, tmp_path, qapp):
+        view.ctx.current_project_dir = str(tmp_path)
+        data_dir = tmp_path / "_data"
+        data_dir.mkdir()
+        (data_dir / "worms_jobs.json").write_text('{"jobs": []}', encoding="utf-8")
+        (data_dir / "worms_cache.json").write_text("{}", encoding="utf-8")
+
+        view.show()
+        view.on_activate()
+        qapp.processEvents()
+        assert not view._job_panel_frame.isVisible()
+
+    def test_panel_progress_text_when_job_present(self, view, tmp_path, qapp):
+        import uuid
+        from datetime import datetime, timezone
+
+        view.ctx.current_project_dir = str(tmp_path)
+        data_dir = tmp_path / "_data"
+        data_dir.mkdir()
+        (data_dir / "worms_cache.json").write_text("{}", encoding="utf-8")
+
+        now = datetime.now(timezone.utc).isoformat()
+        jobs_data = {
+            "jobs": [
+                {
+                    "id": str(uuid.uuid4()),
+                    "status": "running",
+                    "created_at": now,
+                    "updated_at": now,
+                    "created_by": "test",
+                    "record_ids": ["seed:0", "seed:1"],
+                    "cursor": 1,
+                    "counts": {"matched": 1},
+                    "source": "filtered",
+                }
+            ]
+        }
+        (data_dir / "worms_jobs.json").write_text(
+            json.dumps(jobs_data), encoding="utf-8"
+        )
+
+        view.show()
+        view._worms_svc = None
+        view._refresh_job_panel()
+        qapp.processEvents()
+
+        assert "1 / 2" in view._job_progress_label.text()
+
+    def test_panel_hides_when_no_jobs_found(self, view, qapp):
+        import unittest.mock as mock
+        with mock.patch(
+            "app.views.taxonomy_view.WormsService.list_jobs", return_value=[]
+        ):
+            view._refresh_job_panel()
+        assert not view._job_panel_frame.isVisible()
+
+
+# ── Row context menu ──────────────────────────────────────────────────────────
+
+class TestRowContextMenu:
+    def test_context_menu_opens_without_crash(self, view, qapp):
+        """Right-click on a seed row must not raise."""
+        view.on_activate()
+        assert view._model.rowCount() > 0
+
+        import unittest.mock as mock
+        from PyQt6.QtCore import QPoint
+        with mock.patch("app.views.taxonomy_view.QMenu.exec"):
+            view._on_row_context_menu(QPoint(40, 5))
+
+    def test_context_menu_noop_for_off_table(self, view, qapp):
+        """QPoint outside rows must not crash."""
+        view.on_activate()
+        import unittest.mock as mock
+        from PyQt6.QtCore import QPoint
+        with mock.patch("app.views.taxonomy_view.QMenu.exec"):
+            view._on_row_context_menu(QPoint(40, 99999))
