@@ -188,8 +188,7 @@ class SettingsView(BaseView):
           config-btn-row: [检测] [保存] [清除自定义] [重新探测]
         """
         tab = _ScrollTab()
-        tab.body.setContentsMargins(24, 20, 24, 20)
-        tab.body.setSpacing(0)
+        tab.body.setSpacing(0)  # Helicon tab manages its own gaps with addSpacing()
 
         # ── config-header ─────────────────────────────────────────────────
         header_frame = QFrame()
@@ -256,7 +255,7 @@ class SettingsView(BaseView):
         )
         detected_row.add_widget(self._detect_status_badge)
         section_v.addWidget(detected_row)
-        section_v.addSpacing(6)
+        section_v.addSpacing(10)
 
         # ── Row 2: 当前生效路径 ────────────────────────────────────────
         effective_row = _ConfigRow()
@@ -270,14 +269,14 @@ class SettingsView(BaseView):
         )
         effective_row.add_widget(self._effective_path_label, stretch=1)
         section_v.addWidget(effective_row)
-        section_v.addSpacing(6)
+        section_v.addSpacing(14)
 
         # ── Row 3: 自定义路径 (config-row--input) ─────────────────────
         custom_row_frame = QFrame()
         custom_row_frame.setStyleSheet("QFrame { background: transparent; }")
         custom_v = QVBoxLayout(custom_row_frame)
         custom_v.setContentsMargins(0, 0, 0, 0)
-        custom_v.setSpacing(6)
+        custom_v.setSpacing(8)
 
         custom_label = QLabel("自定义路径")
         custom_label.setStyleSheet(
@@ -457,7 +456,7 @@ class SettingsView(BaseView):
         prereq_label.setStyleSheet("font-size: 12px; line-height: 1.5;")
         del_v.addWidget(prereq_label)
 
-        del_v.addSpacing(8)
+        del_v.addSpacing(12)
 
         # The actual checkbox — DEFAULT OFF (hard rule)
         self._delete_jpg_chk = QCheckBox("归档完成后删除原片 JPG（危险操作，默认关闭）")
@@ -511,7 +510,7 @@ class SettingsView(BaseView):
         form.addRow("成果子目录名", self._results_edit)
 
         tab.body.addLayout(form)
-        tab.body.addSpacing(12)
+        tab.body.addSpacing(16)
 
         # Recent projects list
         recent_box = QGroupBox("最近项目")
@@ -860,8 +859,8 @@ class _ScrollTab(QWidget):
         inner = QWidget()
         inner.setStyleSheet(f"background: {_C_BG};")
         self.body = QVBoxLayout(inner)
-        self.body.setContentsMargins(12, 16, 12, 16)
-        self.body.setSpacing(8)
+        self.body.setContentsMargins(28, 24, 28, 24)
+        self.body.setSpacing(16)
 
         scroll.setWidget(inner)
         outer.addWidget(scroll)
