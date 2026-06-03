@@ -574,15 +574,13 @@ class MonitorPanel(QWidget):
         self._del_btn.setEnabled(False)
 
     def _on_delete_clicked(self) -> None:
-        """Delete selected files.
+        """Delete selected JPG files.
 
-        If any selected file is a TIFF (composed result), show a QMessageBox
-        warning before proceeding.  Pure-JPG selections delete directly after
-        assert_safe validation.
+        Hard rule: TIFF 永远保留 — if any TIFF is selected, show a warning
+        and abort entirely (user must deselect TIFFs first).
+        JPG-only selections go through a confirm dialog then os.unlink.
 
-        Hard rule: TIFF auto-archiving never triggers this path (only user
-        manual delete does).  JPG-only auto-delete from archive_service is
-        separate and never calls this method.
+        Oracle: app.js deleteSelectedFiles() — TIFF guard + os.unlink for JPGs.
         """
         sel = self._selected_cards()
         if not sel:
@@ -590,52 +588,45 @@ class MonitorPanel(QWidget):
 
         paths = [getattr(c._entry, "path", "") for c in sel]
         tiff_paths = [p for p in paths if p.lower().endswith((".tif", ".tiff"))]
-        jpg_paths  = [p for p in paths if not p.lower().endswith((".tif", ".tiff"))]
+        jpg_paths  = [p for p in paths if p and not p.lower().endswith((".tif", ".tiff"))]
 
-        # TIFF warning gate
+        # Hard rule: TIFF 永远保留 — abort with warning
         if tiff_paths:
-            msg = QMessageBox(self)
-            msg.setWindowTitle("删除确认")
-            msg.setIcon(QMessageBox.Icon.Warning)
-            msg.setText(
-                f"选中包含 {len(tiff_paths)} 个合成成果 TIFF（不可自动恢复），确定删除？"
+            QMessageBox.warning(
+                self, "无法删除 TIFF",
+                f"选中包含 {len(tiff_paths)} 个 TIFF 成片。\n"
+                "TIFF 永远保留，只有 JPG 原片可以删除。\n"
+                "请取消选择 TIFF 后再操作。"
             )
-            msg.setStandardButtons(
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel
-            )
-            msg.setDefaultButton(QMessageBox.StandardButton.Cancel)
-            if msg.exec() != QMessageBox.StandardButton.Yes:
-                return
+            return
 
-        # Validate paths via default_registry.assert_safe
-        try:
-            from app.utils.path_utils import default_registry
-        except ImportError:
-            default_registry = None
+        if not jpg_paths:
+            QMessageBox.information(self, "删除", "请先选中要删除的 JPG。")
+            return
 
-        import os
-        deleted: list[str] = []
+        reply = QMessageBox.question(
+            self, "确认删除",
+            f"确认删除 {len(jpg_paths)} 张 JPG？\n"
+            "此操作直接从磁盘删除原片，不可恢复。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        import os as _os
         errors: list[str] = []
-        for p in (tiff_paths + jpg_paths):
-            if not p:
-                continue
+        deleted: list[str] = []
+        for p in jpg_paths:
             try:
-                if default_registry is not None:
-                    default_registry.assert_safe(p, "delete")
-                if os.path.isfile(p):
-                    os.remove(p)
+                if _os.path.isfile(p):
+                    _os.unlink(p)
                     deleted.append(p)
-            except PermissionError as exc:
-                errors.append(f"{p}: {exc}")
             except OSError as exc:
-                errors.append(f"{p}: {exc}")
+                errors.append(f"{_os.path.basename(p)}: {exc}")
 
         if errors:
-            QMessageBox.warning(
-                self,
-                "部分删除失败",
-                "\n".join(errors[:5]),
-            )
+            QMessageBox.warning(self, "删除部分失败", "\n".join(errors[:5]))
 
         if deleted:
             self._on_select_none()

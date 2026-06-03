@@ -555,7 +555,55 @@ class TestMetaScoreRing:
 # ── Delete with TIFF warning ───────────────────────────────────────────────────
 
 class TestDeleteWithTiffWarning:
-    """Test that MonitorPanel._on_delete_clicked identifies TIFF in selection."""
+    """Test that MonitorPanel._on_delete_clicked identifies TIFF in selection and deletes JPGs."""
+
+    def test_actual_jpg_deletion(self, tmp_path):
+        """_on_delete_clicked must actually call os.unlink on confirmed JPG paths."""
+        from app.widgets.monitor_panel import MonitorPanel
+        from app.services.monitor_service import FileEntry, ScanResult
+        ctx = _make_ctx()
+        # Create a real temporary JPG file
+        jpg_path = str(tmp_path / "test.jpg")
+        with open(jpg_path, "wb") as f:
+            f.write(b"JFIF" * 100)
+        w = MonitorPanel(ctx)
+        entries = [FileEntry(
+            name="test.jpg", path=jpg_path, kind="jpg",
+            size=400, mtime="2026-06-01T00:00:00+00:00",
+        )]
+        result = ScanResult(project_dir=str(tmp_path), jpg_files=entries)
+        w.load_scan(result)
+        w._on_select_all()
+        # Patch QMessageBox.question to return Yes automatically
+        from unittest.mock import patch
+        from PyQt6.QtWidgets import QMessageBox
+        with patch.object(QMessageBox, 'question', return_value=QMessageBox.StandardButton.Yes):
+            w._on_delete_clicked()
+        assert not os.path.exists(jpg_path), "JPG must be deleted after confirm"
+
+    def test_tiff_selection_blocked(self, tmp_path):
+        """_on_delete_clicked must show warning and abort when TIFFs are selected."""
+        from app.widgets.monitor_panel import MonitorPanel, _FileCard
+        ctx = _make_ctx()
+        w = MonitorPanel(ctx)
+
+        class _Entry:
+            path = str(tmp_path / "result.tif")
+            kind = "tiff"
+            name = "result.tif"
+            attributed_specimen_id = None
+            composed_tiff = None
+            archived = None
+
+        tif_card = _FileCard(_Entry(), parent=w)
+        tif_card._selected = True
+        w._cards = [tif_card]
+
+        from unittest.mock import patch
+        from PyQt6.QtWidgets import QMessageBox
+        with patch.object(QMessageBox, 'warning') as mock_warn:
+            w._on_delete_clicked()
+            mock_warn.assert_called_once()  # must warn about TIFF
 
     def _make_fake_entry(self, path: str, kind: str = "jpg"):
         """Return a minimal fake FileEntry-like object."""
