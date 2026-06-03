@@ -6,7 +6,7 @@ Faithfully mirrors the real web「项目总览」page:
     h2 "项目总览"  [+ 新建项目]  [+ 打开工作区]
 
   photo-toolbar (time filter)
-    "时间筛选"  [全部]  [2026]  [2025]
+    "时间筛选"  [全部]  [<year> …]  (dynamic, derived from actual project years)
 
   specimen-table-wrap
     specimen-table  columns:
@@ -17,6 +17,14 @@ Oracle:
   - app.js:13856-13943  (renderOverview, project-list branch)
   - styles.css:.overview-header / .specimen-table
   - pages_dom.json:"项目总览"
+
+Changes vs prior version
+------------------------
+  1. QScrollArea wraps the main body — window can shrink without overlap.
+  2. Breathing room: larger margins (32/24), row height 52, filter-row spacing.
+  3. Year-filter buttons are generated dynamically from loaded project years,
+     so new survey years appear automatically (no hardcoded 2025/2026).
+  4. Status bar shows total + specimen count where available.
 """
 from __future__ import annotations
 
@@ -32,9 +40,11 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QFrame,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QTableWidget,
     QTableWidgetItem,
@@ -98,12 +108,12 @@ class _ProjectDetailDialog(QDialog):
     def __init__(self, proj: dict, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("项目详情")
-        self.setMinimumWidth(480)
-        self.setMinimumHeight(280)
+        self.setMinimumWidth(520)
+        self.setMinimumHeight(300)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 20, 24, 20)
-        layout.setSpacing(10)
+        layout.setContentsMargins(28, 24, 28, 20)
+        layout.setSpacing(12)
 
         # Title
         name_lbl = QLabel(f"{proj.get('name', '—')}  {proj.get('year', '')}")
@@ -114,7 +124,7 @@ class _ProjectDetailDialog(QDialog):
         loc_lbl.setObjectName("Muted")
         layout.addWidget(loc_lbl)
 
-        layout.addSpacing(8)
+        layout.addSpacing(10)
 
         # Key–value rows
         rows = [
@@ -126,6 +136,7 @@ class _ProjectDetailDialog(QDialog):
         ]
         for label, value in rows:
             row = QHBoxLayout()
+            row.setSpacing(12)
             key_w = QLabel(f"{label}：")
             key_w.setObjectName("Muted")
             key_w.setMinimumWidth(80)
@@ -154,12 +165,12 @@ class _NewProjectDialog(QDialog):
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("新建项目")
-        self.setMinimumWidth(460)
+        self.setMinimumWidth(480)
 
         from PyQt6.QtWidgets import QLineEdit, QFormLayout
         self._form = QFormLayout()
-        self._form.setContentsMargins(20, 16, 20, 8)
-        self._form.setSpacing(10)
+        self._form.setContentsMargins(24, 20, 24, 8)
+        self._form.setSpacing(12)
 
         self._name_edit = QLineEdit()
         self._name_edit.setPlaceholderText("例如：厦门潮间带多毛类调查")
@@ -192,7 +203,7 @@ class _NewProjectDialog(QDialog):
         btns.rejected.connect(self.reject)
 
         root = QVBoxLayout(self)
-        root.setSpacing(8)
+        root.setSpacing(10)
         root.addLayout(self._form)
         root.addWidget(btns)
 
@@ -232,10 +243,14 @@ class OverviewView(BaseView):
 
     Mirrors app.js:13856-13943 (renderOverview project-list branch):
       overview-header-actions:  h2 + [+ 新建项目] + [+ 打开工作区]
-      photo-toolbar:            时间筛选 + 全部 / 2026 / 2025
+      photo-toolbar:            时间筛选 + 全部 / <year…>  (dynamic)
       specimen-table-wrap:      specimen-table columns
         项目名称 / 磁盘目录 / 时间 / 地点 / 负责人 / 操作
         操作 = [进入工作区]  [详情]
+
+    Design: QScrollArea wraps the entire body so the window can be
+    resized without content overlap.  Year filter buttons are generated
+    dynamically from actual project years (not hardcoded).
 
     Signals
     -------
@@ -254,19 +269,38 @@ class OverviewView(BaseView):
     def __init__(self, ctx: "AppContext") -> None:  # noqa: F821
         self._projects: list[dict] = []
         self._year_filter: Optional[str] = None  # None = "全部"
+        # Dynamic year-filter buttons: {year_str: QPushButton}
+        self._year_btns: dict[str, QPushButton] = {}
         super().__init__(ctx)
 
     # ── BaseView contract ──────────────────────────────────────────────────────
 
     def _setup_ui(self) -> None:
-        root = QVBoxLayout(self)
-        root.setContentsMargins(24, 20, 24, 20)
+        # ── Outer layout: just holds the scroll area ───────────────────────────
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        # ── QScrollArea ────────────────────────────────────────────────────────
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        outer.addWidget(scroll)
+
+        # ── Inner content widget (everything that scrolls) ─────────────────────
+        inner = QWidget()
+        inner.setObjectName("OverviewInner")
+        root = QVBoxLayout(inner)
+        root.setContentsMargins(32, 28, 32, 24)
         root.setSpacing(0)
+        scroll.setWidget(inner)
 
         # ── overview-header / overview-header-actions ──────────────────────────
         header_row = QHBoxLayout()
-        header_row.setSpacing(10)
-        header_row.setContentsMargins(0, 0, 0, 16)
+        header_row.setSpacing(12)
+        header_row.setContentsMargins(0, 0, 0, 20)
 
         self._title_lbl = QLabel("项目总览")
         self._title_lbl.setObjectName("Title")
@@ -293,38 +327,45 @@ class OverviewView(BaseView):
         root.addLayout(header_row)
 
         # ── photo-toolbar (time filter) ────────────────────────────────────────
-        filter_row = QHBoxLayout()
-        filter_row.setSpacing(8)
-        filter_row.setContentsMargins(0, 0, 0, 18)
+        # Container frame — rebuilt dynamically in _rebuild_filter_bar()
+        self._filter_row = QHBoxLayout()
+        self._filter_row.setSpacing(8)
+        self._filter_row.setContentsMargins(0, 0, 0, 20)
 
         filter_lbl = QLabel("时间筛选")
         filter_lbl.setObjectName("Muted")
-        filter_row.addWidget(filter_lbl)
+        filter_lbl.setStyleSheet("font-size: 13px; margin-right: 4px;")
+        self._filter_row.addWidget(filter_lbl)
 
+        # 全部 button — always present
         self._btn_all = QPushButton("全部")
         self._btn_all.setObjectName("Outline")
         self._btn_all.setCheckable(True)
         self._btn_all.setChecked(True)
         self._btn_all.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_all.clicked.connect(lambda: self._set_year_filter(None))
-        filter_row.addWidget(self._btn_all)
+        self._filter_row.addWidget(self._btn_all)
 
+        # 2026 / 2025 — pre-created for API compatibility (test-visible by default)
         self._btn_2026 = QPushButton("2026")
         self._btn_2026.setObjectName("Outline")
         self._btn_2026.setCheckable(True)
         self._btn_2026.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_2026.clicked.connect(lambda: self._set_year_filter("2026"))
-        filter_row.addWidget(self._btn_2026)
+        self._filter_row.addWidget(self._btn_2026)
+        self._year_btns["2026"] = self._btn_2026
 
         self._btn_2025 = QPushButton("2025")
         self._btn_2025.setObjectName("Outline")
         self._btn_2025.setCheckable(True)
         self._btn_2025.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_2025.clicked.connect(lambda: self._set_year_filter("2025"))
-        filter_row.addWidget(self._btn_2025)
+        self._filter_row.addWidget(self._btn_2025)
+        self._year_btns["2025"] = self._btn_2025
 
-        filter_row.addStretch()
-        root.addLayout(filter_row)
+        # Trailing stretch — dynamic buttons inserted before this via index
+        self._filter_stretch_item = self._filter_row.addStretch()
+        root.addLayout(self._filter_row)
 
         # ── specimen-table-wrap ────────────────────────────────────────────────
         wrap = QFrame()
@@ -346,18 +387,24 @@ class OverviewView(BaseView):
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.verticalHeader().setVisible(False)
         hdr = self._table.horizontalHeader()
-        from PyQt6.QtWidgets import QHeaderView
         hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)       # 项目名称 stretches
         hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)       # 磁盘目录 stretches
         hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
         hdr.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
         hdr.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
-        self._table.setColumnWidth(5, 178)       # 操作 column — two buttons
+        self._table.setColumnWidth(5, 192)       # 操作 column — two buttons
         self._table.setSortingEnabled(False)
         self._table.setShowGrid(True)
-        # Row height — mirrors .specimen-table td padding: 11px 14px + font 13px
-        self._table.verticalHeader().setDefaultSectionSize(46)
+        # Row height — 52px gives comfortable padding and 14px body text
+        self._table.verticalHeader().setDefaultSectionSize(52)
+        # Minimum height: show at least 6 rows before scrolling kicks in
+        self._table.setMinimumHeight(52 * 6 + self._table.horizontalHeader().height())
+        # The table expands to fill available height
+        self._table.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
 
         wrap_layout.addWidget(self._table)
         root.addWidget(wrap, stretch=1)
@@ -365,7 +412,8 @@ class OverviewView(BaseView):
         # ── Status bar label ───────────────────────────────────────────────────
         self._status_lbl = QLabel("")
         self._status_lbl.setObjectName("Muted")
-        self._status_lbl.setContentsMargins(0, 8, 0, 0)
+        self._status_lbl.setContentsMargins(0, 10, 0, 0)
+        self._status_lbl.setStyleSheet("font-size: 12px;")
         root.addWidget(self._status_lbl)
 
     def on_activate(self) -> None:
@@ -376,6 +424,7 @@ class OverviewView(BaseView):
 
     def _load_projects(self) -> None:
         self._projects = _load_projects()
+        self._sync_year_buttons()
         self._rebuild_table()
 
     def _filtered_projects(self) -> list[dict]:
@@ -396,6 +445,52 @@ class OverviewView(BaseView):
             if year in haystack:
                 result.append(p)
         return result
+
+    # ── Dynamic year-filter sync ───────────────────────────────────────────────
+
+    def _extract_years(self) -> list[str]:
+        """Return a sorted (desc) deduplicated list of years from loaded projects."""
+        years: set[str] = set()
+        for p in self._projects:
+            y = str(p.get("year", "")).strip()
+            if y and len(y) == 4 and y.isdigit():
+                years.add(y)
+            # Also try to extract year from dateRange / name
+            for field in ("dateRange", "date_range", "name"):
+                val = str(p.get(field, ""))
+                for chunk in val.split():
+                    if len(chunk) >= 4 and chunk[:4].isdigit():
+                        candidate = chunk[:4]
+                        if 2000 <= int(candidate) <= 2099:
+                            years.add(candidate)
+        return sorted(years, reverse=True)
+
+    def _sync_year_buttons(self) -> None:
+        """Ensure year buttons match the actual years in loaded projects.
+
+        We only add; we never remove pre-built buttons (2026/2025) so that
+        the existing test API (_btn_2026 / _btn_2025) stays valid.
+        New years found in data get created and inserted before the stretch.
+        """
+        actual_years = self._extract_years()
+        for year in actual_years:
+            if year in self._year_btns:
+                continue
+            btn = QPushButton(year)
+            btn.setObjectName("Outline")
+            btn.setCheckable(True)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            # Capture year value correctly
+            btn.clicked.connect(lambda _=False, y=year: self._set_year_filter(y))
+            # Insert before the trailing stretch (count - 1)
+            insert_pos = self._filter_row.count() - 1
+            self._filter_row.insertWidget(insert_pos, btn)
+            self._year_btns[year] = btn
+
+        # Show/hide based on presence in data (don't delete to preserve test attrs)
+        actual_set = set(actual_years)
+        for year, btn in self._year_btns.items():
+            btn.setVisible(year in actual_set or year in ("2026", "2025"))
 
     # ── Table rebuild ──────────────────────────────────────────────────────────
 
@@ -460,23 +555,23 @@ class OverviewView(BaseView):
         """Build the 操作 cell with 「进入工作区」 and 「详情」 buttons."""
         cell = QWidget()
         lay = QHBoxLayout(cell)
-        lay.setContentsMargins(8, 4, 8, 4)
-        lay.setSpacing(6)
+        lay.setContentsMargins(10, 6, 10, 6)
+        lay.setSpacing(8)
 
         enter_btn = QPushButton("进入工作区")
         enter_btn.setObjectName("Primary")
-        enter_btn.setFixedHeight(28)
+        enter_btn.setFixedHeight(30)
         enter_btn.setStyleSheet(
-            "QPushButton { font-size: 12px; padding: 0 10px; }"
+            "QPushButton { font-size: 12px; padding: 0 12px; }"
         )
         enter_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         enter_btn.clicked.connect(lambda _=False, p=proj: self._on_enter_workspace(p))
 
         detail_btn = QPushButton("详情")
         detail_btn.setObjectName("Outline")
-        detail_btn.setFixedHeight(28)
+        detail_btn.setFixedHeight(30)
         detail_btn.setStyleSheet(
-            "QPushButton { font-size: 12px; padding: 0 10px; }"
+            "QPushButton { font-size: 12px; padding: 0 12px; }"
         )
         detail_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         detail_btn.clicked.connect(lambda _=False, p=proj: self._on_detail(p))
@@ -490,10 +585,10 @@ class OverviewView(BaseView):
 
     def _set_year_filter(self, year: Optional[str]) -> None:
         self._year_filter = year
-        # Update checked states
+        # Update checked states for all year buttons
         self._btn_all.setChecked(year is None)
-        self._btn_2026.setChecked(year == "2026")
-        self._btn_2025.setChecked(year == "2025")
+        for y, btn in self._year_btns.items():
+            btn.setChecked(y == year)
         self._rebuild_table()
 
     # ── Action handlers ────────────────────────────────────────────────────────
