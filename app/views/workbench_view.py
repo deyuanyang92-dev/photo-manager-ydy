@@ -27,10 +27,14 @@ from typing import Optional
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
+    QApplication,
+    QFrame,
+    QHBoxLayout,
     QInputDialog,
     QLabel,
     QMessageBox,
     QProgressDialog,
+    QPushButton,
     QSplitter,
     QVBoxLayout,
     QWidget,
@@ -63,16 +67,36 @@ class WorkbenchView(BaseView):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
+        # ── Topbar: brand + project switcher + global actions ──────────────
+        root.addWidget(self._build_topbar())
+
+        # ── Body container (header + dir-strip + splitter) ─────────────────
+        body = QWidget()
+        body_lay = QVBoxLayout(body)
+        body_lay.setContentsMargins(18, 16, 18, 16)
+        body_lay.setSpacing(12)
+        root.addWidget(body, stretch=1)
+
+        # ── Workspace header: title + project tag + helicon status ─────────
+        body_lay.addLayout(self._build_header())
+
+        # ── Directory info strip ───────────────────────────────────────────
+        self._dir_strip = self._build_dir_strip()
+        body_lay.addWidget(self._dir_strip)
+
         # ── Outer horizontal splitter: left | centre+right ─────────────────
         outer = QSplitter(Qt.Orientation.Horizontal)
+        outer.setObjectName("WorkbenchSplitter")
         outer.setChildrenCollapsible(False)
+        outer.setHandleWidth(12)
 
         # ── Left: specimen sidebar ─────────────────────────────────────────
         self._sidebar = SpecimenSidebar(self.ctx)
-        self._sidebar.setMinimumWidth(160)
+        self._sidebar.setMinimumWidth(210)
         self._sidebar.specimen_selected.connect(self._on_specimen_selected)
         self._sidebar.activate_requested.connect(self._on_sidebar_activate)
         self._sidebar.deactivate_requested.connect(self._on_sidebar_deactivate)
+        self._sidebar.new_specimen_requested.connect(self._on_new_specimen)
         outer.addWidget(self._sidebar)
 
         # ── Centre: vertical splitter (monitor top, grouping bottom) ───────
@@ -100,9 +124,10 @@ class WorkbenchView(BaseView):
         right.setMinimumWidth(220)
         right_lay = QVBoxLayout(right)
         right_lay.setContentsMargins(0, 0, 0, 0)
-        right_lay.setSpacing(0)
+        right_lay.setSpacing(12)
 
         self._naming = NamingPanel(self.ctx)
+        self._naming.save_requested.connect(self._on_naming_save)
         right_lay.addWidget(self._naming, stretch=2)
 
         self._metadata = MetadataPanel(self.ctx)
@@ -112,8 +137,8 @@ class WorkbenchView(BaseView):
         outer.addWidget(right)
 
         # Initial splitter proportions: 1 : 3 : 1.5
-        outer.setSizes([180, 600, 280])
-        root.addWidget(outer)
+        outer.setSizes([220, 640, 320])
+        body_lay.addWidget(outer, stretch=1)
 
         # ── No-project banner ───────────────────────────────────────────────
         self._no_project_banner = QLabel(
@@ -122,7 +147,7 @@ class WorkbenchView(BaseView):
         self._no_project_banner.setObjectName("Muted")
         self._no_project_banner.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._no_project_banner.hide()
-        root.addWidget(self._no_project_banner)
+        body_lay.addWidget(self._no_project_banner)
 
         # Pending grouping-save debounce timer (500 ms)
         self._save_timer = QTimer(self)
@@ -134,6 +159,116 @@ class WorkbenchView(BaseView):
         self._current_uid: Optional[str] = None
         self._pending_grouping = None  # SpecimenGrouping awaiting save
 
+    # ── Header chrome builders ─────────────────────────────────────────────────
+
+    def _build_topbar(self) -> QFrame:
+        """Brand + project switcher + global actions (web renderTopbar)."""
+        bar = QFrame()
+        bar.setObjectName("TopBar")
+        bar.setFixedHeight(54)
+        lay = QHBoxLayout(bar)
+        lay.setContentsMargins(18, 8, 18, 8)
+        lay.setSpacing(12)
+
+        mark = QLabel("SP")
+        mark.setObjectName("BrandMark")
+        lay.addWidget(mark)
+        brand = QLabel("标本影像管理")
+        brand.setObjectName("BrandText")
+        lay.addWidget(brand)
+
+        lay.addSpacing(8)
+        self._project_switcher = QPushButton("当前项目 （未选） ▾")
+        self._project_switcher.setObjectName("ProjectSwitcher")
+        self._project_switcher.setToolTip("当前工作区项目")
+        lay.addWidget(self._project_switcher)
+
+        lay.addStretch()
+        for label, tip in (
+            ("+ 新建项目", "新建一个工作区项目"),
+            ("+ 打开工作区", "打开一个已有项目目录"),
+            ("智能压缩", "JPG→JXL 无损压缩 + ZIP 归档"),
+            ("🎬 Helicon", "Helicon Focus 路径配置"),
+            ("⚙", "全局设置"),
+        ):
+            btn = QPushButton(label)
+            btn.setObjectName("Outline")
+            btn.setToolTip(tip)
+            lay.addWidget(btn)
+        return bar
+
+    def _build_header(self) -> QHBoxLayout:
+        """Workspace title + project tag + Helicon status tag."""
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(12)
+        title = QLabel("拍照工作台")
+        title.setObjectName("WorkspaceTitle")
+        row.addWidget(title)
+        self._project_tag = QLabel("—")
+        self._project_tag.setObjectName("TagSea")
+        row.addWidget(self._project_tag)
+        self._helicon_tag = QLabel("Helicon 未检测")
+        self._helicon_tag.setObjectName("TagWarn")
+        row.addWidget(self._helicon_tag)
+        row.addStretch()
+        return row
+
+    def _build_dir_strip(self) -> QFrame:
+        """Working-directory / camera-JPG / results path strip."""
+        strip = QFrame()
+        strip.setObjectName("DirStrip")
+        lay = QHBoxLayout(strip)
+        lay.setContentsMargins(12, 8, 12, 8)
+        lay.setSpacing(18)
+
+        def _item(label: str) -> QLabel:
+            l = QLabel(label)
+            l.setObjectName("DirLabel")
+            lay.addWidget(l)
+            path = QLabel("—")
+            path.setObjectName("DirPath")
+            lay.addWidget(path)
+            return path
+
+        self._dir_root = _item("工作目录")
+        self._dir_incoming = _item("相机 JPG")
+        self._dir_results = _item("成果")
+        lay.addStretch()
+        return strip
+
+    def _refresh_header(self) -> None:
+        """Update header tags + dir-strip + monitor batch from current state."""
+        project_dir = self.ctx.current_project_dir
+        name = Path(project_dir).name if project_dir else "（未选）"
+        self._project_switcher.setText(f"当前项目  {name}  ▾")
+        self._project_tag.setText(name)
+
+        # Helicon status tag
+        installed = False
+        try:
+            from app.services.helicon_service import detect_helicon
+            installed = bool(detect_helicon())
+        except Exception:
+            installed = False
+        if installed:
+            self._helicon_tag.setText("Helicon OK")
+            self._helicon_tag.setObjectName("TagOk")
+        else:
+            self._helicon_tag.setText("Helicon 未检测")
+            self._helicon_tag.setObjectName("TagWarn")
+        self._helicon_tag.style().unpolish(self._helicon_tag)
+        self._helicon_tag.style().polish(self._helicon_tag)
+
+        # Dir strip
+        if project_dir:
+            self._dir_strip.show()
+            self._dir_root.setText(project_dir)
+            self._dir_incoming.setText("incoming-jpg/")
+            self._dir_results.setText("results/")
+        else:
+            self._dir_strip.hide()
+
     # ── BaseView contract ─────────────────────────────────────────────────────
 
     def on_activate(self) -> None:
@@ -143,6 +278,7 @@ class WorkbenchView(BaseView):
             return
 
         self._no_project_banner.hide()
+        self._refresh_header()
         self._sidebar.refresh()
         self._refresh_monitor()
 
@@ -151,12 +287,91 @@ class WorkbenchView(BaseView):
         if active_uid:
             self._sidebar.select_uid(active_uid)
             self._load_specimen(active_uid)
+        self._refresh_batch_header()
 
     # ── Specimen selection ────────────────────────────────────────────────────
 
     def _on_specimen_selected(self, uid: str) -> None:
         self._current_uid = uid
         self._load_specimen(uid)
+        self._refresh_batch_header()
+
+    def _refresh_batch_header(self) -> None:
+        """Sync the monitor's batch-ident bar with the active specimen."""
+        db = self.ctx.get_db()
+        active_uid = self._get_active_uid()
+        activated_at = None
+        if db and active_uid:
+            try:
+                row = db.execute(
+                    "SELECT activated_at FROM tasks WHERE uid = ?", (active_uid,)
+                ).fetchone()
+                if row:
+                    activated_at = row[0]
+            except Exception:
+                pass
+        batch_uid = active_uid or self._current_uid
+        self._monitor.set_batch(batch_uid, active_uid, activated_at)
+
+    def _on_new_specimen(self) -> None:
+        """Start a fresh blank UID draft in the naming/metadata panels."""
+        self._current_uid = None
+        self._naming.load_specimen({})
+        try:
+            self._metadata.clear()
+        except Exception:
+            pass
+
+    def _on_naming_save(self) -> None:
+        """Persist the naming panel's current UID into the specimens table.
+
+        Mirrors the web 「💾 保存」 button: upsert a specimen row keyed by the
+        live-preview UID with the seven naming segments.  Chinese fields are
+        never auto-filled (hard rule).
+        """
+        db = self.ctx.get_db()
+        project_dir = self.ctx.current_project_dir
+        if not db or not project_dir:
+            QMessageBox.information(self, "保存", "请先打开一个项目工作区。")
+            return
+        uid = self._naming.current_uid()
+        if not uid:
+            QMessageBox.information(self, "保存", "编号尚未填写完整。")
+            return
+        n = self._naming
+        try:
+            db.execute(
+                """
+                INSERT INTO specimens (uid, id, province, site, station,
+                                       storage, collection_date, photo_date,
+                                       owner_project_dir)
+                VALUES (?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(uid) DO UPDATE SET
+                    id=excluded.id, province=excluded.province,
+                    site=excluded.site, station=excluded.station,
+                    storage=excluded.storage,
+                    collection_date=excluded.collection_date,
+                    photo_date=excluded.photo_date,
+                    owner_project_dir=excluded.owner_project_dir
+                """,
+                (
+                    uid,
+                    n._species_id.text().strip(),
+                    n._province.text().strip(),
+                    n._site.text().strip(),
+                    n._station.text().strip(),
+                    n._storage.text().strip(),
+                    n._collection_date.text().strip(),
+                    n._photo_date.text().strip(),
+                    project_dir,
+                ),
+            )
+            db.commit()
+            self._current_uid = uid
+            self._sidebar.refresh()
+            self._sidebar.select_uid(uid)
+        except Exception as exc:
+            QMessageBox.warning(self, "保存失败", str(exc))
 
     def _load_specimen(self, uid: str) -> None:
         """Load grouping + naming + metadata for *uid*."""
@@ -269,6 +484,7 @@ class WorkbenchView(BaseView):
             # Select and load the newly activated specimen
             self._sidebar.select_uid(uid)
             self._load_specimen(uid)
+            self._refresh_batch_header()
         except Exception as exc:
             QMessageBox.warning(self, "激活失败", str(exc))
 
@@ -286,6 +502,7 @@ class WorkbenchView(BaseView):
             svc_deactivate(project_dir, db, uid)
             self._sidebar.refresh()
             self._refresh_monitor()
+            self._refresh_batch_header()
         except Exception as exc:
             QMessageBox.warning(self, "去激活失败", str(exc))
 
@@ -686,4 +903,5 @@ class WorkbenchView(BaseView):
         self._monitor.clear()
         self._grouping.clear()
         self._metadata.clear()
+        self._refresh_header()
         self._no_project_banner.show()

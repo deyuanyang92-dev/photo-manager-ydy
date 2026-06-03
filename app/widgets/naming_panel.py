@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Optional
 
-from PyQt6.QtCore import pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -48,6 +48,7 @@ class NamingPanel(QWidget):
 
     uid_generated = pyqtSignal(str)
     result_id_generated = pyqtSignal(str)
+    save_requested = pyqtSignal()
 
     def __init__(self, ctx: "AppContext", parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -57,86 +58,100 @@ class NamingPanel(QWidget):
     # ── UI ────────────────────────────────────────────────────────────────────
 
     def _setup_ui(self) -> None:
-        root = QVBoxLayout(self)
-        root.setContentsMargins(8, 8, 8, 8)
-        root.setSpacing(8)
+        card = QFrame(self)
+        card.setObjectName("PanelCard")
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(card)
 
-        # Section header
-        hdr = QLabel("命名生成器")
-        hdr.setObjectName("Section")
-        root.addWidget(hdr)
+        root = QVBoxLayout(card)
+        root.setContentsMargins(16, 14, 16, 14)
+        root.setSpacing(10)
 
-        # Form grid: label | field  (6 naming fields)
+        # Card header: title + save button (web: 「照片编号」+「💾 保存」)
+        hdr_row = QHBoxLayout()
+        hdr_row.setContentsMargins(0, 0, 0, 0)
+        hdr = QLabel("照片编号")
+        hdr.setObjectName("CardTitle")
+        hdr_row.addWidget(hdr)
+        hdr_row.addStretch()
+        save_btn = QPushButton("💾 保存")
+        save_btn.setObjectName("Outline")
+        save_btn.setFixedHeight(26)
+        save_btn.setToolTip("把当前输入存到本地，刷新不丢")
+        save_btn.clicked.connect(self.save_requested.emit)
+        hdr_row.addWidget(save_btn)
+        root.addLayout(hdr_row)
+
+        # Form grid: 2-column compact label-over-field rows (web naming-fields)
         grid = QGridLayout()
-        grid.setSpacing(6)
-        grid.setColumnMinimumWidth(0, 60)
-        grid.setColumnStretch(1, 1)
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(9)
 
-        def _row(row: int, label: str, placeholder: str) -> QLineEdit:
+        def _field(row: int, col: int, label: str, placeholder: str,
+                   *, auto: bool = False) -> QLineEdit:
+            wrap = QVBoxLayout()
+            wrap.setSpacing(4)
             lbl = QLabel(label)
-            lbl.setObjectName("Muted")
+            lbl.setObjectName("MutedSmall")
             edit = QLineEdit()
             edit.setPlaceholderText(placeholder)
-            edit.setFixedHeight(28)
-            grid.addWidget(lbl, row, 0)
-            grid.addWidget(edit, row, 1)
+            edit.setFixedHeight(30)
+            if auto:
+                edit.setObjectName("AutoField")
+            wrap.addWidget(lbl)
+            wrap.addWidget(edit)
+            grid.addLayout(wrap, row, col)
             return edit
 
-        self._province = _row(0, "地区", "如 FJ")
-        self._site = _row(1, "样地", "如 YGLZ")
-        self._station = _row(2, "站位", "如 B2")
-        self._species_id = _row(3, "编号", "如 DLC001")
-        self._storage = _row(4, "保存", "如 T95E / RD75E")
-        self._collection_date = _row(5, "采集日期", "YYYYMMDD")
-        self._photo_date = _row(6, "拍摄日期", "YYYYMMDD（选填）")
+        # Auto-derived fields shown dashed (web: .auto class)
+        self._province = _field(0, 0, "地区", "如 FJ", auto=True)
+        self._site = _field(0, 1, "样地", "如 YGLZ", auto=True)
+        self._station = _field(1, 0, "站位", "如 B2", auto=True)
+        self._species_id = _field(1, 1, "物种拼音缩写编号", "如 DLC001")
+        self._storage = _field(2, 0, "保存方式", "如 T95E / RD75E")
+        self._collection_date = _field(2, 1, "采集日期", "YYYYMMDD")
+        self._photo_date = _field(3, 0, "拍摄日期", "YYYYMMDD（选填）")
 
-        # Sequence number
-        seq_lbl = QLabel("序号")
-        seq_lbl.setObjectName("Muted")
+        # Sequence number (right of photo date)
+        seq_wrap = QVBoxLayout()
+        seq_wrap.setSpacing(4)
+        seq_lbl = QLabel("成果序号")
+        seq_lbl.setObjectName("MutedSmall")
         self._seq = QSpinBox()
         self._seq.setMinimum(1)
         self._seq.setMaximum(999)
         self._seq.setValue(1)
-        self._seq.setFixedHeight(28)
-        grid.addWidget(seq_lbl, 7, 0)
-        grid.addWidget(self._seq, 7, 1)
-
+        self._seq.setFixedHeight(30)
+        seq_wrap.addWidget(seq_lbl)
+        seq_wrap.addWidget(self._seq)
+        grid.addLayout(seq_wrap, 3, 1)
         root.addLayout(grid)
 
-        # Divider
-        line = QFrame()
-        line.setFrameShape(QFrame.Shape.HLine)
-        line.setStyleSheet("color: rgba(145,182,181,0.13);")
-        root.addWidget(line)
-
-        # Live preview
+        # ── Live preview blocks ──
         preview_lbl = QLabel("标本唯一编号")
-        preview_lbl.setObjectName("Muted")
+        preview_lbl.setObjectName("MutedSmall")
         root.addWidget(preview_lbl)
-
         self._uid_preview = QLabel("—")
-        self._uid_preview.setObjectName("Mono")
+        self._uid_preview.setObjectName("PreviewEmpty")
         self._uid_preview.setWordWrap(True)
+        self._uid_preview.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         root.addWidget(self._uid_preview)
 
         result_lbl = QLabel("成果编号（含序号）")
-        result_lbl.setObjectName("Muted")
+        result_lbl.setObjectName("MutedSmall")
         root.addWidget(result_lbl)
-
         self._result_preview = QLabel("—")
-        self._result_preview.setObjectName("Mono")
+        self._result_preview.setObjectName("PreviewEmpty")
         self._result_preview.setWordWrap(True)
+        self._result_preview.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         root.addWidget(self._result_preview)
 
         # R-prefix dual-label warning (hidden by default)
         self._rna_warning = QLabel(
             "⚠️  R 前缀（已取 RNA）— 需额外生成 RNAlater 组织管标签"
         )
-        self._rna_warning.setStyleSheet(
-            "color:#e6b04a; background:rgba(230,176,74,0.12);"
-            " border:1px solid rgba(230,176,74,0.3); border-radius:4px;"
-            " padding:4px 8px; font-size:12px;"
-        )
+        self._rna_warning.setObjectName("RnaWarning")
         self._rna_warning.setWordWrap(True)
         self._rna_warning.hide()
         root.addWidget(self._rna_warning)
@@ -226,8 +241,8 @@ class NamingPanel(QWidget):
             seq=seq,
         )
 
-        self._uid_preview.setText(uid if uid else "—")
-        self._result_preview.setText(result_id if result_id else "—")
+        self._set_preview(self._uid_preview, uid)
+        self._set_preview(self._result_preview, result_id)
 
         # R-prefix dual-label warning
         if storage.upper().startswith("R"):
@@ -239,6 +254,14 @@ class NamingPanel(QWidget):
             self.uid_generated.emit(uid)
         if result_id:
             self.result_id_generated.emit(result_id)
+
+    def _set_preview(self, label: QLabel, value: str) -> None:
+        """Set preview text and swap filled/empty styling via object name."""
+        filled = bool(value)
+        label.setText(value if filled else "—")
+        label.setObjectName("PreviewBlock" if filled else "PreviewEmpty")
+        label.style().unpolish(label)
+        label.style().polish(label)
 
     def _copy_uid(self) -> None:
         from PyQt6.QtWidgets import QApplication

@@ -197,31 +197,39 @@ class GroupingPanel(QWidget):
     # ── UI ────────────────────────────────────────────────────────────────────
 
     def _setup_ui(self) -> None:
-        root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        section = QFrame()
+        section.setObjectName("WorkbenchSection")
+        outer.addWidget(section)
+
+        root = QVBoxLayout(section)
+        root.setContentsMargins(16, 14, 16, 14)
+        root.setSpacing(10)
 
         # Toolbar
         toolbar = QHBoxLayout()
-        toolbar.setContentsMargins(8, 6, 8, 6)
-        title = QLabel("分组工具")
+        toolbar.setContentsMargins(0, 0, 0, 0)
+        toolbar.setSpacing(8)
+        title = QLabel("分组工具 · 成果内容")
         title.setObjectName("Section")
         toolbar.addWidget(title)
         toolbar.addStretch()
 
         self._uid_label = QLabel("— 无激活标本 —")
-        self._uid_label.setObjectName("Muted")
+        self._uid_label.setObjectName("Mono")
         toolbar.addWidget(self._uid_label)
 
         add_btn = QPushButton("+ 新组")
+        add_btn.setObjectName("Outline")
         add_btn.setFixedHeight(26)
         add_btn.clicked.connect(self._add_group)
         toolbar.addWidget(add_btn)
         root.addLayout(toolbar)
 
         line = QFrame()
-        line.setFrameShape(QFrame.Shape.HLine)
-        line.setStyleSheet("color: rgba(145,182,181,0.13);")
+        line.setObjectName("Divider")
+        line.setFixedHeight(1)
         root.addWidget(line)
 
         # Scroll area
@@ -229,11 +237,11 @@ class GroupingPanel(QWidget):
         scroll.setWidgetResizable(True)
         self._content = QWidget()
         self._content_lay = QVBoxLayout(self._content)
-        self._content_lay.setContentsMargins(8, 8, 8, 8)
-        self._content_lay.setSpacing(6)
+        self._content_lay.setContentsMargins(0, 4, 0, 4)
+        self._content_lay.setSpacing(8)
         self._content_lay.setAlignment(Qt.AlignmentFlag.AlignTop)
         scroll.setWidget(self._content)
-        root.addWidget(scroll)
+        root.addWidget(scroll, stretch=1)
 
         # Empty state
         self._empty_lbl = QLabel("激活一个标本后查看或编辑分组")

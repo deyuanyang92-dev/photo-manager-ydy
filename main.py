@@ -8,10 +8,9 @@ import sys
 from pathlib import Path
 
 from PyQt6.QtWidgets import QApplication
-from PyQt6.QtGui import QFontDatabase
 
 from app.app_context import AppContext
-from app.config.theme import build_theme_qss_file
+from app.config.theme import build_theme_qss_file, load_fonts
 from app.main_window import MainWindow
 from app.views.registry import ALL_VIEWS
 
@@ -21,14 +20,13 @@ def main() -> int:
     app.setApplicationName("标本照片工作台")
     app.setOrganizationName("SpecimenPhotoWorkbench")
 
+    # ── Fonts (bundled Noto Sans/Serif SC + JetBrains Mono if present;
+    #    web-parity system fallback otherwise) ──────────────────────────
+    load_fonts(app)
+
     # ── Theme ─────────────────────────────────────────────────────────
     qss_path = build_theme_qss_file()
     app.setStyleSheet(qss_path.read_text(encoding="utf-8"))
-
-    # ── Font loading hook ─────────────────────────────────────────────
-    # Add custom font files here when available, e.g.:
-    #   QFontDatabase.addApplicationFont("resources/fonts/NotoSansSC-Regular.ttf")
-    # (font files are not bundled in the skeleton; system fonts are used)
 
     # ── App context (shared state + DI container) ─────────────────────
     ctx = AppContext()

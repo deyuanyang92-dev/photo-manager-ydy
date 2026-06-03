@@ -1,26 +1,34 @@
-"""monitor_panel.py — Incoming-JPG and results-TIFF thumbnail grid.
+"""monitor_panel.py — Incoming-JPG / results-TIFF capture stream.
 
-Shows the contents of ``incoming-jpg/`` and ``results/`` for the current
-project.  Each file card carries:
-  - A small "thumbnail" placeholder (real thumbnail loading is a future task)
-  - A colour-coded attribution badge (raw/stacked/compressed/jpg/archived)
-  - Buttons: Activate attribution, Deactivate, Manual-assign
+Faithfully mirrors the web prototype's "目录监控 / 拍照工作台" centre column
+(app.js renderDirectoryMonitor):
 
-Data source: ``monitor_service.scan_project()``.
-Emits signals so the parent view (WorkbenchView) can coordinate state.
+  ┌ batch-ident bar ─ current batch UID + activation state ───────────┐
+  ├ activity stats ─ 今日新增 / 未整理 / 最近写入 ───────────────────┤
+  ├ controls ─ 自动压缩 / 刷新 / 显示模式 / 添加照片 ────────────────┤
+  ├ stream header ─ 刚写入目录 · 选中操作（全选/清除/删除）──────────┤
+  ├ capture stream ─ gradient-preview file cards, 4-col grid ─────────┤
+  └ unattributed warning ─ ⚠️ N 张 JPG 尚未归入任何编号 ─────────────┘
 
-Layout: scrollable QGridLayout-based grid inside a QScrollArea.
+Each capture card carries (web parity):
+  - a gradient "preview" tile (amber for JPG, green for TIFF) with a
+    corner status pill (未关联 / TIFF 成片 / 已归档)
+  - a mono filename + time caption
+  - a colour-coded attribution label pill (attributed / unattributed)
 
-Badge colour mapping (mirrors web styles.css monitoring area):
-  raw       → teal  (#29b9ab) — unattributed JPG
-  attributed → green (#4caf50) — JPG attributed to a specimen
-  composed  → blue  (#4a90d9) — JPG is bound to a composed TIFF
-  archived  → muted (#87a2a1) — JPG archived in ZIP
-  tiff      → amber (#e6b04a) — TIFF result file
+Data source: ``monitor_service.scan_project()``.  Service wiring,
+``load_scan``/``clear``, ``_stat_label`` and the three signals are kept
+stable for the WorkbenchView and the test-suite.
+
+Badge palette (mirrors web styles.css):
+  raw        → teal   #29b9ab — unattributed JPG
+  attributed → green  #d4edda/#155724 — attributed JPG
+  composed   → blue   #4a90d9 — bound to a composed TIFF
+  archived   → muted  #87a2a1 — archived in ZIP
+  tiff       → green  #36c98f — TIFF result
 """
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
@@ -42,137 +50,153 @@ if TYPE_CHECKING:
     from app.services.monitor_service import ScanResult
 
 
-# ── Badge constants ───────────────────────────────────────────────────────────
-_BADGE: dict[str, str] = {
-    "raw":        ("未归属",   "background:#29b9ab; color:#08161b;"),
-    "attributed": ("已归属",   "background:#4caf50; color:#fff;"),
-    "composed":   ("已合成",   "background:#4a90d9; color:#fff;"),
-    "archived":   ("已归档",   "background:#87a2a1; color:#08161b;"),
-    "tiff":       ("TIFF",     "background:#e6b04a; color:#08161b;"),
+# ── Gradient preview tiles (QSS can't do radial gradients cleanly) ────────────
+_JPG_PREVIEW = (
+    "border:none; border-top-left-radius:9px; border-bottom-left-radius:9px;"
+    "background: qradialgradient(cx:0.48, cy:0.5, radius:0.5,"
+    " fx:0.48, fy:0.5, stop:0 rgba(220,145,76,0.55),"
+    " stop:0.3 rgba(220,145,76,0.0), stop:1 #0a1d23);"
+)
+_TIFF_PREVIEW = (
+    "border:none; border-top-left-radius:9px; border-bottom-left-radius:9px;"
+    "background: qradialgradient(cx:0.48, cy:0.5, radius:0.5,"
+    " fx:0.48, fy:0.5, stop:0 rgba(54,201,143,0.55),"
+    " stop:0.3 rgba(54,201,143,0.0), stop:1 #091b20);"
+)
+
+_PILL = "border-radius:9px; font-size:9px; font-weight:700; padding:1px 6px;"
+_CORNER = {
+    "raw":      ("未关联",   "background:#f1bd57; color:#1a1408;"),
+    "tiff":     ("TIFF 成片", "background:#36c98f; color:#062019;"),
+    "archived": ("已归档",   "background:#87a2a1; color:#08161b;"),
+    "composed": ("已合成",   "background:#4a90d9; color:#fff;"),
 }
-_COMMON_BADGE = (
-    "border-radius:3px; font-size:10px; padding:1px 5px; font-weight:600;"
+_ATTR = {
+    "attributed": "background:#d4edda; color:#155724;",
+    "active":     "background:#155724; color:#d4edda;",
+    "unattributed": "background:#f8d7da; color:#721c24;",
+    "readonly":   "background:#1a3138; color:#87a2a1;",
+}
+_ATTR_PILL = (
+    "border-radius:3px; font-size:10px; font-weight:600; padding:1px 6px;"
 )
 
 
-def _badge_label(state: str) -> QLabel:
-    text, color = _BADGE.get(state, ("?", "background:#555;"))
-    lbl = QLabel(text)
-    lbl.setStyleSheet(color + _COMMON_BADGE)
-    lbl.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-    return lbl
-
-
-# ── Single file card ──────────────────────────────────────────────────────────
-
 class _FileCard(QFrame):
-    """A compact card representing a single file in the monitor grid."""
+    """A capture-stream card: gradient preview + caption + attribution pill."""
 
     activate_requested = pyqtSignal(str)      # path
     deactivate_requested = pyqtSignal(str)    # path
     assign_requested = pyqtSignal(str)        # path
 
-    def __init__(self, entry, parent: Optional[QWidget] = None) -> None:
-        """
-        Parameters
-        ----------
-        entry:
-            A ``FileEntry`` (from monitor_service) or any duck-typed object
-            with ``.name``, ``.path``, ``.kind``, ``.attributed_specimen_id``.
-        """
+    def __init__(self, entry, active_uid: Optional[str] = None,
+                 parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setObjectName("Card")
         self._entry = entry
+        self._active_uid = active_uid
         self._setup_ui()
 
     def _setup_ui(self) -> None:
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(6, 6, 6, 6)
-        lay.setSpacing(4)
+        self.setFixedHeight(64)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
 
-        # Thumbnail placeholder
-        thumb = QLabel("🖼")
-        thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        thumb.setFixedSize(80, 60)
-        thumb.setStyleSheet(
-            "background:#0b2025; border:1px solid rgba(145,182,181,0.13);"
-            " border-radius:4px; font-size:20px;"
-        )
-        lay.addWidget(thumb, alignment=Qt.AlignmentFlag.AlignHCenter)
-
-        # Filename (truncated)
-        name = self._entry.name if hasattr(self._entry, "name") else Path(getattr(self._entry, "path", "")).name
-        name_lbl = QLabel(name)
-        name_lbl.setObjectName("Mono")
-        name_lbl.setWordWrap(False)
-        name_lbl.setMaximumWidth(120)
-        name_lbl.setToolTip(getattr(self._entry, "path", name))
-        lay.addWidget(name_lbl)
-
-        # Badge row
-        badge_row = QHBoxLayout()
-        badge_row.setContentsMargins(0, 0, 0, 0)
         kind = getattr(self._entry, "kind", "jpg")
         uid = getattr(self._entry, "attributed_specimen_id", None)
         composed = getattr(self._entry, "composed_tiff", None)
+        archived = getattr(self._entry, "archived", None)
 
         if kind == "tiff":
-            state = "tiff"
+            corner_state = "tiff"
         elif composed:
-            state = "composed"
-        elif uid:
-            state = "attributed"
+            corner_state = "composed"
+        elif archived:
+            corner_state = "archived"
         else:
-            state = "raw"
+            corner_state = "raw"
 
-        badge_row.addWidget(_badge_label(state))
-        badge_row.addStretch()
-        lay.addLayout(badge_row)
+        # ── Preview tile with corner pill ──
+        preview = QWidget()
+        preview.setFixedWidth(60)
+        preview.setStyleSheet(_TIFF_PREVIEW if kind == "tiff" else _JPG_PREVIEW)
+        pv_lay = QVBoxLayout(preview)
+        pv_lay.setContentsMargins(5, 5, 5, 5)
+        pv_lay.setSpacing(0)
+        c_text, c_color = _CORNER.get(corner_state, _CORNER["raw"])
+        corner = QLabel(c_text)
+        corner.setStyleSheet(c_color + _PILL)
+        corner.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        pv_lay.addWidget(corner, alignment=Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        pv_lay.addStretch()
+        lay.addWidget(preview)
 
-        # Attribution label
-        if uid:
-            uid_lbl = QLabel(uid[:20] + ("…" if len(uid) > 20 else ""))
-            uid_lbl.setObjectName("Muted")
-            uid_lbl.setToolTip(uid)
-            lay.addWidget(uid_lbl)
+        # ── Caption + attribution column ──
+        body = QWidget()
+        body_lay = QVBoxLayout(body)
+        body_lay.setContentsMargins(9, 6, 8, 6)
+        body_lay.setSpacing(3)
 
-        # Action buttons (JPG only)
+        name = getattr(self._entry, "name", None) or Path(getattr(self._entry, "path", "")).name
+        name_lbl = QLabel(name)
+        name_lbl.setStyleSheet("font-family:'JetBrains Mono','Consolas',monospace; font-size:11px;")
+        name_lbl.setToolTip(getattr(self._entry, "path", name))
+        body_lay.addWidget(name_lbl)
+
+        # attribution pill row
+        attr_row = QHBoxLayout()
+        attr_row.setContentsMargins(0, 0, 0, 0)
+        attr_row.setSpacing(6)
         if kind == "jpg":
-            btn_row = QHBoxLayout()
-            btn_row.setContentsMargins(0, 2, 0, 0)
-            btn_row.setSpacing(4)
+            if uid and uid == self._active_uid:
+                attr_lbl = QLabel(uid)
+                attr_lbl.setStyleSheet(_ATTR["active"] + _ATTR_PILL)
+            elif uid:
+                attr_lbl = QLabel(uid)
+                attr_lbl.setStyleSheet(_ATTR["attributed"] + _ATTR_PILL)
+            else:
+                attr_lbl = QLabel("未归属")
+                attr_lbl.setStyleSheet(_ATTR["unattributed"] + _ATTR_PILL)
+        else:
+            attr_lbl = QLabel(uid or "只读")
+            attr_lbl.setStyleSheet(_ATTR["readonly"] + _ATTR_PILL)
+        attr_lbl.setToolTip(uid or "")
+        attr_lbl.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        attr_row.addWidget(attr_lbl)
+        attr_row.addStretch()
+        body_lay.addLayout(attr_row)
+        lay.addWidget(body, stretch=1)
 
+        # ── Action column (JPG only) ──
+        if kind == "jpg":
+            act_col = QVBoxLayout()
+            act_col.setContentsMargins(0, 6, 8, 6)
+            act_col.setSpacing(3)
             act_btn = QPushButton("归属")
+            act_btn.setObjectName("Tiny")
             act_btn.setFixedHeight(22)
-            act_btn.setObjectName("Primary")
             act_btn.setToolTip("手动归属到当前激活标本")
             act_btn.clicked.connect(lambda: self.assign_requested.emit(getattr(self._entry, "path", "")))
-            btn_row.addWidget(act_btn)
-
-            deact_btn = QPushButton("解除")
+            act_col.addWidget(act_btn)
+            deact_btn = QPushButton("撤销")
+            deact_btn.setObjectName("Tiny")
             deact_btn.setFixedHeight(22)
-            deact_btn.setToolTip("解除此 JPG 的归属")
+            deact_btn.setToolTip("撤销此 JPG 的归属（变回无主）")
             deact_btn.clicked.connect(lambda: self.deactivate_requested.emit(getattr(self._entry, "path", "")))
-            btn_row.addWidget(deact_btn)
+            act_col.addWidget(deact_btn)
+            lay.addLayout(act_col)
 
-            lay.addLayout(btn_row)
-
-        self.setFixedWidth(138)
-
-
-# ── Monitor panel ─────────────────────────────────────────────────────────────
 
 class MonitorPanel(QWidget):
-    """Incoming-JPG + results-TIFF thumbnail grid.
+    """Incoming-JPG + results-TIFF capture stream with batch identity header.
 
     Signals
     -------
-    assign_requested(path: str)
-        User requested manual attribution for the given JPG path.
-    unassign_requested(path: str)
-        User requested to remove attribution for the given JPG path.
-    refresh_requested()
-        User clicked the refresh button.
+    assign_requested(path)   manual attribution to active specimen
+    unassign_requested(path) remove attribution (P0 blacklist)
+    refresh_requested()      rescan request
     """
 
     assign_requested = pyqtSignal(str)
@@ -183,6 +207,7 @@ class MonitorPanel(QWidget):
         super().__init__(parent)
         self.ctx = ctx
         self._scan_result: Optional["ScanResult"] = None
+        self._active_uid: Optional[str] = None
         self._setup_ui()
 
     # ── UI ────────────────────────────────────────────────────────────────────
@@ -192,51 +217,159 @@ class MonitorPanel(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # Toolbar row
-        toolbar = QHBoxLayout()
-        toolbar.setContentsMargins(8, 6, 8, 6)
-        title = QLabel("目录监控")
-        title.setObjectName("Section")
-        toolbar.addWidget(title)
-        toolbar.addStretch()
+        section = QFrame()
+        section.setObjectName("WorkbenchSection")
+        sec = QVBoxLayout(section)
+        sec.setContentsMargins(16, 14, 16, 14)
+        sec.setSpacing(11)
+        root.addWidget(section)
 
+        # ── Batch-ident bar ──
+        batch = QFrame()
+        batch.setObjectName("BatchIdentBar")
+        b_lay = QHBoxLayout(batch)
+        b_lay.setContentsMargins(12, 8, 12, 8)
+        b_lay.setSpacing(10)
+        b_title = QLabel("当前照片批次")
+        b_title.setObjectName("Section")
+        b_lay.addWidget(b_title)
+        self._batch_uid = QLabel("—")
+        self._batch_uid.setObjectName("BatchUid")
+        b_lay.addWidget(self._batch_uid)
+        b_lay.addStretch()
+        self._activate_state = QLabel("未激活")
+        self._activate_state.setObjectName("ActivateState")
+        b_lay.addWidget(self._activate_state)
+        sec.addWidget(batch)
+
+        # ── Activity stats ──
+        stats = QHBoxLayout()
+        stats.setContentsMargins(2, 0, 2, 0)
+        stats.setSpacing(28)
+        self._stat_today = self._stat_block(stats, "0 张", "今日新增")
+        self._stat_untidy = self._stat_block(stats, "0 张", "未整理")
+        self._stat_recent = self._stat_block(stats, "刚刚", "最近写入")
+        stats.addStretch()
+        # Keep legacy compact stat label for tests / status text
         self._stat_label = QLabel("无项目")
-        self._stat_label.setObjectName("Muted")
-        toolbar.addWidget(self._stat_label)
+        self._stat_label.setObjectName("MutedSmall")
+        stats.addWidget(self._stat_label, alignment=Qt.AlignmentFlag.AlignBottom)
+        sec.addLayout(stats)
 
-        refresh_btn = QPushButton("刷新")
-        refresh_btn.setFixedHeight(26)
+        # ── Controls row ──
+        controls = QHBoxLayout()
+        controls.setContentsMargins(0, 0, 0, 0)
+        controls.setSpacing(8)
+        self._auto_toggle = QPushButton("◻ 新 TIFF 自动压缩")
+        self._auto_toggle.setObjectName("Outline")
+        self._auto_toggle.setCheckable(True)
+        self._auto_toggle.toggled.connect(
+            lambda on: self._auto_toggle.setText(("◼ " if on else "◻ ") + "新 TIFF 自动压缩")
+        )
+        controls.addWidget(self._auto_toggle)
+        refresh_btn = QPushButton("↻ 刷新目录")
+        refresh_btn.setObjectName("Outline")
         refresh_btn.clicked.connect(self._on_refresh)
-        toolbar.addWidget(refresh_btn)
-        root.addLayout(toolbar)
+        controls.addWidget(refresh_btn)
+        add_btn = QPushButton("+ 添加照片")
+        add_btn.setObjectName("Outline")
+        add_btn.setToolTip("把已有照片添加进来（导入 incoming-jpg/）")
+        controls.addWidget(add_btn)
+        self._raw_count = QLabel("本组原片 0 张")
+        self._raw_count.setObjectName("MutedSmall")
+        controls.addWidget(self._raw_count)
+        controls.addStretch()
+        sec.addLayout(controls)
 
-        # Divider
-        line = QFrame()
-        line.setFrameShape(QFrame.Shape.HLine)
-        line.setStyleSheet("color: rgba(145,182,181,0.13);")
-        root.addWidget(line)
+        sec.addWidget(_divider())
 
-        # Scroll area with grid
+        # ── Stream header + selection bar ──
+        sh = QHBoxLayout()
+        sh.setContentsMargins(0, 0, 0, 0)
+        sh.setSpacing(8)
+        sh_title = QLabel("刚写入目录")
+        sh_title.setObjectName("Section")
+        sh.addWidget(sh_title)
+        sh_hint = QLabel("单击可选中")
+        sh_hint.setObjectName("MutedSmall")
+        sh.addWidget(sh_hint)
+        sh.addStretch()
+        self._sel_count = QLabel("未选中")
+        self._sel_count.setObjectName("MutedSmall")
+        sh.addWidget(self._sel_count)
+        for label, obj in (("全选", "Tiny"), ("清除", "Tiny")):
+            btn = QPushButton(label)
+            btn.setObjectName(obj)
+            btn.setFixedHeight(22)
+            sh.addWidget(btn)
+        del_btn = QPushButton("🗑 删除")
+        del_btn.setObjectName("Danger")
+        del_btn.setFixedHeight(22)
+        del_btn.setEnabled(False)
+        del_btn.setToolTip("删除选中的 JPG（TIFF 成片不可删）")
+        sh.addWidget(del_btn)
+        sec.addLayout(sh)
+
+        # ── Capture stream (scrollable grid) ──
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._grid_widget = QWidget()
         self._grid = QGridLayout(self._grid_widget)
-        self._grid.setContentsMargins(8, 8, 8, 8)
-        self._grid.setSpacing(8)
-        self._grid.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        self._grid.setContentsMargins(0, 4, 0, 4)
+        self._grid.setHorizontalSpacing(8)
+        self._grid.setVerticalSpacing(8)
+        self._grid.setAlignment(Qt.AlignmentFlag.AlignTop)
         scroll.setWidget(self._grid_widget)
-        root.addWidget(scroll)
+        sec.addWidget(scroll, stretch=1)
 
-        # Empty-state label (shown when no files)
-        self._empty_label = QLabel("暂无文件 — 等待相机 JPG 写入 incoming-jpg/")
+        # ── Empty state ──
+        self._empty_label = QLabel(
+            "等待目录中新照片 — 已处理文件不再留在未整理区；TIFF 出现前不会关联原片。"
+        )
         self._empty_label.setObjectName("Muted")
         self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._empty_label.setWordWrap(True)
         self._empty_label.hide()
-        root.addWidget(self._empty_label)
+        sec.addWidget(self._empty_label)
+
+        # ── Unattributed warning ──
+        self._unattr_warning = QLabel("")
+        self._unattr_warning.setObjectName("UnattributedWarning")
+        self._unattr_warning.hide()
+        sec.addWidget(self._unattr_warning)
+
+    def _stat_block(self, layout: QHBoxLayout, value: str, label: str):
+        col = QVBoxLayout()
+        col.setSpacing(1)
+        v = QLabel(value)
+        v.setObjectName("StatValue")
+        l = QLabel(label)
+        l.setObjectName("StatLabel")
+        col.addWidget(v)
+        col.addWidget(l)
+        layout.addLayout(col)
+        return v
 
     # ── Public API ────────────────────────────────────────────────────────────
+
+    def set_batch(self, uid: Optional[str], active_uid: Optional[str] = None,
+                  activated_at: Optional[str] = None) -> None:
+        """Set the current-batch UID + activation state shown in the header."""
+        self._active_uid = active_uid
+        self._batch_uid.setText(uid or "—")
+        if active_uid:
+            txt = f"激活：{active_uid}"
+            if activated_at:
+                txt += f" · 自 {str(activated_at)[11:19]}"
+            self._activate_state.setText(txt)
+            self._activate_state.setObjectName("ActivateStateOn")
+        else:
+            self._activate_state.setText("未激活")
+            self._activate_state.setObjectName("ActivateState")
+        # re-polish to apply object-name-driven style
+        self._activate_state.style().unpolish(self._activate_state)
+        self._activate_state.style().polish(self._activate_state)
 
     def load_scan(self, scan_result: "ScanResult") -> None:
         """Populate the grid from a completed scan result."""
@@ -245,8 +378,13 @@ class MonitorPanel(QWidget):
 
     def clear(self) -> None:
         """Remove all cards and show empty state."""
+        self._scan_result = None
         self._clear_grid()
         self._stat_label.setText("无项目")
+        self._stat_today.setText("0 张")
+        self._stat_untidy.setText("0 张")
+        self._raw_count.setText("本组原片 0 张")
+        self._unattr_warning.hide()
         self._empty_label.show()
 
     # ── Internal ──────────────────────────────────────────────────────────────
@@ -257,28 +395,41 @@ class MonitorPanel(QWidget):
             self._empty_label.show()
             return
 
-        all_files = (
-            list(self._scan_result.jpg_files)
-            + list(self._scan_result.tiff_files)
-        )
+        jpgs = list(self._scan_result.jpg_files)
+        tiffs = list(self._scan_result.tiff_files)
+        all_files = jpgs + tiffs
 
         if not all_files:
             self._empty_label.show()
-            jpg_c = 0
-            tiff_c = 0
+            jpg_c = tiff_c = 0
         else:
             self._empty_label.hide()
-            jpg_c = len(self._scan_result.jpg_files)
-            tiff_c = len(self._scan_result.tiff_files)
-
-            cols = max(1, self._grid_widget.width() // 150) or 5
+            jpg_c, tiff_c = len(jpgs), len(tiffs)
+            cols = 2
             for idx, entry in enumerate(all_files):
-                card = _FileCard(entry, self)
+                card = _FileCard(entry, self._active_uid, self)
                 card.assign_requested.connect(self.assign_requested)
                 card.deactivate_requested.connect(self.unassign_requested)
                 self._grid.addWidget(card, idx // cols, idx % cols)
+            for c in range(cols):
+                self._grid.setColumnStretch(c, 1)
 
-        self._stat_label.setText(f"JPG {jpg_c}  TIFF {tiff_c}")
+        self._stat_label.setText(f"JPG {jpg_c} · TIFF {tiff_c}")
+        self._stat_today.setText(f"{jpg_c} 张")
+        self._stat_untidy.setText(f"{len(all_files)} 张")
+        self._raw_count.setText(f"本组原片 {jpg_c} 张")
+
+        # Unattributed warning
+        unattr = [
+            f for f in jpgs
+            if not getattr(f, "attributed_specimen_id", None)
+            and not getattr(f, "composed_tiff", None)
+        ]
+        if unattr:
+            self._unattr_warning.setText(f"⚠️  {len(unattr)} 张 JPG 尚未归入任何编号")
+            self._unattr_warning.show()
+        else:
+            self._unattr_warning.hide()
 
     def _clear_grid(self) -> None:
         while self._grid.count():
@@ -290,3 +441,12 @@ class MonitorPanel(QWidget):
 
     def _on_refresh(self) -> None:
         self.refresh_requested.emit()
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _divider() -> QFrame:
+    line = QFrame()
+    line.setObjectName("Divider")
+    line.setFixedHeight(1)
+    return line

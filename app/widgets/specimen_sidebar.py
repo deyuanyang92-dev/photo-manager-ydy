@@ -54,6 +54,7 @@ class SpecimenSidebar(QWidget):
     specimen_selected = pyqtSignal(str)
     activate_requested = pyqtSignal(str)
     deactivate_requested = pyqtSignal(str)
+    new_specimen_requested = pyqtSignal()
 
     def __init__(self, ctx: "AppContext", parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -65,30 +66,36 @@ class SpecimenSidebar(QWidget):
 
     def _setup_ui(self) -> None:
         root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(4)
+        root.setContentsMargins(10, 12, 10, 12)
+        root.setSpacing(8)
 
-        # Header row
+        # New-specimen entry (web: 🧬 + 新增标本唯一编号)
+        self._new_btn = QPushButton("🧬  + 新增标本唯一编号")
+        self._new_btn.setObjectName("Outline")
+        self._new_btn.setFixedHeight(34)
+        self._new_btn.setToolTip("开始一个新的标本唯一编号（右侧填写）")
+        self._new_btn.clicked.connect(self.new_specimen_requested.emit)
+        root.addWidget(self._new_btn)
+
+        # Search box (web: 🔍 搜索标本唯一编号)
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("🔍  搜索标本唯一编号")
+        self._search.setClearButtonEnabled(True)
+        self._search.setFixedHeight(32)
+        self._search.textChanged.connect(self._on_search)
+        root.addWidget(self._search)
+
+        # Section label + count
         header = QHBoxLayout()
-        header.setContentsMargins(8, 8, 8, 4)
-        lbl = QLabel("标本列表")
+        header.setContentsMargins(2, 0, 2, 0)
+        lbl = QLabel("已有标本唯一编号")
         lbl.setObjectName("Section")
         header.addWidget(lbl)
         header.addStretch()
         self._count_label = QLabel("0")
-        self._count_label.setObjectName("Muted")
+        self._count_label.setObjectName("MutedSmall")
         header.addWidget(self._count_label)
         root.addLayout(header)
-
-        # Search box
-        search_row = QHBoxLayout()
-        search_row.setContentsMargins(8, 0, 8, 4)
-        self._search = QLineEdit()
-        self._search.setPlaceholderText("搜索编号或物种名…")
-        self._search.setClearButtonEnabled(True)
-        self._search.textChanged.connect(self._on_search)
-        search_row.addWidget(self._search)
-        root.addLayout(search_row)
 
         # List
         self._list = QListWidget()
@@ -100,8 +107,8 @@ class SpecimenSidebar(QWidget):
 
         # Activate / Deactivate + Refresh buttons
         btn_row = QHBoxLayout()
-        btn_row.setContentsMargins(8, 4, 8, 8)
-        btn_row.setSpacing(4)
+        btn_row.setContentsMargins(0, 2, 0, 0)
+        btn_row.setSpacing(6)
 
         self._activate_btn = QPushButton("激活")
         self._activate_btn.setFixedHeight(28)
@@ -111,12 +118,14 @@ class SpecimenSidebar(QWidget):
         btn_row.addWidget(self._activate_btn)
 
         self._deactivate_btn = QPushButton("去激活")
+        self._deactivate_btn.setObjectName("Outline")
         self._deactivate_btn.setFixedHeight(28)
         self._deactivate_btn.setToolTip("取消当前激活标本")
         self._deactivate_btn.clicked.connect(self._on_deactivate_clicked)
         btn_row.addWidget(self._deactivate_btn)
 
         self._refresh_btn = QPushButton("刷新")
+        self._refresh_btn.setObjectName("Ghost")
         self._refresh_btn.setFixedHeight(28)
         self._refresh_btn.clicked.connect(self.refresh)
         btn_row.addWidget(self._refresh_btn)

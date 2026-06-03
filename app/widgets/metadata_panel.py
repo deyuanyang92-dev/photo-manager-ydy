@@ -65,25 +65,31 @@ class MetadataPanel(QWidget):
     # ── UI ────────────────────────────────────────────────────────────────────
 
     def _setup_ui(self) -> None:
-        root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
+        card = QFrame(self)
+        card.setObjectName("PanelCard")
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(card)
+
+        root = QVBoxLayout(card)
+        root.setContentsMargins(16, 14, 16, 14)
+        root.setSpacing(8)
 
         # Header
         header = QHBoxLayout()
-        header.setContentsMargins(8, 6, 8, 6)
-        title = QLabel("元数据")
-        title.setObjectName("Section")
+        header.setContentsMargins(0, 0, 0, 0)
+        title = QLabel("标本与拍摄元数据")
+        title.setObjectName("CardTitle")
         header.addWidget(title)
         header.addStretch()
         self._uid_badge = QLabel("—")
-        self._uid_badge.setObjectName("Muted")
+        self._uid_badge.setObjectName("Mono")
         header.addWidget(self._uid_badge)
         root.addLayout(header)
 
         line = QFrame()
-        line.setFrameShape(QFrame.Shape.HLine)
-        line.setStyleSheet("color: rgba(145,182,181,0.13);")
+        line.setObjectName("Divider")
+        line.setFixedHeight(1)
         root.addWidget(line)
 
         # Scrollable form
