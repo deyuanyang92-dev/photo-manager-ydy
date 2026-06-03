@@ -29,6 +29,7 @@ from app.utils.coord_utils import (
     is_valid,
     is_in_mainland_china,
     infer_lat_lon_order,
+    nominatim_to_zh,
 )
 
 
@@ -525,3 +526,70 @@ class TestIsValid:
 
     def test_nan_invalid(self):
         assert not is_valid(float("nan"), 121.0)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# nominatim_to_zh  (mirrors app.js nominatimToZh, line 13645)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestNominatimToZh:
+    """Golden-vector tests matching the JS implementation's formatting logic."""
+
+    def test_full_address(self):
+        """Province + city + county + suburb + road assembled without separator."""
+        data = {
+            "display_name": "舟山市定海区",
+            "address": {
+                "state": "浙江省",
+                "city": "舟山市",
+                "county": "定海区",
+                "suburb": "白泉镇",
+                "road": "定沈路",
+            },
+        }
+        result = nominatim_to_zh(data)
+        assert "浙江省" in result
+        assert "舟山市" in result
+        assert "定海区" in result
+        assert "白泉镇" in result
+        assert "定沈路" in result
+        # No spaces or other separators between parts
+        assert "  " not in result
+
+    def test_fallback_to_display_name(self):
+        """When address is empty, fall back to display_name."""
+        data = {"display_name": "三门湾, 浙江省", "address": {}}
+        result = nominatim_to_zh(data)
+        assert "三门湾" in result
+
+    def test_name_field_used_for_landmark(self):
+        """'name' field (e.g. POI name) is used when present."""
+        data = {
+            "name": "中国科学院海洋研究所",
+            "display_name": "中国科学院海洋研究所, 崂山区, 青岛市",
+            "address": {
+                "state": "山东省",
+                "city": "青岛市",
+            },
+        }
+        result = nominatim_to_zh(data)
+        assert "中国科学院海洋研究所" in result
+
+    def test_empty_dict_returns_empty_string(self):
+        assert nominatim_to_zh({}) == ""
+
+    def test_none_returns_empty_string(self):
+        assert nominatim_to_zh(None) == ""  # type: ignore[arg-type]
+
+    def test_city_district_as_county_fallback(self):
+        """city_district used when county absent."""
+        data = {
+            "display_name": "上海市黄浦区",
+            "address": {
+                "state": "上海市",
+                "city": "上海市",
+                "city_district": "黄浦区",
+            },
+        }
+        result = nominatim_to_zh(data)
+        assert "黄浦区" in result

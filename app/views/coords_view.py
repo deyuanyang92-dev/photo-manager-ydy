@@ -66,6 +66,7 @@ from app.utils.coord_utils import (
     gcj02_to_wgs84,
     from_dms_fields,
     is_valid,
+    nominatim_to_zh,
 )
 
 if TYPE_CHECKING:
@@ -987,7 +988,10 @@ class CoordsView(BaseView):
                         try:
                             lat = float(item["lat"])
                             lon = float(item["lon"])
-                            results.append({"name": item.get("display_name", "?")[:60], "wgs": {"lat": lat, "lon": lon}})
+                            # Use nominatim_to_zh for province/city/county/road
+                            # formatting (mirrors nominatimToZh in app.js:13645)
+                            name = nominatim_to_zh(item) or item.get("display_name", "?")[:60]
+                            results.append({"name": name[:80], "wgs": {"lat": lat, "lon": lon}})
                         except Exception:
                             pass
                     self.done.emit(results)
@@ -1432,6 +1436,29 @@ class CoordsView(BaseView):
 
         srch_btn.clicked.connect(_map_search)
         map_search.returnPressed.connect(_map_search)
+
+        # Esc key closes map modal (mirrors coordMapEscHandler in app.js line 13556)
+        from PyQt6.QtCore import QObject, QEvent
+        from PyQt6.QtGui import QKeyEvent
+
+        class _EscFilter(QObject):
+            def __init__(self_f, close_fn):
+                super().__init__()
+                self_f._close = close_fn
+
+            def eventFilter(self_f, obj, event):  # noqa: N802
+                if (
+                    event.type() == QEvent.Type.KeyPress
+                    and event.key() == Qt.Key.Key_Escape  # type: ignore[union-attr]
+                ):
+                    self_f._close()
+                    return True
+                return False
+
+        esc_filter = _EscFilter(_close)
+        overlay.installEventFilter(esc_filter)
+        # Keep a reference so it doesn't get GC'd before overlay is closed
+        overlay._esc_filter = esc_filter  # type: ignore[attr-defined]
 
         # Lazy WebEngineView
         self._ensure_web_view(map_body, body_lay, coord_display, coord_formats, confirm_btn)

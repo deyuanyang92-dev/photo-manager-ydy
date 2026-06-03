@@ -513,3 +513,44 @@ def bd09_to_wgs84(lon: float, lat: float) -> dict:
     """Convert BD09 → GCJ-02 → WGS-84."""
     gcj = bd09_to_gcj02(lon, lat)
     return gcj02_to_wgs84(gcj["lon"], gcj["lat"])
+
+
+# ── Nominatim 响应格式化 ───────────────────────────────────────────────────────
+
+def nominatim_to_zh(data: dict) -> str:
+    """Format a Nominatim reverse-geocode response into a compact Chinese string.
+
+    Mirrors app.js nominatimToZh() (line 13645–13654):
+      省 + 市 + 县/区 + 乡镇/村 + 具体地点，无分隔符。
+    Falls back to data["display_name"] if no address components found.
+
+    Parameters
+    ----------
+    data : dict
+        Parsed JSON response from Nominatim /reverse or /search endpoint.
+
+    Returns
+    -------
+    str
+        Compact Chinese place description, or "" if data is empty/malformed.
+    """
+    if not data or not isinstance(data, dict):
+        return ""
+    address = data.get("address") or {}
+    parts = [
+        address.get("state"),
+        address.get("city"),
+        address.get("county") or address.get("city_district"),
+        address.get("suburb") or address.get("town") or address.get("village"),
+        (
+            data.get("name")
+            or address.get("amenity")
+            or address.get("university")
+            or address.get("building")
+            or address.get("tourism")
+            or address.get("leisure")
+            or address.get("road")
+        ),
+    ]
+    result = "".join(p for p in parts if p)
+    return result or data.get("display_name") or ""

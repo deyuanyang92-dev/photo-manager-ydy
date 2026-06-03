@@ -409,3 +409,42 @@ class TestBatch:
         assert v._batch_body.isVisible()
         assert v._batch_controls.isVisible()
         assert v._batch_actions.isVisible()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Esc closes map modal  (mirrors coordMapEscHandler in app.js line 13556)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestEscCloseMap:
+    def test_open_map_sets_flag(self):
+        """_on_open_map() must set _map_open = True."""
+        v = _view()
+        assert not v._map_open
+        v._on_open_map()
+        QApplication.processEvents()
+        assert v._map_open
+
+    def test_esc_closes_map_overlay(self):
+        """Pressing Escape on the overlay widget must close it (mirrors Esc handler in JS)."""
+        from PyQt6.QtCore import QEvent
+        from PyQt6.QtGui import QKeyEvent
+        from PyQt6.QtCore import Qt
+
+        v = _view()
+        v._on_open_map()
+        QApplication.processEvents()
+        assert v._map_overlay is not None
+        assert v._map_overlay.isVisible()
+
+        # Simulate Esc key press on the overlay via its event filter
+        overlay = v._map_overlay
+        esc_event = QKeyEvent(
+            QEvent.Type.KeyPress,
+            Qt.Key.Key_Escape,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        QApplication.sendEvent(overlay, esc_event)
+        QApplication.processEvents()
+
+        # After Esc, map should be closed
+        assert not v._map_open
