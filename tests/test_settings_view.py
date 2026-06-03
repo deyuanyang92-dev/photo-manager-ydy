@@ -36,6 +36,7 @@ from app.views.settings_view import (
     _K_INCOMING_SUBDIR,
     _K_RESULTS_SUBDIR,
     _K_RECENT_PROJECTS,
+    _K_HELICON_PRESETS_JSON,
 )
 
 
@@ -269,3 +270,120 @@ class TestSettingsKeys:
 
     def test_results_subdir_key(self) -> None:
         assert _K_RESULTS_SUBDIR == "project/results_subdir"
+
+    def test_helicon_presets_json_key(self) -> None:
+        assert _K_HELICON_PRESETS_JSON == "helicon/presets_json"
+
+
+# ── Preset CRUD ──────────────────────────────────────────────────────────────
+
+class TestPresetCRUD:
+    """Test named preset save / apply / delete (mirrors server.js /api/helicon/presets)."""
+
+    def test_save_preset_stores_in_settings(self, view: SettingsView) -> None:
+        view._preset_name_edit.setText("标准景深")
+        view._method_combo.setCurrentIndex(1)   # B
+        view._radius_spin.setValue(6)
+        view._smoothing_spin.setValue(2)
+        view._quality_spin.setValue(90)
+        view._save_current_as_preset()
+        presets = view._load_presets()
+        assert len(presets) == 1
+        assert presets[0]["name"] == "标准景深"
+        assert presets[0]["params"]["method"] == 2   # index+1
+        assert presets[0]["params"]["radius"] == 6
+        assert presets[0]["params"]["smoothing"] == 2
+        assert presets[0]["params"]["quality"] == 90
+
+    def test_save_preset_upserts_existing_name(self, view: SettingsView) -> None:
+        """Saving with the same name should overwrite, not duplicate."""
+        view._preset_name_edit.setText("my-preset")
+        view._radius_spin.setValue(4)
+        view._save_current_as_preset()
+        view._radius_spin.setValue(8)
+        view._save_current_as_preset()
+        presets = view._load_presets()
+        assert len(presets) == 1
+        assert presets[0]["params"]["radius"] == 8
+
+    def test_empty_preset_name_not_saved(self, view: SettingsView) -> None:
+        """Empty name → silent no-op, list stays empty."""
+        view._preset_name_edit.setText("")
+        view._save_current_as_preset()
+        assert view._load_presets() == []
+
+    def test_apply_preset_fills_spinboxes(self, view: SettingsView) -> None:
+        # First save a preset
+        view._preset_name_edit.setText("应用测试预设")
+        view._method_combo.setCurrentIndex(2)   # C
+        view._radius_spin.setValue(3)
+        view._smoothing_spin.setValue(6)
+        view._quality_spin.setValue(80)
+        view._save_current_as_preset()
+
+        # Reset spinboxes to defaults
+        view._method_combo.setCurrentIndex(0)
+        view._radius_spin.setValue(4)
+        view._smoothing_spin.setValue(4)
+        view._quality_spin.setValue(95)
+
+        # Select the preset in the list and apply
+        view._preset_list.setCurrentRow(0)
+        view._apply_selected_preset()
+
+        assert view._method_combo.currentIndex() == 2
+        assert view._radius_spin.value() == 3
+        assert view._smoothing_spin.value() == 6
+        assert view._quality_spin.value() == 80
+
+    def test_apply_preset_double_click(self, view: SettingsView) -> None:
+        """Double-clicking a list item applies the preset."""
+        view._preset_name_edit.setText("双击测试")
+        view._radius_spin.setValue(7)
+        view._save_current_as_preset()
+
+        view._radius_spin.setValue(4)  # reset
+        view._preset_list.setCurrentRow(0)
+        # itemDoubleClicked is connected to _apply_selected_preset; simulate via direct call
+        view._apply_selected_preset()
+        assert view._radius_spin.value() == 7
+
+    def test_delete_preset_removes_from_list(self, view: SettingsView) -> None:
+        view._preset_name_edit.setText("删除测试")
+        view._save_current_as_preset()
+        assert view._preset_list.count() == 1
+
+        view._preset_list.setCurrentRow(0)
+        view._delete_selected_preset()
+
+        assert view._preset_list.count() == 0
+        assert view._load_presets() == []
+
+    def test_preset_list_survives_reload(self, view: SettingsView) -> None:
+        """Presets persisted to QSettings survive on_activate() reload."""
+        view._preset_name_edit.setText("持久化测试")
+        view._radius_spin.setValue(5)
+        view._save_current_as_preset()
+
+        view.on_activate()  # reload from QSettings
+        assert view._preset_list.count() == 1
+        assert view._preset_list.item(0).text() == "持久化测试"
+
+    def test_multiple_presets_in_list(self, view: SettingsView) -> None:
+        """Can store and list multiple presets."""
+        for name in ["预设A", "预设B", "预设C"]:
+            view._preset_name_edit.setText(name)
+            view._save_current_as_preset()
+        assert view._preset_list.count() == 3
+
+    def test_delete_one_of_many_presets(self, view: SettingsView) -> None:
+        for name in ["第一", "第二", "第三"]:
+            view._preset_name_edit.setText(name)
+            view._save_current_as_preset()
+        # Delete the middle one
+        view._preset_list.setCurrentRow(1)
+        view._delete_selected_preset()
+        remaining = [p["name"] for p in view._load_presets()]
+        assert "第二" not in remaining
+        assert "第一" in remaining
+        assert "第三" in remaining

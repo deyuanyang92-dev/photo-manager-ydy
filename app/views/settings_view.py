@@ -73,6 +73,8 @@ _K_DELETE_JPG = "archive/delete_jpg"  # default False — hard rule
 
 _K_CURRENT_USER = "user/current_user"
 
+_K_HELICON_PRESETS_JSON = "helicon/presets_json"
+
 _RECENT_MAX = 10
 
 # ── Theme colours (mirrors CSS :root tokens) ──────────────────────────────────
@@ -374,20 +376,30 @@ class SettingsView(BaseView):
         tab.body.addWidget(section)
         tab.body.addSpacing(16)
 
-        # ── 合成参数预设 (synthesis preset params — kept for QSettings round-trip) ─
+        # ── 合成参数预设 CRUD ─────────────────────────────────────────────────────
         preset_box = QGroupBox("合成参数预设")
-        preset_form = QFormLayout(preset_box)
+        preset_v = QVBoxLayout(preset_box)
+        preset_v.setSpacing(8)
+
+        # Preset list
+        self._preset_list = QListWidget()
+        self._preset_list.setFixedHeight(100)
+        self._preset_list.setAlternatingRowColors(True)
+        self._preset_list.setToolTip("已保存的合成参数预设，双击应用")
+        self._preset_list.itemDoubleClicked.connect(self._apply_selected_preset)
+        preset_v.addWidget(self._preset_list)
+
+        # Parameter form (method / radius / smoothing / quality)
+        preset_form = QFormLayout()
         preset_form.setHorizontalSpacing(16)
         preset_form.setVerticalSpacing(8)
 
-        # Method (A / B / C strings matching Helicon CLI 1/2/3)
         self._method_combo = QComboBox()
         self._method_combo.addItems(["A — 加权平均 (1)", "B — 景深图 (2)", "C — 金字塔 (3)"])
         self._method_combo.setToolTip("-mp: 参数，A=1 B=2 C=3")
         self._method_combo.currentIndexChanged.connect(self._save_helicon)
         preset_form.addRow("合成方式 (-mp)", self._method_combo)
 
-        # Radius
         self._radius_spin = QSpinBox()
         self._radius_spin.setRange(1, 16)
         self._radius_spin.setValue(4)
@@ -395,7 +407,6 @@ class SettingsView(BaseView):
         self._radius_spin.valueChanged.connect(self._save_helicon)
         preset_form.addRow("半径 (-rp)", self._radius_spin)
 
-        # Smoothing
         self._smoothing_spin = QSpinBox()
         self._smoothing_spin.setRange(0, 8)
         self._smoothing_spin.setValue(4)
@@ -403,13 +414,51 @@ class SettingsView(BaseView):
         self._smoothing_spin.valueChanged.connect(self._save_helicon)
         preset_form.addRow("平滑度 (-sp)", self._smoothing_spin)
 
-        # JPEG quality (for -j flag)
         self._quality_spin = QSpinBox()
         self._quality_spin.setRange(70, 100)
         self._quality_spin.setValue(95)
         self._quality_spin.setToolTip("-j: JPEG 质量，仅当输出格式为 JPEG 时有效")
         self._quality_spin.valueChanged.connect(self._save_helicon)
         preset_form.addRow("JPEG 质量 (-j)", self._quality_spin)
+
+        preset_v.addLayout(preset_form)
+
+        # Preset name input + action buttons
+        preset_name_row = QHBoxLayout()
+        preset_name_row.setContentsMargins(0, 0, 0, 0)
+        preset_name_row.setSpacing(8)
+
+        preset_name_lbl = QLabel("预设名称")
+        preset_name_lbl.setFixedWidth(60)
+        preset_name_lbl.setStyleSheet(f"font-size: 12px; color: {_C_MUTED};")
+        self._preset_name_edit = QLineEdit()
+        self._preset_name_edit.setPlaceholderText("输入预设名称后保存")
+        self._preset_name_edit.setMaxLength(60)
+        preset_name_row.addWidget(preset_name_lbl)
+        preset_name_row.addWidget(self._preset_name_edit, stretch=1)
+        preset_v.addLayout(preset_name_row)
+
+        preset_btn_row = QHBoxLayout()
+        preset_btn_row.setContentsMargins(0, 0, 0, 0)
+        preset_btn_row.setSpacing(8)
+
+        self._save_preset_btn = QPushButton("保存为预设")
+        self._save_preset_btn.setStyleSheet(_btn_style("primary"))
+        self._save_preset_btn.clicked.connect(self._save_current_as_preset)
+
+        self._apply_preset_btn = QPushButton("应用选中预设")
+        self._apply_preset_btn.setStyleSheet(_btn_style("outline"))
+        self._apply_preset_btn.clicked.connect(self._apply_selected_preset)
+
+        self._delete_preset_btn = QPushButton("删除选中预设")
+        self._delete_preset_btn.setStyleSheet(_btn_style("outline"))
+        self._delete_preset_btn.clicked.connect(self._delete_selected_preset)
+
+        preset_btn_row.addWidget(self._save_preset_btn)
+        preset_btn_row.addWidget(self._apply_preset_btn)
+        preset_btn_row.addWidget(self._delete_preset_btn)
+        preset_btn_row.addStretch()
+        preset_v.addLayout(preset_btn_row)
 
         tab.body.addWidget(preset_box)
         tab.body.addStretch()
@@ -648,6 +697,9 @@ class SettingsView(BaseView):
         # User tab
         self._current_user_edit.setText(qs.value(_K_CURRENT_USER, ""))
 
+        # Preset list widget
+        self._refresh_preset_list_widget()
+
     def _refresh_helicon_display(self) -> None:
         """Update auto-detected and effective path labels from stored/detected state."""
         qs = self.ctx.settings._qs
@@ -706,6 +758,90 @@ class SettingsView(BaseView):
         name = self._current_user_edit.text().strip()
         qs.setValue(_K_CURRENT_USER, name)
         self.ctx.settings.sync()
+
+    # ── Helicon preset CRUD ───────────────────────────────────────────────────
+
+    def _load_presets(self) -> list:
+        """Read preset list from QSettings (JSON)."""
+        import json
+        qs = self.ctx.settings._qs
+        raw = qs.value(_K_HELICON_PRESETS_JSON, "[]")
+        try:
+            data = json.loads(str(raw))
+            if isinstance(data, list):
+                return data
+        except (json.JSONDecodeError, TypeError):
+            pass
+        return []
+
+    def _save_preset_list(self, presets: list) -> None:
+        """Persist preset list to QSettings."""
+        import json
+        qs = self.ctx.settings._qs
+        qs.setValue(_K_HELICON_PRESETS_JSON, json.dumps(presets))
+        self.ctx.settings.sync()
+
+    def _refresh_preset_list_widget(self) -> None:
+        """Reload QListWidget from QSettings."""
+        self._preset_list.clear()
+        for p in self._load_presets():
+            self._preset_list.addItem(p.get("name", ""))
+
+    def _save_current_as_preset(self) -> None:
+        """保存为预设 — upsert by name (mirrors server.js:2449-2452)."""
+        name = self._preset_name_edit.text().strip()
+        if not name:
+            return  # 空名称：静默忽略
+        from datetime import datetime, timezone
+        params = {
+            "method": self._method_combo.currentIndex() + 1,
+            "radius": self._radius_spin.value(),
+            "smoothing": self._smoothing_spin.value(),
+            "quality": self._quality_spin.value(),
+        }
+        preset = {
+            "name": name,
+            "params": params,
+            "updatedAt": datetime.now(timezone.utc).isoformat(),
+        }
+        presets = self._load_presets()
+        existing = next((i for i, p in enumerate(presets) if p.get("name") == name), -1)
+        if existing >= 0:
+            presets[existing] = preset
+        else:
+            presets.append(preset)
+        self._save_preset_list(presets)
+        self._refresh_preset_list_widget()
+
+    def _apply_selected_preset(self) -> None:
+        """应用选中预设 — fill spinboxes + save."""
+        item = self._preset_list.currentItem()
+        if not item:
+            return
+        name = item.text()
+        presets = self._load_presets()
+        preset = next((p for p in presets if p.get("name") == name), None)
+        if not preset:
+            return
+        params = preset.get("params", {})
+        method_idx = int(params.get("method", 1)) - 1  # 1-based → 0-based index
+        method_idx = max(0, min(method_idx, self._method_combo.count() - 1))
+        self._method_combo.setCurrentIndex(method_idx)
+        self._radius_spin.setValue(int(params.get("radius", 4)))
+        self._smoothing_spin.setValue(int(params.get("smoothing", 4)))
+        self._quality_spin.setValue(int(params.get("quality", 95)))
+        self._save_helicon()
+
+    def _delete_selected_preset(self) -> None:
+        """删除选中预设 — remove from list (mirrors server.js:2462-2471)."""
+        item = self._preset_list.currentItem()
+        if not item:
+            return
+        name = item.text()
+        presets = [p for p in self._load_presets() if p.get("name") != name]
+        self._save_preset_list(presets)
+        self._preset_name_edit.clear()
+        self._refresh_preset_list_widget()
 
     # ── Helicon button handlers (web: 检测 / 保存 / 清除自定义 / 重新探测) ───
 
