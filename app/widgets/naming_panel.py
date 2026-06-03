@@ -20,12 +20,14 @@ from typing import TYPE_CHECKING, Optional
 
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
+    QButtonGroup,
     QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -123,17 +125,54 @@ class NamingPanel(QWidget):
         self._site = _field(0, 1, "样地", "如 YGLZ", auto=True)
         self._station = _field(1, 0, "站位", "如 B2", auto=True)
         self._species_id = _field(1, 1, "物种拼音缩写编号", "如 DLC001")
-        self._storage = _field(2, 0, "保存方式", "如 T95E / RD75E")
-        self._collection_date = _field(2, 1, "采集日期", "YYYYMMDD")
-        self._photo_date = _field(3, 0, "拍摄日期", "YYYYMMDD（选填）")
+        self._collection_date = _field(2, 0, "采集日期", "YYYYMMDD")
+        self._photo_date = _field(2, 1, "拍摄日期", "YYYYMMDD（选填）")
 
-        # Sequence number (right of photo date)
+        # ── 保存方式 button group (row 3, full width) ──
+        # Hidden QLineEdit proxy for backward-compat with workbench_view and tests
+        self._storage = QLineEdit()
+        self._storage.setPlaceholderText("如 T95E / RD75E")
+        self._storage.setFixedHeight(32)
+        self._storage.textChanged.connect(self._update_preview)
+
+        storage_cell = QWidget()
+        sc_lay = QVBoxLayout(storage_cell)
+        sc_lay.setContentsMargins(0, 0, 0, 0)
+        sc_lay.setSpacing(5)
+        sc_lbl = QLabel("保存方式")
+        sc_lbl.setObjectName("MutedSmall")
+        sc_lay.addWidget(sc_lbl)
+
+        # Button group row
+        btn_row_storage = QHBoxLayout()
+        btn_row_storage.setContentsMargins(0, 0, 0, 0)
+        btn_row_storage.setSpacing(4)
+        self._storage_btn_group = QButtonGroup(self)
+        self._storage_btn_group.setExclusive(True)
+        for code in ("T95E", "D95E", "D75E", "T75E", "D79", "T79", "T100"):
+            b = QPushButton(code)
+            b.setCheckable(True)
+            b.setObjectName("StorageBtn")
+            b.setFixedHeight(26)
+            b.clicked.connect(lambda _=False, c=code: self._on_storage_btn(c))
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._storage_btn_group.addButton(b)
+            btn_row_storage.addWidget(b)
+        btn_row_storage.addStretch()
+        sc_lay.addLayout(btn_row_storage)
+        # Custom/free-text field below the buttons
+        sc_lay.addWidget(self._storage)
+        grid.addWidget(storage_cell, 3, 0, 1, 2)  # full row span
+
+        # Sequence number (row 4)
+        # auto-虚线: show as dashed QLabel preview, SpinBox for actual input
         self._seq = QSpinBox()
         self._seq.setMinimum(1)
         self._seq.setMaximum(999)
         self._seq.setValue(1)
         self._seq.setFixedHeight(32)
-        grid.addWidget(_cell("成果序号", self._seq), 3, 1)
+        grid.addWidget(_cell("成果序号（auto）", self._seq), 4, 0)
+
         root.addLayout(grid)
 
         # ── Live preview blocks ──
@@ -165,21 +204,39 @@ class NamingPanel(QWidget):
         self._rna_warning.hide()
         root.addWidget(self._rna_warning)
 
-        # Copy buttons
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(8)
+        # Duplicate-UID warning (naming-dup-warn, hidden by default)
+        self._dup_warn = QLabel("⚠ 编号重复 — 该编号已存在")
+        self._dup_warn.setObjectName("UnattributedWarning")
+        self._dup_warn.setWordWrap(True)
+        self._dup_warn.hide()
+        root.addWidget(self._dup_warn)
+
+        # naming-action-row: 📌 添加到侧栏 + copy shortcuts
+        action_row = QHBoxLayout()
+        action_row.setContentsMargins(0, 4, 0, 0)
+        action_row.setSpacing(8)
+
+        self._pin_btn = QPushButton("📌 添加到侧栏")
+        self._pin_btn.setObjectName("Outline")
+        self._pin_btn.setFixedHeight(32)
+        self._pin_btn.setToolTip("把当前编号保存并添加到左侧标本列表")
+        self._pin_btn.clicked.connect(self.save_requested.emit)
+        action_row.addWidget(self._pin_btn)
+
         copy_uid_btn = QPushButton("复制 UID")
+        copy_uid_btn.setObjectName("Ghost")
         copy_uid_btn.setFixedHeight(32)
         icons.set_button_icon(copy_uid_btn, "mdi6.content-copy", color=icons.TONE_MUTED, size=14)
         copy_uid_btn.clicked.connect(self._copy_uid)
-        btn_row.addWidget(copy_uid_btn)
+        action_row.addWidget(copy_uid_btn)
 
         copy_rid_btn = QPushButton("复制成果编号")
+        copy_rid_btn.setObjectName("Ghost")
         copy_rid_btn.setFixedHeight(32)
         icons.set_button_icon(copy_rid_btn, "mdi6.content-copy", color=icons.TONE_MUTED, size=14)
         copy_rid_btn.clicked.connect(self._copy_result_id)
-        btn_row.addWidget(copy_rid_btn)
-        root.addLayout(btn_row)
+        action_row.addWidget(copy_rid_btn)
+        root.addLayout(action_row)
 
         root.addStretch()
 
@@ -204,7 +261,11 @@ class NamingPanel(QWidget):
         self._site.setText(sp.get("site") or "")
         self._station.setText(sp.get("station") or "")
         self._species_id.setText(sp.get("id") or "")
-        self._storage.setText(sp.get("storage") or "")
+        storage_val = sp.get("storage") or ""
+        self._storage.setText(storage_val)
+        # Sync storage button group with loaded value
+        for btn in self._storage_btn_group.buttons():
+            btn.setChecked(btn.text() == storage_val)
         self._collection_date.setText(sp.get("collectionDate") or sp.get("collection_date") or "")
         self._photo_date.setText(sp.get("photoDate") or sp.get("photo_date") or "")
         # seq hint
@@ -220,6 +281,13 @@ class NamingPanel(QWidget):
 
     def current_result_id(self) -> str:
         return self._result_preview.text() if self._result_preview.text() != "—" else ""
+
+    def show_dup_warn(self, show: bool = True) -> None:
+        """Show or hide the duplicate-UID warning label."""
+        if show:
+            self._dup_warn.show()
+        else:
+            self._dup_warn.hide()
 
     # ── Internal ──────────────────────────────────────────────────────────────
 
@@ -286,3 +354,15 @@ class NamingPanel(QWidget):
         rid = self.current_result_id()
         if rid:
             QApplication.clipboard().setText(rid)
+
+    def _on_storage_btn(self, code: str) -> None:
+        """Called when a storage button group button is clicked.
+
+        Sets the free-text storage QLineEdit to the selected code and
+        un-checks all other buttons.  The QLineEdit.textChanged signal
+        will trigger _update_preview automatically.
+        """
+        self._storage.setText(code)
+        # Sync button checked state: check the matching button, uncheck others
+        for btn in self._storage_btn_group.buttons():
+            btn.setChecked(btn.text() == code)

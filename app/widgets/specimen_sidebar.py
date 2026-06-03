@@ -151,6 +151,44 @@ class SpecimenSidebar(QWidget):
         btn_row.addWidget(self._refresh_btn)
         root.addLayout(btn_row)
 
+        # ── collab-status bottom strip ──
+        collab_strip = QFrame()
+        collab_strip.setObjectName("CollabStrip")
+        cs_lay = QVBoxLayout(collab_strip)
+        cs_lay.setContentsMargins(10, 8, 10, 8)
+        cs_lay.setSpacing(5)
+
+        cs_title = QLabel("协作状态")
+        cs_title.setObjectName("Section")
+        cs_lay.addWidget(cs_title)
+
+        self._collab_addr = QLabel("分享地址: —")
+        self._collab_addr.setObjectName("MutedSmall")
+        cs_lay.addWidget(self._collab_addr)
+
+        cs_device_row = QHBoxLayout()
+        cs_device_row.setContentsMargins(0, 0, 0, 0)
+        cs_device_row.setSpacing(6)
+        self._collab_device = QLabel("匿名·本机")
+        self._collab_device.setObjectName("MutedSmall")
+        cs_device_row.addWidget(self._collab_device)
+        cs_device_row.addStretch()
+        self._collab_members = QLabel("成员: 0")
+        self._collab_members.setObjectName("MutedSmall")
+        cs_device_row.addWidget(self._collab_members)
+        cs_lay.addLayout(cs_device_row)
+
+        self._collab_sync = QLabel("同步编号: —")
+        self._collab_sync.setObjectName("MutedSmall")
+        cs_lay.addWidget(self._collab_sync)
+
+        collab_mgr_btn = QPushButton("协作管理")
+        collab_mgr_btn.setObjectName("Ghost")
+        collab_mgr_btn.setFixedHeight(26)
+        cs_lay.addWidget(collab_mgr_btn)
+
+        root.addWidget(collab_strip)
+
     # ── Public API ────────────────────────────────────────────────────────────
 
     def refresh(self) -> None:

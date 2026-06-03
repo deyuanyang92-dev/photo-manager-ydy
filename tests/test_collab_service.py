@@ -381,8 +381,8 @@ class TestCollabViewSmoke:
 
         view = CollabView(ctx)
         assert view.view_id == "collab"
-        assert view.nav_title == "协作"
-        assert view.nav_icon == "👥"
+        assert view.nav_title == "项目汇总"
+        assert view.nav_icon == "📋"
         view.close()
 
     def test_view_with_service_shows_no_peers(self):

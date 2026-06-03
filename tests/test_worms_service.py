@@ -472,7 +472,7 @@ class TestWormsViewOffscreen:
 
         view = WormsView(ctx)
         assert view.view_id   == "worms"
-        assert view.nav_title == "WoRMS"
+        assert view.nav_title == "WoRMS 分类库"
         assert view.nav_icon  == "🌊"
         assert view._service  is not None
 

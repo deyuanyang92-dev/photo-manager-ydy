@@ -545,7 +545,7 @@ class TestTaxonomyViewSmoke:
         view = TaxonomyView(mock_ctx)
         assert view is not None
         assert view.view_id == "taxonomy"
-        assert view.nav_title == "分类库"
+        assert view.nav_title == "内置分类库"
         assert view.nav_icon == "🧬"
 
     def test_view_on_activate_no_crash(self, mock_ctx, app_instance):

@@ -82,7 +82,7 @@ class TestInstantiation:
         assert view.view_id == "settings"
 
     def test_nav_title_correct(self, view: SettingsView) -> None:
-        assert view.nav_title == "全局设置"
+        assert view.nav_title == "配置"
 
     def test_nav_icon_set(self, view: SettingsView) -> None:
         assert view.nav_icon  # non-empty

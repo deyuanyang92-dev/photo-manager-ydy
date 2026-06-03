@@ -504,6 +504,38 @@ QPushButton#Danger:disabled {{ color: {t["muted_dim"]}; border-color: {t["border
 
 QPushButton#Tiny {{ padding: 3px 11px; font-size: {t["font_xs"]}; border-radius: {t["radius_sm"]}; }}
 
+/* ── Sidebar collab-status strip ────────────────────────────────────── */
+QFrame#CollabStrip {{
+    background-color: {t["panel_2"]};
+    border: 1px solid {t["border"]};
+    border-top: 1px solid {t["edge_highlight_soft"]};
+    border-radius: {t["radius_sm"]};
+    margin-top: 8px;
+}}
+
+/* ── Storage-mode button group (保存方式 pills) ─────────────────────── */
+QPushButton#StorageBtn {{
+    background-color: {t["panel_inset"]};
+    color: {t["muted"]};
+    border: 1px solid {t["border"]};
+    border-radius: {t["radius_pill"]};
+    padding: 3px 10px;
+    font-size: {t["font_xs"]};
+    font-weight: 600;
+    font-family: {mono};
+}}
+QPushButton#StorageBtn:hover {{
+    border-color: {t["accent"]};
+    color: {t["text"]};
+    background-color: {t["accent_softer"]};
+}}
+QPushButton#StorageBtn:checked {{
+    background: {accent_grad};
+    color: {t["bg"]};
+    border-color: {t["accent_bottom"]};
+    font-weight: 700;
+}}
+
 /* ── Drop target (process selected JPG+TIFF) ─────────────────────── */
 QPushButton#DropTarget {{
     background-color: {t["panel_inset"]};
