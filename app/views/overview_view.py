@@ -622,47 +622,58 @@ class OverviewView(BaseView):
         dlg.exec()
 
     def _on_new_project(self) -> None:
-        """Open 「新建项目」 modal and persist the new project."""
-        dlg = _NewProjectDialog(parent=self)
+        """Open 「新建项目」 modal (ProjectDialog) and persist the new project."""
+        from app.views.project_dialog import ProjectDialog
+        existing = _load_projects()
+        dlg = ProjectDialog(mode="new", existing_projects=existing, parent=self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        candidate = dlg.result_dict()
-        directory = candidate.get("directory", "")
-        if not directory:
+        proj = dlg.result_project()
+        if not proj:
             return
         try:
-            from app.services.project_service import create_project
-            proj = create_project(candidate["name"], directory)
-            proj["location"] = candidate.get("location", "")
-            proj["collector"] = candidate.get("collector", "")
-            # Persist
             all_projects = _load_projects()
-            # Avoid duplicates by directory
             existing_dirs = {p.get("directory") or p.get("dir") for p in all_projects}
             if proj.get("directory") not in existing_dirs:
                 all_projects.append(proj)
                 _save_projects(all_projects)
             self._load_projects()
+            # Activate new project in context and navigate to workbench
+            main_win = self.window()
+            if hasattr(main_win, "ctx"):
+                main_win.ctx.current_project_dir = proj.get("directory", "")
+            if hasattr(main_win, "navigate_to"):
+                main_win.navigate_to("workbench")
+            if hasattr(main_win, "refresh_context_bar"):
+                main_win.refresh_context_bar()
         except Exception as exc:
             QMessageBox.critical(self, "新建项目失败", str(exc))
 
     def _on_open_workspace(self) -> None:
-        """Let the user pick an existing directory and register it as a project."""
-        directory = QFileDialog.getExistingDirectory(self, "打开工作区目录")
-        if not directory:
+        """Open 「打开工作区」 modal (ProjectDialog) and register the project."""
+        from app.views.project_dialog import ProjectDialog
+        existing = _load_projects()
+        dlg = ProjectDialog(mode="open", existing_projects=existing, parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        proj = dlg.result_project()
+        if not proj:
             return
         try:
-            from app.services.project_service import open_project
-            proj = open_project(directory)
-            proj["name"] = Path(directory).name
-            proj["location"] = ""
-            proj["collector"] = ""
             all_projects = _load_projects()
             existing_dirs = {p.get("directory") or p.get("dir") for p in all_projects}
             if proj.get("directory") not in existing_dirs:
                 all_projects.append(proj)
                 _save_projects(all_projects)
             self._load_projects()
+            # Activate project and navigate to workbench
+            main_win = self.window()
+            if hasattr(main_win, "ctx"):
+                main_win.ctx.current_project_dir = proj.get("directory", "")
+            if hasattr(main_win, "navigate_to"):
+                main_win.navigate_to("workbench")
+            if hasattr(main_win, "refresh_context_bar"):
+                main_win.refresh_context_bar()
         except Exception as exc:
             QMessageBox.critical(self, "打开工作区失败", str(exc))
 

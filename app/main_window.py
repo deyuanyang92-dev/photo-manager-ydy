@@ -151,7 +151,7 @@ class MainWindow(QMainWindow):
         self._btn_new_project = QPushButton("+ 新建项目")
         self._btn_new_project.setObjectName("Outline")
         self._btn_new_project.setToolTip("新建一个项目工作区目录")
-        self._btn_new_project.clicked.connect(lambda: self.navigate_to("overview"))
+        self._btn_new_project.clicked.connect(self._on_new_project)
         self._btn_new_project.setCursor(Qt.CursorShape.PointingHandCursor)
         lay.addWidget(self._btn_new_project)
 
@@ -160,7 +160,7 @@ class MainWindow(QMainWindow):
         self._btn_open_ws = QPushButton("+ 打开工作区")
         self._btn_open_ws.setObjectName("Outline")
         self._btn_open_ws.setToolTip("打开已有项目工作区目录")
-        self._btn_open_ws.clicked.connect(lambda: self.navigate_to("overview"))
+        self._btn_open_ws.clicked.connect(self._on_open_workspace)
         self._btn_open_ws.setCursor(Qt.CursorShape.PointingHandCursor)
         lay.addWidget(self._btn_open_ws)
 
@@ -382,6 +382,46 @@ class MainWindow(QMainWindow):
                 handler()
             except Exception:
                 pass
+
+    # ── Top-bar project actions ───────────────────────────────────────────
+
+    def _on_new_project(self) -> None:
+        """「+ 新建项目」topbar button → ProjectDialog(mode="new")."""
+        self._open_project_dialog(mode="new")
+
+    def _on_open_workspace(self) -> None:
+        """「+ 打开工作区」topbar button → ProjectDialog(mode="open")."""
+        self._open_project_dialog(mode="open")
+
+    def _open_project_dialog(self, mode: str) -> None:
+        """Open ProjectDialog, persist result, navigate to workbench."""
+        from app.views.project_dialog import ProjectDialog
+        from app.views.overview_view import _load_projects, _save_projects
+
+        existing = _load_projects()
+        dlg = ProjectDialog(mode=mode, existing_projects=existing, parent=self)
+        if dlg.exec() != ProjectDialog.DialogCode.Accepted:
+            return
+        proj = dlg.result_project()
+        if not proj:
+            return
+
+        # Persist to user_projects.json (dedup by directory)
+        all_projects = _load_projects()
+        existing_dirs = {p.get("directory") or p.get("dir") for p in all_projects}
+        if proj.get("directory") not in existing_dirs:
+            all_projects.append(proj)
+            _save_projects(all_projects)
+
+        # Activate project in context and navigate
+        self.ctx.current_project_dir = proj.get("directory", "")
+        self.navigate_to("workbench")
+        self.refresh_context_bar()
+
+        # Notify overview to reload next time it's activated
+        ov = self._views.get("overview")
+        if ov and hasattr(ov, "_load_projects"):
+            ov._load_projects()
 
     # ── Status bar public API ─────────────────────────────────────────────
 
