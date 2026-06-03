@@ -987,4 +987,40 @@ class CollabService(QObject):
         port = self._port or 5050
         return f"{ip}:{port}"
 
+    # ── Task action stubs (UI-level helpers) ──────────────────────────────
+
+    def assign_task(self, uid: str, operator: str) -> None:
+        """Assign task *uid* to *operator* (transition → ASSIGNED).
+
+        Convenience wrapper for the UI context menu; updates the local store
+        and emits tasks_changed.  Logs a warning when the transition is invalid.
+        """
+        try:
+            self.store.update_status(uid, TaskStatus.ASSIGNED, assignee=operator)
+            self.tasks_changed.emit()
+        except ValueError as exc:
+            logger.warning("assign_task failed uid=%s: %s", uid, exc)
+
+    def void_task(self, uid: str) -> None:
+        """Void task *uid* (transition → VOID).
+
+        Logs a warning when the transition is invalid.
+        """
+        try:
+            self.store.update_status(uid, TaskStatus.VOID)
+            self.tasks_changed.emit()
+        except ValueError as exc:
+            logger.warning("void_task failed uid=%s: %s", uid, exc)
+
+    def resolve_conflict(self, uid: str) -> None:
+        """Resolve a conflicted task by resetting it to CREATED.
+
+        Logs a warning when the transition is invalid.
+        """
+        try:
+            self.store.update_status(uid, TaskStatus.CREATED)
+            self.tasks_changed.emit()
+        except ValueError as exc:
+            logger.warning("resolve_conflict failed uid=%s: %s", uid, exc)
+
 
