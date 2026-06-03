@@ -368,6 +368,14 @@ class SpecimenSidebar(QWidget):
 
     # ── Collab strip update ───────────────────────────────────────────────────
 
+    def _open_collab_view(self) -> None:
+        """Navigate the main window to the collab view."""
+        win = self.window()
+        if hasattr(win, "navigate_to"):
+            win.navigate_to("collab")
+        elif hasattr(win, "switch_to_view"):
+            win.switch_to_view("collab")
+
     def update_collab_status(self, service: Optional["CollabService"]) -> None:
         """Refresh the sidebar collab strip from *service*.
 

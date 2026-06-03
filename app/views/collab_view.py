@@ -22,11 +22,14 @@ from typing import Optional
 from PyQt6.QtCore import Qt, QTimer, pyqtSlot
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
+    QApplication,
+    QDialog,
     QFrame,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMenu,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -106,6 +109,12 @@ class CollabView(BaseView):
         self._status_badge.setFont(bold)
         header.addWidget(self._status_badge)
         header.addStretch()
+
+        self._share_btn = QPushButton("分享地址")
+        self._share_btn.setObjectName("Outline")
+        self._share_btn.setFixedWidth(80)
+        self._share_btn.clicked.connect(self._on_share_addr)
+        header.addWidget(self._share_btn)
 
         self._debug_btn = QPushButton("🔧 调试")
         self._debug_btn.setCheckable(True)
@@ -213,6 +222,8 @@ class CollabView(BaseView):
         self._task_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self._task_table.setAlternatingRowColors(True)
         self._task_table.verticalHeader().hide()
+        self._task_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._task_table.customContextMenuRequested.connect(self._on_task_context_menu)
         right_layout.addWidget(self._task_table)
 
         splitter.addWidget(right)
@@ -353,6 +364,53 @@ class CollabView(BaseView):
         self._conflict_banner.show()
         QTimer.singleShot(4000, self._conflict_banner.hide)
 
+    def _on_share_addr(self) -> None:
+        dlg = _CollabShareDialog(self._ctx, self)
+        dlg.exec()
+
+    def _on_task_context_menu(self, pos) -> None:
+        row = self._task_table.rowAt(pos.y())
+        if row < 0:
+            return
+        uid_item = self._task_table.item(row, 0)
+        if uid_item is None:
+            return
+        uid = uid_item.text()
+
+        status_item = self._task_table.item(row, 1)
+        status_label = status_item.text() if status_item else ""
+        is_conflict = status_label == _STATUS_LABEL.get("conflict", "冲突")
+
+        menu = QMenu(self)
+        assign_act = menu.addAction("分配给我")
+        void_act = menu.addAction("作废")
+        resolve_act = None
+        if is_conflict:
+            resolve_act = menu.addAction("处理冲突")
+
+        action = menu.exec(self._task_table.viewport().mapToGlobal(pos))
+        svc = self._service
+        if not svc or action is None:
+            return
+
+        if action == assign_act:
+            operator = getattr(getattr(self._ctx, "settings", None), "operator_name", "")
+            try:
+                svc.assign_task(uid, operator)
+            except Exception:
+                pass
+        elif action == void_act:
+            try:
+                svc.void_task(uid)
+            except Exception:
+                pass
+        elif resolve_act is not None and action == resolve_act:
+            try:
+                svc.resolve_conflict(uid)
+            except Exception:
+                pass
+        self.on_activate()
+
     def _toggle_debug_drawer(self, checked: bool) -> None:
         self._debug_drawer.setVisible(checked)
         if checked and self._service:
@@ -384,3 +442,35 @@ def _hex_to_qcolor(hex_colour: str):  # type: ignore[return]
     """Convert #rrggbb to QColor (import deferred to avoid top-level Qt import)."""
     from PyQt6.QtGui import QColor
     return QColor(hex_colour)
+
+
+# ── Share address dialog ──────────────────────────────────────────────────────
+
+class _CollabShareDialog(QDialog):
+    """Dialog showing the local LAN address for sharing with other operators."""
+
+    def __init__(self, ctx: "AppContext", parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("分享局域网地址")
+        self.setMinimumWidth(340)
+
+        addr = ""
+        svc = getattr(ctx, "collab_service", None)
+        if svc is not None and hasattr(svc, "local_address"):
+            addr = svc.local_address() or ""
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+        layout.addWidget(QLabel("局域网地址："))
+
+        self._addr_edit = QLineEdit(addr)
+        self._addr_edit.setReadOnly(True)
+        layout.addWidget(self._addr_edit)
+
+        copy_btn = QPushButton("复制地址")
+        copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(addr))
+        layout.addWidget(copy_btn)
+
+        close_btn = QPushButton("关闭")
+        close_btn.clicked.connect(self.close)
+        layout.addWidget(close_btn)
