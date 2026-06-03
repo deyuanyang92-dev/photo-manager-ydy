@@ -23,6 +23,7 @@ worms-body  (HSplitter: left flex-6 / right flex-4)
       worms-classification-chain  nodes (rank / name / #AphiaID)
       worms-detail-tabs  [概览] [子分类] [同义词]
       worms-tab-content
+      worms-fill-btn  (填充到当前标本 — web parity)
 
 Batch jobs: collapsible footer panel (de-emphasised; not in web renderWormsPage
 but kept for service completeness).
@@ -36,6 +37,7 @@ Oracle:
   app.js  renderWormsOverviewTab ~12546
   app.js  renderWormsChildrenTab ~12584
   app.js  renderWormsSynonymsTab ~12614
+  app.js  wormsFillToSpecimen ~11447
   styles.css  ~5250–5650 (worms-* classes)
   docs/modules/worms.md
 """
@@ -167,6 +169,14 @@ def _badge(text: str, kind: str) -> QLabel:
     return lbl
 
 
+def _divider() -> QFrame:
+    """Thin horizontal rule."""
+    div = QFrame()
+    div.setFrameShape(QFrame.Shape.HLine)
+    div.setStyleSheet("background:rgba(145,182,181,0.10); max-height:1px; border:none;")
+    return div
+
+
 # ── Result item widget (mirrors worms-result-item) ────────────────────────────
 
 class _ResultItemWidget(QWidget):
@@ -192,8 +202,8 @@ class _ResultItemWidget(QWidget):
         )
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(8, 6, 8, 6)
-        root.setSpacing(2)
+        root.setContentsMargins(10, 8, 10, 8)
+        root.setSpacing(3)
 
         # Top row: sciname | authority | badges
         top = QHBoxLayout()
@@ -255,11 +265,11 @@ def _chain_node_widget(node: dict, is_current: bool = False) -> QWidget:
     )
 
     row = QHBoxLayout(w)
-    row.setContentsMargins(10, 2, 4, 2)
+    row.setContentsMargins(10, 3, 6, 3)
     row.setSpacing(8)
 
     rank_lbl = _label(node.get("rank", ""), color=_MUTED, size=11)
-    rank_lbl.setFixedWidth(72)
+    rank_lbl.setFixedWidth(80)
     row.addWidget(rank_lbl)
 
     name_lbl = _label(node.get("scientificname", ""), font=_MONO, size=12)
@@ -281,8 +291,8 @@ def _build_overview_tab(rec: dict) -> QWidget:
     """worms-overview-tab: key-value field list."""
     c = QWidget()
     lay = QVBoxLayout(c)
-    lay.setContentsMargins(0, 4, 0, 4)
-    lay.setSpacing(1)
+    lay.setContentsMargins(2, 6, 2, 6)
+    lay.setSpacing(2)
 
     fields = [
         ("AphiaID",  str(rec.get("AphiaID", ""))),
@@ -303,9 +313,9 @@ def _build_overview_tab(rec: dict) -> QWidget:
         if not val:
             continue
         row = QHBoxLayout()
-        row.setContentsMargins(0, 2, 0, 2)
+        row.setContentsMargins(0, 3, 0, 3)
         lbl = _label(field_name, color=_MUTED, size=12)
-        lbl.setFixedWidth(62)
+        lbl.setFixedWidth(66)
         lbl.setAlignment(Qt.AlignmentFlag.AlignTop)
         row.addWidget(lbl)
         val_lbl = _label(val, size=12)
@@ -321,9 +331,9 @@ def _build_overview_tab(rec: dict) -> QWidget:
     if rec.get("isTerrestrial"): habitat.append("陆地")
     if habitat:
         row = QHBoxLayout()
-        row.setContentsMargins(0, 2, 0, 2)
+        row.setContentsMargins(0, 3, 0, 3)
         lbl = _label("生境", color=_MUTED, size=12)
-        lbl.setFixedWidth(62)
+        lbl.setFixedWidth(66)
         row.addWidget(lbl)
         row.addWidget(_label(" / ".join(habitat), size=12))
         lay.addLayout(row)
@@ -336,8 +346,8 @@ def _build_children_tab(children: list[dict], loading: bool) -> QWidget:
     """worms-children-tab: list of child taxa."""
     c = QWidget()
     lay = QVBoxLayout(c)
-    lay.setContentsMargins(0, 4, 0, 4)
-    lay.setSpacing(2)
+    lay.setContentsMargins(2, 6, 2, 6)
+    lay.setSpacing(3)
 
     if loading:
         lay.addWidget(_label("加载子分类…", color=_MUTED, size=12))
@@ -347,7 +357,7 @@ def _build_children_tab(children: list[dict], loading: bool) -> QWidget:
         for child in children:
             row_w = QWidget()
             row_lay = QHBoxLayout(row_w)
-            row_lay.setContentsMargins(4, 2, 4, 2)
+            row_lay.setContentsMargins(4, 3, 4, 3)
             row_lay.setSpacing(6)
             row_lay.addWidget(_label(child.get("scientificname", ""), font=_MONO, size=12))
             if child.get("rank"):
@@ -362,8 +372,8 @@ def _build_synonyms_tab(synonyms: list[dict], loading: bool) -> QWidget:
     """worms-synonyms-tab: list of synonym records."""
     c = QWidget()
     lay = QVBoxLayout(c)
-    lay.setContentsMargins(0, 4, 0, 4)
-    lay.setSpacing(2)
+    lay.setContentsMargins(2, 6, 2, 6)
+    lay.setSpacing(3)
 
     if loading:
         lay.addWidget(_label("加载同义词…", color=_MUTED, size=12))
@@ -373,7 +383,7 @@ def _build_synonyms_tab(synonyms: list[dict], loading: bool) -> QWidget:
         for syn in synonyms:
             row_w = QWidget()
             row_lay = QHBoxLayout(row_w)
-            row_lay.setContentsMargins(4, 2, 4, 2)
+            row_lay.setContentsMargins(4, 3, 4, 3)
             row_lay.setSpacing(6)
             row_lay.addWidget(_label(syn.get("scientificname", ""), font=_MONO, size=12))
             status = (syn.get("status") or "").lower()
@@ -394,13 +404,16 @@ class _DetailPanel(QWidget):
 
     Shows empty placeholder until a taxon is selected, then shows the
     full detail view with classification chain + tabs (overview / children
-    / synonyms).
+    / synonyms) + worms-fill-btn.
     """
 
     TAB_OVERVIEW  = "overview"
     TAB_CHILDREN  = "children"
     TAB_SYNONYMS  = "synonyms"
     TAB_LABELS    = {"overview": "概览", "children": "子分类", "synonyms": "同义词"}
+
+    # Emitted when user clicks "填充到当前标本".
+    fill_requested = pyqtSignal(dict)   # the selected WoRMS record
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -418,8 +431,8 @@ class _DetailPanel(QWidget):
         self._loading:  bool = False
 
         self._root = QVBoxLayout(self)
-        self._root.setContentsMargins(14, 14, 14, 14)
-        self._root.setSpacing(8)
+        self._root.setContentsMargins(16, 16, 16, 16)
+        self._root.setSpacing(10)
 
         self._render()
 
@@ -456,6 +469,12 @@ class _DetailPanel(QWidget):
         self._current_tab = tab
         self._render()
 
+    def update_fill_label(self, specimen_label: str) -> None:
+        """Refresh the fill button text after active specimen changes."""
+        # Re-render to pick up new label; only meaningful when detail is shown.
+        if self._rec is not None:
+            self._render()
+
     # ── Rendering ──────────────────────────────────────────────────────
 
     def _clear(self) -> None:
@@ -464,8 +483,7 @@ class _DetailPanel(QWidget):
             if item.widget():
                 item.widget().deleteLater()
             elif item.layout():
-                # nested layout — just remove
-                pass
+                pass  # nested layout — just remove reference
 
     def _render(self) -> None:
         self._clear()
@@ -486,8 +504,8 @@ class _DetailPanel(QWidget):
         # ── worms-detail-header ────────────────────────────────────────
         header_w = QWidget()
         header_lay = QHBoxLayout(header_w)
-        header_lay.setContentsMargins(0, 0, 0, 8)
-        header_lay.setSpacing(6)
+        header_lay.setContentsMargins(0, 0, 0, 4)
+        header_lay.setSpacing(8)
 
         name_lbl = _label(
             rec.get("scientificname") or "?",
@@ -513,7 +531,7 @@ class _DetailPanel(QWidget):
                        color=_WARN, size=11)
             )
 
-        # WoRMS external link (text-only label since we're in Qt)
+        # WoRMS external link (text-only label)
         aphia = rec.get("AphiaID")
         if aphia:
             link_lbl = _label(
@@ -522,11 +540,7 @@ class _DetailPanel(QWidget):
             )
             self._root.addWidget(link_lbl)
 
-        # Divider
-        div = QFrame()
-        div.setFrameShape(QFrame.Shape.HLine)
-        div.setStyleSheet(f"background:rgba(145,182,181,0.10); max-height:1px;")
-        self._root.addWidget(div)
+        self._root.addWidget(_divider())
 
         # ── worms-classification-chain ─────────────────────────────────
         if self._loading:
@@ -536,10 +550,10 @@ class _DetailPanel(QWidget):
             chain_container.setObjectName("WChainContainer")
             chain_container.setStyleSheet(
                 f"QWidget#WChainContainer {{ background:{_PANEL_2};"
-                f" border-radius:6px; padding:4px 0; }}"
+                f" border-radius:6px; }}"
             )
             chain_lay = QVBoxLayout(chain_container)
-            chain_lay.setContentsMargins(0, 4, 0, 4)
+            chain_lay.setContentsMargins(0, 6, 0, 6)
             chain_lay.setSpacing(0)
 
             current_aphia = rec.get("AphiaID")
@@ -556,7 +570,7 @@ class _DetailPanel(QWidget):
             f"QWidget#WTabBar {{ border-bottom:1px solid rgba(145,182,181,0.10); }}"
         )
         tab_row = QHBoxLayout(tab_bar)
-        tab_row.setContentsMargins(0, 0, 0, 0)
+        tab_row.setContentsMargins(0, 4, 0, 0)
         tab_row.setSpacing(0)
 
         for tab_id, tab_label in self.TAB_LABELS.items():
@@ -568,7 +582,7 @@ class _DetailPanel(QWidget):
             btn.setStyleSheet(
                 f"QPushButton#WTabBtn {{ background:none; border:none;"
                 f" border-bottom:2px solid {accent_border}; margin-bottom:-1px;"
-                f" color:{text_color}; padding:6px 12px; font-size:12px;"
+                f" color:{text_color}; padding:7px 14px; font-size:12px;"
                 f" font-weight:{'600' if is_sel else '500'}; }}"
                 f"QPushButton#WTabBtn:hover {{ color:{_TEXT}; }}"
             )
@@ -588,11 +602,30 @@ class _DetailPanel(QWidget):
             content = _build_synonyms_tab(self._synonyms, self._loading)
 
         # Scroll area for tab content
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setWidget(content)
-        self._root.addWidget(scroll, stretch=1)
+        tab_scroll = QScrollArea()
+        tab_scroll.setWidgetResizable(True)
+        tab_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        tab_scroll.setStyleSheet("QScrollArea { background: transparent; }")
+        tab_scroll.setWidget(content)
+        self._root.addWidget(tab_scroll, stretch=1)
+
+        # ── worms-fill-btn (web parity: 填充到当前标本) ────────────────
+        self._root.addWidget(_divider())
+
+        fill_btn = QPushButton("填充到当前标本")
+        fill_btn.setObjectName("WFillBtn")
+        fill_btn.setToolTip("将 WoRMS 分类信息（纲/目/科/属/学名）写入工作区当前标本")
+        fill_btn.setStyleSheet(
+            f"QPushButton#WFillBtn {{ background:rgba(41,185,171,0.12);"
+            f"  color:{_ACCENT}; border:1px solid rgba(41,185,171,0.30);"
+            f"  border-radius:6px; padding:7px 14px; font-size:12px; font-weight:600; }}"
+            f"QPushButton#WFillBtn:hover {{ background:rgba(41,185,171,0.20);"
+            f"  border-color:{_ACCENT}; }}"
+            f"QPushButton#WFillBtn:pressed {{ background:rgba(41,185,171,0.28); }}"
+        )
+        _rec = rec  # capture
+        fill_btn.clicked.connect(lambda: self.fill_requested.emit(_rec))
+        self._root.addWidget(fill_btn)
 
 
 # ── Main view ──────────────────────────────────────────────────────────────────
@@ -613,9 +646,12 @@ class WormsView(BaseView):
                 worms-result-list  (custom _ResultItemWidget per row)
 
             worms-detail-panel (right, _DetailPanel)
+                worms-fill-btn at bottom (web parity)
 
         Batch jobs (collapsible QGroupBox footer — not in web page but
         kept for parity with worms_service job management).
+
+    Outer QScrollArea prevents content squashing when window is short.
     """
 
     view_id   = "worms"
@@ -648,23 +684,42 @@ class WormsView(BaseView):
     def _setup_ui(self) -> None:
         self._service = self._init_service()
 
-        root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
+        # Outer layout: full-view, no margins
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        # ── Outer scroll area (prevents squash on short windows) ───────
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setStyleSheet("QScrollArea { background: transparent; }")
+        outer.addWidget(scroll)
+
+        # Content widget inside the scroll
+        content_w = QWidget()
+        content_w.setObjectName("WContentWidget")
+        content_w.setStyleSheet("QWidget#WContentWidget { background: transparent; }")
+        content_w.setMinimumHeight(560)
+
+        content_lay = QVBoxLayout(content_w)
+        content_lay.setContentsMargins(0, 0, 0, 0)
+        content_lay.setSpacing(0)
+        scroll.setWidget(content_w)
 
         # ── worms-header ───────────────────────────────────────────────
         header_w = QWidget()
         header_w.setObjectName("WHeader")
         header_w.setStyleSheet(
-            f"QWidget#WHeader {{ padding:20px 24px 12px; background:transparent; }}"
+            "QWidget#WHeader { padding: 0; background: transparent; }"
         )
         header_lay = QVBoxLayout(header_w)
-        header_lay.setContentsMargins(0, 0, 0, 0)
-        header_lay.setSpacing(4)
+        header_lay.setContentsMargins(28, 22, 28, 14)
+        header_lay.setSpacing(6)
 
         # worms-title-row
         title_row = QHBoxLayout()
-        title_row.setSpacing(10)
+        title_row.setSpacing(12)
         title_row.setAlignment(Qt.AlignmentFlag.AlignVCenter)
 
         h2 = _label(
@@ -685,34 +740,35 @@ class WormsView(BaseView):
             color=_MUTED, size=12
         )
         header_lay.addWidget(desc)
-        root.addWidget(header_w)
+        content_lay.addWidget(header_w)
 
         # ── worms-body (HSplitter) ─────────────────────────────────────
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setHandleWidth(18)
         splitter.setChildrenCollapsible(False)
-        root.addWidget(splitter, stretch=1)
+        splitter.setMinimumHeight(400)
+        content_lay.addWidget(splitter, stretch=1)
 
         # Left: search panel
         left_container = QWidget()
         left_container.setObjectName("WSearchContainer")
         left_container.setStyleSheet("background:transparent;")
         left_lay = QVBoxLayout(left_container)
-        left_lay.setContentsMargins(24, 0, 12, 12)
-        left_lay.setSpacing(8)
+        left_lay.setContentsMargins(28, 4, 14, 16)
+        left_lay.setSpacing(10)
 
         # worms-search-bar
         search_bar = QWidget()
         sb_lay = QHBoxLayout(search_bar)
         sb_lay.setContentsMargins(0, 0, 0, 0)
-        sb_lay.setSpacing(6)
+        sb_lay.setSpacing(8)
 
         self._search_input = QLineEdit()
         self._search_input.setObjectName("WSearchInput")
         self._search_input.setPlaceholderText("输入拉丁学名搜索…")
         self._search_input.setStyleSheet(
             f"QLineEdit#WSearchInput {{ background:{_PANEL}; border:1px solid {_BORDER};"
-            f"  border-radius:6px; padding:7px 12px; color:{_TEXT}; font-size:13px;"
+            f"  border-radius:6px; padding:8px 12px; color:{_TEXT}; font-size:13px;"
             f"  font-family:{_MONO}; outline:none; }}"
             f"QLineEdit#WSearchInput:focus {{ border-color:{_ACCENT}; }}"
         )
@@ -723,7 +779,7 @@ class WormsView(BaseView):
         self._like_cb = QCheckBox("模糊匹配")
         self._like_cb.setChecked(True)
         self._like_cb.setStyleSheet(
-            f"QCheckBox {{ color:{_MUTED}; font-size:12px; spacing:4px; }}"
+            f"QCheckBox {{ color:{_MUTED}; font-size:12px; spacing:5px; }}"
             f"QCheckBox::indicator {{ width:14px; height:14px; border-radius:4px;"
             f"  border:1px solid rgba(145,182,181,0.25); background:{_PANEL}; }}"
             f"QCheckBox::indicator:checked {{ background:{_ACCENT}; border-color:{_ACCENT}; }}"
@@ -735,7 +791,7 @@ class WormsView(BaseView):
         self._search_btn.setObjectName("WSearchBtn")
         self._search_btn.setStyleSheet(
             f"QPushButton#WSearchBtn {{ background:{_ACCENT}; color:{_BG};"
-            f"  border:none; border-radius:6px; padding:7px 16px;"
+            f"  border:none; border-radius:6px; padding:8px 18px;"
             f"  font-size:13px; font-weight:600; }}"
             f"QPushButton#WSearchBtn:hover {{ background:{_ACCENT_H}; }}"
             f"QPushButton#WSearchBtn:disabled {{ background:#10242a; color:{_MUTED_2}; }}"
@@ -745,9 +801,13 @@ class WormsView(BaseView):
 
         left_lay.addWidget(search_bar)
 
-        # Status / progress
+        # Status / progress row
+        status_row = QHBoxLayout()
+        status_row.setContentsMargins(0, 0, 0, 0)
+        status_row.setSpacing(8)
+
         self._status_lbl = _label("", color=_MUTED, size=11)
-        left_lay.addWidget(self._status_lbl)
+        status_row.addWidget(self._status_lbl)
 
         self._progress = QProgressBar()
         self._progress.setRange(0, 0)
@@ -757,23 +817,25 @@ class WormsView(BaseView):
             f"QProgressBar {{ background:{_PANEL}; border:none; border-radius:2px; }}"
             f"QProgressBar::chunk {{ background:{_ACCENT}; border-radius:2px; }}"
         )
-        left_lay.addWidget(self._progress)
+        status_row.addWidget(self._progress, stretch=1)
+        left_lay.addLayout(status_row)
 
         # Result area (scrollable)
         self._result_scroll = QScrollArea()
         self._result_scroll.setWidgetResizable(True)
         self._result_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self._result_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._result_scroll.setStyleSheet("QScrollArea { background: transparent; }")
 
         self._result_container = QWidget()
         self._result_container.setObjectName("WResultContainer")
         self._result_container.setStyleSheet("background:transparent;")
         self._result_layout = QVBoxLayout(self._result_container)
-        self._result_layout.setContentsMargins(0, 0, 0, 0)
-        self._result_layout.setSpacing(2)
+        self._result_layout.setContentsMargins(0, 0, 4, 0)
+        self._result_layout.setSpacing(3)
         self._result_layout.addStretch()
 
-        # Initial empty state
+        # Initial empty state label
         self._empty_lbl = _label("", color=_MUTED, size=12)
         self._empty_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._result_layout.insertWidget(0, self._empty_lbl)
@@ -785,10 +847,11 @@ class WormsView(BaseView):
 
         # Right: detail panel
         self._detail_panel = _DetailPanel()
+        self._detail_panel.fill_requested.connect(self._on_fill_to_specimen)
         right_container = QWidget()
         right_container.setStyleSheet("background:transparent;")
         right_lay = QVBoxLayout(right_container)
-        right_lay.setContentsMargins(12, 0, 24, 12)
+        right_lay.setContentsMargins(14, 4, 28, 16)
         right_lay.setSpacing(0)
         right_lay.addWidget(self._detail_panel)
         splitter.addWidget(right_container)
@@ -798,33 +861,34 @@ class WormsView(BaseView):
 
         # ── Batch jobs footer (de-emphasised) ──────────────────────────
         jobs_box = self._build_jobs_section()
-        root.addWidget(jobs_box)
+        content_lay.addWidget(jobs_box)
 
     def _build_jobs_section(self) -> QGroupBox:
         """Collapsible batch validation jobs panel (worms_service parity)."""
         box = QGroupBox("批量验证任务")
         box.setCheckable(True)
         box.setChecked(False)
-        box.setMaximumHeight(170)
+        box.setMaximumHeight(180)
         box.setStyleSheet(
             f"QGroupBox {{ color:{_MUTED}; font-size:12px; font-weight:600;"
             f"  border:1px solid rgba(145,182,181,0.10); border-radius:8px;"
-            f"  margin-top:0; padding:8px 12px; background:{_PANEL_2}; }}"
-            f"QGroupBox::title {{ subcontrol-origin:margin; left:12px; top:-6px;"
+            f"  margin:0 28px 16px 28px; padding:10px 14px; background:{_PANEL_2}; }}"
+            f"QGroupBox::title {{ subcontrol-origin:margin; left:14px; top:-6px;"
             f"  padding:0 4px; background:{_BG}; }}"
             f"QGroupBox::indicator {{ width:14px; height:14px; }}"
         )
 
         inner = QVBoxLayout(box)
-        inner.setContentsMargins(4, 6, 4, 6)
-        inner.setSpacing(5)
+        inner.setContentsMargins(4, 8, 4, 8)
+        inner.setSpacing(6)
 
         ctrl = QHBoxLayout()
+        ctrl.setSpacing(8)
         self._job_ids_input = QLineEdit()
         self._job_ids_input.setPlaceholderText("逗号分隔的 record_id（必填）")
         self._job_ids_input.setStyleSheet(
             f"QLineEdit {{ background:{_PANEL}; border:1px solid {_BORDER};"
-            f"  border-radius:6px; padding:5px 9px; color:{_TEXT}; font-size:12px; }}"
+            f"  border-radius:6px; padding:6px 10px; color:{_TEXT}; font-size:12px; }}"
         )
         ctrl.addWidget(self._job_ids_input, stretch=1)
 
@@ -832,7 +896,7 @@ class WormsView(BaseView):
         create_btn.setFixedWidth(84)
         create_btn.setStyleSheet(
             f"QPushButton {{ background:{_PANEL}; color:{_TEXT}; border:1px solid {_BORDER};"
-            f"  border-radius:6px; padding:5px 10px; font-size:12px; }}"
+            f"  border-radius:6px; padding:6px 10px; font-size:12px; }}"
             f"QPushButton:hover {{ border-color:{_ACCENT}; color:{_ACCENT}; }}"
         )
         create_btn.clicked.connect(self._on_create_job)
@@ -842,7 +906,7 @@ class WormsView(BaseView):
         refresh_btn.setFixedWidth(52)
         refresh_btn.setStyleSheet(
             f"QPushButton {{ background:{_PANEL}; color:{_MUTED}; border:1px solid {_BORDER};"
-            f"  border-radius:6px; padding:5px 8px; font-size:12px; }}"
+            f"  border-radius:6px; padding:6px 8px; font-size:12px; }}"
             f"QPushButton:hover {{ color:{_TEXT}; }}"
         )
         refresh_btn.clicked.connect(self._refresh_jobs)
@@ -850,11 +914,11 @@ class WormsView(BaseView):
         inner.addLayout(ctrl)
 
         self._jobs_list = QListWidget()
-        self._jobs_list.setFixedHeight(80)
+        self._jobs_list.setFixedHeight(84)
         self._jobs_list.setStyleSheet(
             f"QListWidget {{ background:{_PANEL}; border:1px solid {_BORDER};"
             f"  border-radius:6px; font-size:11px; color:{_MUTED}; }}"
-            f"QListWidget::item {{ padding:3px 8px; border-radius:4px; }}"
+            f"QListWidget::item {{ padding:4px 8px; border-radius:4px; }}"
             f"QListWidget::item:hover {{ background:#0c2027; color:{_TEXT}; }}"
         )
         inner.addWidget(self._jobs_list)
@@ -904,7 +968,7 @@ class WormsView(BaseView):
             name = self._search_input.text().strip()
             msg = f'"{name}" 无匹配结果。试试模糊匹配或缩短搜索词。' if name else "无结果"
             self._empty_lbl.setText(msg)
-            self._set_status(f"0 条结果")
+            self._set_status("0 条结果")
             return
 
         self._empty_lbl.setText("")
@@ -982,6 +1046,31 @@ class WormsView(BaseView):
 
     def _on_detail_error(self, msg: str) -> None:
         self._set_status(f"详情加载失败: {msg}")
+
+    # ── Fill to specimen (worms-fill-btn) ──────────────────────────────
+
+    def _on_fill_to_specimen(self, rec: dict) -> None:
+        """Apply WoRMS classification fields to the active specimen via ctx."""
+        ctx = self.ctx
+        # Resolve to accepted record if unaccepted
+        r = rec
+        if rec.get("status") == "unaccepted" and rec.get("valid_name"):
+            r = dict(rec)
+            r["scientificname"] = rec["valid_name"]
+
+        # Delegate to app context if it supports specimen fill
+        fill_fn = getattr(ctx, "worms_fill_specimen", None)
+        if callable(fill_fn):
+            try:
+                fill_fn(r)
+                self._set_status(f"已从 WoRMS 填充分类信息: {r.get('scientificname', '')}")
+                return
+            except Exception as exc:
+                self._set_status(f"填充失败: {exc}")
+                return
+
+        # Fallback: inform the user that no specimen is active
+        self._set_status("（需先在工作区选择标本）")
 
     # ── Batch jobs ─────────────────────────────────────────────────────
 

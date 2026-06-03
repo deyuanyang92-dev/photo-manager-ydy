@@ -105,7 +105,7 @@ def main() -> int:
     ctx.current_project_dir = str(tmp)
 
     view = WormsView(ctx)
-    view.resize(1280, 820)
+    view.resize(1920, 1080)
 
     # Inject synthetic search results into the result area
     view._search_input.setText("Acanthurus olivaceus")
