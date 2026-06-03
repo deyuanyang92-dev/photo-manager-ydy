@@ -1,0 +1,203 @@
+"""Tests for app/services/project_service.py — TDD.
+
+Covers:
+- create_project: returns dict, creates dirs
+- open_project: returns dict, registers root in default_registry
+- list_projects: reads user_projects.json
+- get_incoming_jpg_dir: modern name / legacy fallback
+- get_results_dir
+- ensure_project_dirs: creates incoming-jpg / results / _data
+"""
+import json
+import os
+import tempfile
+from pathlib import Path
+
+import pytest
+
+
+# ── Helpers ────────────────────────────────────────────────────────────────
+
+def _write_projects_json(path: Path, projects: list) -> None:
+    path.write_text(json.dumps({"version": 1, "projects": projects}), encoding="utf-8")
+
+
+# ── create_project ─────────────────────────────────────────────────────────
+
+class TestCreateProject:
+    def test_returns_dict(self, tmp_path):
+        from app.services.project_service import create_project
+        result = create_project("Test Project", str(tmp_path / "proj"))
+        assert isinstance(result, dict)
+
+    def test_has_name_and_dir(self, tmp_path):
+        from app.services.project_service import create_project
+        proj_dir = str(tmp_path / "proj")
+        result = create_project("My Specimens", proj_dir)
+        assert result.get("name") == "My Specimens"
+        assert "dir" in result or "directory" in result
+
+    def test_creates_subdirs(self, tmp_path):
+        from app.services.project_service import create_project
+        proj_dir = tmp_path / "proj"
+        create_project("Test", str(proj_dir))
+        assert (proj_dir / "incoming-jpg").exists()
+        assert (proj_dir / "results").exists()
+        assert (proj_dir / "_data").exists()
+
+    def test_result_has_id(self, tmp_path):
+        from app.services.project_service import create_project
+        result = create_project("T", str(tmp_path / "p"))
+        assert "id" in result
+
+
+# ── open_project ───────────────────────────────────────────────────────────
+
+class TestOpenProject:
+    def test_returns_dict(self, tmp_path):
+        from app.services.project_service import open_project
+        proj_dir = tmp_path / "proj"
+        proj_dir.mkdir()
+        result = open_project(str(proj_dir))
+        assert isinstance(result, dict)
+
+    def test_registers_root_in_default_registry(self, tmp_path):
+        """Opening a project must register its dir in the default SafePathRegistry."""
+        from app.services.project_service import open_project
+        from app.utils.path_utils import default_registry
+        proj_dir = tmp_path / "proj_open"
+        proj_dir.mkdir()
+        open_project(str(proj_dir))
+        # After open, a child path must pass assert_safe
+        child = str(proj_dir / "results" / "file.tif")
+        # Should not raise
+        default_registry.assert_safe(child)
+
+    def test_creates_subdirs_if_missing(self, tmp_path):
+        from app.services.project_service import open_project
+        proj_dir = tmp_path / "new_proj"
+        proj_dir.mkdir()
+        open_project(str(proj_dir))
+        assert (proj_dir / "incoming-jpg").exists()
+        assert (proj_dir / "results").exists()
+
+    def test_has_dir_key(self, tmp_path):
+        from app.services.project_service import open_project
+        proj_dir = tmp_path / "proj"
+        proj_dir.mkdir()
+        result = open_project(str(proj_dir))
+        assert "dir" in result or "directory" in result
+
+
+# ── list_projects ──────────────────────────────────────────────────────────
+
+class TestListProjects:
+    def test_returns_list(self, tmp_path):
+        from app.services.project_service import list_projects
+        json_path = tmp_path / "user_projects.json"
+        _write_projects_json(json_path, [])
+        result = list_projects(str(json_path))
+        assert isinstance(result, list)
+
+    def test_returns_projects(self, tmp_path):
+        from app.services.project_service import list_projects
+        json_path = tmp_path / "user_projects.json"
+        _write_projects_json(json_path, [
+            {"id": "1", "name": "Proj A", "directory": "/tmp/a"},
+            {"id": "2", "name": "Proj B", "directory": "/tmp/b"},
+        ])
+        result = list_projects(str(json_path))
+        assert len(result) == 2
+
+    def test_missing_file_returns_empty(self, tmp_path):
+        from app.services.project_service import list_projects
+        result = list_projects(str(tmp_path / "nonexistent.json"))
+        assert result == []
+
+    def test_empty_file_returns_empty(self, tmp_path):
+        from app.services.project_service import list_projects
+        json_path = tmp_path / "user_projects.json"
+        _write_projects_json(json_path, [])
+        result = list_projects(str(json_path))
+        assert result == []
+
+
+# ── get_incoming_jpg_dir ───────────────────────────────────────────────────
+
+class TestGetIncomingJpgDir:
+    def test_modern_dir_when_present(self, tmp_path):
+        """Returns 'incoming-jpg' dir when it exists."""
+        from app.services.project_service import get_incoming_jpg_dir
+        proj_dir = tmp_path / "proj"
+        modern = proj_dir / "incoming-jpg"
+        modern.mkdir(parents=True)
+        result = get_incoming_jpg_dir(str(proj_dir))
+        assert Path(result).name == "incoming-jpg"
+
+    def test_legacy_fallback_when_modern_missing(self, tmp_path):
+        """Falls back to '新拍JPG' when 'incoming-jpg' does not exist but legacy does."""
+        from app.services.project_service import get_incoming_jpg_dir
+        proj_dir = tmp_path / "proj"
+        legacy = proj_dir / "新拍JPG"
+        legacy.mkdir(parents=True)
+        result = get_incoming_jpg_dir(str(proj_dir))
+        assert Path(result).name == "新拍JPG"
+
+    def test_modern_preferred_over_legacy(self, tmp_path):
+        """When both exist, modern 'incoming-jpg' is preferred."""
+        from app.services.project_service import get_incoming_jpg_dir
+        proj_dir = tmp_path / "proj"
+        (proj_dir / "incoming-jpg").mkdir(parents=True)
+        (proj_dir / "新拍JPG").mkdir(parents=True)
+        result = get_incoming_jpg_dir(str(proj_dir))
+        assert Path(result).name == "incoming-jpg"
+
+    def test_returns_modern_path_when_neither_exists(self, tmp_path):
+        """When neither dir exists, return the modern path (not yet created)."""
+        from app.services.project_service import get_incoming_jpg_dir
+        proj_dir = tmp_path / "proj"
+        proj_dir.mkdir()
+        result = get_incoming_jpg_dir(str(proj_dir))
+        assert "incoming-jpg" in result or "incoming" in result.lower()
+
+
+# ── get_results_dir ────────────────────────────────────────────────────────
+
+class TestGetResultsDir:
+    def test_returns_results_subdir(self, tmp_path):
+        from app.services.project_service import get_results_dir
+        proj_dir = str(tmp_path / "proj")
+        result = get_results_dir(proj_dir)
+        assert Path(result).name == "results"
+
+    def test_is_inside_project_dir(self, tmp_path):
+        from app.services.project_service import get_results_dir
+        proj_dir = str(tmp_path / "proj")
+        result = get_results_dir(proj_dir)
+        assert result.startswith(str(tmp_path))
+
+
+# ── ensure_project_dirs ────────────────────────────────────────────────────
+
+class TestEnsureProjectDirs:
+    def test_creates_incoming_results_data(self, tmp_path):
+        from app.services.project_service import ensure_project_dirs
+        proj_dir = tmp_path / "proj"
+        ensure_project_dirs(str(proj_dir))
+        assert (proj_dir / "incoming-jpg").is_dir()
+        assert (proj_dir / "results").is_dir()
+        assert (proj_dir / "_data").is_dir()
+
+    def test_idempotent(self, tmp_path):
+        from app.services.project_service import ensure_project_dirs
+        proj_dir = tmp_path / "proj"
+        ensure_project_dirs(str(proj_dir))
+        ensure_project_dirs(str(proj_dir))  # should not raise
+        assert (proj_dir / "incoming-jpg").is_dir()
+
+    def test_returns_dict_with_paths(self, tmp_path):
+        from app.services.project_service import ensure_project_dirs
+        proj_dir = tmp_path / "proj"
+        result = ensure_project_dirs(str(proj_dir))
+        assert isinstance(result, dict)
+        assert "projectDir" in result or "project_dir" in result
