@@ -320,15 +320,15 @@ class _Step1Widget(QWidget):
         self.setStyleSheet("background: #08161b; color: #eef3ef;")
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(16, 12, 16, 12)
-        root.setSpacing(8)
+        root.setContentsMargins(20, 16, 20, 16)
+        root.setSpacing(12)
 
         # ── Step title ────────────────────────────────────────────────
         root.addWidget(_section_label("Step 1: 选择标本", large=True))
 
         # ── label-proj-row ────────────────────────────────────────────
         proj_row = QHBoxLayout()
-        proj_row.setSpacing(6)
+        proj_row.setSpacing(8)
         proj_row.addWidget(QLabel("项目: "))
         self._proj_combo = QComboBox()
         self._proj_combo.setMinimumWidth(220)
@@ -343,7 +343,7 @@ class _Step1Widget(QWidget):
 
         # ── label-spec-actions ────────────────────────────────────────
         actions_row = QHBoxLayout()
-        actions_row.setSpacing(4)
+        actions_row.setSpacing(6)
         self._btn_all = _outline_btn("全选")
         self._btn_rna = _outline_btn("仅 RNA")
         self._btn_sample_only = _outline_btn("仅样品")
@@ -371,7 +371,7 @@ class _Step1Widget(QWidget):
 
         # ── label-bucket-row (two bucket cards) ─────────────────────
         bucket_row = QHBoxLayout()
-        bucket_row.setSpacing(8)
+        bucket_row.setSpacing(12)
 
         self._sample_card = self._make_bucket_card("sample")
         self._tissue_card = self._make_bucket_card("tissue")
@@ -1104,8 +1104,8 @@ class _Step2Widget(QWidget):
         self.setStyleSheet("background: #08161b; color: #eef3ef;")
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(16, 12, 16, 12)
-        root.setSpacing(10)
+        root.setContentsMargins(20, 16, 20, 16)
+        root.setSpacing(14)
 
         # Title row with persisted hint
         title_row = QHBoxLayout()
@@ -1202,14 +1202,14 @@ class _Step3Widget(QWidget):
         self.setStyleSheet("background: #08161b; color: #eef3ef;")
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(16, 12, 16, 12)
-        root.setSpacing(8)
+        root.setContentsMargins(20, 16, 20, 16)
+        root.setSpacing(12)
 
         root.addWidget(_section_label("Step 3: 编辑预览", large=True))
 
         # Bucket toggle
         toggle_row = QHBoxLayout()
-        toggle_row.setSpacing(4)
+        toggle_row.setSpacing(6)
         self._sample_toggle = _outline_btn("🧪 样品瓶")
         self._tissue_toggle = _outline_btn("🧬 RNAlater 组织管")
         self._sample_toggle.setCheckable(True)
@@ -1321,14 +1321,14 @@ class _Step4Widget(QWidget):
         self.setStyleSheet("background: #08161b; color: #eef3ef;")
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(16, 12, 16, 12)
-        root.setSpacing(12)
+        root.setContentsMargins(20, 16, 20, 16)
+        root.setSpacing(16)
 
         root.addWidget(_section_label("Step 4: 纸张 / 尺寸 / 份数", large=True))
 
         # Per-bucket paper-type rows (sample + tissue)
         paper_row = QHBoxLayout()
-        paper_row.setSpacing(16)
+        paper_row.setSpacing(20)
 
         self._sample_paper_col = self._make_paper_col("sample")
         self._tissue_paper_col = self._make_paper_col("tissue")
@@ -1419,6 +1419,21 @@ class _Step4Widget(QWidget):
         else:
             self._tissue_radios = radios
 
+        # Grid preview: compact count display (label-render analog)
+        col.addSpacing(6)
+        grid_lbl = QLabel("—")
+        grid_lbl.setStyleSheet(
+            "color:#5f7d7a; font-size:10px; background:#0a1e25;"
+            " border:1px solid rgba(145,182,181,0.08); border-radius:3px; padding:4px 6px;"
+        )
+        grid_lbl.setWordWrap(True)
+        col.addWidget(grid_lbl)
+
+        if bucket == "sample":
+            self._sample_grid_preview = grid_lbl
+        else:
+            self._tissue_grid_preview = grid_lbl
+
         return box
 
     # ── Public API ────────────────────────────────────────────────────
@@ -1440,6 +1455,16 @@ class _Step4Widget(QWidget):
         self._output_info.setText(
             f"样品瓶 {sample_count} · RNAlater 组织管 {tissue_count}"
             f" · 每种 {copies} 份 → 总 {total} 张"
+        )
+
+        # Update grid preview labels
+        self._sample_grid_preview.setText(
+            f"🧪 样品瓶标签 × {sample_count} 张"
+            if sample_count > 0 else "— 无样品瓶标签"
+        )
+        self._tissue_grid_preview.setText(
+            f"🧬 RNAlater 组织管 × {tissue_count} 张"
+            if tissue_count > 0 else "— 无组织管标签（需 R 前缀标本）"
         )
 
         html = "<b>样品桶</b><br>" + _warnings_html(sample_warnings)
@@ -1523,6 +1548,9 @@ class LabelsView(BaseView):
         root.addWidget(nav_frame)
 
         # ── Stacked pages ──────────────────────────────────────────────
+        # Each step is wrapped in a QScrollArea so a short window never
+        # squashes the content. The step widgets remain directly accessible
+        # via self._step1…4 for all tests and internal callers.
         self._stack = QStackedWidget()
         self._stack.setStyleSheet("background: #08161b;")
 
@@ -1531,10 +1559,20 @@ class LabelsView(BaseView):
         self._step3 = _Step3Widget()
         self._step4 = _Step4Widget()
 
-        self._stack.addWidget(self._step1)
-        self._stack.addWidget(self._step2)
-        self._stack.addWidget(self._step3)
-        self._stack.addWidget(self._step4)
+        _scroll_style = (
+            "QScrollArea { background: #08161b; border: none; }"
+            "QScrollBar:vertical { background: #0c1e26; width: 8px; }"
+            "QScrollBar::handle:vertical { background: rgba(145,182,181,0.25); border-radius: 4px; }"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
+        )
+        for step_widget in (self._step1, self._step2, self._step3, self._step4):
+            sa = QScrollArea()
+            sa.setWidgetResizable(True)
+            sa.setFrameShape(QFrame.Shape.NoFrame)
+            sa.setStyleSheet(_scroll_style)
+            sa.setWidget(step_widget)
+            self._stack.addWidget(sa)
+
         root.addWidget(self._stack, stretch=1)
 
         # ── Bottom prev/next bar ───────────────────────────────────────
