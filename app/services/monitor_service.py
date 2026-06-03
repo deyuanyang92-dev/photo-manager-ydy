@@ -47,6 +47,7 @@ class FileEntry:
     basename: Optional[str] = None
     has_zip: Optional[bool] = None
     detail: str = ""
+    is_grouped: bool = False
 
 
 @dataclass
@@ -316,6 +317,26 @@ def scan_project(
     if attr is not None:
         for f in jpg_files:
             f.attributed_specimen_id = attribute_jpg(f, attr)
+
+    # ── is_grouped: mark JPGs that appear in grouping table ──────────────────
+    # Query all jpg_paths from rows where uid IS NOT NULL; parse JSON lists.
+    grouped_paths: set[str] = set()
+    try:
+        rows = db.execute(
+            "SELECT jpg_paths FROM grouping WHERE uid IS NOT NULL"
+        ).fetchall()
+        for row in rows:
+            raw = row[0] if isinstance(row, (tuple, list)) else row["jpg_paths"]
+            if raw:
+                import json as _json
+                for p in _json.loads(raw):
+                    if p:
+                        grouped_paths.add(str(Path(p).resolve()))
+    except Exception:
+        pass  # table may not exist; degrade gracefully
+
+    for f in jpg_files:
+        f.is_grouped = str(Path(f.path).resolve()) in grouped_paths
 
     # Sort by mtime desc (mirrors monitor-service.js:368-370)
     jpg_files.sort(key=lambda f: f.mtime, reverse=True)
