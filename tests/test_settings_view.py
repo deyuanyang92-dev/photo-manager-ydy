@@ -33,10 +33,20 @@ from app.views.settings_view import (
     _K_HELICON_RADIUS,
     _K_HELICON_SMOOTHING,
     _K_HELICON_QUALITY,
+    _K_HELICON_OUTPUT_FORMAT,
+    _K_HELICON_TIFF_COMPRESSION,
+    _K_HELICON_SAVE_DEPTH_MAP,
+    _K_HELICON_RUN_MODE,
+    _K_HELICON_CONCURRENCY,
     _K_INCOMING_SUBDIR,
     _K_RESULTS_SUBDIR,
     _K_RECENT_PROJECTS,
     _K_HELICON_PRESETS_JSON,
+    _K_WB_AUTO_WATCH,
+    _K_WB_AUTO_ACTIVATE_NEW,
+    _K_WB_GROUPING_AUTO_WATCH,
+    _K_WB_GROUPING_AUTO_WATCH_MODE,
+    _K_WB_FILE_VIEW_MODE,
 )
 
 
@@ -95,11 +105,11 @@ class TestInstantiation:
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 
 class TestTabs:
-    def test_has_five_tabs(self, view: SettingsView) -> None:
-        assert view._tabs.count() == 5
+    def test_has_six_tabs(self, view: SettingsView) -> None:
+        assert view._tabs.count() == 6
 
     def test_tab_titles(self, view: SettingsView) -> None:
-        expected = ["项目", "Helicon", "归档", "操作人", "关于"]
+        expected = ["项目", "Helicon", "归档", "工作台", "操作人", "关于"]
         actual = [view._tabs.tabText(i) for i in range(view._tabs.count())]
         assert actual == expected
 
@@ -387,3 +397,228 @@ class TestPresetCRUD:
         assert "第二" not in remaining
         assert "第一" in remaining
         assert "第三" in remaining
+
+
+# ── Helicon advanced output params ───────────────────────────────────────────
+
+
+class TestHeliconAdvancedParams:
+    """Round-trip tests for Helicon 高级输出选项 block (◐ → ✓).
+
+    Mirrors web renderHeliconConfigModal <details>输出选项 block:
+    outputFormat / tiffCompression / saveDepthMap / runMode / concurrency
+    """
+
+    def test_output_format_key(self) -> None:
+        assert _K_HELICON_OUTPUT_FORMAT == "helicon/output_format"
+
+    def test_tiff_compression_key(self) -> None:
+        assert _K_HELICON_TIFF_COMPRESSION == "helicon/tiff_compression"
+
+    def test_save_depth_map_key(self) -> None:
+        assert _K_HELICON_SAVE_DEPTH_MAP == "helicon/save_depth_map"
+
+    def test_run_mode_key(self) -> None:
+        assert _K_HELICON_RUN_MODE == "helicon/run_mode"
+
+    def test_concurrency_key(self) -> None:
+        assert _K_HELICON_CONCURRENCY == "helicon/concurrency"
+
+    def test_output_format_default_tif(self, view: SettingsView) -> None:
+        """Fresh settings → output format defaults to TIF (index 0)."""
+        assert view._output_format_combo.currentIndex() == 0
+
+    def test_output_format_round_trip_jpg(self, view: SettingsView) -> None:
+        view._output_format_combo.setCurrentIndex(1)  # JPG
+        view._save_helicon_advanced()
+        view.on_activate()
+        assert view._output_format_combo.currentIndex() == 1
+
+    def test_output_format_round_trip_tif(self, view: SettingsView) -> None:
+        view._output_format_combo.setCurrentIndex(0)  # TIF
+        view._save_helicon_advanced()
+        view.on_activate()
+        assert view._output_format_combo.currentIndex() == 0
+
+    def test_tiff_compression_default_u(self, view: SettingsView) -> None:
+        """Fresh settings → TIFF compression defaults to 'u' (index 0)."""
+        assert view._tiff_compression_combo.currentIndex() == 0
+
+    def test_tiff_compression_round_trip_lzw(self, view: SettingsView) -> None:
+        view._tiff_compression_combo.setCurrentIndex(1)  # LZW
+        view._save_helicon_advanced()
+        view.on_activate()
+        assert view._tiff_compression_combo.currentIndex() == 1
+
+    def test_tiff_compression_round_trip_zip(self, view: SettingsView) -> None:
+        view._tiff_compression_combo.setCurrentIndex(2)  # ZIP
+        view._save_helicon_advanced()
+        view.on_activate()
+        assert view._tiff_compression_combo.currentIndex() == 2
+
+    def test_run_mode_default_silent(self, view: SettingsView) -> None:
+        """Fresh settings → runMode defaults to 'silent' (index 0)."""
+        assert view._run_mode_combo.currentIndex() == 0
+
+    def test_run_mode_round_trip_progress(self, view: SettingsView) -> None:
+        view._run_mode_combo.setCurrentIndex(1)  # progress
+        view._save_helicon_advanced()
+        view.on_activate()
+        assert view._run_mode_combo.currentIndex() == 1
+
+    def test_run_mode_round_trip_gui(self, view: SettingsView) -> None:
+        view._run_mode_combo.setCurrentIndex(2)  # gui
+        view._save_helicon_advanced()
+        view.on_activate()
+        assert view._run_mode_combo.currentIndex() == 2
+
+    def test_concurrency_default_1(self, view: SettingsView) -> None:
+        assert view._concurrency_spin.value() == 1
+
+    def test_concurrency_round_trip(self, view: SettingsView) -> None:
+        view._concurrency_spin.setValue(4)
+        view._save_helicon_advanced()
+        view.on_activate()
+        assert view._concurrency_spin.value() == 4
+
+    def test_save_depth_map_default_false(self, view: SettingsView) -> None:
+        assert view._save_depth_map_chk.isChecked() is False
+
+    def test_save_depth_map_round_trip_true(self, view: SettingsView) -> None:
+        view._save_depth_map_chk.setChecked(True)
+        view._save_helicon_advanced()
+        view.on_activate()
+        assert view._save_depth_map_chk.isChecked() is True
+
+    def test_qsettings_stores_output_format_as_string(
+        self, view: SettingsView
+    ) -> None:
+        view._output_format_combo.setCurrentIndex(1)
+        view._save_helicon_advanced()
+        stored = view.ctx.settings._qs.value(_K_HELICON_OUTPUT_FORMAT, "tif")
+        assert stored == "jpg"
+
+    def test_qsettings_stores_run_mode_silent(self, view: SettingsView) -> None:
+        view._run_mode_combo.setCurrentIndex(0)
+        view._save_helicon_advanced()
+        stored = view.ctx.settings._qs.value(_K_HELICON_RUN_MODE, "silent")
+        assert stored == "silent"
+
+    def test_qsettings_stores_tiff_compression_lzw(
+        self, view: SettingsView
+    ) -> None:
+        view._tiff_compression_combo.setCurrentIndex(1)
+        view._save_helicon_advanced()
+        stored = view.ctx.settings._qs.value(_K_HELICON_TIFF_COMPRESSION, "u")
+        assert stored == "lzw"
+
+
+# ── Workbench auto-watch toggles ──────────────────────────────────────────────
+
+
+class TestWorkbenchToggles:
+    """Round-trip tests for 工作台 tab (mirrors saveV4Settings / loadV4Settings)."""
+
+    def test_wb_auto_watch_key(self) -> None:
+        assert _K_WB_AUTO_WATCH == "workbench/auto_watch"
+
+    def test_wb_auto_activate_key(self) -> None:
+        assert _K_WB_AUTO_ACTIVATE_NEW == "workbench/auto_activate_new"
+
+    def test_wb_grouping_auto_watch_key(self) -> None:
+        assert _K_WB_GROUPING_AUTO_WATCH == "workbench/grouping_auto_watch"
+
+    def test_wb_grouping_mode_key(self) -> None:
+        assert _K_WB_GROUPING_AUTO_WATCH_MODE == "workbench/grouping_auto_watch_mode"
+
+    def test_wb_file_view_mode_key(self) -> None:
+        assert _K_WB_FILE_VIEW_MODE == "workbench/file_view_mode"
+
+    def test_auto_watch_default_true(self, view: SettingsView) -> None:
+        """autoWatch web default = true."""
+        assert view._auto_watch_chk.isChecked() is True
+
+    def test_auto_activate_new_default_false(self, view: SettingsView) -> None:
+        """autoActivateOnNewSpecimen web default = false."""
+        assert view._auto_activate_new_chk.isChecked() is False
+
+    def test_grouping_auto_watch_default_false(self, view: SettingsView) -> None:
+        assert view._grouping_auto_watch_chk.isChecked() is False
+
+    def test_grouping_mode_default_compose_organize(
+        self, view: SettingsView
+    ) -> None:
+        """web default groupingAutoWatchMode = 'compose+organize' (index 2)."""
+        assert view._grouping_mode_combo.currentIndex() == 2
+
+    def test_file_view_mode_default_jpg_tif(self, view: SettingsView) -> None:
+        """web default fileViewMode = 'jpg-tif' (index 0)."""
+        assert view._file_view_mode_combo.currentIndex() == 0
+
+    def test_auto_watch_round_trip_false(self, view: SettingsView) -> None:
+        view._auto_watch_chk.setChecked(False)
+        view._save_workbench()
+        view.on_activate()
+        assert view._auto_watch_chk.isChecked() is False
+
+    def test_auto_activate_round_trip_true(self, view: SettingsView) -> None:
+        view._auto_activate_new_chk.setChecked(True)
+        view._save_workbench()
+        view.on_activate()
+        assert view._auto_activate_new_chk.isChecked() is True
+
+    def test_grouping_auto_watch_round_trip_true(
+        self, view: SettingsView
+    ) -> None:
+        view._grouping_auto_watch_chk.setChecked(True)
+        view._save_workbench()
+        view.on_activate()
+        assert view._grouping_auto_watch_chk.isChecked() is True
+
+    def test_grouping_mode_round_trip_compose(self, view: SettingsView) -> None:
+        view._grouping_mode_combo.setCurrentIndex(0)  # compose
+        view._save_workbench()
+        view.on_activate()
+        assert view._grouping_mode_combo.currentIndex() == 0
+
+    def test_grouping_mode_round_trip_organize(self, view: SettingsView) -> None:
+        view._grouping_mode_combo.setCurrentIndex(1)  # organize
+        view._save_workbench()
+        view.on_activate()
+        assert view._grouping_mode_combo.currentIndex() == 1
+
+    def test_file_view_mode_round_trip_with_zip(self, view: SettingsView) -> None:
+        view._file_view_mode_combo.setCurrentIndex(1)  # with-zip
+        view._save_workbench()
+        view.on_activate()
+        assert view._file_view_mode_combo.currentIndex() == 1
+
+    def test_file_view_mode_round_trip_all(self, view: SettingsView) -> None:
+        view._file_view_mode_combo.setCurrentIndex(2)  # all
+        view._save_workbench()
+        view.on_activate()
+        assert view._file_view_mode_combo.currentIndex() == 2
+
+    def test_qsettings_stores_auto_watch_false(self, view: SettingsView) -> None:
+        view._auto_watch_chk.setChecked(False)
+        view._save_workbench()
+        stored = view.ctx.settings._qs.value(_K_WB_AUTO_WATCH, "true")
+        assert stored == "false"
+
+    def test_qsettings_stores_grouping_mode_string(
+        self, view: SettingsView
+    ) -> None:
+        view._grouping_mode_combo.setCurrentIndex(0)  # compose
+        view._save_workbench()
+        stored = view.ctx.settings._qs.value(
+            _K_WB_GROUPING_AUTO_WATCH_MODE, "compose+organize"
+        )
+        assert stored == "compose"
+
+    def test_qsettings_stores_file_view_mode_all(
+        self, view: SettingsView
+    ) -> None:
+        view._file_view_mode_combo.setCurrentIndex(2)  # all
+        view._save_workbench()
+        stored = view.ctx.settings._qs.value(_K_WB_FILE_VIEW_MODE, "jpg-tif")
+        assert stored == "all"

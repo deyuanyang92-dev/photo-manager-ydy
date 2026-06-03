@@ -68,12 +68,26 @@ _K_HELICON_RADIUS = "helicon/radius"
 _K_HELICON_SMOOTHING = "helicon/smoothing"
 _K_HELICON_QUALITY = "helicon/quality"
 
+_K_HELICON_OUTPUT_FORMAT = "helicon/output_format"     # "tif" | "jpg"
+_K_HELICON_TIFF_COMPRESSION = "helicon/tiff_compression"  # "u" | "lzw" | "zip"
+_K_HELICON_SAVE_DEPTH_MAP = "helicon/save_depth_map"   # "true"/"false"
+_K_HELICON_RUN_MODE = "helicon/run_mode"               # "silent" | "progress" | "gui"
+_K_HELICON_CONCURRENCY = "helicon/concurrency"          # int 1–8
+
 _K_JXL_EFFORT = "archive/jxl_effort"
 _K_DELETE_JPG = "archive/delete_jpg"  # default False — hard rule
 
 _K_CURRENT_USER = "user/current_user"
 
 _K_HELICON_PRESETS_JSON = "helicon/presets_json"
+
+# ── Workbench auto-watch toggles (mirrors saveV4Settings / loadV4Settings) ───
+
+_K_WB_AUTO_WATCH = "workbench/auto_watch"
+_K_WB_AUTO_ACTIVATE_NEW = "workbench/auto_activate_new"
+_K_WB_GROUPING_AUTO_WATCH = "workbench/grouping_auto_watch"
+_K_WB_GROUPING_AUTO_WATCH_MODE = "workbench/grouping_auto_watch_mode"
+_K_WB_FILE_VIEW_MODE = "workbench/file_view_mode"
 
 _RECENT_MAX = 10
 
@@ -171,6 +185,7 @@ class SettingsView(BaseView):
         self._build_tab_project()
         self._build_tab_helicon()
         self._build_tab_archive()
+        self._build_tab_workbench()
         self._build_tab_user()
         self._build_tab_about()
 
@@ -461,6 +476,61 @@ class SettingsView(BaseView):
         preset_v.addLayout(preset_btn_row)
 
         tab.body.addWidget(preset_box)
+        tab.body.addSpacing(16)
+
+        # ── 高级输出选项 (mirrors web renderHeliconConfigModal <details>输出选项) ─────────
+        adv_box = QGroupBox("高级输出选项")
+        adv_box.setCheckable(True)
+        adv_box.setChecked(False)  # collapsed by default, like web <details>
+        adv_v = QVBoxLayout(adv_box)
+        adv_form = QFormLayout()
+        adv_form.setHorizontalSpacing(16)
+        adv_form.setVerticalSpacing(8)
+
+        # outputFormat: tif | jpg
+        self._output_format_combo = QComboBox()
+        self._output_format_combo.addItems(["TIF（推荐，无损）", "JPG"])
+        self._output_format_combo.setToolTip("输出格式：tif 或 jpg")
+        self._output_format_combo.currentIndexChanged.connect(self._save_helicon_advanced)
+        adv_form.addRow("输出格式", self._output_format_combo)
+
+        # tiffCompression: u | lzw | zip
+        self._tiff_compression_combo = QComboBox()
+        self._tiff_compression_combo.addItems(["无压缩 (u)", "LZW", "ZIP"])
+        self._tiff_compression_combo.setToolTip("-tc: TIFF 压缩方式，仅输出格式为 TIF 时有效")
+        self._tiff_compression_combo.currentIndexChanged.connect(self._save_helicon_advanced)
+        adv_form.addRow("TIFF 压缩", self._tiff_compression_combo)
+
+        # runMode: silent | progress | gui
+        self._run_mode_combo = QComboBox()
+        self._run_mode_combo.addItems([
+            "静默（silent，默认）",
+            "显示进度（progress）",
+            "Helicon 界面（gui）",
+        ])
+        self._run_mode_combo.setToolTip(
+            "运行方式：silent=无窗跑完；progress=本软件显示进度；gui=弹 Helicon 界面"
+        )
+        self._run_mode_combo.currentIndexChanged.connect(self._save_helicon_advanced)
+        adv_form.addRow("运行方式", self._run_mode_combo)
+
+        # concurrency: 1–8
+        self._concurrency_spin = QSpinBox()
+        self._concurrency_spin.setRange(1, 8)
+        self._concurrency_spin.setValue(1)
+        self._concurrency_spin.setToolTip("并发数，默认 1；Helicon 吃满 GPU，调大未必更快")
+        self._concurrency_spin.valueChanged.connect(self._save_helicon_advanced)
+        adv_form.addRow("并发数", self._concurrency_spin)
+
+        adv_v.addLayout(adv_form)
+
+        # saveDepthMap checkbox
+        self._save_depth_map_chk = QCheckBox("保存深度图（saveDepthMap）")
+        self._save_depth_map_chk.setChecked(False)
+        self._save_depth_map_chk.stateChanged.connect(self._save_helicon_advanced)
+        adv_v.addWidget(self._save_depth_map_chk)
+
+        tab.body.addWidget(adv_box)
         tab.body.addStretch()
 
         # Legacy status label alias (kept for _detect_helicon compat)
@@ -584,6 +654,76 @@ class SettingsView(BaseView):
 
         self._tabs.addTab(tab, "项目")
 
+    def _build_tab_workbench(self) -> None:
+        """工作台 tab — auto-watch toggles (mirrors saveV4Settings / loadV4Settings).
+
+        Persists:
+          autoWatch                  → workbench/auto_watch
+          autoActivateOnNewSpecimen  → workbench/auto_activate_new
+          groupingAutoWatch          → workbench/grouping_auto_watch
+          groupingAutoWatchMode      → workbench/grouping_auto_watch_mode
+          fileViewMode               → workbench/file_view_mode
+        """
+        tab = _ScrollTab()
+
+        watch_box = QGroupBox("自动监控")
+        watch_v = QVBoxLayout(watch_box)
+        watch_v.setSpacing(10)
+
+        self._auto_watch_chk = QCheckBox("新 TIFF 入库后自动激活（autoWatch）")
+        self._auto_watch_chk.setChecked(True)  # web default = true
+        self._auto_watch_chk.stateChanged.connect(self._save_workbench)
+        watch_v.addWidget(self._auto_watch_chk)
+
+        self._auto_activate_new_chk = QCheckBox("新建编号后自动激活（autoActivateOnNewSpecimen）")
+        self._auto_activate_new_chk.setChecked(False)  # web default = false
+        self._auto_activate_new_chk.stateChanged.connect(self._save_workbench)
+        watch_v.addWidget(self._auto_activate_new_chk)
+
+        self._grouping_auto_watch_chk = QCheckBox("JPG 入库后自动分组处理（groupingAutoWatch）")
+        self._grouping_auto_watch_chk.setChecked(False)  # web default = false
+        self._grouping_auto_watch_chk.stateChanged.connect(self._save_workbench)
+        watch_v.addWidget(self._grouping_auto_watch_chk)
+
+        tab.body.addWidget(watch_box)
+        tab.body.addSpacing(12)
+
+        mode_box = QGroupBox("分组自动处理模式")
+        mode_v = QVBoxLayout(mode_box)
+        mode_form = QFormLayout()
+        mode_form.setHorizontalSpacing(16)
+        mode_form.setVerticalSpacing(8)
+
+        # groupingAutoWatchMode: compose | organize | compose+organize
+        self._grouping_mode_combo = QComboBox()
+        self._grouping_mode_combo.addItems([
+            "合成 (compose)",
+            "整理 (organize)",
+            "合成+整理 (compose+organize)",
+        ])
+        self._grouping_mode_combo.setCurrentIndex(2)  # default: compose+organize
+        self._grouping_mode_combo.setToolTip("触发 groupingAutoWatch 时的处理模式")
+        self._grouping_mode_combo.currentIndexChanged.connect(self._save_workbench)
+        mode_form.addRow("自动处理模式", self._grouping_mode_combo)
+
+        # fileViewMode: jpg-tif | with-zip | all
+        self._file_view_mode_combo = QComboBox()
+        self._file_view_mode_combo.addItems([
+            "jpg-tif（JPG + TIFF，默认）",
+            "with-zip（含 ZIP）",
+            "all（全部文件）",
+        ])
+        self._file_view_mode_combo.setCurrentIndex(0)
+        self._file_view_mode_combo.setToolTip("文件列表视图模式")
+        self._file_view_mode_combo.currentIndexChanged.connect(self._save_workbench)
+        mode_form.addRow("文件视图模式", self._file_view_mode_combo)
+
+        mode_v.addLayout(mode_form)
+        tab.body.addWidget(mode_box)
+        tab.body.addStretch()
+
+        self._tabs.addTab(tab, "工作台")
+
     def _build_tab_user(self) -> None:
         """操作人 tab — currentUser name used as modifiedBy in taxonomy edits."""
         tab = _ScrollTab()
@@ -677,6 +817,22 @@ class SettingsView(BaseView):
         # Refresh detected / effective display
         self._refresh_helicon_display()
 
+        # Helicon advanced params
+        fmt = qs.value(_K_HELICON_OUTPUT_FORMAT, "tif")
+        fmt_idx = 1 if fmt == "jpg" else 0
+        self._output_format_combo.setCurrentIndex(fmt_idx)
+        tiff_map = {"u": 0, "lzw": 1, "zip": 2}
+        tiff_val = str(qs.value(_K_HELICON_TIFF_COMPRESSION, "u"))
+        self._tiff_compression_combo.setCurrentIndex(tiff_map.get(tiff_val, 0))
+        run_map = {"silent": 0, "progress": 1, "gui": 2}
+        run_val = str(qs.value(_K_HELICON_RUN_MODE, "silent"))
+        self._run_mode_combo.setCurrentIndex(run_map.get(run_val, 0))
+        self._concurrency_spin.setValue(
+            max(1, min(8, int(qs.value(_K_HELICON_CONCURRENCY, 1))))
+        )
+        raw_depth = qs.value(_K_HELICON_SAVE_DEPTH_MAP, "false")
+        self._save_depth_map_chk.setChecked(str(raw_depth).lower() == "true")
+
         # Archive tab
         effort_idx = int(qs.value(_K_JXL_EFFORT, 0))
         self._jxl_effort_combo.setCurrentIndex(
@@ -696,6 +852,23 @@ class SettingsView(BaseView):
 
         # User tab
         self._current_user_edit.setText(qs.value(_K_CURRENT_USER, ""))
+
+        # Workbench tab
+        self._auto_watch_chk.setChecked(
+            str(qs.value(_K_WB_AUTO_WATCH, "true")).lower() != "false"
+        )
+        self._auto_activate_new_chk.setChecked(
+            str(qs.value(_K_WB_AUTO_ACTIVATE_NEW, "false")).lower() == "true"
+        )
+        self._grouping_auto_watch_chk.setChecked(
+            str(qs.value(_K_WB_GROUPING_AUTO_WATCH, "false")).lower() == "true"
+        )
+        mode_map = {"compose": 0, "organize": 1, "compose+organize": 2}
+        mode_val = str(qs.value(_K_WB_GROUPING_AUTO_WATCH_MODE, "compose+organize"))
+        self._grouping_mode_combo.setCurrentIndex(mode_map.get(mode_val, 2))
+        fv_map = {"jpg-tif": 0, "with-zip": 1, "all": 2}
+        fv_val = str(qs.value(_K_WB_FILE_VIEW_MODE, "jpg-tif"))
+        self._file_view_mode_combo.setCurrentIndex(fv_map.get(fv_val, 0))
 
         # Preset list widget
         self._refresh_preset_list_widget()
@@ -751,6 +924,58 @@ class SettingsView(BaseView):
         qs.setValue(_K_JXL_EFFORT, self._jxl_effort_combo.currentIndex())
         # Store as explicit "true"/"false" string for unambiguous retrieval
         qs.setValue(_K_DELETE_JPG, "true" if self._delete_jpg_chk.isChecked() else "false")
+        self.ctx.settings.sync()
+
+    def _save_helicon_advanced(self) -> None:
+        """Persist Helicon advanced output params (mirrors web 高级参数 block)."""
+        qs = self.ctx.settings._qs
+        fmt_idx = self._output_format_combo.currentIndex()
+        qs.setValue(_K_HELICON_OUTPUT_FORMAT, "jpg" if fmt_idx == 1 else "tif")
+        tiff_vals = ["u", "lzw", "zip"]
+        qs.setValue(
+            _K_HELICON_TIFF_COMPRESSION,
+            tiff_vals[self._tiff_compression_combo.currentIndex()]
+            if self._tiff_compression_combo.currentIndex() < len(tiff_vals)
+            else "u",
+        )
+        run_vals = ["silent", "progress", "gui"]
+        qs.setValue(
+            _K_HELICON_RUN_MODE,
+            run_vals[self._run_mode_combo.currentIndex()]
+            if self._run_mode_combo.currentIndex() < len(run_vals)
+            else "silent",
+        )
+        qs.setValue(_K_HELICON_CONCURRENCY, self._concurrency_spin.value())
+        qs.setValue(
+            _K_HELICON_SAVE_DEPTH_MAP,
+            "true" if self._save_depth_map_chk.isChecked() else "false",
+        )
+        self.ctx.settings.sync()
+
+    def _save_workbench(self) -> None:
+        """Persist workbench auto-watch toggles (mirrors saveV4Settings)."""
+        qs = self.ctx.settings._qs
+        qs.setValue(_K_WB_AUTO_WATCH, "true" if self._auto_watch_chk.isChecked() else "false")
+        qs.setValue(
+            _K_WB_AUTO_ACTIVATE_NEW,
+            "true" if self._auto_activate_new_chk.isChecked() else "false",
+        )
+        qs.setValue(
+            _K_WB_GROUPING_AUTO_WATCH,
+            "true" if self._grouping_auto_watch_chk.isChecked() else "false",
+        )
+        mode_vals = ["compose", "organize", "compose+organize"]
+        idx = self._grouping_mode_combo.currentIndex()
+        qs.setValue(
+            _K_WB_GROUPING_AUTO_WATCH_MODE,
+            mode_vals[idx] if 0 <= idx < len(mode_vals) else "compose+organize",
+        )
+        fv_vals = ["jpg-tif", "with-zip", "all"]
+        fv_idx = self._file_view_mode_combo.currentIndex()
+        qs.setValue(
+            _K_WB_FILE_VIEW_MODE,
+            fv_vals[fv_idx] if 0 <= fv_idx < len(fv_vals) else "jpg-tif",
+        )
         self.ctx.settings.sync()
 
     def _save_user(self) -> None:
