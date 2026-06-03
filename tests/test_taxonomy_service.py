@@ -516,6 +516,341 @@ class TestHistory:
         assert set(before.keys()) == expected_keys
 
 
+# ── find_seed_by_level ────────────────────────────────────────────────────────
+
+class TestFindSeedByLevel:
+    def test_find_existing_class(self, svc):
+        e = svc.find_seed_by_level("class", "Polychaeta")
+        assert e is not None
+        assert e["class"] == "Polychaeta"
+
+    def test_find_case_insensitive(self, svc):
+        e = svc.find_seed_by_level("family", "polynoidae")
+        assert e is not None
+        assert e["family"] == "Polynoidae"
+
+    def test_find_missing_returns_none(self, svc):
+        assert svc.find_seed_by_level("class", "NoSuchClass") is None
+
+    def test_find_empty_value_returns_none(self, svc):
+        assert svc.find_seed_by_level("class", "") is None
+
+    def test_find_species_level(self, svc):
+        e = svc.find_seed_by_level("species", "Portunus trituberculatus")
+        assert e is not None
+        assert e["order"] == "Decapoda"
+
+
+# ── validate_taxonomy_chain ───────────────────────────────────────────────────
+
+class TestValidateTaxonomyChain:
+    def test_consistent_chain_ok(self, svc):
+        sp = {
+            "taxonGroup": "Polychaeta",
+            "order": "Phyllodocida",
+            "family": "Polynoidae",
+            "genus": "Halosydna",
+            "scientificName": "Halosydna brevisetosa",
+        }
+        result = svc.validate_taxonomy_chain(sp)
+        assert result["ok"] is True
+        assert result["mismatches"] == []
+
+    def test_mismatch_order_detected(self, svc):
+        sp = {
+            "taxonGroup": "Polychaeta",
+            "order": "Decapoda",        # wrong order for this species
+            "family": "Polynoidae",
+            "scientificName": "Halosydna brevisetosa",
+        }
+        result = svc.validate_taxonomy_chain(sp)
+        assert result["ok"] is False
+        sp_keys = [m["spKey"] for m in result["mismatches"]]
+        assert "order" in sp_keys
+
+    def test_mismatch_class_detected(self, svc):
+        sp = {
+            "taxonGroup": "Malacostraca",   # wrong class for Polychaeta species
+            "order": "Phyllodocida",
+            "family": "Polynoidae",
+            "scientificName": "Halosydna brevisetosa",
+        }
+        result = svc.validate_taxonomy_chain(sp)
+        assert result["ok"] is False
+        sp_keys = [m["spKey"] for m in result["mismatches"]]
+        assert "taxonGroup" in sp_keys
+
+    def test_empty_specimen_is_ok(self, svc):
+        result = svc.validate_taxonomy_chain({})
+        assert result["ok"] is True
+        assert result["mismatches"] == []
+
+    def test_unknown_species_no_mismatch(self, svc):
+        """Unknown species → no seed entry → no mismatch generated."""
+        sp = {
+            "taxonGroup": "Polychaeta",
+            "order": "Phyllodocida",
+            "family": "Polynoidae",
+            "scientificName": "Unknown species xyz",
+        }
+        result = svc.validate_taxonomy_chain(sp)
+        # speciesEntry = None → no mismatches from species anchor
+        assert result["speciesEntry"] is None
+
+    def test_returns_seed_entries(self, svc):
+        sp = {
+            "scientificName": "Halosydna brevisetosa",
+        }
+        result = svc.validate_taxonomy_chain(sp)
+        assert result["speciesEntry"] is not None
+        assert result["speciesEntry"]["family"] == "Polynoidae"
+
+
+# ── apply_taxonomy_authority ──────────────────────────────────────────────────
+
+class TestApplyTaxonomyAuthority:
+    def test_apply_from_species_entry(self, svc):
+        sp: dict[str, Any] = {}
+        validation = svc.validate_taxonomy_chain(
+            {"scientificName": "Halosydna brevisetosa"}
+        )
+        svc.apply_taxonomy_authority(sp, validation)
+        assert sp["taxonGroup"] == "Polychaeta"
+        assert sp["order"] == "Phyllodocida"
+        assert sp["family"] == "Polynoidae"
+
+    def test_apply_fills_cn_fields(self, svc):
+        sp: dict[str, Any] = {}
+        validation = svc.validate_taxonomy_chain(
+            {"scientificName": "Halosydna brevisetosa"}
+        )
+        svc.apply_taxonomy_authority(sp, validation)
+        assert sp.get("taxonGroupCn") == "多毛纲"
+        assert sp.get("orderCn") == "叶须虫目"
+
+    def test_apply_sets_taxonomy_confirmed_false(self, svc):
+        sp: dict[str, Any] = {"taxonomyConfirmed": True}
+        validation = svc.validate_taxonomy_chain(
+            {"scientificName": "Halosydna brevisetosa"}
+        )
+        svc.apply_taxonomy_authority(sp, validation)
+        assert sp["taxonomyConfirmed"] is False
+
+    def test_apply_no_entry_does_nothing(self, svc):
+        sp: dict[str, Any] = {"taxonGroup": "Polychaeta"}
+        validation = {"speciesEntry": None, "genusEntry": None,
+                      "familyEntry": None, "orderEntry": None}
+        svc.apply_taxonomy_authority(sp, validation)
+        assert sp["taxonGroup"] == "Polychaeta"  # unchanged
+
+
+# ── taxon_entry_cn ────────────────────────────────────────────────────────────
+
+class TestTaxonEntryCn:
+    def test_returns_cn_from_entry_directly(self, svc):
+        entry = {"class": "Polychaeta", "classCn": "多毛纲"}
+        result = svc.taxon_entry_cn(entry, "class", "classCn")
+        assert result == "多毛纲"
+
+    def test_falls_back_to_seed_lookup(self, svc):
+        entry = {"class": "Polychaeta"}  # no classCn in entry
+        result = svc.taxon_entry_cn(entry, "class", "classCn")
+        assert result == "多毛纲"   # found from seed
+
+    def test_returns_empty_when_not_found(self, svc):
+        entry = {"class": "UnknownClass"}
+        result = svc.taxon_entry_cn(entry, "class", "classCn")
+        assert result == ""
+
+
+# ── find_user_entry_for_current ───────────────────────────────────────────────
+
+class TestFindUserEntryForCurrent:
+    def test_finds_matching_entry(self, svc):
+        svc.learn({
+            "class": "Polychaeta", "order": "Phyllodocida",
+            "family": "Polynoidae", "species": "Halosydna brevisetosa",
+        })
+        sp = {
+            "taxonGroup": "Polychaeta",
+            "order": "Phyllodocida",
+            "family": "Polynoidae",
+            "scientificName": "Halosydna brevisetosa",
+        }
+        result = svc.find_user_entry_for_current(sp)
+        assert result is not None
+        assert result["class"] == "Polychaeta"
+
+    def test_case_insensitive_match(self, svc):
+        svc.learn({
+            "class": "Polychaeta", "order": "Phyllodocida",
+            "family": "Polynoidae", "species": "Halosydna brevisetosa",
+        })
+        sp = {
+            "taxonGroup": "POLYCHAETA",
+            "order": "phyllodocida",
+            "family": "Polynoidae",
+            "scientificName": "Halosydna brevisetosa",
+        }
+        result = svc.find_user_entry_for_current(sp)
+        assert result is not None
+
+    def test_returns_none_when_no_match(self, svc):
+        sp = {
+            "taxonGroup": "Polychaeta", "order": "Phyllodocida",
+            "family": "Polynoidae", "scientificName": "Unknown sp",
+        }
+        result = svc.find_user_entry_for_current(sp)
+        assert result is None
+
+    def test_returns_none_when_user_empty(self, svc):
+        sp = {
+            "taxonGroup": "Polychaeta", "order": "Phyllodocida",
+            "family": "Polynoidae", "scientificName": "Halosydna brevisetosa",
+        }
+        result = svc.find_user_entry_for_current(sp)
+        assert result is None
+
+
+# ── apply_draft_to_specimen ───────────────────────────────────────────────────
+
+class TestApplyDraftToSpecimen:
+    def test_copies_all_8_fields(self):
+        from app.services.taxonomy_service import TaxonomyService
+        sp: dict[str, Any] = {}
+        draft = {
+            "class":     "Polychaeta",
+            "classCn":   "多毛纲",
+            "order":     "Phyllodocida",
+            "orderCn":   "叶须虫目",
+            "family":    "Polynoidae",
+            "familyCn":  "多鳞虫科",
+            "species":   "Halosydna brevisetosa",
+            "speciesCn": "短毛海鳞虫",
+        }
+        TaxonomyService.apply_draft_to_specimen(sp, draft)
+        assert sp["taxonGroup"]       == "Polychaeta"
+        assert sp["taxonGroupCn"]     == "多毛纲"
+        assert sp["order"]            == "Phyllodocida"
+        assert sp["orderCn"]          == "叶须虫目"
+        assert sp["family"]           == "Polynoidae"
+        assert sp["familyCn"]         == "多鳞虫科"
+        assert sp["scientificName"]   == "Halosydna brevisetosa"
+        assert sp["scientificNameCn"] == "短毛海鳞虫"
+
+    def test_sets_taxonomy_confirmed_false(self):
+        from app.services.taxonomy_service import TaxonomyService
+        sp: dict[str, Any] = {"taxonomyConfirmed": True}
+        TaxonomyService.apply_draft_to_specimen(sp, {
+            "class": "A", "order": "B", "family": "C", "species": "D sp",
+        })
+        assert sp["taxonomyConfirmed"] is False
+
+    def test_strips_whitespace(self):
+        from app.services.taxonomy_service import TaxonomyService
+        sp: dict[str, Any] = {}
+        TaxonomyService.apply_draft_to_specimen(sp, {
+            "class": "  Polychaeta  ", "order": " Phyllodocida ",
+            "family": "Polynoidae", "species": "X sp",
+        })
+        assert sp["taxonGroup"] == "Polychaeta"
+        assert sp["order"] == "Phyllodocida"
+
+    def test_missing_draft_fields_become_empty(self):
+        from app.services.taxonomy_service import TaxonomyService
+        sp: dict[str, Any] = {}
+        TaxonomyService.apply_draft_to_specimen(sp, {
+            "class": "Polychaeta", "order": "Phyllodocida",
+            "family": "Polynoidae", "species": "X sp",
+            # no CN fields
+        })
+        assert sp["taxonGroupCn"] == ""
+        assert sp["orderCn"] == ""
+
+
+# ── Widget blur exact-match with ancestor fill ────────────────────────────────
+
+class TestEditingFinishedExactMatch:
+    """Tests for the blur / editing-finished exact-match ancestor fill.
+
+    Mirrors commitTypedTaxon in app.js: exact match → fill ancestors.
+    """
+
+    @pytest.fixture
+    def app_instance(self):
+        from PyQt6.QtWidgets import QApplication
+        import sys
+        app = QApplication.instance()
+        if app is None:
+            app = QApplication(sys.argv)
+        yield app
+
+    def test_blur_exact_latin_fills_ancestors(self, svc, app_instance):
+        """Typing exact family name on blur fills ancestor inputs (order, class)."""
+        from app.widgets.taxonomy_input import TaxonomyInputPanel
+        panel = TaxonomyInputPanel(svc)
+        committed: list[dict] = []
+        panel.value_committed.connect(committed.append)
+
+        # Simulate: user typed "Polynoidae" into the family field then blurred
+        panel._inputs["family"].setText("Polynoidae")
+        panel._active_sp_key = "family"
+        panel._on_editing_finished("family")
+
+        # Should have committed at least family + its ancestors
+        assert len(committed) >= 1
+        merged = {}
+        for d in committed:
+            merged.update(d)
+        assert merged.get("family") == "Polynoidae"
+        # Ancestors filled from full record
+        assert merged.get("order") == "Phyllodocida"
+        assert merged.get("taxonGroup") == "Polychaeta"
+
+    def test_blur_exact_cn_fills_ancestors(self, svc, app_instance):
+        """Typing the Chinese name on blur should resolve to the Latin and fill ancestors."""
+        from app.widgets.taxonomy_input import TaxonomyInputPanel
+        panel = TaxonomyInputPanel(svc)
+        committed: list[dict] = []
+        panel.value_committed.connect(committed.append)
+
+        panel._inputs["family"].setText("多鳞虫科")   # Chinese for Polynoidae
+        panel._active_sp_key = "family"
+        panel._on_editing_finished("family")
+
+        merged = {}
+        for d in committed:
+            merged.update(d)
+        # Latin value resolved
+        assert merged.get("family") == "Polynoidae"
+
+    def test_blur_no_match_emits_nothing(self, svc, app_instance):
+        """Typing a string that doesn't match any candidate emits no value_committed."""
+        from app.widgets.taxonomy_input import TaxonomyInputPanel
+        panel = TaxonomyInputPanel(svc)
+        committed: list[dict] = []
+        panel.value_committed.connect(committed.append)
+
+        panel._inputs["family"].setText("NoSuchFamilyXYZ123")
+        panel._active_sp_key = "family"
+        panel._on_editing_finished("family")
+
+        assert committed == []
+
+    def test_blur_does_not_overwrite_child_inputs(self, svc, app_instance):
+        """Selecting a family-level entry must NOT touch scientificName input."""
+        from app.widgets.taxonomy_input import TaxonomyInputPanel
+        panel = TaxonomyInputPanel(svc)
+        # Pre-set species
+        panel.set_values({"scientificName": "My custom species"})
+        panel._active_sp_key = "family"
+        panel._inputs["family"].setText("Polynoidae")
+        panel._on_editing_finished("family")
+
+        # scientificName must still be what the user typed, not overwritten
+        assert panel._inputs["scientificName"].text() == "My custom species"
+
+
 # ── Widget smoke tests (offscreen) ────────────────────────────────────────────
 
 class TestTaxonomyInputPanelSmoke:

@@ -514,3 +514,253 @@ class TaxonomyService:
         """Number of user records loaded."""
         self._ensure_loaded()
         return len(self._user)
+
+    # ── Chain validation helpers (mirrors app.js findSeedByLevel / validateTaxonomyChain) ─
+
+    def find_seed_by_level(self, level: str, value: str) -> Optional[dict[str, Any]]:
+        """Return the first seed entry whose *level* field matches *value* (case-insensitive).
+
+        Parameters
+        ----------
+        level:
+            Seed record key, e.g. ``"class"``, ``"order"``, ``"family"``,
+            ``"genus"``, ``"species"``.
+        value:
+            Value to match (Latin name only).
+
+        Returns
+        -------
+        dict or None
+            First matching seed entry, or None.
+
+        Mirrors ``findSeedByLevel(level, value)`` in app.js.
+        """
+        self._ensure_loaded()
+        if not value:
+            return None
+        v = value.strip().lower()
+        for e in self._seed:
+            if (e.get(level) or "").lower() == v:
+                return e
+        return None
+
+    def validate_taxonomy_chain(
+        self,
+        sp_fields: dict[str, str],
+    ) -> dict[str, Any]:
+        """Check 4-level taxonomy self-consistency against the seed.
+
+        Walks species → genus → family → order (most-specific first), finds the
+        best matching seed entry at each level, and compares the implied upper
+        levels against the current specimen values.
+
+        Parameters
+        ----------
+        sp_fields:
+            Dict with any of the specimen keys:
+            ``taxonGroup``, ``order``, ``family``, ``genus``,
+            ``scientificName``.
+
+        Returns
+        -------
+        dict
+            ``{"ok": bool, "mismatches": [...], "speciesEntry": dict|None,
+               "genusEntry": dict|None, "familyEntry": dict|None,
+               "orderEntry": dict|None}``
+
+            Each mismatch entry:
+            ``{"spKey", "label", "current", "expected", "expectedCn",
+               "triggeredBy", "triggeredByLevel"}``
+
+        Mirrors ``validateTaxonomyChain(sp)`` in app.js.
+        """
+        out: dict[str, Any] = {"ok": True, "mismatches": []}
+
+        def _check(seed_entry: Optional[dict], checks: list[dict[str, str]]) -> None:
+            if seed_entry is None:
+                return
+            for lv in checks:
+                expected = (seed_entry.get(lv["seedKey"]) or "").strip()
+                current  = (sp_fields.get(lv["spKey"]) or "").strip()
+                if not current or not expected:
+                    continue
+                if current.lower() == expected.lower():
+                    continue
+                # Skip if sp_key already registered (more-specific wins)
+                if any(m["spKey"] == lv["spKey"] for m in out["mismatches"]):
+                    continue
+                triggered = (
+                    seed_entry.get("species")
+                    or seed_entry.get("family")
+                    or seed_entry.get("order")
+                    or ""
+                )
+                triggered_level = (
+                    "种" if seed_entry.get("species") else
+                    "科" if seed_entry.get("family") else
+                    "目"
+                )
+                out["mismatches"].append({
+                    "spKey":          lv["spKey"],
+                    "label":          lv["label"],
+                    "current":        current,
+                    "expected":       expected,
+                    "expectedCn":     seed_entry.get(lv.get("seedCn", ""), ""),
+                    "triggeredBy":    triggered,
+                    "triggeredByLevel": triggered_level,
+                })
+
+        species_entry = self.find_seed_by_level("species", sp_fields.get("scientificName", ""))
+        _check(species_entry, [
+            {"spKey": "genus",       "seedKey": "genus",  "seedCn": "genusCn",  "label": "属"},
+            {"spKey": "family",      "seedKey": "family", "seedCn": "familyCn", "label": "科"},
+            {"spKey": "order",       "seedKey": "order",  "seedCn": "orderCn",  "label": "目"},
+            {"spKey": "taxonGroup",  "seedKey": "class",  "seedCn": "classCn",  "label": "类群"},
+        ])
+        genus_entry = self.find_seed_by_level("genus", sp_fields.get("genus", ""))
+        _check(genus_entry, [
+            {"spKey": "family",     "seedKey": "family", "seedCn": "familyCn", "label": "科"},
+            {"spKey": "order",      "seedKey": "order",  "seedCn": "orderCn",  "label": "目"},
+            {"spKey": "taxonGroup", "seedKey": "class",  "seedCn": "classCn",  "label": "类群"},
+        ])
+        family_entry = self.find_seed_by_level("family", sp_fields.get("family", ""))
+        _check(family_entry, [
+            {"spKey": "order",      "seedKey": "order",  "seedCn": "orderCn",  "label": "目"},
+            {"spKey": "taxonGroup", "seedKey": "class",  "seedCn": "classCn",  "label": "类群"},
+        ])
+        order_entry = self.find_seed_by_level("order", sp_fields.get("order", ""))
+        _check(order_entry, [
+            {"spKey": "taxonGroup", "seedKey": "class",  "seedCn": "classCn",  "label": "类群"},
+        ])
+
+        out["ok"] = len(out["mismatches"]) == 0
+        out["speciesEntry"] = species_entry
+        out["genusEntry"]   = genus_entry
+        out["familyEntry"]  = family_entry
+        out["orderEntry"]   = order_entry
+        return out
+
+    def apply_taxonomy_authority(
+        self,
+        sp_fields: dict[str, str],
+        validation: dict[str, Any],
+    ) -> None:
+        """Overwrite *sp_fields* upper-level fields from the best seed match.
+
+        Uses the most-specific entry found by :py:meth:`validate_taxonomy_chain`
+        (species > genus > family > order) and applies its values to *sp_fields*
+        in-place.
+
+        Parameters
+        ----------
+        sp_fields:
+            Mutable specimen dict (modified in place).
+        validation:
+            Return value of :py:meth:`validate_taxonomy_chain`.
+
+        Mirrors ``applyTaxonomyAuthority(sp, validation)`` in app.js.
+        """
+        e = (
+            validation.get("speciesEntry")
+            or validation.get("genusEntry")
+            or validation.get("familyEntry")
+            or validation.get("orderEntry")
+        )
+        if e is None:
+            return
+        if e.get("class"):
+            sp_fields["taxonGroup"]   = e["class"]
+            sp_fields["taxonGroupCn"] = e.get("classCn", "") or ""
+        if e.get("order"):
+            sp_fields["order"]   = e["order"]
+            sp_fields["orderCn"] = e.get("orderCn", "") or ""
+        if e.get("family"):
+            sp_fields["family"]   = e["family"]
+            sp_fields["familyCn"] = e.get("familyCn", "") or ""
+        if e.get("genus"):
+            sp_fields["genus"]   = e["genus"]
+            sp_fields["genusCn"] = e.get("genusCn", "") or ""
+        if validation.get("speciesEntry"):
+            sp_fields["scientificName"]   = e.get("species") or sp_fields.get("scientificName", "")
+            sp_fields["scientificNameCn"] = e.get("speciesCn", "") or ""
+        sp_fields["taxonomyConfirmed"] = False
+
+    def taxon_entry_cn(self, entry: dict[str, Any], key: str, cn_key: str) -> str:
+        """Return the Chinese name for *key* from *entry*, or look it up from seed.
+
+        If ``entry[cn_key]`` is non-empty, returns it directly.  Otherwise
+        searches the seed for the first entry whose *key* field matches
+        ``entry[key]`` and returns its *cn_key* value.
+
+        Mirrors ``taxonEntryCn(entry, key, cnKey)`` in app.js.
+        """
+        if entry.get(cn_key):
+            return str(entry[cn_key])
+        authority = self.find_seed_by_level(key, entry.get(key, ""))
+        return (authority.get(cn_key) or "") if authority else ""
+
+    def find_user_entry_for_current(
+        self,
+        sp_fields: dict[str, str],
+    ) -> Optional[dict[str, Any]]:
+        """Find the user record whose 4-tuple matches the specimen's current values.
+
+        Case-insensitive comparison on class/order/family/species.
+
+        Parameters
+        ----------
+        sp_fields:
+            Dict with specimen fields: ``taxonGroup``, ``order``, ``family``,
+            ``scientificName``.
+
+        Returns
+        -------
+        dict or None
+            Matching user record, or None.
+
+        Mirrors ``findUserEntryForCurrent(sp)`` in app.js.
+        """
+        self._ensure_loaded()
+        cls = (sp_fields.get("taxonGroup") or "").lower()
+        order = (sp_fields.get("order") or "").lower()
+        family = (sp_fields.get("family") or "").lower()
+        species = (sp_fields.get("scientificName") or "").lower()
+        for e in self._user:
+            if (
+                (e.get("class") or "").lower() == cls
+                and (e.get("order") or "").lower() == order
+                and (e.get("family") or "").lower() == family
+                and (e.get("species") or "").lower() == species
+            ):
+                return e
+        return None
+
+    @staticmethod
+    def apply_draft_to_specimen(
+        sp_fields: dict[str, str],
+        draft: dict[str, str],
+    ) -> None:
+        """Copy 8 draft fields back to the specimen dict (in-place).
+
+        The draft is the data from the add/edit taxonomy dialog; this method
+        writes it back to the specimen's display fields.
+
+        Parameters
+        ----------
+        sp_fields:
+            Mutable specimen dict (modified in place).
+        draft:
+            Dict with keys: ``class``, ``classCn``, ``order``, ``orderCn``,
+            ``family``, ``familyCn``, ``species``, ``speciesCn``.
+
+        Mirrors ``applyTaxonDraftToSpecimen(sp, draft)`` in app.js.
+        """
+        sp_fields["taxonGroup"]       = (draft.get("class")     or "").strip()
+        sp_fields["taxonGroupCn"]     = (draft.get("classCn")   or "").strip()
+        sp_fields["order"]            = (draft.get("order")     or "").strip()
+        sp_fields["orderCn"]          = (draft.get("orderCn")   or "").strip()
+        sp_fields["family"]           = (draft.get("family")    or "").strip()
+        sp_fields["familyCn"]         = (draft.get("familyCn")  or "").strip()
+        sp_fields["scientificName"]   = (draft.get("species")   or "").strip()
+        sp_fields["scientificNameCn"] = (draft.get("speciesCn") or "").strip()
+        sp_fields["taxonomyConfirmed"] = False

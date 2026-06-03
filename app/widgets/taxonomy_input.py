@@ -683,20 +683,57 @@ class TaxonomyInputPanel(QWidget):
             self._popup.hide()
 
     def _on_editing_finished(self, sp_key: str) -> None:
-        """Called on Enter or focus-leave.  Commit the typed value."""
+        """Called on Enter or focus-leave.  Commit the typed value.
+
+        Mirrors ``commitTypedTaxon(spKey, sp, typedValue)`` in app.js:
+          1. Try exact match within constrained (ancestor-filtered) candidates.
+          2. If not found, try unconstrained cross-level search (Chinese or Latin).
+          3. On any exact hit: call ``_commit_candidate`` so ancestor inputs are
+             back-filled (critical: this is the path that was previously missing).
+          4. If no match at all: leave typed text as-is (raw entry, no ancestry).
+        """
         inp = self._inputs.get(sp_key)
         if inp is None:
             return
         text = inp.text().strip()
         if not text:
             return
-        # Try exact match from candidates
-        cands = self._svc.search(sp_key, text, context=self._context, max_results=5)
+        q_lower = _nfkc(text).lower()
+
+        # Step 1: constrained search
+        cands = self._svc.search(sp_key, text, context=self._context, max_results=30)
         exact = next(
-            (c for c in cands if c.value.strip().lower() == text.lower()),
+            (c for c in cands
+             if _nfkc(c.value).lower() == q_lower
+             or (c.cn and _nfkc(c.cn).lower() == q_lower)),
             None,
         )
-        if exact:
+
+        # Step 2: unconstrained cross-level fallback (mirrors exactTaxonCandidate)
+        if exact is None:
+            cands_all = self._svc.search(sp_key, text, context={}, max_results=30)
+            seen_keys: set[str] = {
+                (c.value + "|" + (c.cn or "")) for c in cands
+            }
+            for c in cands_all:
+                key = c.value + "|" + (c.cn or "")
+                if key in seen_keys:
+                    continue
+                if (
+                    _nfkc(c.value).lower() == q_lower
+                    or (c.cn and _nfkc(c.cn).lower() == q_lower)
+                ):
+                    # Mark as cross-level source so parent knows
+                    exact = TaxonCandidate(
+                        value=c.value,
+                        cn=c.cn,
+                        source="cross",
+                        full=c.full,
+                    )
+                    break
+
+        # Step 3: commit — this fills ancestor inputs (not just the typed field)
+        if exact is not None:
             self._commit_candidate(sp_key, exact)
 
     def _on_accept_popup(self) -> None:
