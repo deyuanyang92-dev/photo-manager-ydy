@@ -92,10 +92,10 @@ Legend: ✓ fully covered · ◐ partially covered · ✗ missing / not ported
 | 68 | `renderLabelEl(data,tmpl,dims,…)` | ✓ | `LabelScene._build()` + `LabelEditorWidget` — Qt WYSIWYG scene is the equivalent |
 | 69 | `buildPrintLabel(data,tmpl,dims)` | ✓ | `LabelsView._paint_labels()` (QPainter onto QPrinter) |
 | 70 | `renderQrControlPanel(bucket,dims)` | ◐ | Web: dedicated QR position/size panel. Qt: QR draggable in `LabelScene`; no explicit numeric input panel for position. |
-| 71 | `renderEditorModeBar(bucket)` | ✗ | **Missing**: web row-edit toolbar (add/remove/move rows). Qt scene allows moving text items but no structural row add/remove UI. |
-| 72 | `renderRowFloatingToolbar(bucket)` | ✗ | **Missing**: per-row floating action bar (add field, remove row, reorder). |
+| 71 | `renderEditorModeBar(bucket)` | ✓ | `_RowEditorPanel` in `label_editor.py`: lists rows with size/bold/italic controls + add/delete/reorder buttons. |
+| 72 | `renderRowFloatingToolbar(bucket)` | ✓ | Merged into `_RowEditorPanel`: per-row card has field-add dropdown, ↑/↓, ✕, size spinner, bold/italic. |
 | 73 | `updateSelectionUI(bucket,wrapEl)` | ✓ | `_BucketColWidget._rebuild_template_picker()` rebuilds on selection change |
-| 74 | `renderLabelPreviewContextMenu()` | ✗ | **Missing**: right-click context menu on label preview area. |
+| 74 | `renderLabelPreviewContextMenu()` | ✓ | `LabelEditorWidget._show_preview_context_menu()`: right-click QMenu with copy text / QR position cycle / add row. |
 | 75 | `renderLabelTemplateContextMenu()` | ✓ | `_BucketColWidget._show_mgmt_menu()` (QMenu dropdown on template card) |
 | 76 | `renderLabelRecordContextMenu()` | ✓ | `_TemplateManageDialog` + per-card `_show_mgmt_menu()` |
 | 77 | `attachFieldDrag(span,bucket,ri,fi,dims)` | ◐ | Qt: `QGraphicsTextItem` is movable; no row-index-aware field drag. |
@@ -131,12 +131,12 @@ Legend: ✓ fully covered · ◐ partially covered · ✗ missing / not ported
 
 | Category | Total | ✓ | ◐ | ✗ |
 |---|---|---|---|---|
-| Pure logic (label_core / label_service) | 21 | 19 | 1 | 1 |
-| Template library CRUD | 32 | 27 | 3 | 3 (backup subsystem) |
-| Rendering / UI | 26 | 15 | 4 | 7 |
+| Pure logic (label_core / label_service) | 21 | 20 | 1 | 0 |
+| Template library CRUD | 32 | 30 | 3 | 0 (backup subsystem now in lib) |
+| Rendering / UI | 26 | 18 | 4 | 4 |
 | Print / QR | 4 | 4 | 0 | 0 |
 | Navigation helpers | 9 | 5 | 1 | 3 (web-only mode flags) |
-| **Total** | **92** | **70 (76%)** | **9 (10%)** | **13 (14%)** |
+| **Total** | **92** | **77 (84%)** | **9 (10%)** | **7 (8%)** |
 
 ### Hard-rule red-lines: all PASS
 
@@ -145,10 +145,19 @@ Legend: ✓ fully covered · ◐ partially covered · ✗ missing / not ported
 - **2 mm safety margin**: `_SAFETY_MARGIN_MM = 2.0` in `label_editor.py`. ✓
 - **一标本一张 (one-per-page print)**: QPrinter calls `printer.newPage()` per item. ✓
 
-### Honest gaps
+### Honest gaps (updated 2026-06-04)
 
-1. **Backup subsystem** (`backupLabelCustomTemplate` / `latestLabelCustomBackup` / `restoreLatestLabelCustomBackup`): absent in Qt. Per-session undo (30 steps) covers most needs; cross-session backup is the delta.
-2. **Row structural editor** (`renderEditorModeBar`, `renderRowFloatingToolbar`): web lets users add/remove/reorder rows interactively. Qt editor shows existing rows but has no add/remove row UI.
-3. **Workbench mode** (`renderLabelsWorkbench`, `renderLabelLayoutSwitch`, `setLabelLayout`): intentionally deferred.
-4. **Preview context menu** (`renderLabelPreviewContextMenu`): absent. Right-click on label preview does nothing in Qt.
-5. **`labelDataText()`**: trivial helper (uniqueId + speciesName + region + collectorLabel joined by newline). Absent but low impact.
+1. **Workbench mode** (`renderLabelsWorkbench`, `renderLabelLayoutSwitch`, `setLabelLayout`,
+   `labelModeName`, `setLabelMode`): intentionally deferred — web-only UI variants; Qt ships
+   the 4-step classic wizard only.
+2. **Remaining ◐ partial items**: `formatLabelTemplateTime` (inline not a named fn),
+   `getCurrentCustomTemplate` / `saveCustomTemplate` (logic equivalent via library),
+   `attachFieldDrag` (QGraphicsTextItem movable but not row-index-aware),
+   `renderQrControlPanel` (no numeric position input panel; QR is draggable),
+   `handleLabelsKeydown` (QShortcut replaces keydown listener).
+
+Previously noted gaps now resolved:
+- **Backup subsystem**: `backup_library` / `latest_backup` / `restore_latest_backup` in `LabelTemplateLibrary`.
+- **Row structural editor**: `_RowEditorPanel` in `label_editor.py` (add/delete/reorder/style per row).
+- **Preview context menu**: `LabelEditorWidget._show_preview_context_menu()` with copy text / QR cycle / add row.
+- **`labelDataText()`**: `label_core.label_data_text()`.
