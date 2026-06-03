@@ -1,0 +1,404 @@
+"""test_coords_view.py — Smoke + interaction tests for CoordsView.
+
+Runs headless (QT_QPA_PLATFORM=offscreen).
+
+Covers:
+  - CoordsView instantiates and shows without crashing.
+  - All expected widgets are present (input, badge, cs-tab buttons, struct toggle,
+    batch toggle, place search input).
+  - Typing a valid DD coord shows green badge and CS cards.
+  - Typing an invalid string shows red badge.
+  - Clearing input hides badge and CS section.
+  - CS tab switching updates the card values.
+  - Structured DMS inputs sync to main input.
+  - Batch parse: valid rows populate table; invalid rows show error.
+  - Batch format toggle DD / DMS / DDM works.
+  - Batch CS toggle wgs84 / gcj02 / bd09 works (numeric shift for China coords).
+  - Batch CSV export contains correct header.
+  - on_activate() is callable without crashing.
+"""
+from __future__ import annotations
+
+import os
+from unittest.mock import MagicMock
+
+import pytest
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from PyQt6.QtWidgets import QApplication, QLabel, QLineEdit, QPushButton
+
+from app.app_context import AppContext
+from app.views.coords_view import CoordsView
+
+# ── Qt singleton ──────────────────────────────────────────────────────────────
+
+_APP = None
+
+
+@pytest.fixture(scope="module", autouse=True)
+def qt_app():
+    global _APP
+    if _APP is None:
+        _APP = QApplication.instance() or QApplication([])
+    return _APP
+
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+
+def _make_ctx():
+    ctx = MagicMock(spec=AppContext)
+    ctx.has_project = False
+    ctx.current_project_dir = None
+    ctx.settings = MagicMock()
+    return ctx
+
+
+def _view() -> CoordsView:
+    v = CoordsView(_make_ctx())
+    v.resize(1024, 768)
+    v.show()
+    QApplication.processEvents()
+    return v
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Construction smoke test
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestConstruction:
+    def test_instantiates(self):
+        v = _view()
+        assert v is not None
+        assert v.view_id == "coords"
+        assert v.nav_title == "坐标工具"
+
+    def test_input_edit_present(self):
+        v = _view()
+        assert v._input_edit is not None
+        assert isinstance(v._input_edit, QLineEdit)
+
+    def test_badge_initially_hidden(self):
+        v = _view()
+        assert not v._badge.isVisible()
+
+    def test_cs_section_initially_hidden(self):
+        v = _view()
+        assert not v._cs_section.isVisible()
+
+    def test_struct_widget_initially_hidden(self):
+        v = _view()
+        assert not v._struct_widget.isVisible()
+
+    def test_batch_body_initially_hidden(self):
+        v = _view()
+        assert not v._batch_body.isVisible()
+
+    def test_cs_tab_buttons_all_present(self):
+        v = _view()
+        assert set(v._cs_tab_btns.keys()) == {"dd", "dms", "ddm"}
+
+    def test_on_activate_no_crash(self):
+        v = _view()
+        v.on_activate()  # must not raise
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Input → badge
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestBadge:
+    def test_valid_dd_shows_green_badge(self):
+        v = _view()
+        v._input_edit.setText("29.11492 N 121.76421 E")
+        QApplication.processEvents()
+        assert v._badge.isVisible()
+        assert "lat" in v._badge.text().lower() or "29" in v._badge.text()
+        # Green badge has accent color style
+        assert "rgba(41,185,171" in v._badge.styleSheet()
+
+    def test_invalid_input_shows_red_badge(self):
+        v = _view()
+        v._input_edit.setText("not a coord at all !!")
+        QApplication.processEvents()
+        assert v._badge.isVisible()
+        assert "rgba(230,110,99" in v._badge.styleSheet()
+
+    def test_clear_hides_badge(self):
+        v = _view()
+        v._input_edit.setText("29.11492 N 121.76421 E")
+        QApplication.processEvents()
+        v._input_edit.clear()
+        QApplication.processEvents()
+        assert not v._badge.isVisible()
+
+    def test_dms_input_shows_badge(self):
+        v = _view()
+        v._input_edit.setText("29°06'53.7\"N 121°45'51.2\"E")
+        QApplication.processEvents()
+        assert v._badge.isVisible()
+        assert "DMS" in v._badge.text() or "度分秒" in v._badge.text()
+
+    def test_iso6709_input(self):
+        v = _view()
+        v._input_edit.setText("+29.11492+121.76421/")
+        QApplication.processEvents()
+        assert v._badge.isVisible()
+        assert "rgba(41,185,171" in v._badge.styleSheet()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CS cards
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestCsCards:
+    def test_cs_section_visible_after_valid_input(self):
+        v = _view()
+        v._input_edit.setText("29.11492 N 121.76421 E")
+        QApplication.processEvents()
+        assert v._cs_section.isVisible()
+
+    def test_three_cs_cards_present(self):
+        v = _view()
+        v._input_edit.setText("29.11492 N 121.76421 E")
+        QApplication.processEvents()
+        # Count cards inside cs_cards_widget
+        count = v._cs_cards_lay.count()
+        assert count == 3, f"expected 3 CS cards, got {count}"
+
+    def test_cs_section_hidden_after_clear(self):
+        v = _view()
+        v._input_edit.setText("29.11492 N 121.76421 E")
+        QApplication.processEvents()
+        v._input_edit.clear()
+        QApplication.processEvents()
+        assert not v._cs_section.isVisible()
+
+    def test_cs_tab_dd_selected_by_default(self):
+        v = _view()
+        assert v._cs_tab == "dd"
+        assert v._cs_tab_btns["dd"].isChecked()
+        assert not v._cs_tab_btns["dms"].isChecked()
+
+    def test_cs_tab_switch_to_dms(self):
+        v = _view()
+        v._input_edit.setText("29.11492 N 121.76421 E")
+        QApplication.processEvents()
+        v._on_cs_tab("dms")
+        QApplication.processEvents()
+        assert v._cs_tab == "dms"
+        assert v._cs_tab_btns["dms"].isChecked()
+        assert not v._cs_tab_btns["dd"].isChecked()
+        # Cards still 3
+        assert v._cs_cards_lay.count() == 3
+
+    def test_cs_tab_switch_to_ddm(self):
+        v = _view()
+        v._input_edit.setText("29.11492 N 121.76421 E")
+        QApplication.processEvents()
+        v._on_cs_tab("ddm")
+        assert v._cs_tab == "ddm"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Structured DMS
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestStructuredDms:
+    def test_toggle_shows_widget(self):
+        v = _view()
+        assert not v._struct_widget.isVisible()
+        v._on_struct_toggle()
+        QApplication.processEvents()
+        assert v._struct_widget.isVisible()
+
+    def test_toggle_twice_hides(self):
+        v = _view()
+        v._on_struct_toggle()
+        v._on_struct_toggle()
+        QApplication.processEvents()
+        assert not v._struct_widget.isVisible()
+
+    def test_struct_sync_fills_main_input(self):
+        v = _view()
+        v._on_struct_toggle()
+        # Set 29°06'53.7"N 121°45'51.2"E via struct fields
+        v._struct_lat_d.setText("29")
+        v._struct_lat_m.setText("6")
+        v._struct_lat_s.setText("53.7")
+        v._struct_lat_dir.setCurrentText("N")
+        v._struct_lon_d.setText("121")
+        v._struct_lon_m.setText("45")
+        v._struct_lon_s.setText("51.2")
+        v._struct_lon_dir.setCurrentText("E")
+        QApplication.processEvents()
+        txt = v._input_edit.text()
+        assert "29" in txt
+        assert "121" in txt
+
+    def test_struct_sync_updates_parsed(self):
+        v = _view()
+        v._on_struct_toggle()
+        v._struct_lat_d.setText("29")
+        v._struct_lat_m.setText("6")
+        v._struct_lat_s.setText("53.7")
+        v._struct_lat_dir.setCurrentText("N")
+        v._struct_lon_d.setText("121")
+        v._struct_lon_m.setText("45")
+        v._struct_lon_s.setText("51.2")
+        v._struct_lon_dir.setCurrentText("E")
+        QApplication.processEvents()
+        assert v._parsed is not None
+        assert abs(v._parsed["lat"] - 29.114917) < 0.001
+        assert abs(v._parsed["lon"] - 121.764222) < 0.001
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Batch conversion
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestBatch:
+    _VALID_INPUT = "29.11492, 121.76421\n24.48921N 118.18432E"
+    _MIXED_INPUT = "29.11492, 121.76421\nnot-a-coord"
+
+    def test_toggle_shows_body(self):
+        v = _view()
+        assert not v._batch_body.isVisible()
+        v._on_batch_toggle()
+        QApplication.processEvents()
+        assert v._batch_body.isVisible()
+
+    def test_parse_valid_rows(self):
+        v = _view()
+        v._batch_textarea.setPlainText(self._VALID_INPUT)
+        v._on_batch_parse()
+        QApplication.processEvents()
+        assert len(v._batch_rows) == 2
+        for row in v._batch_rows:
+            assert row["error"] is None
+            assert abs(row["lat"]) <= 90
+            assert abs(row["lon"]) <= 180
+
+    def test_parse_invalid_row(self):
+        v = _view()
+        v._batch_textarea.setPlainText(self._MIXED_INPUT)
+        v._on_batch_parse()
+        ok = [r for r in v._batch_rows if r["error"] is None]
+        err = [r for r in v._batch_rows if r["error"] is not None]
+        assert len(ok) == 1
+        assert len(err) == 1
+
+    def test_table_visible_after_parse(self):
+        v = _view()
+        v._on_batch_toggle()
+        v._batch_textarea.setPlainText(self._VALID_INPUT)
+        v._on_batch_parse()
+        QApplication.processEvents()
+        assert v._batch_table.isVisible()
+
+    def test_table_row_count(self):
+        v = _view()
+        v._batch_textarea.setPlainText(self._VALID_INPUT)
+        v._on_batch_parse()
+        assert v._batch_table.rowCount() == 2
+
+    def test_batch_fmt_dd(self):
+        v = _view()
+        v._batch_textarea.setPlainText("29.11492N 121.76421E")
+        v._on_batch_parse()
+        v._on_batch_fmt("dd")
+        QApplication.processEvents()
+        lat_text = v._batch_table.item(0, 2).text()
+        assert "29" in lat_text
+        assert "°" not in lat_text
+
+    def test_batch_fmt_dms(self):
+        v = _view()
+        v._batch_textarea.setPlainText("29.11492N 121.76421E")
+        v._on_batch_parse()
+        v._on_batch_fmt("dms")
+        QApplication.processEvents()
+        lat_text = v._batch_table.item(0, 2).text()
+        assert "°" in lat_text and "'" in lat_text
+
+    def test_batch_fmt_ddm(self):
+        v = _view()
+        v._batch_textarea.setPlainText("29.11492N 121.76421E")
+        v._on_batch_parse()
+        v._on_batch_fmt("ddm")
+        QApplication.processEvents()
+        lat_text = v._batch_table.item(0, 2).text()
+        assert "°" in lat_text and "'" in lat_text
+        assert '"' not in lat_text  # DDM has no seconds
+
+    def test_batch_cs_gcj02_shifts_china_coords(self):
+        """GCJ-02 conversion must shift coords inside mainland China."""
+        v = _view()
+        v._batch_textarea.setPlainText("29.11492N 121.76421E")
+        v._on_batch_parse()
+        v._on_batch_cs("wgs84")
+        QApplication.processEvents()
+        lat_wgs = float(v._batch_table.item(0, 2).text())
+
+        v._on_batch_cs("gcj02")
+        QApplication.processEvents()
+        lat_gcj = float(v._batch_table.item(0, 2).text())
+
+        # Must differ by > 0.001° inside mainland China
+        assert abs(lat_wgs - lat_gcj) > 0.001
+
+    def test_batch_cs_bd09_shifts_china_coords(self):
+        v = _view()
+        v._batch_textarea.setPlainText("29.11492N 121.76421E")
+        v._on_batch_parse()
+        v._on_batch_cs("wgs84")
+        QApplication.processEvents()
+        lat_wgs = float(v._batch_table.item(0, 2).text())
+
+        v._on_batch_cs("bd09")
+        QApplication.processEvents()
+        lat_bd = float(v._batch_table.item(0, 2).text())
+        assert abs(lat_wgs - lat_bd) > 0.001
+
+    def test_csv_export_has_header(self):
+        v = _view()
+        v._batch_textarea.setPlainText(self._VALID_INPUT)
+        v._on_batch_parse()
+        csv_text = v._batch_to_csv()
+        first_line = csv_text.splitlines()[0]
+        assert "输入" in first_line or "#" in first_line
+
+    def test_csv_export_row_count(self):
+        v = _view()
+        v._batch_textarea.setPlainText(self._VALID_INPUT)
+        v._on_batch_parse()
+        csv_text = v._batch_to_csv()
+        lines = [ln for ln in csv_text.splitlines() if ln.strip()]
+        # header + 2 data rows
+        assert len(lines) == 3
+
+    def test_example_select_fills_textarea(self):
+        v = _view()
+        v._on_batch_toggle()
+        # Simulate selecting "dd" example (index 2 in combobox: 0=placeholder, 1=mixed, 2=dd)
+        # Find index by key
+        for i in range(v._example_combo.count()):
+            if v._example_combo.itemData(i) == "dd":
+                v._example_combo.setCurrentIndex(i)
+                QApplication.processEvents()
+                break
+        text = v._batch_textarea.toPlainText()
+        assert len(text.strip()) > 0
+        assert len(v._batch_rows) > 0
+
+    def test_controls_visible_after_parse(self):
+        """Controls should be explicitly shown after parsing; check parent-visible path."""
+        v = _view()
+        v._on_batch_toggle()           # open batch body first
+        v._batch_textarea.setPlainText(self._VALID_INPUT)
+        v._on_batch_parse()
+        QApplication.processEvents()
+        # isVisible() propagates from parent; batch_body is open so all should show
+        assert v._batch_body.isVisible()
+        assert v._batch_controls.isVisible()
+        assert v._batch_actions.isVisible()

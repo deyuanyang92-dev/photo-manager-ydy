@@ -15,10 +15,11 @@ from app.views.taxonomy_view import TaxonomyView
 from app.views.worms_view import WormsView
 from app.views.coords_view import CoordsView
 from app.views.labels_view import LabelsView
-from app.views.collab_view import CollabView
+from app.views.summary_view import SummaryView
 from app.views.settings_view import SettingsView
 
 # Order = nav order (mirrors web prototype topbar exactly)
+# CollabView is NOT a nav tab — collaboration lives inline in the workbench sidebar.
 ALL_VIEWS: list[type] = [
     WorkbenchView,   # 照片工作区（含 监控/分组/命名/合成/整理/成果 面板）
     OverviewView,    # 项目总览（+ 导出 Excel/CSV/DwC）
@@ -26,6 +27,6 @@ ALL_VIEWS: list[type] = [
     WormsView,       # WoRMS 分类库（海洋物种验证）
     TaxonomyView,    # 内置分类库（+ 4 级补全浮层）
     CoordsView,      # 坐标工具（交互地图）
-    CollabView,      # 项目汇总
+    SummaryView,     # 项目汇总（跨项目标本数据汇总表 + 导出 Excel/CSV）
     SettingsView,    # 配置
 ]
