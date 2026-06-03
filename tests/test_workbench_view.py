@@ -1289,3 +1289,50 @@ class TestComposePreviewDialog:
         assert hasattr(w, "_show_compose_preview")
         assert callable(w._show_compose_preview)
         db.close()
+
+
+# ── _BatchResultDialog ────────────────────────────────────────────────────────
+
+class TestBatchResultDialog:
+    """Tests for _BatchResultDialog and FileResult in workbench_view / retroactive_service."""
+
+    def test_batch_result_dialog_row_count(self):
+        """3 FileResult items → table has 3 rows."""
+        from app.services.retroactive_service import FileResult
+        from app.views.workbench_view import _BatchResultDialog
+        results = [
+            FileResult(name="a.jpg", ok=True, size_bytes=1024, error=""),
+            FileResult(name="b.jpg", ok=True, size_bytes=2048, error=""),
+            FileResult(name="c.jpg", ok=False, size_bytes=0, error="打包失败"),
+        ]
+        dlg = _BatchResultDialog(results)
+        assert dlg._table.rowCount() == 3
+
+    def test_batch_result_dialog_summary(self):
+        """2 ok 1 fail → summary label shows correct counts."""
+        from app.services.retroactive_service import FileResult
+        from app.views.workbench_view import _BatchResultDialog
+        results = [
+            FileResult(name="a.jpg", ok=True, size_bytes=1024, error=""),
+            FileResult(name="b.jpg", ok=True, size_bytes=2048, error=""),
+            FileResult(name="c.jpg", ok=False, size_bytes=0, error="失败"),
+        ]
+        dlg = _BatchResultDialog(results)
+        text = dlg._summary.text()
+        assert "2" in text
+        assert "1" in text
+
+    def test_batch_result_dialog_constructs_empty(self):
+        """_BatchResultDialog with empty list must not crash."""
+        from app.views.workbench_view import _BatchResultDialog
+        dlg = _BatchResultDialog([])
+        assert dlg._table.rowCount() == 0
+
+    def test_file_result_fields(self):
+        """FileResult must have name, ok, size_bytes, error fields."""
+        from app.services.retroactive_service import FileResult
+        r = FileResult(name="x.jpg", ok=True, size_bytes=512, error="")
+        assert r.name == "x.jpg"
+        assert r.ok is True
+        assert r.size_bytes == 512
+        assert r.error == ""

@@ -17,11 +17,21 @@ from __future__ import annotations
 import os
 import re
 import sqlite3
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 from app.services.organize_service import _parse_uid_from_tiff_name
+
+
+@dataclass
+class FileResult:
+    """Per-file result from a batch retroactive archive operation."""
+    name: str
+    ok: bool
+    size_bytes: int
+    error: str
 
 
 def _iso_mtime(p: str) -> str:

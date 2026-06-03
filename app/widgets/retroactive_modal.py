@@ -179,21 +179,33 @@ class RetroactiveModal(QDialog):
         if confirm != QMessageBox.StandardButton.Yes:
             return
 
-        ok_count, fail_count = 0, 0
+        from app.services.retroactive_service import FileResult
+        from app.views.workbench_view import _BatchResultDialog
+        file_results: list[FileResult] = []
         for uid, g in to_archive:
+            tiff_name = Path(g["tiffPath"]).name
             try:
-                archive_group(
+                ar = archive_group(
                     jpg_paths=g["jpgPaths"],
                     tiff_path=g["tiffPath"],
                     project_dir=project_dir,
                     delete_jpg=self._delete_jpg,
                 )
-                ok_count += 1
-            except Exception:
-                fail_count += 1
+                zip_size = 0
+                if ar.zip_path:
+                    try:
+                        import os as _os
+                        zip_size = _os.path.getsize(ar.zip_path)
+                    except OSError:
+                        pass
+                file_results.append(FileResult(
+                    name=tiff_name, ok=True, size_bytes=zip_size, error=""
+                ))
+            except Exception as exc:
+                file_results.append(FileResult(
+                    name=tiff_name, ok=False, size_bytes=0, error=str(exc)
+                ))
 
-        msg = f"存量整理完成：{ok_count} 组归档"
-        if fail_count:
-            msg += f"，{fail_count} 组失败"
-        QMessageBox.information(self, "整理完成", msg)
+        dlg = _BatchResultDialog(file_results, parent=self)
+        dlg.exec()
         self.accept()
