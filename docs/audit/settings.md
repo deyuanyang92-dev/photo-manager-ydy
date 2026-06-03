@@ -20,7 +20,7 @@ Source: `prototype-photo-gui/app.js` (12 config functions) vs `app/views/setting
 | About 页 (版本/环境/配置文件路径) | ✓ | `_build_tab_about()` |
 | `renderHeliconConfigModal()` 高级参数 (app.js:7029) | ◐ | **Helicon tab 已有 method/radius/smoothing/jpegQuality；缺 tiffCompression / outputFormat / saveDepthMap / runMode / concurrency（"高级" 折叠块）** |
 | `saveV4Settings()` / `loadV4Settings()` (app.js:2593–2614) | ✗ | **autoWatch、groupingAutoWatch、groupingAutoWatchMode、fileViewMode、autoActivateOnNewSpecimen — 五个工作台持久化开关，settings_view 无对应项** |
-| `renderGlobalSettings()` (app.js:4463) | ✗ | **fontScale 滑块、icons 四项 emoji 替换、useRealCompression 复选框、键盘快捷键录制 UI — settings_view 全无** |
+| `renderGlobalSettings()` (app.js:4463) | ✓ | `_build_tab_ui()` — 界面 tab：fontScale QDoubleSpinBox(0.7–1.5)、四项 icon emoji 输入框、useRealCompression QCheckBox、四个 QKeySequenceEdit 快捷键录制 |
 | `renderProjectSettingsDrawer()` 概要/保存方式/人员预设/命名规则/TIFF元数据 (app.js:9418) | ✗ | **项目级面板（非全局配置）；Qt 中归属 WorkbenchView 抽屉，不在 settings_view。属于已知范围外缺口** |
 | `renderSettingsSection()` 工作台压缩折叠 (app.js:17716) | ✗ | **autoNaming / autoStart 仅在工作台压缩面板出现，属 WorkbenchView 不属 settings_view。不应迁入此文件** |
 
@@ -66,23 +66,22 @@ Source: `prototype-photo-gui/app.js` (12 config functions) vs `app/views/setting
 
 **实现方案**：在项目 tab 或新增「工作台」tab 中暴露这 5 项。
 
-### 3. 全局设置 (✗ → ✓)
+### 3. 全局设置 (✗ → ✓) ← 已完成
 
-`renderGlobalSettings()` 包含：
+`renderGlobalSettings()` 对应 `_build_tab_ui()`（界面 tab），实现：
 
-| 项目 | web 默认 | QSettings key |
-|---|---|---|
-| fontScale | 1.0 | `ui/font_scale` |
-| icons.gps | "📡" | `ui/icon_gps` |
-| icons.map | "📍" | `ui/icon_map` |
-| icons.folder | "📁" | `ui/icon_folder` |
-| icons.search | "🔍" | `ui/icon_search` |
-| useRealCompression | false | `debug/use_real_compression` |
-
-键盘快捷键录制（`ensureShortcutsSettings` / `renderShortcutScope`）：  
-Qt 原生用 `QKeySequenceEdit`，可替代 web 的「按键录制」模式；scope 两个：monitor / labels。  
-**建议**：新增「界面」tab 放 fontScale + icons；快捷键放独立 tab 或「界面」tab 末尾。  
-useRealCompression 是调试开关，可放「关于」tab 底部。
+| 项目 | web 默认 | QSettings key | 实现 |
+|---|---|---|---|
+| fontScale | 1.0 | `ui/font_scale` | QDoubleSpinBox 0.7–1.5，实时更新百分比标签 |
+| icons.gps | "📡" | `ui/icon_gps` | QLineEdit，emoji 输入 |
+| icons.map | "📍" | `ui/icon_map` | QLineEdit |
+| icons.folder | "📁" | `ui/icon_folder` | QLineEdit |
+| icons.search | "🔍" | `ui/icon_search` | QLineEdit |
+| useRealCompression | false | `debug/use_real_compression` | QCheckBox |
+| shortcuts/monitor_activate | "" | `shortcuts/monitor_activate` | QKeySequenceEdit |
+| shortcuts/monitor_deactivate | "" | `shortcuts/monitor_deactivate` | QKeySequenceEdit |
+| shortcuts/labels_print | "" | `shortcuts/labels_print` | QKeySequenceEdit |
+| shortcuts/labels_next | "" | `shortcuts/labels_next` | QKeySequenceEdit |
 
 ---
 
@@ -95,18 +94,21 @@ useRealCompression 是调试开关，可放「关于」tab 底部。
 
 ---
 
-## 当前测试覆盖（44 tests，全绿）
+## 当前测试覆盖（109 tests，全绿）
 
 | 测试类 | 项目 |
 |---|---|
 | `TestInstantiation` (5) | 实例化/view_id/nav_title/nav_icon/objectName |
-| `TestTabs` (2) | 5 tabs + 标题验证 |
+| `TestTabs` (2) | 7 tabs + 标题验证 |
 | `TestDeleteJpgDefault` (6) | **红线断言**：fresh/false/true/回退/QSettings key |
 | `TestRoundTrip` (8) | currentUser/heliconExe/jxlEffort/radius/smoothing/quality/incoming/results |
 | `TestRecentProjects` (4) | add/deduplicate/move-to-front/clear |
 | `TestAboutTab` (2) | version nonempty / tab accessible |
 | `TestSettingsKeys` (7) | key 字符串常量校验 |
 | `TestPresetCRUD` (9) | save/upsert/empty/apply/double-click/delete/persist/multiple/delete-one-of-many |
+| `TestHeliconAdvancedParams` (18) | outputFormat/tiffCompression/saveDepthMap/runMode/concurrency round-trip |
+| `TestWorkbenchToggles` (19) | autoWatch/autoActivateNew/groupingAutoWatch/groupingMode/fileViewMode round-trip |
+| `TestUISettings` (29) | fontScale/icons/useRealCompression/shortcuts round-trip + key constants |
 
 ---
 

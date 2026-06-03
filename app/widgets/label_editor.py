@@ -8,6 +8,14 @@ QGraphicsScene-based editor where:
   - An ``QUndoStack`` (max 30) tracks template changes.
   - QR codes are generated with the ``qrcode`` library at error-correction Q.
 
+Structural row editor (mirrors renderEditorModeBar + renderRowFloatingToolbar):
+  - ``_RowEditorPanel`` lists all rows with add / delete / reorder / style controls.
+  - Displayed below the QGraphicsView in the LabelEditorWidget layout.
+
+Preview context menu (mirrors renderLabelPreviewContextMenu):
+  - Right-click on the QGraphicsView opens a QMenu with: copy text, QR position
+    toggle, and add-row shortcut.
+
 Usage
 -----
     editor = LabelEditorWidget(template, dims, label_data)
@@ -16,6 +24,7 @@ Usage
 
 from __future__ import annotations
 
+import copy
 import io
 from typing import Optional
 
@@ -34,17 +43,23 @@ from PyQt6.QtGui import (
     QShortcut,
 )
 from PyQt6.QtWidgets import (
+    QApplication,
+    QComboBox,
+    QFrame,
     QGraphicsScene,
     QGraphicsView,
     QGraphicsTextItem,
     QGraphicsRectItem,
     QGraphicsPixmapItem,
+    QMenu,
+    QScrollArea,
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
     QPushButton,
     QLabel,
     QSizePolicy,
+    QSpinBox,
 )
 
 from app.utils.label_core import (
@@ -69,7 +84,7 @@ def _px_to_mm(px: float) -> float:
     return px / _SCENE_SCALE
 
 
-# ── Undo command ──────────────────────────────────────────────────────────────
+# ── Undo commands ─────────────────────────────────────────────────────────────
 
 class _MoveQrCommand(QUndoCommand):
     """Undo/redo: move QR item to a new mm position."""
@@ -113,6 +128,333 @@ class _EditTextCommand(QUndoCommand):
 
     def redo(self) -> None:
         self._item.setPlainText(self._new)
+
+
+class _RowsCommand(QUndoCommand):
+    """Undo/redo: any structural change to template rows.
+
+    Saves full rows snapshot before and after for simple rollback.
+    Mirrors JS saveCustomTemplate(bucket, tmpl) with undo stack support.
+    """
+
+    def __init__(
+        self,
+        editor: "LabelEditorWidget",
+        old_rows: list,
+        new_rows: list,
+        description: str = "Rows edit",
+        parent: Optional[QUndoCommand] = None,
+    ) -> None:
+        super().__init__(description, parent)
+        self._editor = editor
+        self._old = copy.deepcopy(old_rows)
+        self._new = copy.deepcopy(new_rows)
+
+    def undo(self) -> None:
+        self._editor._apply_rows(copy.deepcopy(self._old))
+
+    def redo(self) -> None:
+        self._editor._apply_rows(copy.deepcopy(self._new))
+
+
+# ── Field-key display names ───────────────────────────────────────────────────
+
+_FIELD_NAMES: dict[str, str] = {
+    "uniqueId": "唯一编号",
+    "headerId": "编号头",
+    "storage": "保存方式",
+    "shortDate": "日期段",
+    "fullDate": "完整日期段",
+    "speciesName": "物种名称",
+    "latin": "拉丁名",
+    "family": "科",
+    "region": "地点",
+    "collectorLabel": "采集人",
+    "photographer": "拍摄者",
+    "lon": "经度",
+    "lat": "纬度",
+    "geoArea": "采集地理区",
+    "rnaPreservative": "RNA保存液",
+}
+
+_ALL_FIELD_KEYS = list(_FIELD_NAMES.keys()) + [
+    "province", "site", "station", "speciesId", "date",
+    "collectionDate", "photoDate", "photoNotes", "collector",
+]
+
+
+# ── Row editor panel ──────────────────────────────────────────────────────────
+
+class _RowEditorPanel(QWidget):
+    """Structural row editor for a label template.
+
+    Shows each row as a card with:
+      - row index + field summary label
+      - font size spinner
+      - bold / italic toggles
+      - field-add dropdown
+      - ↑ / ↓ reorder buttons
+      - ✕ delete button
+    Plus an "+ 新增行" button at the top.
+
+    Mirrors: ``renderEditorModeBar(bucket)`` + ``renderRowFloatingToolbar(bucket)``
+    from app.js (web oracle).
+    """
+
+    rows_changed = pyqtSignal()
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._rows: list[dict] = []
+        self._build_ui()
+
+    def _build_ui(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(4)
+
+        # Header bar
+        hdr = QHBoxLayout()
+        hdr.setSpacing(6)
+        title = QLabel("行结构编辑器")
+        title.setStyleSheet("color: #cfe0db; font-size: 11px; font-weight: bold;")
+        hdr.addWidget(title)
+        hdr.addStretch()
+        add_btn = QPushButton("+ 新增行")
+        add_btn.setFixedHeight(22)
+        add_btn.setStyleSheet(
+            "QPushButton { background: rgba(41,185,171,0.18); border: 1px solid #29b9ab;"
+            " border-radius: 3px; color: #29b9ab; font-size: 10px; padding: 0 6px; }"
+            "QPushButton:hover { background: rgba(41,185,171,0.30); }"
+        )
+        add_btn.clicked.connect(self._add_row)
+        hdr.addWidget(add_btn)
+        root.addLayout(hdr)
+
+        # Scroll area for row cards
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setStyleSheet("QScrollArea { background: transparent; }")
+        scroll.setMaximumHeight(180)
+
+        self._cards_widget = QWidget()
+        self._cards_widget.setStyleSheet("background: transparent;")
+        self._cards_layout = QVBoxLayout(self._cards_widget)
+        self._cards_layout.setContentsMargins(0, 0, 0, 0)
+        self._cards_layout.setSpacing(2)
+        self._cards_layout.addStretch()
+        scroll.setWidget(self._cards_widget)
+        root.addWidget(scroll)
+
+    # ── Public API ────────────────────────────────────────────────────────
+
+    def set_rows(self, rows: list) -> None:
+        self._rows = copy.deepcopy(rows or [])
+        self._rebuild_cards()
+
+    def get_rows(self) -> list:
+        return copy.deepcopy(self._rows)
+
+    # ── Internal: rebuild cards ───────────────────────────────────────────
+
+    def _rebuild_cards(self) -> None:
+        while self._cards_layout.count():
+            item = self._cards_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        for ri, row in enumerate(self._rows):
+            self._cards_layout.addWidget(self._make_row_card(ri, row))
+        self._cards_layout.addStretch()
+
+    def _make_row_card(self, ri: int, row: dict) -> QFrame:
+        card = QFrame()
+        card.setStyleSheet(
+            "QFrame { background: #0c2027; border: 1px solid rgba(145,182,181,0.12);"
+            " border-radius: 4px; padding: 2px; }"
+        )
+        row_layout = QHBoxLayout(card)
+        row_layout.setContentsMargins(4, 2, 4, 2)
+        row_layout.setSpacing(4)
+
+        # Row index badge
+        idx_lbl = QLabel(f"#{ri + 1}")
+        idx_lbl.setFixedWidth(22)
+        idx_lbl.setStyleSheet("color: #5f7d7a; font-size: 10px;")
+        row_layout.addWidget(idx_lbl)
+
+        # Field summary
+        fields = row.get("fields") or []
+        field_names = []
+        for f in fields:
+            k = f.get("key") if isinstance(f, dict) else str(f)
+            field_names.append(_FIELD_NAMES.get(k, k) or k)
+        summary = " · ".join(field_names) if field_names else "（空行）"
+        summary_lbl = QLabel(summary)
+        summary_lbl.setStyleSheet("color: #cfe0db; font-size: 10px;")
+        summary_lbl.setMinimumWidth(80)
+        row_layout.addWidget(summary_lbl, stretch=1)
+
+        # Font size spinner
+        size_spin = QSpinBox()
+        size_spin.setRange(5, 24)
+        size_spin.setValue(int(row.get("size") or 9))
+        size_spin.setFixedWidth(50)
+        size_spin.setFixedHeight(20)
+        size_spin.setStyleSheet(
+            "QSpinBox { background:#0f2127; border:1px solid rgba(145,182,181,0.18);"
+            " border-radius:3px; color:#eef3ef; font-size:10px; padding:1px; }"
+        )
+        size_spin.setToolTip("字号 pt")
+
+        def _size_changed(val: int, _ri: int = ri) -> None:
+            if _ri < len(self._rows):
+                self._rows[_ri]["size"] = val
+                self.rows_changed.emit()
+
+        size_spin.valueChanged.connect(_size_changed)
+        row_layout.addWidget(size_spin)
+
+        # Bold / italic
+        style = str(row.get("style") or "")
+        bold_btn = QPushButton("B")
+        bold_btn.setFixedSize(20, 20)
+        bold_btn.setCheckable(True)
+        bold_btn.setChecked("bold" in style)
+        bold_btn.setStyleSheet(
+            "QPushButton { background: transparent; border:1px solid rgba(145,182,181,0.18);"
+            " border-radius:3px; color:#87a2a1; font-weight:bold; font-size:10px; }"
+            "QPushButton:checked { color:#29b9ab; border-color:#29b9ab; }"
+        )
+
+        def _bold_toggled(checked: bool, _ri: int = ri) -> None:
+            if _ri < len(self._rows):
+                parts = [p for p in (self._rows[_ri].get("style") or "").split() if p != "bold"]
+                if checked:
+                    parts.append("bold")
+                self._rows[_ri]["style"] = " ".join(parts)
+                self.rows_changed.emit()
+
+        bold_btn.toggled.connect(_bold_toggled)
+        row_layout.addWidget(bold_btn)
+
+        italic_btn = QPushButton("I")
+        italic_btn.setFixedSize(20, 20)
+        italic_btn.setCheckable(True)
+        italic_btn.setChecked("italic" in style)
+        italic_btn.setStyleSheet(
+            "QPushButton { background: transparent; border:1px solid rgba(145,182,181,0.18);"
+            " border-radius:3px; color:#87a2a1; font-style:italic; font-size:10px; }"
+            "QPushButton:checked { color:#29b9ab; border-color:#29b9ab; }"
+        )
+
+        def _italic_toggled(checked: bool, _ri: int = ri) -> None:
+            if _ri < len(self._rows):
+                parts = [p for p in (self._rows[_ri].get("style") or "").split() if p != "italic"]
+                if checked:
+                    parts.append("italic")
+                self._rows[_ri]["style"] = " ".join(parts)
+                self.rows_changed.emit()
+
+        italic_btn.toggled.connect(_italic_toggled)
+        row_layout.addWidget(italic_btn)
+
+        # Reorder: ↑ ↓
+        up_btn = QPushButton("↑")
+        up_btn.setFixedSize(20, 20)
+        up_btn.setEnabled(ri > 0)
+        _btn_style = (
+            "QPushButton { background:transparent; border:1px solid rgba(145,182,181,0.15);"
+            " border-radius:3px; color:#87a2a1; font-size:10px; }"
+            "QPushButton:hover { color:#29b9ab; border-color:#29b9ab; }"
+            "QPushButton:disabled { color:#2d4a52; border-color:rgba(145,182,181,0.06); }"
+        )
+        up_btn.setStyleSheet(_btn_style)
+        up_btn.setToolTip("上移行")
+        up_btn.clicked.connect(lambda checked, _ri=ri: self._move_row(_ri, -1))
+        row_layout.addWidget(up_btn)
+
+        down_btn = QPushButton("↓")
+        down_btn.setFixedSize(20, 20)
+        down_btn.setEnabled(ri < len(self._rows) - 1)
+        down_btn.setStyleSheet(_btn_style)
+        down_btn.setToolTip("下移行")
+        down_btn.clicked.connect(lambda checked, _ri=ri: self._move_row(_ri, +1))
+        row_layout.addWidget(down_btn)
+
+        # Field picker dropdown
+        add_field_combo = QComboBox()
+        add_field_combo.setFixedHeight(20)
+        add_field_combo.setFixedWidth(80)
+        add_field_combo.setStyleSheet(
+            "QComboBox { background:#0f2127; border:1px solid rgba(145,182,181,0.15);"
+            " border-radius:3px; color:#87a2a1; font-size:9px; padding:1px 2px; }"
+            "QComboBox::drop-down { border:none; width:12px; }"
+        )
+        add_field_combo.addItem("+ 字段", "")
+        for k in _ALL_FIELD_KEYS:
+            add_field_combo.addItem(_FIELD_NAMES.get(k, k), k)
+        add_field_combo.setToolTip("添加字段到此行")
+
+        def _add_field(idx: int, _ri: int = ri, _combo: QComboBox = add_field_combo) -> None:
+            if idx <= 0:
+                return
+            key = _combo.itemData(idx)
+            if key and _ri < len(self._rows):
+                existing_keys = [
+                    (f.get("key") if isinstance(f, dict) else f)
+                    for f in (self._rows[_ri].get("fields") or [])
+                ]
+                if key not in existing_keys:
+                    self._rows[_ri].setdefault("fields", [])
+                    self._rows[_ri]["fields"].append({
+                        "key": key, "style": "", "size": None, "offsetX": 0, "offsetY": 0,
+                    })
+                    self.rows_changed.emit()
+                    self._rebuild_cards()
+            _combo.setCurrentIndex(0)
+
+        add_field_combo.currentIndexChanged.connect(_add_field)
+        row_layout.addWidget(add_field_combo)
+
+        # Delete row
+        del_btn = QPushButton("✕")
+        del_btn.setFixedSize(20, 20)
+        del_btn.setStyleSheet(
+            "QPushButton { background:transparent; border:1px solid rgba(230,110,99,0.25);"
+            " border-radius:3px; color:#e66e63; font-size:10px; }"
+            "QPushButton:hover { border-color:#e66e63; background:rgba(230,110,99,0.12); }"
+        )
+        del_btn.setToolTip("删除此行")
+        del_btn.clicked.connect(lambda checked, _ri=ri: self._delete_row(_ri))
+        row_layout.addWidget(del_btn)
+
+        return card
+
+    # ── Row mutation helpers ──────────────────────────────────────────────
+
+    def _add_row(self) -> None:
+        new_row: dict = {
+            "fields": [{"key": "speciesName", "style": "", "size": None,
+                        "offsetX": 0, "offsetY": 0}],
+            "size": 9, "style": "", "align": "left", "wrap": True,
+        }
+        self._rows.append(new_row)
+        self.rows_changed.emit()
+        self._rebuild_cards()
+
+    def _delete_row(self, ri: int) -> None:
+        if 0 <= ri < len(self._rows):
+            self._rows.pop(ri)
+            self.rows_changed.emit()
+            self._rebuild_cards()
+
+    def _move_row(self, ri: int, delta: int) -> None:
+        j = ri + delta
+        if 0 <= j < len(self._rows):
+            self._rows[ri], self._rows[j] = self._rows[j], self._rows[ri]
+            self.rows_changed.emit()
+            self._rebuild_cards()
 
 
 # ── QR generation helper ──────────────────────────────────────────────────────
@@ -286,7 +628,7 @@ class LabelScene(QGraphicsScene):
 
         self.setSceneRect(0, 0, w_px, h_px)
 
-    # ── Public API ─────────────────────────────────────────────────────────
+    # ── Public API ─────────────────────────────────────────────────────────────
 
     def rebuild(self, template: Optional[dict] = None, dims: Optional[dict] = None,
                 label_data: Optional[dict] = None) -> None:
@@ -399,6 +741,9 @@ class LabelEditorWidget(QWidget):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
         self._view.setMinimumHeight(120)
+        # Enable right-click context menu (mirrors renderLabelPreviewContextMenu)
+        self._view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._view.customContextMenuRequested.connect(self._show_preview_context_menu)
         layout.addWidget(self._view)
 
         # Fit scene in view
@@ -413,6 +758,84 @@ class LabelEditorWidget(QWidget):
         undo_sc.activated.connect(self._undo_stack.undo)
         redo_sc = QShortcut(QKeySequence.StandardKey.Redo, self)
         redo_sc.activated.connect(self._undo_stack.redo)
+
+        # Row structural editor panel (mirrors renderEditorModeBar +
+        # renderRowFloatingToolbar from app.js)
+        self._row_editor = _RowEditorPanel(self)
+        self._row_editor.set_rows(list(self._template.get("rows") or []))
+        self._row_editor.rows_changed.connect(self._on_rows_changed)
+        layout.addWidget(self._row_editor)
+
+    # ── Row editor callbacks ───────────────────────────────────────────────
+
+    def _on_rows_changed(self) -> None:
+        """Called when _RowEditorPanel emits rows_changed. Push undo + rebuild scene."""
+        new_rows = self._row_editor.get_rows()
+        old_rows = list(self._template.get("rows") or [])
+        cmd = _RowsCommand(self, old_rows, new_rows, "Row edit")
+        self._undo_stack.push(cmd)
+
+    def _apply_rows(self, rows: list) -> None:
+        """Apply a rows list to the template (called by _RowsCommand undo/redo)."""
+        self._template = copy.deepcopy(self._template)
+        self._template["rows"] = rows
+        self._row_editor.set_rows(rows)
+        self._scene.rebuild(self._template, self._dims, self._label_data)
+        self._view.fitInView(self._scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+        self.template_changed.emit(copy.deepcopy(self._template))
+
+    # ── Preview right-click context menu ──────────────────────────────────
+    # Mirrors renderLabelPreviewContextMenu() in app.js
+
+    def _show_preview_context_menu(self, pos: "QPointF") -> None:
+        """Show right-click context menu on the label preview view."""
+        menu = QMenu(self)
+        menu.setStyleSheet(
+            "QMenu { background: #10242a; color: #cfe0db;"
+            " border: 1px solid rgba(145,182,181,0.20); }"
+            "QMenu::item:selected { background: rgba(41,185,171,0.25); }"
+            "QMenu::separator { background: rgba(145,182,181,0.12); height: 1px;"
+            " margin: 2px 6px; }"
+        )
+
+        copy_act = menu.addAction("复制标签文本")
+        copy_act.triggered.connect(self._copy_label_text)
+
+        menu.addSeparator()
+
+        qr_positions = ["right", "bottom", "left", "top", "none"]
+        pos_names = {"right": "右", "bottom": "下", "left": "左", "top": "上", "none": "无"}
+        cur_pos = (self._template.get("qr") or {}).get("position") or "right"
+        next_pos = qr_positions[(qr_positions.index(cur_pos) + 1) % len(qr_positions)]
+        qr_act = menu.addAction(
+            f"切换 QR 位置（{pos_names.get(cur_pos, cur_pos)} → {pos_names.get(next_pos, next_pos)}）"
+        )
+        qr_act.triggered.connect(self._cycle_qr_position)
+
+        menu.addSeparator()
+
+        add_row_act = menu.addAction("+ 新增文本行")
+        add_row_act.triggered.connect(self._row_editor._add_row)
+
+        menu.exec(self._view.mapToGlobal(pos))
+
+    def _copy_label_text(self) -> None:
+        """Copy plain-text label summary to clipboard."""
+        from app.utils.label_core import label_data_text
+        text = label_data_text(self._label_data)
+        QApplication.clipboard().setText(text)
+
+    def _cycle_qr_position(self) -> None:
+        """Cycle QR position right→bottom→left→top→none→right."""
+        order = ["right", "bottom", "left", "top", "none"]
+        tmpl = copy.deepcopy(self._template)
+        qr_cfg = tmpl.setdefault("qr", {})
+        cur = qr_cfg.get("position") or "right"
+        qr_cfg["position"] = order[(order.index(cur) + 1) % len(order)]
+        self._template = tmpl
+        self._scene.rebuild(self._template, self._dims, self._label_data)
+        self._view.fitInView(self._scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+        self.template_changed.emit(copy.deepcopy(self._template))
 
     # ── Public API ─────────────────────────────────────────────────────────
 
@@ -431,6 +854,7 @@ class LabelEditorWidget(QWidget):
         if label_data is not None:
             self._label_data = label_data
         self._scene.rebuild(self._template, self._dims, self._label_data)
+        self._row_editor.set_rows(list(self._template.get("rows") or []))
         self._view.fitInView(self._scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
 
     @property
@@ -440,6 +864,11 @@ class LabelEditorWidget(QWidget):
     @property
     def scene(self) -> LabelScene:
         return self._scene
+
+    @property
+    def row_editor(self) -> _RowEditorPanel:
+        """The structural row editor panel."""
+        return self._row_editor
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
