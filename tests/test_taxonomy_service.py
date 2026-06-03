@@ -540,6 +540,19 @@ class TestFindSeedByLevel:
         assert e is not None
         assert e["order"] == "Decapoda"
 
+    def test_find_seed_by_level_found(self, svc):
+        e = svc.find_seed_by_level("order", "Decapoda")
+        assert e is not None
+        assert e["order"] == "Decapoda"
+
+    def test_find_seed_by_level_not_found(self, svc):
+        assert svc.find_seed_by_level("family", "Nonexistent") is None
+
+    def test_find_seed_by_level_case_insensitive(self, svc):
+        e = svc.find_seed_by_level("species", "HALOSYDNA BREVISETOSA")
+        assert e is not None
+        assert e["species"] == "Halosydna brevisetosa"
+
 
 # ── validate_taxonomy_chain ───────────────────────────────────────────────────
 
@@ -604,6 +617,30 @@ class TestValidateTaxonomyChain:
         result = svc.validate_taxonomy_chain(sp)
         assert result["speciesEntry"] is not None
         assert result["speciesEntry"]["family"] == "Polynoidae"
+
+    def test_validate_taxonomy_chain_consistent(self, svc):
+        sp = {
+            "taxonGroup": "Polychaeta",
+            "order": "Phyllodocida",
+            "family": "Polynoidae",
+            "genus": "Halosydna",
+            "scientificName": "Halosydna brevisetosa",
+        }
+        result = svc.validate_taxonomy_chain(sp)
+        assert result["ok"] is True
+        assert result["mismatches"] == []
+
+    def test_validate_taxonomy_chain_mismatch(self, svc):
+        sp = {
+            "taxonGroup": "Polychaeta",
+            "order": "Decapoda",   # wrong: Halosydna brevisetosa is in Phyllodocida
+            "family": "Polynoidae",
+            "scientificName": "Halosydna brevisetosa",
+        }
+        result = svc.validate_taxonomy_chain(sp)
+        assert result["ok"] is False
+        sp_keys = [m["spKey"] for m in result["mismatches"]]
+        assert "order" in sp_keys
 
 
 # ── apply_taxonomy_authority ──────────────────────────────────────────────────
