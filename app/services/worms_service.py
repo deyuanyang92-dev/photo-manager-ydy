@@ -6,6 +6,7 @@ marinespecies.org REST API with SQLite-backed disk caching and a rate limiter.
 Oracle:
   server.js ~1722–2188 (wormsFetch, worms endpoints, job runner)
   docs/modules/worms.md
+  docs/audit/worms.md
 
 Key invariants
 --------------
@@ -18,6 +19,7 @@ Key invariants
       children        14 days
       record          14 days
       family-genera   30 days
+      genus-species   30 days
 3. Rate limit: 600 ms between live API calls.
 4. Cache max size: 10 MB (oldest 25 % evicted on overflow).
 5. Batch jobs: persisted as dicts in a list; cursor-based sequential processing;
@@ -50,6 +52,7 @@ TTL_SYNONYMS        = 14 * 86400
 TTL_CHILDREN        = 14 * 86400
 TTL_RECORD          = 14 * 86400
 TTL_FAMILY          = 30 * 86400
+TTL_GENUS           = 30 * 86400
 
 CACHE_MAX_BYTES = 10 * 1024 * 1024   # 10 MB
 
@@ -179,6 +182,9 @@ class WormsService:
         *,
         timeout: float = 15.0,
         rate_interval: float = RATE_MIN_INTERVAL,
+        family_cache_path: Optional[str] = None,
+        genus_cache_path: Optional[str] = None,
+        taxonomy_path: Optional[str] = None,
     ) -> None:
         self._cache_path = cache_path
         self._jobs_path = jobs_path
@@ -189,6 +195,13 @@ class WormsService:
         self._last_call_time: float = 0.0
         # Active jobs (id → Thread)
         self._active_jobs: dict[str, threading.Thread] = {}
+
+        # Separate caches for family-genera and genus-species (oracle: server.js ~1723)
+        base = Path(cache_path).parent
+        self._family_cache_path = family_cache_path or str(base / "worms_family_genera.json")
+        self._genus_cache_path  = genus_cache_path  or str(base / "worms_genus_species.json")
+        # Taxonomy mappings store (oracle: server.js WORMS_TAXONOMY_PATH ~127)
+        self._taxonomy_path = taxonomy_path or str(base / "worms_taxonomy.json")
 
     # ── Internal helpers ──────────────────────────────────────────────────
 
@@ -617,3 +630,328 @@ class WormsService:
             if removed:
                 self._write_cache(cache)
         return removed
+
+    # ── Family-genera (oracle: server.js /api/worms/family-genera ~1896) ──────
+
+    def family_genera(self, family_name: str) -> list[dict]:
+        """Return all accepted genera within *family_name* from WoRMS.
+
+        Results are cached in a separate file (worms_family_genera.json) with
+        a 30-day TTL — mirrors server.js WORMS_FAMILY_CACHE_PATH behaviour.
+
+        Parameters
+        ----------
+        family_name:
+            Scientific family name (e.g. "Acanthuridae").
+
+        Returns
+        -------
+        List of dicts: ``{AphiaID, scientificname, class, order, family}``.
+
+        Raises
+        ------
+        ValueError
+            If *family_name* is empty.
+        LookupError
+            If the family is not found in WoRMS.
+        """
+        name = family_name.strip()
+        if not name:
+            raise ValueError("family_name must not be empty")
+        key = name.lower()
+
+        # Read from family cache
+        cache = _read_json_safe(self._family_cache_path, {})
+        entry = cache.get(key)
+        if entry and entry.get("fetched_at"):
+            if _elapsed_seconds(entry["fetched_at"]) < TTL_FAMILY:
+                return entry.get("genera", [])
+
+        # Lookup accepted family record
+        family_rec = self._lookup_accepted(name, "Family")
+        if not family_rec:
+            raise LookupError(f"Family not found in WoRMS: {name!r}")
+        aphia_id = family_rec["AphiaID"]
+
+        genera = self._paginate_children(aphia_id, rank_filter="Genus", max_count=500)
+        result = [
+            {
+                "AphiaID": g.get("AphiaID"),
+                "scientificname": g.get("scientificname", ""),
+                "class": g.get("class", ""),
+                "order": g.get("order", ""),
+                "family": g.get("family", ""),
+            }
+            for g in genera
+        ]
+
+        cache[key] = {
+            "aphiaId": aphia_id,
+            "family": name,
+            "genera": result,
+            "fetched_at": _now_iso(),
+        }
+        _atomic_write_json(self._family_cache_path, cache)
+        return result
+
+    # ── Genus-species (oracle: server.js /api/worms/genus-species ~1926) ─────
+
+    def genus_species(self, genus_name: str) -> list[dict]:
+        """Return all accepted species within *genus_name* from WoRMS.
+
+        Results are cached in worms_genus_species.json with a 30-day TTL.
+
+        Parameters
+        ----------
+        genus_name:
+            Scientific genus name (e.g. "Acanthurus").
+
+        Returns
+        -------
+        List of dicts: ``{AphiaID, scientificname, class, order, family, genus}``.
+
+        Raises
+        ------
+        ValueError
+            If *genus_name* is empty.
+        LookupError
+            If the genus is not found in WoRMS.
+        """
+        name = genus_name.strip()
+        if not name:
+            raise ValueError("genus_name must not be empty")
+        key = name.lower()
+
+        cache = _read_json_safe(self._genus_cache_path, {})
+        entry = cache.get(key)
+        if entry and entry.get("fetched_at"):
+            if _elapsed_seconds(entry["fetched_at"]) < TTL_GENUS:
+                return entry.get("species", [])
+
+        genus_rec = self._lookup_accepted(name, "Genus")
+        if not genus_rec:
+            raise LookupError(f"Genus not found in WoRMS: {name!r}")
+        aphia_id = genus_rec["AphiaID"]
+
+        children = self._paginate_children(aphia_id, rank_filter="Species", max_count=500)
+        result = [
+            {
+                "AphiaID": c.get("AphiaID"),
+                "scientificname": c.get("scientificname", ""),
+                "class": c.get("class", ""),
+                "order": c.get("order", ""),
+                "family": c.get("family", ""),
+                "genus": c.get("genus", genus_name),
+            }
+            for c in children
+        ]
+
+        cache[key] = {
+            "aphiaId": aphia_id,
+            "genus": name,
+            "species": result,
+            "fetched_at": _now_iso(),
+        }
+        _atomic_write_json(self._genus_cache_path, cache)
+        return result
+
+    # ── Taxonomy candidates (oracle: server.js /api/worms/taxonomy/candidates ~2095) ──
+
+    def load_taxonomy_candidates(self) -> list[dict]:
+        """Return WoRMS-matched / renamed records for taxonomy autocomplete.
+
+        Reads from worms_taxonomy.json (same file as resolve_mapping writes to),
+        mirrors ``loadWormsTaxonomyCandidates()`` in app.js (line 804).
+
+        Returns
+        -------
+        List of dicts with keys ``{class, order, family, genus, genusCn, species,
+        source, aphiaId}`` — only "matched" and "renamed" status entries.
+        """
+        store = _read_json_safe(self._taxonomy_path, {"mappings": {}})
+        mappings = store.get("mappings", {})
+        result = []
+        for mapping in mappings.values():
+            if mapping.get("status") not in ("matched", "renamed"):
+                continue
+            worms = mapping.get("worms", {})
+            if not worms:
+                continue
+            result.append({
+                "class":    worms.get("class", ""),
+                "order":    worms.get("order", ""),
+                "family":   worms.get("family", ""),
+                "genus":    worms.get("genus", ""),
+                "genusCn":  mapping.get("original", {}).get("genusCn", ""),
+                "species":  worms.get("scientificname", ""),
+                "source":   "worms",
+                "aphiaId":  worms.get("AphiaID", ""),
+                "mappingStatus": mapping.get("status", ""),
+            })
+        return result
+
+    # ── Resolve mapping (oracle: server.js /api/worms/mappings/:recordId/resolve ~2170) ──
+
+    def resolve_mapping(
+        self,
+        record_id: str,
+        aphia_id: Optional[int],
+        *,
+        no_match: bool = False,
+        reviewed_by: str = "",
+        worms_record: Optional[dict] = None,
+        chain: Optional[list[dict]] = None,
+    ) -> str:
+        """Persist a manual WoRMS match decision for *record_id*.
+
+        Parameters
+        ----------
+        record_id:
+            The taxonomy row's recordId.
+        aphia_id:
+            The chosen WoRMS AphiaID.  Ignored when *no_match* is True.
+        no_match:
+            If True, marks the row as "not_found" without an AphiaID.
+        reviewed_by:
+            Operator name for audit trail.
+        worms_record:
+            Pre-fetched WoRMS AphiaRecord dict (avoids a network call).
+        chain:
+            Pre-flattened classification chain.
+
+        Returns
+        -------
+        The new mapping status string: "matched" | "renamed" | "not_found".
+
+        Raises
+        ------
+        ValueError
+            If *record_id* is empty, or *aphia_id* is required but not given.
+        """
+        if not record_id:
+            raise ValueError("record_id must not be empty")
+        now = _now_iso()
+        store = _read_json_safe(self._taxonomy_path, {"mappings": {}})
+        if not isinstance(store.get("mappings"), dict):
+            store["mappings"] = {}
+
+        if no_match:
+            store["mappings"][record_id] = {
+                "recordId": record_id,
+                "status": "not_found",
+                "reviewedBy": reviewed_by,
+                "updatedAt": now,
+            }
+            _atomic_write_json(self._taxonomy_path, store)
+            return "not_found"
+
+        if not aphia_id or aphia_id <= 0:
+            raise ValueError("aphia_id is required when no_match is False")
+
+        # Use pre-fetched record or look it up from cache
+        rec = worms_record or self.record(aphia_id) or {}
+        flat_chain = chain or []
+        if not flat_chain:
+            try:
+                raw = self.classification(aphia_id)
+                flat_chain = self.flatten_classification(raw)
+            except Exception:
+                flat_chain = []
+
+        # Determine status: "matched" if name unchanged, "renamed" otherwise
+        original_name = store.get("mappings", {}).get(record_id, {}).get(
+            "original", {}
+        ).get("species", "")
+        accepted_name = rec.get("valid_name") or rec.get("scientificname") or ""
+        if original_name and accepted_name:
+            status = (
+                "matched"
+                if original_name.lower() == accepted_name.lower()
+                else "renamed"
+            )
+        else:
+            status = "matched"
+
+        existing = store["mappings"].get(record_id, {})
+        store["mappings"][record_id] = {
+            **existing,
+            "recordId": record_id,
+            "status": status,
+            "inputAphiaId": aphia_id,
+            "acceptedAphiaId": rec.get("valid_AphiaID") or aphia_id,
+            "worms": rec,
+            "chain": flat_chain,
+            "reviewedBy": reviewed_by,
+            "updatedAt": now,
+        }
+        _atomic_write_json(self._taxonomy_path, store)
+        return status
+
+    # ── Internal helpers (family/genus pagination) ──────────────────────────
+
+    def _lookup_accepted(self, name: str, rank: str) -> Optional[dict]:
+        """Find the first accepted WoRMS record with *name* and *rank*.
+
+        Oracle: server.js wormsLookupAccepted (~1886).
+        """
+        self._rate_wait()
+        url = WORMS_BASE_URL + "/AphiaRecordsByName/" + name + "?marine_only=false"
+        try:
+            resp = httpx.get(url, headers={"Accept": "application/json"}, timeout=self._timeout)
+            if not resp.status_code == 200:
+                return None
+            records = resp.json()
+            if not isinstance(records, list):
+                return None
+            for r in records:
+                if (
+                    str(r.get("rank", "")).lower() == rank.lower()
+                    and r.get("status") == "accepted"
+                ):
+                    return r
+            return None
+        except Exception:
+            return None
+
+    def _paginate_children(
+        self,
+        parent_id: int,
+        rank_filter: str,
+        max_count: int = 500,
+    ) -> list[dict]:
+        """Paginate WoRMS children of *parent_id*, returning up to *max_count* entries
+        matching *rank_filter* (accepted status only).
+
+        Oracle: server.js wormsPaginateChildren (~1862).
+        """
+        results: list[dict] = []
+        offset = 1
+        while len(results) < max_count:
+            self._rate_wait()
+            url = (
+                WORMS_BASE_URL
+                + f"/AphiaChildrenByAphiaID/{parent_id}"
+                + f"?marine_only=false&offset={offset}"
+            )
+            try:
+                resp = httpx.get(url, headers={"Accept": "application/json"}, timeout=self._timeout)
+                if resp.status_code in (204, 404):
+                    break
+                if resp.status_code != 200:
+                    break
+                children = resp.json()
+                if not isinstance(children, list) or not children:
+                    break
+                for c in children:
+                    if (
+                        c.get("rank") == rank_filter
+                        and c.get("status") == "accepted"
+                        and len(results) < max_count
+                    ):
+                        results.append(c)
+                if len(children) < 50:
+                    break
+                offset += 50
+            except Exception:
+                break
+        return results

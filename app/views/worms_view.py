@@ -53,7 +53,7 @@ from PyQt6.QtWidgets import (
     QLineEdit, QListWidget, QListWidgetItem, QSplitter,
     QGroupBox, QScrollArea, QFrame, QSizePolicy, QCheckBox,
     QAbstractItemView, QStackedWidget, QTextBrowser, QMessageBox,
-    QProgressBar,
+    QProgressBar, QDialog,
 )
 
 from app.views.base_view import BaseView
@@ -125,6 +125,29 @@ class _DetailWorker(QObject):
             except Exception:
                 kids = []
             self.finished.emit({"chain": chain, "synonyms": synonyms, "children": kids})
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+
+class _LoadMoreWorker(QObject):
+    """Fetch the next page of children for a taxon (load-more pagination).
+
+    Oracle: renderWormsChildrenTab app.js ~12599–12609.
+    """
+
+    finished = pyqtSignal(list)   # additional children
+    error    = pyqtSignal(str)
+
+    def __init__(self, service: WormsService, aphia_id: int, offset: int) -> None:
+        super().__init__()
+        self._svc      = service
+        self._aphia_id = aphia_id
+        self._offset   = offset
+
+    def run(self) -> None:
+        try:
+            kids = self._svc.children(self._aphia_id, offset=self._offset)
+            self.finished.emit(kids if isinstance(kids, list) else [])
         except Exception as exc:
             self.error.emit(str(exc))
 
@@ -342,8 +365,30 @@ def _build_overview_tab(rec: dict) -> QWidget:
     return c
 
 
-def _build_children_tab(children: list[dict], loading: bool) -> QWidget:
-    """worms-children-tab: list of child taxa."""
+def _build_children_tab(
+    children: list[dict],
+    loading: bool,
+    *,
+    has_more: bool = False,
+    on_child_click: Optional[Any] = None,
+    on_load_more: Optional[Any] = None,
+) -> QWidget:
+    """worms-children-tab: list of child taxa.
+
+    Parameters
+    ----------
+    children:
+        List of child AphiaRecord dicts.
+    loading:
+        True while the initial fetch is in progress.
+    has_more:
+        True when a "加载更多" button should be shown (≥50 children returned).
+        Oracle: renderWormsChildrenTab app.js ~12598.
+    on_child_click:
+        Optional callback(rec: dict) invoked when a child row is clicked.
+    on_load_more:
+        Optional callback() invoked when the "加载更多" button is clicked.
+    """
     c = QWidget()
     lay = QVBoxLayout(c)
     lay.setContentsMargins(2, 6, 2, 6)
@@ -356,6 +401,12 @@ def _build_children_tab(children: list[dict], loading: bool) -> QWidget:
     else:
         for child in children:
             row_w = QWidget()
+            row_w.setObjectName("WChildItem")
+            row_w.setCursor(Qt.CursorShape.PointingHandCursor)
+            row_w.setStyleSheet(
+                "QWidget#WChildItem:hover { background: rgba(41,185,171,0.06); "
+                "border-radius: 4px; }"
+            )
             row_lay = QHBoxLayout(row_w)
             row_lay.setContentsMargins(4, 3, 4, 3)
             row_lay.setSpacing(6)
@@ -364,6 +415,23 @@ def _build_children_tab(children: list[dict], loading: bool) -> QWidget:
                 row_lay.addWidget(_badge(child["rank"], "rank"))
             row_lay.addStretch()
             lay.addWidget(row_w)
+            if callable(on_child_click):
+                _child = child  # capture loop var
+                row_w.mousePressEvent = lambda _e, rec=_child: on_child_click(rec)  # type: ignore[method-assign]
+
+        # "加载更多" button — oracle: app.js renderWormsChildrenTab ~12598
+        if has_more and callable(on_load_more):
+            more_btn = QPushButton("加载更多…")
+            more_btn.setObjectName("WMoreBtn")
+            more_btn.setStyleSheet(
+                f"QPushButton#WMoreBtn {{ background:none; color:{_ACCENT};"
+                f"  border:1px solid rgba(41,185,171,0.30); border-radius:6px;"
+                f"  padding:5px 12px; font-size:12px; }}"
+                f"QPushButton#WMoreBtn:hover {{ background:rgba(41,185,171,0.08); }}"
+            )
+            more_btn.clicked.connect(on_load_more)
+            lay.addWidget(more_btn)
+
     lay.addStretch()
     return c
 
@@ -405,6 +473,10 @@ class _DetailPanel(QWidget):
     Shows empty placeholder until a taxon is selected, then shows the
     full detail view with classification chain + tabs (overview / children
     / synonyms) + worms-fill-btn.
+
+    Children pagination:  _children_offset / _children_has_more mirror
+    app.js state.worms.childrenOffset / childrenHasMore.
+    Oracle: renderWormsChildrenTab ~12598.
     """
 
     TAB_OVERVIEW  = "overview"
@@ -414,6 +486,8 @@ class _DetailPanel(QWidget):
 
     # Emitted when user clicks "填充到当前标本".
     fill_requested = pyqtSignal(dict)   # the selected WoRMS record
+    # Emitted when a child taxon row is clicked (to navigate).
+    child_selected = pyqtSignal(dict)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -430,6 +504,13 @@ class _DetailPanel(QWidget):
         self._children: list[dict] = []
         self._loading:  bool = False
 
+        # Children pagination state (oracle: app.js childrenOffset/childrenHasMore)
+        self._children_offset: int = 1
+        self._children_has_more: bool = False
+        self._service: Optional[WormsService] = None
+        self._load_more_thread: Optional[QThread] = None
+        self._load_more_worker: Optional["_LoadMoreWorker"] = None
+
         self._root = QVBoxLayout(self)
         self._root.setContentsMargins(16, 16, 16, 16)
         self._root.setSpacing(10)
@@ -438,6 +519,10 @@ class _DetailPanel(QWidget):
 
     # ── Public API ─────────────────────────────────────────────────────
 
+    def set_service(self, service: WormsService) -> None:
+        """Provide a WormsService instance for load-more pagination."""
+        self._service = service
+
     def show_empty(self) -> None:
         self._rec = None
         self._chain = []
@@ -445,6 +530,8 @@ class _DetailPanel(QWidget):
         self._children = []
         self._loading = False
         self._current_tab = self.TAB_OVERVIEW
+        self._children_offset = 1
+        self._children_has_more = False
         self._render()
 
     def show_loading(self, rec: dict) -> None:
@@ -454,6 +541,8 @@ class _DetailPanel(QWidget):
         self._children = []
         self._loading = True
         self._current_tab = self.TAB_OVERVIEW
+        self._children_offset = 1
+        self._children_has_more = False
         self._render()
 
     def show_detail(self, rec: dict, chain: list[dict],
@@ -463,6 +552,9 @@ class _DetailPanel(QWidget):
         self._synonyms = synonyms
         self._children = children
         self._loading  = False
+        # Detect has_more: ≥50 means there may be more (oracle: app.js ~12674)
+        self._children_has_more = len(children) >= 50
+        self._children_offset = 1
         self._render()
 
     def set_tab(self, tab: str) -> None:
@@ -474,6 +566,47 @@ class _DetailPanel(QWidget):
         # Re-render to pick up new label; only meaningful when detail is shown.
         if self._rec is not None:
             self._render()
+
+    # ── Children pagination ─────────────────────────────────────────
+
+    def _on_load_more_children(self) -> None:
+        """Fetch the next page of children.
+
+        Oracle: renderWormsChildrenTab "加载更多" button handler app.js ~12600.
+        Increments childrenOffset and fires _LoadMoreWorker on a background thread.
+        """
+        if self._rec is None or self._service is None:
+            return
+        if self._load_more_thread and self._load_more_thread.isRunning():
+            return
+
+        aphia_id = self._rec.get("AphiaID")
+        if not aphia_id:
+            return
+
+        self._children_offset += 1
+        worker = _LoadMoreWorker(self._service, int(aphia_id), self._children_offset)
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_load_more_done)
+        worker.error.connect(lambda _: None)   # silently ignore errors (oracle behaviour)
+        worker.finished.connect(thread.quit)
+        worker.error.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        self._load_more_worker = worker
+        self._load_more_thread = thread
+        thread.start()
+
+    def _on_load_more_done(self, more: list[dict]) -> None:
+        """Append fetched children and re-render the children tab."""
+        if more:
+            self._children = self._children + more
+            self._children_has_more = len(more) >= 50
+        else:
+            self._children_has_more = False
+        self._render()
 
     # ── Rendering ──────────────────────────────────────────────────────
 
@@ -597,7 +730,13 @@ class _DetailPanel(QWidget):
         if self._current_tab == self.TAB_OVERVIEW:
             content = _build_overview_tab(rec)
         elif self._current_tab == self.TAB_CHILDREN:
-            content = _build_children_tab(self._children, self._loading)
+            content = _build_children_tab(
+                self._children,
+                self._loading,
+                has_more=self._children_has_more,
+                on_child_click=self.child_selected.emit,
+                on_load_more=self._on_load_more_children,
+            )
         else:
             content = _build_synonyms_tab(self._synonyms, self._loading)
 
@@ -683,6 +822,8 @@ class WormsView(BaseView):
 
     def _setup_ui(self) -> None:
         self._service = self._init_service()
+        # NOTE: _detail_panel is created later in this method; set_service is
+        # called again in on_activate() to pick up any project change.
 
         # Outer layout: full-view, no margins
         outer = QVBoxLayout(self)
@@ -848,6 +989,8 @@ class WormsView(BaseView):
         # Right: detail panel
         self._detail_panel = _DetailPanel()
         self._detail_panel.fill_requested.connect(self._on_fill_to_specimen)
+        self._detail_panel.child_selected.connect(self._on_result_clicked)
+        self._detail_panel.set_service(self._service)
         right_container = QWidget()
         right_container.setStyleSheet("background:transparent;")
         right_lay = QVBoxLayout(right_container)
@@ -929,6 +1072,7 @@ class WormsView(BaseView):
 
     def on_activate(self) -> None:
         self._service = self._init_service()
+        self._detail_panel.set_service(self._service)
         self._refresh_jobs()
 
     # ── Search ─────────────────────────────────────────────────────────
@@ -1050,9 +1194,20 @@ class WormsView(BaseView):
     # ── Fill to specimen (worms-fill-btn) ──────────────────────────────
 
     def _on_fill_to_specimen(self, rec: dict) -> None:
-        """Apply WoRMS classification fields to the active specimen via ctx."""
+        """Apply WoRMS classification fields to the active specimen via ctx.
+
+        Field mapping mirrors wormsFillToSpecimen() in app.js ~11447:
+          class  → sp.taxonGroup
+          order  → sp.order
+          family → sp.family
+          scientificname (Species rank) → sp.scientificName
+          taxonomyConfirmed → False
+
+        Chinese fields (*Cn) are NEVER overwritten (hard invariant).
+        """
         ctx = self.ctx
-        # Resolve to accepted record if unaccepted
+
+        # Resolve unaccepted → accepted name
         r = rec
         if rec.get("status") == "unaccepted" and rec.get("valid_name"):
             r = dict(rec)
@@ -1069,7 +1224,30 @@ class WormsView(BaseView):
                 self._set_status(f"填充失败: {exc}")
                 return
 
-        # Fallback: inform the user that no specimen is active
+        # Fallback: apply directly to current_specimen if ctx exposes it
+        specimen_fn = getattr(ctx, "current_specimen", None)
+        sp = specimen_fn() if callable(specimen_fn) else None
+        if sp is not None and isinstance(sp, dict):
+            if r.get("class"):
+                sp["taxonGroup"] = r["class"]
+            if r.get("order"):
+                sp["order"] = r["order"]
+            if r.get("family"):
+                sp["family"] = r["family"]
+            if r.get("rank") == "Species" and r.get("scientificname"):
+                sp["scientificName"] = r["scientificname"]
+            sp["taxonomyConfirmed"] = False
+            # Persist via ctx if available
+            save_fn = getattr(ctx, "save_specimen", None)
+            if callable(save_fn):
+                try:
+                    save_fn(sp)
+                except Exception:
+                    pass
+            self._set_status(f"已从 WoRMS 填充分类信息: {r.get('scientificname', '')}")
+            return
+
+        # No active specimen
         self._set_status("（需先在工作区选择标本）")
 
     # ── Batch jobs ─────────────────────────────────────────────────────
@@ -1131,3 +1309,453 @@ class WormsView(BaseView):
 
     def _set_status(self, msg: str) -> None:
         self._status_lbl.setText(msg)
+
+
+# ── WormsMatchDialog ───────────────────────────────────────────────────────────
+
+class _MatchSearchWorker(QObject):
+    """Search WoRMS for a manual-match query from within WormsMatchDialog."""
+
+    finished = pyqtSignal(list)
+    error    = pyqtSignal(str)
+
+    def __init__(self, service: WormsService, name: str, like: bool) -> None:
+        super().__init__()
+        self._svc  = service
+        self._name = name
+        self._like = like
+
+    def run(self) -> None:
+        try:
+            self.finished.emit(self._svc.search(self._name, like=self._like))
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+
+class _MatchChainWorker(QObject):
+    """Fetch classification chain for the selected candidate in WormsMatchDialog."""
+
+    finished = pyqtSignal(list)   # flattened chain
+    error    = pyqtSignal(str)
+
+    def __init__(self, service: WormsService, aphia_id: int) -> None:
+        super().__init__()
+        self._svc      = service
+        self._aphia_id = aphia_id
+
+    def run(self) -> None:
+        try:
+            raw   = self._svc.classification(self._aphia_id)
+            chain = self._svc.flatten_classification(raw)
+            self.finished.emit(chain)
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+
+class WormsMatchDialog(QDialog):
+    """Manual WoRMS match dialog for taxonomy review rows.
+
+    Mirrors ``renderWormsMatchModal()`` + ``searchWormsForTaxonRow()`` +
+    ``selectWormsMatchCandidate()`` + ``saveWormsMatchCandidate()`` in
+    app.js lines ~11767–11811.
+
+    Usage::
+
+        dlg = WormsMatchDialog(service, row_record, parent=self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            aphia_id, chain = dlg.result_aphia_id, dlg.result_chain
+
+    Emits nothing — callers inspect ``result_aphia_id`` and ``result_chain``
+    after ``exec()``.  For "no match / skip", both are None.
+
+    Parameters
+    ----------
+    service:
+        WormsService instance for searches.
+    row:
+        The taxonomy row dict being matched.  Must contain at least
+        ``recordId`` and ``species`` (original name).
+    parent:
+        Parent widget for centering.
+    """
+
+    def __init__(
+        self,
+        service: WormsService,
+        row: dict,
+        *,
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self._svc  = service
+        self._row  = row
+
+        self.result_aphia_id: Optional[int] = None
+        self.result_chain:    list[dict]    = []
+
+        self._results:        list[dict]  = []
+        self._selected_rec:   Optional[dict] = None
+        self._chain:          list[dict]  = []
+        self._loading:        bool = False
+        self._chain_loading:  bool = False
+        self._error:          str  = ""
+
+        self._search_thread: Optional[QThread] = None
+        self._chain_thread:  Optional[QThread] = None
+
+        self.setWindowTitle("WoRMS 匹配物种")
+        self.setMinimumSize(680, 480)
+        self.setModal(True)
+        self.setStyleSheet(
+            f"QDialog {{ background:{_BG}; color:{_TEXT}; }}"
+            f"QLabel {{ color:{_TEXT}; background:transparent; }}"
+        )
+        self._build_ui()
+
+        # Auto-search with the original species name
+        initial = row.get("species", "")
+        if initial:
+            self._search_input.setText(initial)
+            self._on_search()
+
+    # ── UI ─────────────────────────────────────────────────────────────────
+
+    def _build_ui(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(20, 16, 20, 16)
+        root.setSpacing(10)
+
+        root.addWidget(_label("WoRMS 匹配物种", size=15, bold=True))
+
+        original = self._row.get("species", "")
+        if original:
+            orig_lbl = _label(f"原始种名：{original}", color=_MUTED, size=12)
+            root.addWidget(orig_lbl)
+
+        # Search bar
+        bar = QHBoxLayout()
+        bar.setSpacing(8)
+
+        self._search_input = QLineEdit()
+        self._search_input.setObjectName("WMSearchInput")
+        self._search_input.setPlaceholderText("输入科学名")
+        self._search_input.setStyleSheet(
+            f"QLineEdit#WMSearchInput {{ background:{_PANEL}; border:1px solid {_BORDER};"
+            f"  border-radius:6px; padding:7px 10px; color:{_TEXT}; font-size:13px;"
+            f"  font-family:{_MONO}; }}"
+            f"QLineEdit#WMSearchInput:focus {{ border-color:{_ACCENT}; }}"
+        )
+        self._search_input.returnPressed.connect(self._on_search)
+        bar.addWidget(self._search_input, stretch=1)
+
+        self._like_cb = QCheckBox("模糊匹配")
+        self._like_cb.setStyleSheet(
+            f"QCheckBox {{ color:{_MUTED}; font-size:12px; spacing:5px; }}"
+        )
+        bar.addWidget(self._like_cb)
+
+        search_btn = QPushButton("搜索")
+        search_btn.setObjectName("WMSearchBtn")
+        search_btn.setStyleSheet(
+            f"QPushButton#WMSearchBtn {{ background:{_ACCENT}; color:{_BG};"
+            f"  border:none; border-radius:6px; padding:7px 16px; font-size:12px; font-weight:600; }}"
+            f"QPushButton#WMSearchBtn:hover {{ background:{_ACCENT_H}; }}"
+        )
+        search_btn.clicked.connect(self._on_search)
+        bar.addWidget(search_btn)
+        root.addLayout(bar)
+
+        # Error label
+        self._error_lbl = _label("", color=_DANGER, size=11)
+        self._error_lbl.setVisible(False)
+        root.addWidget(self._error_lbl)
+
+        # Body: results list | chain preview
+        body = QHBoxLayout()
+        body.setSpacing(12)
+
+        # Results list
+        results_w = QWidget()
+        results_w.setObjectName("WMResultsPanel")
+        results_w.setStyleSheet(
+            f"QWidget#WMResultsPanel {{ background:{_PANEL}; border:1px solid {_BORDER};"
+            f"  border-radius:6px; }}"
+        )
+        results_lay = QVBoxLayout(results_w)
+        results_lay.setContentsMargins(6, 6, 6, 6)
+        results_lay.setSpacing(4)
+
+        self._results_scroll = QScrollArea()
+        self._results_scroll.setWidgetResizable(True)
+        self._results_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._results_scroll.setStyleSheet("QScrollArea { background: transparent; }")
+
+        self._results_container = QWidget()
+        self._results_container.setStyleSheet("background:transparent;")
+        self._results_layout = QVBoxLayout(self._results_container)
+        self._results_layout.setContentsMargins(0, 0, 0, 0)
+        self._results_layout.setSpacing(3)
+        self._results_layout.addStretch()
+
+        self._results_scroll.setWidget(self._results_container)
+        results_lay.addWidget(self._results_scroll)
+        body.addWidget(results_w, stretch=3)
+
+        # Chain preview
+        detail_w = QWidget()
+        detail_w.setObjectName("WMDetailPanel")
+        detail_w.setStyleSheet(
+            f"QWidget#WMDetailPanel {{ background:{_PANEL_2}; border:1px solid {_BORDER};"
+            f"  border-radius:6px; }}"
+        )
+        detail_lay = QVBoxLayout(detail_w)
+        detail_lay.setContentsMargins(10, 10, 10, 10)
+        detail_lay.setSpacing(4)
+
+        self._chain_scroll = QScrollArea()
+        self._chain_scroll.setWidgetResizable(True)
+        self._chain_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._chain_scroll.setStyleSheet("QScrollArea { background: transparent; }")
+        self._chain_content = QWidget()
+        self._chain_content.setStyleSheet("background:transparent;")
+        self._chain_layout = QVBoxLayout(self._chain_content)
+        self._chain_layout.setContentsMargins(0, 0, 0, 0)
+        self._chain_layout.setSpacing(2)
+        self._chain_layout.addWidget(
+            _label("选择候选后预览标准分类阶元", color=_MUTED_2, size=12)
+        )
+        self._chain_scroll.setWidget(self._chain_content)
+        detail_lay.addWidget(self._chain_scroll)
+        body.addWidget(detail_w, stretch=2)
+
+        root.addLayout(body, stretch=1)
+
+        # Action buttons
+        actions = QHBoxLayout()
+        actions.setSpacing(8)
+        actions.addStretch()
+
+        self._save_btn = QPushButton("采用并保存")
+        self._save_btn.setObjectName("WMSaveBtn")
+        self._save_btn.setEnabled(False)
+        self._save_btn.setStyleSheet(
+            f"QPushButton#WMSaveBtn {{ background:{_ACCENT}; color:{_BG};"
+            f"  border:none; border-radius:6px; padding:8px 18px; font-size:12px; font-weight:600; }}"
+            f"QPushButton#WMSaveBtn:disabled {{ background:#10242a; color:{_MUTED_2}; }}"
+            f"QPushButton#WMSaveBtn:hover:enabled {{ background:{_ACCENT_H}; }}"
+        )
+        self._save_btn.clicked.connect(self._on_save)
+        actions.addWidget(self._save_btn)
+
+        cancel_btn = QPushButton("取消")
+        cancel_btn.setObjectName("WMCancelBtn")
+        cancel_btn.setStyleSheet(
+            f"QPushButton#WMCancelBtn {{ background:{_PANEL}; color:{_MUTED};"
+            f"  border:1px solid {_BORDER}; border-radius:6px; padding:8px 16px; font-size:12px; }}"
+            f"QPushButton#WMCancelBtn:hover {{ color:{_TEXT}; }}"
+        )
+        cancel_btn.clicked.connect(self.reject)
+        actions.addWidget(cancel_btn)
+        root.addLayout(actions)
+
+    # ── Search (mirrors searchWormsForTaxonRow app.js ~11777) ───────────────
+
+    def _on_search(self) -> None:
+        name = self._search_input.text().strip()
+        if not name:
+            return
+        if self._search_thread and self._search_thread.isRunning():
+            return
+
+        self._loading = True
+        self._error = ""
+        self._results = []
+        self._selected_rec = None
+        self._chain = []
+        self._save_btn.setEnabled(False)
+        self._error_lbl.setVisible(False)
+        self._update_results_list()
+        self._update_chain_view()
+
+        like = self._like_cb.isChecked()
+        worker = _MatchSearchWorker(self._svc, name, like)
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_search_done)
+        worker.error.connect(self._on_search_error)
+        worker.finished.connect(thread.quit)
+        worker.error.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        self._search_thread = thread
+        thread.start()
+
+    def _on_search_done(self, results: list[dict]) -> None:
+        self._loading = False
+        self._results = results
+        self._update_results_list()
+
+    def _on_search_error(self, msg: str) -> None:
+        self._loading = False
+        self._error = f"搜索失败：{msg}"
+        self._error_lbl.setText(self._error)
+        self._error_lbl.setVisible(True)
+        self._update_results_list()
+
+    # ── Candidate selection (mirrors selectWormsMatchCandidate ~11791) ──────
+
+    def _on_candidate_clicked(self, rec: dict) -> None:
+        self._selected_rec = rec
+        aphia_id = rec.get("valid_AphiaID") or rec.get("AphiaID")
+        if not aphia_id:
+            return
+
+        self._chain_loading = True
+        self._chain = []
+        self._save_btn.setEnabled(False)
+        self._update_results_list()   # re-highlight selected
+        self._update_chain_view()
+
+        worker = _MatchChainWorker(self._svc, int(aphia_id))
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_chain_done)
+        worker.error.connect(lambda _: self._on_chain_done([]))
+        worker.finished.connect(thread.quit)
+        worker.error.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        self._chain_thread = thread
+        thread.start()
+
+    def _on_chain_done(self, chain: list[dict]) -> None:
+        self._chain = chain
+        self._chain_loading = False
+        self._save_btn.setEnabled(self._selected_rec is not None)
+        self._update_chain_view()
+
+    # ── Save (mirrors saveWormsMatchCandidate ~11806) ───────────────────────
+
+    def _on_save(self) -> None:
+        if not self._selected_rec:
+            return
+        self.result_aphia_id = int(
+            self._selected_rec.get("valid_AphiaID") or self._selected_rec.get("AphiaID") or 0
+        )
+        self.result_chain = self._chain
+        self.accept()
+
+    # ── UI helpers ──────────────────────────────────────────────────────────
+
+    def _update_results_list(self) -> None:
+        # Clear old widgets
+        to_remove = []
+        for i in range(self._results_layout.count()):
+            item = self._results_layout.itemAt(i)
+            if item and item.widget():
+                to_remove.append(item.widget())
+        for w in to_remove:
+            self._results_layout.removeWidget(w)
+            w.deleteLater()
+
+        if self._loading:
+            self._results_layout.addWidget(
+                _label("正在查询 WoRMS…", color=_MUTED, size=12)
+            )
+        elif not self._results:
+            msg = "未找到候选，请修改关键词或启用模糊匹配。" if not self._loading else ""
+            self._results_layout.addWidget(_label(msg, color=_MUTED, size=12))
+        else:
+            selected_id = (
+                (self._selected_rec.get("valid_AphiaID") or self._selected_rec.get("AphiaID"))
+                if self._selected_rec
+                else None
+            )
+            for rec in self._results:
+                rec_id = rec.get("valid_AphiaID") or rec.get("AphiaID")
+                is_sel = rec_id == selected_id
+
+                btn_w = QWidget()
+                btn_w.setObjectName("WMCandBtn")
+                btn_w.setCursor(Qt.CursorShape.PointingHandCursor)
+                bg = "rgba(41,185,171,0.12)" if is_sel else "transparent"
+                border = _ACCENT if is_sel else "transparent"
+                btn_w.setStyleSheet(
+                    f"QWidget#WMCandBtn {{ background:{bg}; border:1px solid {border};"
+                    f"  border-radius:6px; }}"
+                    f"QWidget#WMCandBtn:hover {{ background:rgba(41,185,171,0.08); }}"
+                )
+                row_lay = QVBoxLayout(btn_w)
+                row_lay.setContentsMargins(8, 6, 8, 6)
+                row_lay.setSpacing(2)
+
+                name_row = QHBoxLayout()
+                name_row.setSpacing(6)
+                name = rec.get("valid_name") or rec.get("scientificname") or ""
+                name_row.addWidget(_label(name, bold=True, font=_MONO, size=12))
+                name_row.addStretch()
+                status = (rec.get("status") or "").lower()
+                name_row.addWidget(_badge(
+                    status,
+                    "accepted" if status == "accepted" else "unaccepted"
+                ))
+                row_lay.addLayout(name_row)
+
+                detail_txt = (
+                    (status or "")
+                    + f"  ·  AphiaID {rec_id}"
+                )
+                row_lay.addWidget(_label(detail_txt, color=_MUTED_2, size=11))
+
+                bc = " > ".join(
+                    p for p in [rec.get("class"), rec.get("order"), rec.get("family")]
+                    if p
+                )
+                if bc:
+                    row_lay.addWidget(_label(bc, color=_MUTED_2, size=11))
+
+                _rec = rec  # capture
+                btn_w.mousePressEvent = lambda _e, r=_rec: self._on_candidate_clicked(r)  # type: ignore[method-assign]
+                self._results_layout.addWidget(btn_w)
+
+        self._results_layout.addStretch()
+
+    def _update_chain_view(self) -> None:
+        # Clear old widgets
+        to_remove = []
+        for i in range(self._chain_layout.count()):
+            item = self._chain_layout.itemAt(i)
+            if item and item.widget():
+                to_remove.append(item.widget())
+        for w in to_remove:
+            self._chain_layout.removeWidget(w)
+            w.deleteLater()
+
+        if self._chain_loading:
+            self._chain_layout.addWidget(
+                _label("加载分类链…", color=_MUTED, size=12)
+            )
+        elif self._selected_rec and self._chain:
+            self._chain_layout.addWidget(
+                _label("采用后保存的 WoRMS 分类链", bold=True, size=12, color=_MUTED)
+            )
+            for node in self._chain:
+                row_w = QWidget()
+                row_lay = QHBoxLayout(row_w)
+                row_lay.setContentsMargins(4, 1, 4, 1)
+                row_lay.setSpacing(8)
+                rank_lbl = _label(node.get("rank", ""), color=_MUTED_2, size=11)
+                rank_lbl.setFixedWidth(72)
+                row_lay.addWidget(rank_lbl)
+                row_lay.addWidget(
+                    _label(node.get("scientificname", ""), font=_MONO, size=11)
+                )
+                row_lay.addStretch()
+                self._chain_layout.addWidget(row_w)
+        else:
+            self._chain_layout.addWidget(
+                _label("选择候选后预览标准分类阶元", color=_MUTED_2, size=12)
+            )
+        self._chain_layout.addStretch()

@@ -483,3 +483,243 @@ class TestWormsViewOffscreen:
         ctx.current_project_dir = str(tmp_path)
         view = WormsView(ctx)
         view.on_activate()   # should not raise
+
+    def test_detail_panel_service_is_set(self, qt_app, tmp_path):
+        """_DetailPanel.set_service should store the reference."""
+        from app.views.worms_view import WormsView
+
+        ctx = MagicMock()
+        ctx.current_project_dir = str(tmp_path)
+        view = WormsView(ctx)
+        assert view._detail_panel._service is not None
+
+    def test_worms_match_dialog_constructs(self, qt_app, tmp_path):
+        """WormsMatchDialog should construct without raising.
+
+        Uses an empty species so no auto-search thread is launched during init.
+        """
+        from app.views.worms_view import WormsMatchDialog
+
+        svc = _make_service(str(tmp_path))
+        # Empty species → no auto-search fired (oracle: __init__ guard `if initial:`)
+        row = {"recordId": "r1", "species": ""}
+        dlg = WormsMatchDialog(svc, row)
+        assert dlg._row is row
+        assert dlg.result_aphia_id is None
+        assert dlg._results == []
+
+
+# ── Family-genera (new) ───────────────────────────────────────────────────────
+
+class TestFamilyGenera:
+    """WormsService.family_genera() — cache hit, live fetch, empty validation."""
+
+    def test_family_genera_empty_raises(self, tmp_path):
+        svc = _make_service(str(tmp_path))
+        with pytest.raises(ValueError):
+            svc.family_genera("")
+
+    def test_family_genera_cached(self, tmp_path):
+        svc = _make_service(str(tmp_path))
+        fake_genera = [{"AphiaID": 1, "scientificname": "Acanthurus", "class": "Act", "order": "Per", "family": "Acan"}]
+        cache_data = {
+            "acanthuridae": {
+                "aphiaId": 999,
+                "family": "Acanthuridae",
+                "genera": fake_genera,
+                "fetched_at": _iso_ago(60),   # 1 min old ≪ 30d TTL
+            }
+        }
+        import json
+        with open(svc._family_cache_path, "w", encoding="utf-8") as fh:
+            json.dump(cache_data, fh)
+
+        with patch("httpx.get") as mock_get:
+            result = svc.family_genera("Acanthuridae")
+            mock_get.assert_not_called()
+
+        assert result == fake_genera
+
+    def test_family_genera_live_fetch(self, tmp_path):
+        svc = _make_service(str(tmp_path))
+
+        # _lookup_accepted returns a family record
+        family_rec = {"AphiaID": 999, "rank": "Family", "status": "accepted", "scientificname": "Acanthuridae"}
+        # _paginate_children returns two genera, then empty page
+        genus_page = [
+            {"AphiaID": 1, "rank": "Genus", "status": "accepted", "scientificname": "Acanthurus",
+             "class": "Actinopterygii", "order": "Perciformes", "family": "Acanthuridae"},
+        ]
+
+        call_count = {"n": 0}
+        def fake_get(url, **kw):
+            call_count["n"] += 1
+            m = MagicMock()
+            m.status_code = 200
+            if "AphiaRecordsByName" in url:
+                m.json.return_value = [family_rec]
+            else:
+                # children endpoint — return one page then empty
+                if call_count["n"] <= 2:
+                    m.json.return_value = genus_page
+                else:
+                    m.json.return_value = []
+            return m
+
+        with patch("httpx.get", side_effect=fake_get):
+            result = svc.family_genera("Acanthuridae")
+
+        assert isinstance(result, list)
+        assert result[0]["scientificname"] == "Acanthurus"
+
+    def test_family_genera_not_found_raises(self, tmp_path):
+        svc = _make_service(str(tmp_path))
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = []   # no accepted family match
+
+        with patch("httpx.get", return_value=mock_resp):
+            with pytest.raises(LookupError, match="not found"):
+                svc.family_genera("NoSuchFamily")
+
+
+# ── Genus-species (new) ───────────────────────────────────────────────────────
+
+class TestGenusSpecies:
+    """WormsService.genus_species() — empty validation, cached, not-found."""
+
+    def test_genus_species_empty_raises(self, tmp_path):
+        svc = _make_service(str(tmp_path))
+        with pytest.raises(ValueError):
+            svc.genus_species("")
+
+    def test_genus_species_cached(self, tmp_path):
+        svc = _make_service(str(tmp_path))
+        fake_species = [{"AphiaID": 2, "scientificname": "Acanthurus olivaceus",
+                         "class": "A", "order": "B", "family": "C", "genus": "Acanthurus"}]
+        import json
+        with open(svc._genus_cache_path, "w", encoding="utf-8") as fh:
+            json.dump({"acanthurus": {"aphiaId": 100, "genus": "Acanthurus",
+                                      "species": fake_species, "fetched_at": _iso_ago(60)}}, fh)
+
+        with patch("httpx.get") as mock_get:
+            result = svc.genus_species("Acanthurus")
+            mock_get.assert_not_called()
+
+        assert result == fake_species
+
+    def test_genus_species_not_found_raises(self, tmp_path):
+        svc = _make_service(str(tmp_path))
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = []
+
+        with patch("httpx.get", return_value=mock_resp):
+            with pytest.raises(LookupError, match="not found"):
+                svc.genus_species("NoSuchGenus")
+
+
+# ── load_taxonomy_candidates (new) ───────────────────────────────────────────
+
+class TestLoadTaxonomyCandidates:
+    """WormsService.load_taxonomy_candidates() reads worms_taxonomy.json."""
+
+    def _write_taxonomy(self, path: str, mappings: dict) -> None:
+        import json
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"mappings": mappings}, fh, ensure_ascii=False)
+
+    def test_returns_empty_when_no_file(self, tmp_path):
+        svc = _make_service(str(tmp_path))
+        result = svc.load_taxonomy_candidates()
+        assert result == []
+
+    def test_returns_matched_and_renamed(self, tmp_path):
+        svc = _make_service(str(tmp_path))
+        self._write_taxonomy(svc._taxonomy_path, {
+            "r1": {
+                "status": "matched",
+                "worms": {"AphiaID": 1, "scientificname": "Foo bar", "class": "C", "order": "O", "family": "F", "genus": "Foo"},
+                "original": {"genusCn": "甲科"},
+            },
+            "r2": {
+                "status": "review",     # should be excluded
+                "worms": {"AphiaID": 2, "scientificname": "Baz qux"},
+            },
+            "r3": {
+                "status": "renamed",
+                "worms": {"AphiaID": 3, "scientificname": "Bar baz", "class": "C2"},
+                "original": {},
+            },
+        })
+        result = svc.load_taxonomy_candidates()
+        ids = {r["aphiaId"] for r in result}
+        assert 1 in ids     # matched included
+        assert 3 in ids     # renamed included
+        assert 2 not in ids  # review excluded
+
+    def test_chinese_field_genusCn_preserved(self, tmp_path):
+        svc = _make_service(str(tmp_path))
+        self._write_taxonomy(svc._taxonomy_path, {
+            "r1": {
+                "status": "matched",
+                "worms": {"AphiaID": 10, "scientificname": "A b", "genus": "A"},
+                "original": {"genusCn": "甲属"},
+            },
+        })
+        result = svc.load_taxonomy_candidates()
+        assert result[0]["genusCn"] == "甲属"
+
+
+# ── resolve_mapping (new) ─────────────────────────────────────────────────────
+
+class TestResolveMapping:
+    """WormsService.resolve_mapping() — no_match, valid match, validation."""
+
+    def test_empty_record_id_raises(self, tmp_path):
+        svc = _make_service(str(tmp_path))
+        with pytest.raises(ValueError, match="record_id"):
+            svc.resolve_mapping("", aphia_id=123)
+
+    def test_no_match_writes_not_found(self, tmp_path):
+        svc = _make_service(str(tmp_path))
+        status = svc.resolve_mapping("r1", aphia_id=None, no_match=True, reviewed_by="tester")
+        assert status == "not_found"
+        import json
+        with open(svc._taxonomy_path, encoding="utf-8") as fh:
+            store = json.load(fh)
+        assert store["mappings"]["r1"]["status"] == "not_found"
+        assert store["mappings"]["r1"]["reviewedBy"] == "tester"
+
+    def test_zero_aphia_id_without_no_match_raises(self, tmp_path):
+        svc = _make_service(str(tmp_path))
+        with pytest.raises(ValueError, match="aphia_id"):
+            svc.resolve_mapping("r1", aphia_id=0)
+
+    def test_resolve_with_pre_fetched_record(self, tmp_path):
+        svc = _make_service(str(tmp_path))
+        worms_rec = {
+            "AphiaID": 100,
+            "valid_AphiaID": 100,
+            "scientificname": "Acanthurus olivaceus",
+            "valid_name": "Acanthurus olivaceus",
+            "status": "accepted",
+            "rank": "Species",
+        }
+        chain = [{"rank": "Species", "scientificname": "Acanthurus olivaceus", "AphiaID": 100}]
+
+        with patch("httpx.get") as mock_get:
+            status = svc.resolve_mapping(
+                "r1", aphia_id=100,
+                worms_record=worms_rec,
+                chain=chain,
+                reviewed_by="op",
+            )
+            mock_get.assert_not_called()
+
+        assert status in ("matched", "renamed")
+        import json
+        with open(svc._taxonomy_path, encoding="utf-8") as fh:
+            store = json.load(fh)
+        assert store["mappings"]["r1"]["worms"]["AphiaID"] == 100
+        assert store["mappings"]["r1"]["chain"] == chain
