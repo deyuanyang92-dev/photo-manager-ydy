@@ -25,7 +25,7 @@ import math
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QColor, QPainter, QPen
 from PyQt6.QtWidgets import (
     QFormLayout,
@@ -215,6 +215,17 @@ class MetadataPanel(QWidget):
         self._geo_area = _field("地理区域", "geo_area", attr="geo_area")
         self._lon = _field("经度 (DD)", "e.g. 120.1234", attr="lon")
         self._lat = _field("纬度 (DD)", "e.g. 25.6789", attr="lat")
+
+        # Reverse-geocode button  #cursor metaReverseGeocode
+        _grw = QHBoxLayout()
+        self._geocode_btn = QPushButton("📍 经纬度 → 采集地名")
+        self._geocode_btn.setObjectName("Ghost")
+        self._geocode_btn.setFixedHeight(26)
+        self._geocode_btn.setToolTip("Nominatim 反查采集地名，填入「地理区域」字段")
+        self._geocode_btn.clicked.connect(self._on_reverse_geocode)
+        _grw.addWidget(self._geocode_btn)
+        _grw.addStretch()
+        form.addRow(_grw)
 
         # ── Storage ──────────────────────────────────────────────────────────
         form.addRow(_section_label("保存"))
@@ -412,6 +423,47 @@ class MetadataPanel(QWidget):
             self._genus, self._scientific_name,
         ]
 
+    def _on_reverse_geocode(self) -> None:
+        """Reverse-geocode lon/lat via Nominatim and fill geo_area.
+
+        Mirrors web metaReverseGeocode() app.js:13655.  #cursor
+        """
+        lon_str = self._lon.text().strip()
+        lat_str = self._lat.text().strip()
+        try:
+            lon = float(lon_str)
+            lat = float(lat_str)
+        except ValueError:
+            from app.utils.ui import warn
+            warn(self, "反查地名", "请先填写有效的经纬度（十进制度数）。")
+            return
+        existing = self._geo_area.text().strip()
+        if existing:
+            from app.utils.ui import question
+            from PyQt6.QtWidgets import QMessageBox
+            reply = question(self, "地名已有", "地理区域字段已有内容，是否覆盖？")
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+        self._geocode_btn.setEnabled(False)
+        self._geocode_btn.setText("查询中…")
+        self._geocode_worker = _NominatimWorker(lat, lon)
+        self._geocode_worker.result_ready.connect(self._on_geocode_result)
+        self._geocode_worker.error_occurred.connect(self._on_geocode_error)
+        self._geocode_worker.start()
+
+    def _on_geocode_result(self, name: str) -> None:
+        self._geocode_btn.setEnabled(True)
+        self._geocode_btn.setText("📍 经纬度 → 采集地名")
+        if name:
+            self._geo_area.setText(name)
+            self._on_field_edited("geo_area", name)
+
+    def _on_geocode_error(self, msg: str) -> None:
+        self._geocode_btn.setEnabled(True)
+        self._geocode_btn.setText("📍 经纬度 → 采集地名")
+        from app.utils.ui import warn
+        warn(self, "反查地名失败", f"Nominatim 查询失败：{msg}")
+
     def _on_field_edited(self, field: str, value: str) -> None:
         self._dirty = True
         self._save_btn.setEnabled(True)
@@ -509,6 +561,67 @@ class MetadataPanel(QWidget):
             self._dirty = False
             self._save_btn.setEnabled(False)
             self.save_requested.emit(self._uid)
+
+
+# ── Nominatim reverse-geocode worker  #cursor metaReverseGeocode ─────────────
+
+
+class _NominatimWorker(QThread):
+    """Background thread calling Nominatim reverse-geocode.
+
+    Oracle: app.js metaReverseGeocode() app.js:13655.
+    """
+
+    result_ready = pyqtSignal(str)
+    error_occurred = pyqtSignal(str)
+
+    def __init__(self, lat: float, lon: float, parent=None) -> None:
+        super().__init__(parent)
+        self._lat = lat
+        self._lon = lon
+
+    def run(self) -> None:
+        import json as _json
+        import urllib.request
+        url = (
+            f"https://nominatim.openstreetmap.org/reverse"
+            f"?format=json&zoom=18&accept-language=zh-CN"
+            f"&lat={self._lat}&lon={self._lon}"
+        )
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": "photo-workbench-qt/1.0 (research use)"},
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = _json.loads(resp.read().decode())
+            name = _nominatim_to_zh(data)
+            if name:
+                self.result_ready.emit(name)
+            else:
+                self.error_occurred.emit("Nominatim 未返回有效地名")
+        except Exception as exc:
+            self.error_occurred.emit(str(exc))
+
+
+def _nominatim_to_zh(data: dict) -> str:
+    """Extract a Chinese place-name from a Nominatim reverse result."""
+    if not isinstance(data, dict):
+        return ""
+    display = data.get("display_name", "")
+    if display:
+        parts = [p.strip() for p in display.split(",") if p.strip()]
+        if len(parts) > 4:
+            parts = parts[:4]
+        return ", ".join(parts[::-1]) if parts else display
+    addr = data.get("address", {})
+    for key in ("village", "town", "city_district", "suburb", "city",
+                "county", "state_district", "state"):
+        val = addr.get(key, "")
+        if val:
+            state = addr.get("state", "")
+            return f"{state} {val}".strip() if state else val
+    return ""
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
