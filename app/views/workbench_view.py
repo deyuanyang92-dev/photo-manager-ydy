@@ -12,22 +12,25 @@ The view wires up all inter-widget signals and drives the service layer:
   - on_activate(): scans the project via monitor_service and loads the
     last-active specimen.
   - Selecting a specimen: loads its grouping + metadata.
-  - Compose / organise / undo signals: placeholder stubs — real
-    helicon_service / archive_service integration deferred to the
-    caller's wiring pass (see CLAUDE.md constraint: only build listed files).
+  - Activate/deactivate: activation_service (mutual exclusion + event log).
+  - Compose: helicon_service (QProcess + QProgressDialog; graceful no-Helicon).
+  - Organise: organize_service gate + archive_service.archive_group.
 
 Oracle: docs/modules/workbench.md, monitor.md; web app.js workspace render.
 """
 from __future__ import annotations
 
+import os
 import sqlite3
 from pathlib import Path
 from typing import Optional
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
+    QInputDialog,
     QLabel,
     QMessageBox,
+    QProgressDialog,
     QSplitter,
     QVBoxLayout,
     QWidget,
@@ -68,6 +71,8 @@ class WorkbenchView(BaseView):
         self._sidebar = SpecimenSidebar(self.ctx)
         self._sidebar.setMinimumWidth(160)
         self._sidebar.specimen_selected.connect(self._on_specimen_selected)
+        self._sidebar.activate_requested.connect(self._on_sidebar_activate)
+        self._sidebar.deactivate_requested.connect(self._on_sidebar_deactivate)
         outer.addWidget(self._sidebar)
 
         # ── Centre: vertical splitter (monitor top, grouping bottom) ───────
@@ -192,7 +197,12 @@ class WorkbenchView(BaseView):
     # ── Monitor ───────────────────────────────────────────────────────────────
 
     def _refresh_monitor(self) -> None:
-        """Re-scan the project directory and repopulate the monitor panel."""
+        """Re-scan the project directory and repopulate the monitor panel.
+
+        Builds a full AttributionCtx by merging:
+          - activation/manual-assign events from activation_service.read_activations
+          - explicit_unassigns + path_to_uid from grouping_service
+        """
         project_dir = self.ctx.current_project_dir
         if not project_dir:
             self._monitor.clear()
@@ -204,22 +214,36 @@ class WorkbenchView(BaseView):
             return
 
         try:
-            from app.services.monitor_service import (
-                AttributionCtx,
-                scan_project,
+            from app.services.monitor_service import scan_project
+            from app.services.grouping_service import (
+                get_explicit_unassigns,
+                load_grouping,
             )
-            from app.services.grouping_service import get_explicit_unassigns
+            from app.services.activation_service import read_activations
 
-            # Build minimal attribution context (no activation events here;
-            # full activation wiring is done when the caller integrates
-            # specimen-log reading — see NOTES.md and workbench.md)
-            explicit_unassigns = set()
+            # Base ctx from activation log (activations + assign_to_uid)
+            attr = read_activations(project_dir)
+
+            # Merge explicit_unassigns from grouping table (P0 blacklist)
             try:
-                explicit_unassigns = get_explicit_unassigns(db)
+                attr.explicit_unassigns = get_explicit_unassigns(db)
             except Exception:
                 pass
 
-            attr = AttributionCtx(explicit_unassigns=explicit_unassigns)
+            # Merge grouping path_to_uid (P1): all confirmed groups
+            try:
+                rows = db.execute(
+                    "SELECT uid, jpg_paths FROM grouping"
+                ).fetchall()
+                import json as _json
+                for row in rows:
+                    uid = row[0]
+                    paths = _json.loads(row[1] or "[]")
+                    for p in paths:
+                        resolved = str(Path(p).resolve())
+                        attr.path_to_uid[resolved] = uid
+            except Exception:
+                pass
 
             result = scan_project(project_dir, db, attr=attr)
             self._monitor.load_scan(result)
@@ -228,12 +252,79 @@ class WorkbenchView(BaseView):
         except Exception:
             self._monitor.clear()
 
+    def _on_sidebar_activate(self, uid: str) -> None:
+        """Activate *uid* via activation_service and refresh the sidebar + monitor.
+
+        Oracle: server.js:3844-3888 POST /api/specimen-log/activate.
+        """
+        project_dir = self.ctx.current_project_dir
+        db = self.ctx.get_db()
+        if not project_dir or not db or not uid:
+            return
+        try:
+            from app.services.activation_service import activate as svc_activate
+            svc_activate(project_dir, db, uid)
+            self._sidebar.refresh()
+            self._refresh_monitor()
+            # Select and load the newly activated specimen
+            self._sidebar.select_uid(uid)
+            self._load_specimen(uid)
+        except Exception as exc:
+            QMessageBox.warning(self, "激活失败", str(exc))
+
+    def _on_sidebar_deactivate(self, uid: str) -> None:
+        """Deactivate *uid* via activation_service and refresh.
+
+        Oracle: server.js:3857-3861 (active=false path).
+        """
+        project_dir = self.ctx.current_project_dir
+        db = self.ctx.get_db()
+        if not project_dir or not db or not uid:
+            return
+        try:
+            from app.services.activation_service import deactivate as svc_deactivate
+            svc_deactivate(project_dir, db, uid)
+            self._sidebar.refresh()
+            self._refresh_monitor()
+        except Exception as exc:
+            QMessageBox.warning(self, "去激活失败", str(exc))
+
     def _on_assign_jpg(self, path: str) -> None:
-        """Manual attribution: wire to grouping_service / monitor log when caller integrates."""
-        # Stub — emits a signal; full integration needs specimen-log write
-        # (server.js POST /api/specimen-log/assign equivalent).
-        # Called when user presses "归属" on a JPG card.
-        pass
+        """Manual attribution: assign *path* to the currently active specimen.
+
+        Writes a manual-assign event so the attribution P2 table picks it up.
+        If no specimen is active, show an informational message.
+
+        Oracle: server.js:3891-3913 POST /api/specimen-log/assign.
+        """
+        project_dir = self.ctx.current_project_dir
+        db = self.ctx.get_db()
+        if not project_dir or not db or not path:
+            return
+
+        # Determine active specimen
+        try:
+            from app.services.activation_service import (
+                get_active_uid,
+                manual_assign,
+            )
+            active_uid = get_active_uid(db)
+        except Exception:
+            active_uid = None
+
+        if not active_uid:
+            QMessageBox.information(
+                self,
+                "手动归属",
+                "请先激活一个标本，再手动归属 JPG。",
+            )
+            return
+
+        try:
+            manual_assign(project_dir, active_uid, [path])
+            self._refresh_monitor()
+        except Exception as exc:
+            QMessageBox.warning(self, "手动归属失败", str(exc))
 
     def _on_unassign_jpg(self, path: str) -> None:
         """Explicit unassign: adds path to the P0 blacklist."""
@@ -250,13 +341,211 @@ class WorkbenchView(BaseView):
     # ── Grouping ──────────────────────────────────────────────────────────────
 
     def _on_compose_requested(self, uid: str, group_index: int) -> None:
-        """Stub — caller wires helicon_service.compose_group() here."""
-        # Oracle: workbench.md groupingComposeSelected → helicon.js stackSingle
-        pass
+        """Compose the JPGs in the specified group via Helicon Focus CLI.
+
+        Steps:
+          1. Detect Helicon .exe (graceful failure if not found).
+          2. Build output TIFF path using organize_service sequence.
+          3. Call helicon_service.stack_single_subprocess with progress dialog.
+          4. Update grouping DB with composedTiffPath + status="composed".
+
+        Oracle: workbench.md, helicon.md; helicon_service.stack_single_subprocess.
+
+        NOTE: QProcess real invocation requires a true machine with Helicon.
+        """
+        db = self.ctx.get_db()
+        project_dir = self.ctx.current_project_dir
+        if not db or not project_dir or not uid:
+            return
+
+        try:
+            from app.services.grouping_service import load_grouping, save_grouping
+            from app.services.helicon_service import detect_helicon, stack_single_subprocess
+            from app.services.organize_service import organize_preview, build_result_basename
+
+            grouping = load_grouping(db, uid)
+            group = next(
+                (g for g in grouping.groups if g.group_index == group_index), None
+            )
+            if group is None:
+                QMessageBox.warning(self, "合成", f"找不到组 {group_index}")
+                return
+
+            if len(group.jpg_paths) < 2:
+                QMessageBox.warning(
+                    self, "合成", "该组 JPG 不足 2 张，无法合成。"
+                )
+                return
+
+            # Check Helicon availability first
+            exe = detect_helicon()
+            if not exe:
+                QMessageBox.warning(
+                    self,
+                    "未检测到 Helicon Focus",
+                    "未在常见安装目录找到 Helicon Focus，请确认已安装并设置 "
+                    "HELICON_FOCUS_PATH 环境变量指向可执行文件。",
+                )
+                return
+
+            # Determine output path
+            results_dir = os.path.join(project_dir, "results")
+            os.makedirs(results_dir, exist_ok=True)
+            incoming_dir = os.path.join(project_dir, "incoming-jpg")
+
+            preview = organize_preview(db, uid, results_dir, incoming_dir)
+            output_name = preview.suggested_tiff_name
+            output_path = os.path.join(results_dir, output_name)
+
+            # Progress dialog (NOTE: real subprocess is blocking; QProcess would
+            # allow non-blocking — use subprocess for now as stack_single_subprocess
+            # is the existing service API)
+            progress = QProgressDialog(
+                f"正在合成 {len(group.jpg_paths)} 张 JPG…",
+                None,  # no cancel button (blocking call)
+                0, 0,  # indeterminate
+                self,
+            )
+            progress.setWindowModality(Qt.WindowModality.WindowModal)
+            progress.setWindowTitle("Helicon 合成")
+            progress.show()
+            from PyQt6.QtWidgets import QApplication
+            QApplication.processEvents()
+
+            try:
+                result = stack_single_subprocess(
+                    jpg_paths=group.jpg_paths,
+                    output_file=output_path,
+                )
+            finally:
+                progress.close()
+
+            if result.get("ok") and os.path.isfile(output_path):
+                # Update grouping in DB
+                from datetime import datetime, timezone
+                now = datetime.now(tz=timezone.utc).isoformat()
+                group.composed_tiff_path = output_path
+                group.status = "composed"
+                group.updated_at = now
+                save_grouping(db, uid, grouping.groups)
+
+                # Reload grouping panel
+                self._grouping.load_grouping(uid, grouping)
+                QMessageBox.information(
+                    self,
+                    "合成完成",
+                    f"TIFF 已生成：{output_name}",
+                )
+            else:
+                QMessageBox.warning(self, "合成失败", "Helicon 执行后未生成输出文件。")
+
+        except RuntimeError as exc:
+            QMessageBox.warning(self, "合成失败", str(exc))
+        except Exception as exc:
+            QMessageBox.warning(self, "合成失败", f"意外错误：{exc}")
 
     def _on_organise_requested(self, uid: str, group_index: int) -> None:
-        """Stub — caller wires archive_service.archive_group() here."""
-        pass
+        """Organise (archive) the composed group.
+
+        Gate checks (via organize_service._check_organize_gate):
+          - uid must be active (or user explicitly bypasses)
+          - group must have ≥2 JPGs
+          - TIFF must already be composed
+
+        delete_jpg is READ from settings; defaults to False (TIFF 永不删).
+        Calls archive_service.archive_group (JPG→JXL→ZIP + optional delete).
+
+        Oracle: server.js:3615-3840 organizeSpecimen; archive.js:67-190.
+        """
+        db = self.ctx.get_db()
+        project_dir = self.ctx.current_project_dir
+        if not db or not project_dir or not uid:
+            return
+
+        try:
+            from app.services.grouping_service import load_grouping, save_grouping
+            from app.services.organize_service import _check_organize_gate, OrganizeGateError
+            from app.services.archive_service import archive_group
+
+            grouping = load_grouping(db, uid)
+            group = next(
+                (g for g in grouping.groups if g.group_index == group_index), None
+            )
+            if group is None:
+                QMessageBox.warning(self, "整理", f"找不到组 {group_index}")
+                return
+
+            if not group.composed_tiff_path:
+                QMessageBox.warning(
+                    self, "整理", "该组尚未合成，请先合成 TIFF 再整理。"
+                )
+                return
+
+            # Gate check (uid must be active)
+            try:
+                groups_as_dicts = [
+                    {"jpgPaths": g.jpg_paths} for g in grouping.groups
+                ]
+                _check_organize_gate(db, uid, groups_as_dicts)
+            except OrganizeGateError as e:
+                reply = QMessageBox.question(
+                    self,
+                    "整理确认",
+                    f"{e}\n\n是否跳过激活检查继续整理？",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if reply != QMessageBox.StandardButton.Yes:
+                    return
+
+            if not group.jpg_paths:
+                QMessageBox.warning(self, "整理", "该组无 JPG 原片，无法归档。")
+                return
+
+            # Read delete_jpg setting (default False — TIFF 永不删，JPG 也默认保留)
+            delete_jpg: bool = False
+            try:
+                delete_jpg = bool(
+                    getattr(self.ctx.settings, "delete_jpg_after_archive", False)
+                )
+            except Exception:
+                pass
+
+            # Run archive
+            result = archive_group(
+                jpg_paths=group.jpg_paths,
+                tiff_path=group.composed_tiff_path,
+                project_dir=project_dir,
+                delete_jpg=delete_jpg,
+            )
+
+            if result.ok:
+                # Update grouping record with archive info
+                from datetime import datetime, timezone
+                now = datetime.now(tz=timezone.utc).isoformat()
+                group.status = "organized"
+                group.archive_zip = result.zip_path
+                group.updated_at = now
+                save_grouping(db, uid, grouping.groups)
+                self._grouping.load_grouping(uid, grouping)
+                self._refresh_monitor()
+
+                msg = (
+                    f"归档完成：{Path(result.zip_path).name}\n"
+                    f"压缩率：{result.saved_percent}%\n"
+                )
+                if result.delete_jpg:
+                    msg += "JPG 原片已删除。"
+                elif result.requested_delete_jpg and not result.delete_jpg:
+                    msg += f"JPG 保留（{result.deletion_skipped_reason}）。"
+                QMessageBox.information(self, "整理完成", msg)
+            else:
+                QMessageBox.warning(self, "整理失败", "归档过程出现错误。")
+
+        except FileNotFoundError as exc:
+            QMessageBox.warning(self, "整理失败", f"文件不存在：{exc}")
+        except Exception as exc:
+            QMessageBox.warning(self, "整理失败", f"意外错误：{exc}")
 
     def _on_undo_compose(self, uid: str, group_index: int) -> None:
         """Undo compose: clear composedTiffPath, move TIFF to _retired-tiff/."""
@@ -387,10 +676,8 @@ class WorkbenchView(BaseView):
         if not db:
             return None
         try:
-            row = db.execute(
-                "SELECT uid FROM tasks WHERE is_active = 1 LIMIT 1"
-            ).fetchone()
-            return row[0] if row else None
+            from app.services.activation_service import get_active_uid
+            return get_active_uid(db)
         except Exception:
             return None
 

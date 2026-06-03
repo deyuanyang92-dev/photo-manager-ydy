@@ -45,9 +45,15 @@ class SpecimenSidebar(QWidget):
     -------
     specimen_selected(str)
         Emitted with the specimen UID when the user selects an entry.
+    activate_requested(str)
+        Emitted when the user clicks the "激活" button for a specimen.
+    deactivate_requested(str)
+        Emitted when the user clicks the "去激活" button for the active specimen.
     """
 
     specimen_selected = pyqtSignal(str)
+    activate_requested = pyqtSignal(str)
+    deactivate_requested = pyqtSignal(str)
 
     def __init__(self, ctx: "AppContext", parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -92,9 +98,24 @@ class SpecimenSidebar(QWidget):
         self._list.itemClicked.connect(self._on_item_clicked)
         root.addWidget(self._list)
 
-        # Refresh button
+        # Activate / Deactivate + Refresh buttons
         btn_row = QHBoxLayout()
         btn_row.setContentsMargins(8, 4, 8, 8)
+        btn_row.setSpacing(4)
+
+        self._activate_btn = QPushButton("激活")
+        self._activate_btn.setFixedHeight(28)
+        self._activate_btn.setObjectName("Primary")
+        self._activate_btn.setToolTip("激活选中标本（全局互斥）")
+        self._activate_btn.clicked.connect(self._on_activate_clicked)
+        btn_row.addWidget(self._activate_btn)
+
+        self._deactivate_btn = QPushButton("去激活")
+        self._deactivate_btn.setFixedHeight(28)
+        self._deactivate_btn.setToolTip("取消当前激活标本")
+        self._deactivate_btn.clicked.connect(self._on_deactivate_clicked)
+        btn_row.addWidget(self._deactivate_btn)
+
         self._refresh_btn = QPushButton("刷新")
         self._refresh_btn.setFixedHeight(28)
         self._refresh_btn.clicked.connect(self.refresh)
@@ -214,3 +235,15 @@ class SpecimenSidebar(QWidget):
         uid = item.data(Qt.ItemDataRole.UserRole)
         if uid:
             self.specimen_selected.emit(uid)
+
+    def _on_activate_clicked(self) -> None:
+        """Emit activate_requested for the currently selected specimen."""
+        uid = self.current_uid()
+        if uid:
+            self.activate_requested.emit(uid)
+
+    def _on_deactivate_clicked(self) -> None:
+        """Emit deactivate_requested for the currently selected specimen."""
+        uid = self.current_uid()
+        if uid:
+            self.deactivate_requested.emit(uid)

@@ -7,13 +7,10 @@ Displays and allows editing of:
   - Collector / photographer / identifier
   - Notes / photo_notes
   - Taxonomy (4-level): taxon_group / order_name / family / genus
-    (Latin fields only; Chinese name fields are intentionally user-filled,
-     NOT auto-populated — see project constraint "中文字段不自动填充")
-  - Scientific name (Latin)
-
-The taxonomy floating autocomplete overlay is a placeholder: each field is
-a simple QLineEdit.  A future agent will replace these with the full
-taxonomy autocomplete widget (see CLAUDE.md "taxonomy 浮层另有 agent 做").
+    via TaxonomyInputPanel (4-level autocomplete overlay with Latin names).
+    Chinese name fields are intentionally user-filled, NOT auto-populated
+    (see project constraint "中文字段不自动填充").
+  - Scientific name (Latin) — part of TaxonomyInputPanel
 
 Signals
 -------
@@ -24,6 +21,7 @@ save_requested(uid: str)
 """
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 from PyQt6.QtCore import pyqtSignal
@@ -128,12 +126,47 @@ class MetadataPanel(QWidget):
         self._storage = _field("保存方式", "e.g. T95E / RD75E", attr="storage")
 
         # ── Taxonomy (Latin — no auto-fill for Chinese) ──────────────────────
-        form.addRow(_section_label("分类（占位 — taxonomy 浮层待替换）"))
-        self._taxon_group = _field("大类", "e.g. Mollusca", attr="taxon_group")
-        self._order_name = _field("目", "Order", attr="order_name")
-        self._family = _field("科", "Family", attr="family")
-        self._genus = _field("属", "Genus", attr="genus")
-        self._scientific_name = _field("种名", "e.g. Conus textile", attr="scientific_name")
+        form.addRow(_section_label("分类（4 级自动补全）"))
+
+        # Build TaxonomyInputPanel with TaxonomyService
+        # Graceful fallback: if taxonomy data files are unavailable, keep
+        # plain QLineEdit stubs so the panel doesn't crash.
+        self._taxonomy_panel: Optional[QWidget] = None
+        try:
+            from app.services.taxonomy_service import TaxonomyService
+            from app.widgets.taxonomy_input import TaxonomyInputPanel
+
+            # Locate seed and user taxonomy files relative to this package
+            _here = Path(__file__).parent.parent.parent  # project root
+            seed_path = _here / "data" / "taxonomy_seed.json"
+            user_path = _here / "data" / "user_taxonomy.json"
+
+            svc = TaxonomyService(seed_path, user_path)
+            self._taxonomy_panel = TaxonomyInputPanel(svc, form_container)
+            self._taxonomy_panel.value_committed.connect(self._on_taxonomy_committed)
+            form.addRow(self._taxonomy_panel)
+        except Exception:
+            # Fallback: plain QLineEdits (service unavailable)
+            self._taxonomy_panel = None
+
+        # Proxy QLineEdit attributes expected by workbench_view._on_save_metadata
+        # and load_specimen.  When the taxonomy panel is active these properties
+        # wrap get_value() / set_value() on the panel.
+        if self._taxonomy_panel is None:
+            # Plain-linedit fallback (original stub behaviour)
+            self._taxon_group = _field("大类", "e.g. Mollusca", attr="taxon_group")
+            self._order_name = _field("目", "Order", attr="order_name")
+            self._family = _field("科", "Family", attr="family")
+            self._genus = _field("属", "Genus", attr="genus")
+            self._scientific_name = _field("种名", "e.g. Conus textile", attr="scientific_name")
+        else:
+            # Create invisible proxy QLineEdits so workbench_view can read .text()
+            # without knowing about the overlay.
+            self._taxon_group = _invisible_line_edit()
+            self._order_name = _invisible_line_edit()
+            self._family = _invisible_line_edit()
+            self._genus = _invisible_line_edit()
+            self._scientific_name = _invisible_line_edit()
 
         # ── Notes ────────────────────────────────────────────────────────────
         form.addRow(_section_label("备注"))
@@ -190,6 +223,23 @@ class MetadataPanel(QWidget):
         _set(self._lon, str(specimen.lon) if specimen.lon is not None else "")
         _set(self._lat, str(specimen.lat) if specimen.lat is not None else "")
         _set(self._storage, specimen.storage)
+
+        # Populate taxonomy: either via TaxonomyInputPanel or plain QLineEdits
+        taxon_values = {
+            "taxonGroup":     str(specimen.taxon_group or ""),
+            "order":          str(specimen.order_name or ""),
+            "family":         str(specimen.family or ""),
+            "scientificName": str(specimen.scientific_name or ""),
+        }
+        if self._taxonomy_panel is not None:
+            try:
+                from app.widgets.taxonomy_input import TaxonomyInputPanel
+                if isinstance(self._taxonomy_panel, TaxonomyInputPanel):
+                    self._taxonomy_panel.set_context(taxon_values)
+                    self._taxonomy_panel.set_values(taxon_values)
+            except Exception:
+                pass
+        # Always keep proxy QLineEdits in sync so workbench_view can read them
         _set(self._taxon_group, specimen.taxon_group)
         _set(self._order_name, specimen.order_name)
         _set(self._family, specimen.family)
@@ -217,6 +267,13 @@ class MetadataPanel(QWidget):
             ta.blockSignals(True)
             ta.clear()
             ta.blockSignals(False)
+        if self._taxonomy_panel is not None:
+            try:
+                from app.widgets.taxonomy_input import TaxonomyInputPanel
+                if isinstance(self._taxonomy_panel, TaxonomyInputPanel):
+                    self._taxonomy_panel.clear_all()
+            except Exception:
+                pass
 
     # ── Internal ──────────────────────────────────────────────────────────────
 
@@ -236,6 +293,30 @@ class MetadataPanel(QWidget):
         if self._uid:
             self.metadata_changed.emit(self._uid, field, value)
 
+    def _on_taxonomy_committed(self, changed: dict) -> None:
+        """Called when TaxonomyInputPanel commits a selection.
+
+        Updates proxy QLineEdits so workbench_view._on_save_metadata can read
+        .text() as usual.  Emits metadata_changed for each updated field.
+
+        Hard rule: Chinese fields (*Cn) are NEVER auto-filled here.
+        Mapping: taxonGroup → taxon_group, order → order_name,
+                 family → family, scientificName → scientific_name.
+        """
+        _sp_to_db: dict[str, tuple[str, QLineEdit]] = {
+            "taxonGroup":     ("taxon_group",     self._taxon_group),
+            "order":          ("order_name",      self._order_name),
+            "family":         ("family",          self._family),
+            "scientificName": ("scientific_name", self._scientific_name),
+        }
+        for sp_key, value in changed.items():
+            db_field, proxy_edit = _sp_to_db.get(sp_key, (None, None))
+            if db_field and proxy_edit is not None:
+                proxy_edit.blockSignals(True)
+                proxy_edit.setText(value)
+                proxy_edit.blockSignals(False)
+                self._on_field_edited(db_field, value)
+
     def _on_save(self) -> None:
         if self._uid:
             self._dirty = False
@@ -243,7 +324,7 @@ class MetadataPanel(QWidget):
             self.save_requested.emit(self._uid)
 
 
-# ── Helper ────────────────────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _section_label(text: str) -> QLabel:
     """Return a styled section separator label for the form."""
@@ -251,3 +332,14 @@ def _section_label(text: str) -> QLabel:
     lbl.setObjectName("Muted")
     lbl.setStyleSheet("font-size:11px; letter-spacing:1px; padding-top:8px;")
     return lbl
+
+
+def _invisible_line_edit() -> QLineEdit:
+    """Return a hidden QLineEdit used as a proxy for taxonomy panel values.
+
+    workbench_view._on_save_metadata reads .text() on these proxies to collect
+    taxonomy field values; the actual visible input is in TaxonomyInputPanel.
+    """
+    edit = QLineEdit()
+    edit.hide()
+    return edit
