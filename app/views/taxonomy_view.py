@@ -347,6 +347,7 @@ class _RecordDialog(QDialog):
     """Form dialog for adding or editing a user taxonomy record.
 
     Mirrors openTaxonomyTableModal() in app.js.
+    Shows a '查看历史' button when the record has a history[] list.
     """
 
     def __init__(
@@ -359,6 +360,7 @@ class _RecordDialog(QDialog):
         self.setMinimumWidth(420)
         self._record = record or {}
         self._inputs: dict[str, QLineEdit] = {}
+        self._btn_history: QPushButton = QPushButton("查看历史")
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -380,6 +382,13 @@ class _RecordDialog(QDialog):
 
         layout.addLayout(form)
 
+        # History button — visible only when record has history entries
+        history = self._record.get("history", [])
+        self._btn_history.setObjectName("Outline")
+        self._btn_history.setVisible(bool(history))
+        self._btn_history.clicked.connect(self._show_history)
+        layout.addWidget(self._btn_history)
+
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
@@ -395,8 +404,89 @@ class _RecordDialog(QDialog):
                 return
         self.accept()
 
+    def _show_history(self) -> None:
+        history = self._record.get("history", [])
+        if not history:
+            return
+        dlg = _HistoryDialog(self, history=history)
+        restored = dlg.exec_and_get()
+        if restored is not None:
+            # Apply restored snapshot to the form inputs
+            for k, v in restored.items():
+                inp = self._inputs.get(k)
+                if inp is not None:
+                    inp.setText(str(v))
+
     def get_record(self) -> dict[str, Any]:
         return {k: inp.text().strip() for k, inp in self._inputs.items()}
+
+
+class _HistoryDialog(QDialog):
+    """Shows history entries for a user record and allows 1-level rollback.
+
+    Each entry in history[] has: { "at": ISO8601, "before": {10 fields} }
+    Selecting an entry and clicking "回滚到此版本" fills the parent form
+    with the snapshot values (the parent dialog still needs OK to persist).
+    """
+
+    def __init__(
+        self,
+        parent: Optional[QWidget] = None,
+        history: Optional[list[dict[str, Any]]] = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("编辑历史")
+        self.setMinimumWidth(560)
+        self.setMinimumHeight(320)
+        self._history = list(reversed(history or []))  # newest first
+        self._selected_before: Optional[dict[str, Any]] = None
+        self._build_ui()
+
+    def _build_ui(self) -> None:
+        from PyQt6.QtWidgets import QListWidget, QListWidgetItem
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 12)
+        layout.setSpacing(10)
+
+        info = QLabel("选择历史版本后点击「回滚」，将把该快照填入编辑框（需再点确定保存）。")
+        info.setWordWrap(True)
+        info.setStyleSheet("color:#87a2a1; font-size:11px;")
+        layout.addWidget(info)
+
+        self._list = QListWidget()
+        self._list.setAlternatingRowColors(True)
+        for entry in self._history:
+            at = entry.get("at", "")
+            before = entry.get("before", {})
+            species = before.get("species", "")
+            family  = before.get("family", "")
+            label   = f"{at[:19].replace('T', ' ')}  →  {species} ({family})"
+            item = QListWidgetItem(label)
+            item.setData(Qt.ItemDataRole.UserRole, before)
+            self._list.addItem(item)
+        layout.addWidget(self._list, 1)
+
+        buttons = QDialogButtonBox()
+        btn_rollback = buttons.addButton("回滚到此版本", QDialogButtonBox.ButtonRole.AcceptRole)
+        btn_cancel   = buttons.addButton("取消",         QDialogButtonBox.ButtonRole.RejectRole)
+        btn_rollback.clicked.connect(self._on_rollback)
+        btn_cancel.clicked.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _on_rollback(self) -> None:
+        item = self._list.currentItem()
+        if item is None:
+            QMessageBox.information(self, "提示", "请先选择一条历史记录")
+            return
+        self._selected_before = item.data(Qt.ItemDataRole.UserRole)
+        self.accept()
+
+    def exec_and_get(self) -> Optional[dict[str, Any]]:
+        """Run dialog modally; return the snapshot dict if user confirmed, else None."""
+        if self.exec() == QDialog.DialogCode.Accepted:
+            return self._selected_before
+        return None
 
 
 # ── Column-group chip button (taxon-col-chip style) ───────────────────────────

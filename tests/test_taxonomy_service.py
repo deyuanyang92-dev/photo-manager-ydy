@@ -623,3 +623,40 @@ class TestTaxonomyViewSmoke:
         from app.views.taxonomy_view import TaxonomyView
         view = TaxonomyView(mock_ctx)
         assert hasattr(view, "_table")
+
+    def test_record_dialog_history_button_visible_when_history_present(
+        self, svc, app_instance
+    ):
+        """_RecordDialog shows 'history' button when record has history."""
+        from app.views.taxonomy_view import _RecordDialog
+        # Learn a record then update it to create history
+        svc.learn({
+            "class": "Polychaeta", "order": "Phyllodocida",
+            "family": "Polynoidae", "species": "Halosydna brevisetosa",
+        })
+        records, _ = svc.all_records(source_filter="user")
+        rec_id = records[0]["recordId"]
+        svc.update(rec_id, {"classCn": "多毛纲"})
+        records2, _ = svc.all_records(source_filter="user")
+        rec = records2[0]
+        assert "history" in rec
+        dlg = _RecordDialog(record=rec)
+        # history button must exist and not be hidden
+        assert hasattr(dlg, "_btn_history")
+        assert not dlg._btn_history.isHidden()
+
+    def test_record_dialog_no_history_button_when_no_history(
+        self, svc, app_instance
+    ):
+        """_RecordDialog hides history button when record has no history."""
+        from app.views.taxonomy_view import _RecordDialog
+        svc.learn({
+            "class": "Polychaeta", "order": "Phyllodocida",
+            "family": "Polynoidae", "species": "Halosydna brevisetosa",
+        })
+        records, _ = svc.all_records(source_filter="user")
+        rec = records[0]
+        assert not rec.get("history")
+        dlg = _RecordDialog(record=rec)
+        assert hasattr(dlg, "_btn_history")
+        assert dlg._btn_history.isHidden()
