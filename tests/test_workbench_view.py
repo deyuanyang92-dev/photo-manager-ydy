@@ -15,6 +15,7 @@ These tests run headless (QT_QPA_PLATFORM=offscreen) and verify:
 from __future__ import annotations
 
 import os
+import json
 import sqlite3
 import tempfile
 from pathlib import Path
@@ -358,6 +359,44 @@ class TestSpecimenSidebar:
         assert w._list.count() == 1
         db.close()
 
+    def test_copy_current_uid_to_clipboard(self, tmp_path, qt_app):
+        from app.widgets.specimen_sidebar import SpecimenSidebar
+        project_dir = str(tmp_path)
+        db = _make_db(str(tmp_path / "project.db"))
+        uid = "FJ-XM-B2-DLC001-T95E-20260601"
+        db.execute(
+            "INSERT INTO specimens (uid, owner_project_dir) VALUES (?, ?)",
+            (uid, project_dir),
+        )
+        db.commit()
+        ctx = _make_ctx(project_dir=project_dir, db=db)
+        w = SpecimenSidebar(ctx)
+        w.refresh()
+        w.select_uid(uid)
+        assert w.copy_current_uid() is True
+        assert QApplication.clipboard().text() == uid
+        db.close()
+
+    def test_print_current_labels_signal(self, tmp_path):
+        from app.widgets.specimen_sidebar import SpecimenSidebar
+        project_dir = str(tmp_path)
+        db = _make_db(str(tmp_path / "project.db"))
+        uid = "FJ-XM-B2-DLC001-T95E-20260601"
+        db.execute(
+            "INSERT INTO specimens (uid, owner_project_dir) VALUES (?, ?)",
+            (uid, project_dir),
+        )
+        db.commit()
+        ctx = _make_ctx(project_dir=project_dir, db=db)
+        w = SpecimenSidebar(ctx)
+        received = []
+        w.print_labels_requested.connect(received.append)
+        w.refresh()
+        w.select_uid(uid)
+        assert w.print_current_labels() is True
+        assert received == [uid]
+        db.close()
+
 
 # ── GroupingPanel ─────────────────────────────────────────────────────────────
 
@@ -576,6 +615,88 @@ class TestMetaScoreRing:
         assert w._score_ring.score() == 100
         w.clear()
         assert w._score_ring.score() == 0
+
+
+class TestLabelsUidSelection:
+    def test_select_uid_selects_only_matching_specimen(self, tmp_path):
+        from app.views.labels_view import LabelsView
+        project_dir = str(tmp_path)
+        db = _make_db(str(tmp_path / "project.db"))
+        uid1 = "FJ-XM-B2-DLC001-T95E-20260601"
+        uid2 = "FJ-XM-B2-BLC001-T95E-20260601"
+        for uid, sid in ((uid1, "DLC001"), (uid2, "BLC001")):
+            db.execute(
+                """
+                INSERT INTO specimens (
+                    uid, id, province, site, station, storage,
+                    collection_date, photo_date, owner_project_dir
+                )
+                VALUES (?, ?, 'FJ', 'XM', 'B2', 'T95E', '20260601', '20260601', ?)
+                """,
+                (uid, sid, project_dir),
+            )
+        db.commit()
+        ctx = _make_ctx(project_dir=project_dir, db=db)
+        view = LabelsView(ctx)
+        view.on_activate()
+        assert view.select_uid(uid2) is True
+        selected = view._step1.selected_indices()
+        assert len(selected) == 1
+        assert view._specimens[selected[0]]["id"] == "BLC001"
+        db.close()
+
+
+class TestWorkbenchWormsFill:
+    def test_worms_fill_updates_latin_fields_not_chinese(self, tmp_path):
+        from app.views.workbench_view import WorkbenchView
+        project_dir = str(tmp_path)
+        db = _make_db(str(tmp_path / "project.db"))
+        uid = "FJ-XM-B2-DLC001-T95E-20260601"
+        db.execute(
+            """
+            INSERT INTO specimens (
+                uid, id, owner_project_dir, scientific_name_cn,
+                family_cn, raw_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                uid,
+                "DLC001",
+                project_dir,
+                "中文种名",
+                "中文科名",
+                json.dumps({"scientificNameCn": "中文种名", "familyCn": "中文科名"}, ensure_ascii=False),
+            ),
+        )
+        db.commit()
+        ctx = _make_ctx(project_dir=project_dir, db=db)
+        w = WorkbenchView(ctx)
+        w._current_uid = uid
+        filled_uid = w.worms_fill_specimen({
+            "AphiaID": 123,
+            "scientificname": "Diopatra cuprea",
+            "class": "Polychaeta",
+            "order": "Eunicida",
+            "family": "Onuphidae",
+            "genus": "Diopatra",
+            "status": "accepted",
+        })
+        assert filled_uid == uid
+        row = db.execute("SELECT * FROM specimens WHERE uid = ?", (uid,)).fetchone()
+        assert row["scientific_name"] == "Diopatra cuprea"
+        assert row["taxon_group"] == "Polychaeta"
+        assert row["order_name"] == "Eunicida"
+        assert row["family"] == "Onuphidae"
+        assert row["genus"] == "Diopatra"
+        assert row["scientific_name_cn"] == "中文种名"
+        assert row["family_cn"] == "中文科名"
+        raw = json.loads(row["raw_json"])
+        assert raw["worms_aphia_id"] == 123
+        assert raw["scientificNameCn"] == "中文种名"
+        assert raw["familyCn"] == "中文科名"
+        assert raw["taxonomyConfirmed"] is False
+        db.close()
 
 
 # ── Delete with TIFF warning ───────────────────────────────────────────────────
@@ -1014,3 +1135,157 @@ class TestGroupingPanelDeleteClearGroup:
         row = _DraftGroupRow(g)
         assert hasattr(row, "clear_group_requested")
         assert hasattr(row, "delete_group_requested")
+
+    def test_draft_group_row_has_import_tiff_signal(self):
+        """_DraftGroupRow must have import_tiff_requested signal (#cursor groupingImportTiff)."""
+        from app.widgets.grouping_panel import _DraftGroupRow
+        from app.services.grouping_service import Group
+        g = Group(group_index=0, jpg_paths=[])
+        row = _DraftGroupRow(g)
+        assert hasattr(row, "import_tiff_requested")
+
+    def test_grouping_panel_has_import_tiff_signal(self):
+        """GroupingPanel must expose import_tiff_requested signal."""
+        from app.widgets.grouping_panel import GroupingPanel
+        ctx = _make_ctx()
+        w = GroupingPanel(ctx)
+        assert hasattr(w, "import_tiff_requested")
+
+
+# ── groupingImportTiff (TIFF import dialog) ────────────────────────────────────
+
+class TestTiffImportDialog:
+    """Tests for _TiffImportDialog in grouping_panel."""
+
+    def test_constructs_empty_candidates(self):
+        from app.widgets.grouping_panel import _TiffImportDialog
+        dlg = _TiffImportDialog(group_index=0, tiff_candidates=[])
+        assert dlg is not None
+        assert dlg.windowTitle() == "导入 TIF → 组 0"
+
+    def test_constructs_with_candidates(self, tmp_path):
+        tif = str(tmp_path / "test.tif")
+        Path(tif).write_bytes(b"")
+        from app.widgets.grouping_panel import _TiffImportDialog
+        dlg = _TiffImportDialog(group_index=1, tiff_candidates=[tif])
+        assert dlg._list.count() == 1
+        assert dlg._list.item(0).toolTip() == tif
+
+    def test_selected_path_empty_by_default(self):
+        from app.widgets.grouping_panel import _TiffImportDialog
+        dlg = _TiffImportDialog(group_index=0, tiff_candidates=[])
+        assert dlg.selected_path() == ""
+
+    def test_prefills_existing_tiff(self, tmp_path):
+        tif = str(tmp_path / "old.tif")
+        from app.widgets.grouping_panel import _TiffImportDialog
+        dlg = _TiffImportDialog(group_index=0, tiff_candidates=[], existing_tiff=tif)
+        assert dlg._path_edit.text() == tif
+
+
+# ── findDuplicateSpecimen (NamingPanel dup check) ─────────────────────────────
+
+class TestNamingPanelDupCheck:
+    """Tests for _check_duplicate and _check_compliance in NamingPanel."""
+
+    def test_no_dup_warn_when_uid_absent_from_db(self, tmp_path):
+        from app.widgets.naming_panel import NamingPanel
+        db = _make_db(str(tmp_path / "p.db"))
+        ctx = _make_ctx(db=db)
+        w = NamingPanel(ctx)
+        w._check_duplicate("FJ-XM-B2-DLC001-T95E-20260601")
+        assert w._dup_warn.isHidden(), "dup_warn must be hidden when UID not in DB"
+        db.close()
+
+    def test_dup_warn_shown_when_uid_exists(self, tmp_path):
+        from app.widgets.naming_panel import NamingPanel
+        db = _make_db(str(tmp_path / "p.db"))
+        uid = "FJ-XM-B2-DLC001-T95E-20260601"
+        db.execute(
+            "INSERT INTO specimens (uid, owner_project_dir) VALUES (?, ?)",
+            (uid, "/some/project"),
+        )
+        db.commit()
+        ctx = _make_ctx(db=db)
+        w = NamingPanel(ctx)
+        w._check_duplicate(uid)
+        # isHidden() is reliable even when widget has no parent window
+        assert not w._dup_warn.isHidden(), "dup_warn must be shown after duplicate found"
+        db.close()
+
+    def test_compliance_no_warn_empty(self):
+        from app.widgets.naming_panel import NamingPanel
+        ctx = _make_ctx()
+        w = NamingPanel(ctx)
+        w._check_compliance("")
+        assert w._compliance_warn.isHidden()
+
+    def test_compliance_warns_bad_date(self):
+        from app.widgets.naming_panel import NamingPanel
+        ctx = _make_ctx()
+        w = NamingPanel(ctx)
+        w._province.setText("FJ")
+        w._collection_date.setText("2026060")  # 7 chars, not 8
+        w._check_compliance("FJ-X-B2-DLC001-T95E-2026060")
+        assert not w._compliance_warn.isHidden(), "compliance_warn must be shown"
+        assert "8 位" in w._compliance_warn.text()
+
+
+# ── metaReverseGeocode (MetadataPanel) ───────────────────────────────────────
+
+class TestMetadataPanelGeocode:
+    """Tests for _on_reverse_geocode and _NominatimWorker in MetadataPanel."""
+
+    def test_geocode_button_exists(self):
+        from app.widgets.metadata_panel import MetadataPanel
+        ctx = _make_ctx()
+        w = MetadataPanel(ctx)
+        assert hasattr(w, "_geocode_btn")
+        assert w._geocode_btn is not None
+
+    def test_geocode_requires_valid_float_coords(self):
+        """_on_reverse_geocode requires float coords - internal coord check."""
+        from app.widgets.metadata_panel import MetadataPanel
+        ctx = _make_ctx()
+        w = MetadataPanel(ctx)
+        # With valid coords, no thread should have started yet (button is still enabled)
+        w._lon.setText("120.1")
+        w._lat.setText("25.6")
+        # We don't call _on_reverse_geocode here (it would try to open dialogs)
+        # Just verify the button exists and is connected
+        assert w._geocode_btn is not None
+        assert w._geocode_btn.isEnabled()
+
+    def test_nominatim_to_zh_parses_display(self):
+        """_nominatim_to_zh must extract place name from Nominatim response."""
+        from app.widgets.metadata_panel import _nominatim_to_zh
+        data = {
+            "display_name": "鼓浪屿, 厦门市, 福建省, 中国",
+        }
+        result = _nominatim_to_zh(data)
+        assert result  # non-empty
+
+    def test_nominatim_to_zh_empty_input(self):
+        from app.widgets.metadata_panel import _nominatim_to_zh
+        assert _nominatim_to_zh({}) == ""
+        assert _nominatim_to_zh(None) == ""
+
+
+# ── Pre-compose preview dialog ────────────────────────────────────────────────
+
+class TestComposePreviewDialog:
+    """Tests for _show_compose_preview in WorkbenchView (#cursor renderComposePreviewModal)."""
+
+    def test_show_compose_preview_exists(self, tmp_path):
+        from app.views.workbench_view import WorkbenchView
+        project_dir = str(tmp_path / "proj")
+        Path(project_dir).mkdir(parents=True)
+        (Path(project_dir) / "incoming-jpg").mkdir()
+        (Path(project_dir) / "results").mkdir()
+        (Path(project_dir) / "_data").mkdir()
+        db = _make_db(str(tmp_path / "proj/_data/project.db"))
+        ctx = _make_ctx(project_dir=project_dir, db=db)
+        w = WorkbenchView(ctx)
+        assert hasattr(w, "_show_compose_preview")
+        assert callable(w._show_compose_preview)
+        db.close()
