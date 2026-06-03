@@ -34,10 +34,13 @@ from typing import TYPE_CHECKING, Optional
 
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
+    QApplication,
+    QCheckBox,
     QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QMenu,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -222,6 +225,17 @@ class _FileCard(QFrame):
         self._selected = val
         self._update_selection_style()
 
+    def contextMenuEvent(self, event) -> None:
+        if getattr(self._entry, "kind", "") == "jpg":
+            self._on_jpg_context_menu(event.pos())
+
+    def _on_jpg_context_menu(self, pos) -> None:
+        jpg_path = getattr(self._entry, "path", "")
+        menu = QMenu(self)
+        action = menu.addAction("复制路径")
+        action.triggered.connect(lambda: QApplication.clipboard().setText(jpg_path))
+        menu.exec(self.mapToGlobal(pos))
+
 
 class MonitorPanel(QWidget):
     """Incoming-JPG + results-TIFF capture stream with batch identity header.
@@ -244,6 +258,7 @@ class MonitorPanel(QWidget):
         self._scan_result: Optional["ScanResult"] = None
         self._active_uid: Optional[str] = None
         self._cards: list[_FileCard] = []  # all current cards (for selection ops)
+        self._hide_archived: bool = False
         self._setup_ui()
 
     # ── UI ────────────────────────────────────────────────────────────────────
@@ -384,6 +399,9 @@ class MonitorPanel(QWidget):
         sh_hint.setObjectName("MutedSmall")
         sh.addWidget(sh_hint)
         sh.addStretch()
+        self._hide_archived_cb = QCheckBox("隐藏已归档")
+        self._hide_archived_cb.toggled.connect(self._on_hide_archived_toggled)
+        sh.addWidget(self._hide_archived_cb)
         self._sel_count = QLabel("未选中")
         self._sel_count.setObjectName("MutedSmall")
         sh.addWidget(self._sel_count)
@@ -528,6 +546,8 @@ class MonitorPanel(QWidget):
         self._stat_untidy.setText(f"{len(all_files)} 张")
         self._raw_count.setText(f"本组原片 {jpg_c} 张")
 
+        self._apply_filter()
+
         # Unattributed warning
         unattr = [
             f for f in jpgs
@@ -545,6 +565,19 @@ class MonitorPanel(QWidget):
             item = self._grid.takeAt(0)
             if item and item.widget():
                 item.widget().deleteLater()
+
+    def _on_hide_archived_toggled(self, checked: bool) -> None:
+        self._hide_archived = checked
+        self._apply_filter()
+
+    def _apply_filter(self) -> None:
+        """Show/hide cards based on _hide_archived state."""
+        for card in self._cards:
+            is_grouped = getattr(card._entry, "is_grouped", False)
+            if self._hide_archived and is_grouped:
+                card.hide()
+            else:
+                card.show()
 
     # ── Selection helpers ─────────────────────────────────────────────────────
 
