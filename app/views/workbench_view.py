@@ -20,6 +20,7 @@ Oracle: docs/modules/workbench.md, monitor.md; web app.js workspace render.
 """
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 from pathlib import Path
@@ -124,6 +125,7 @@ class WorkbenchView(BaseView):
         self._sidebar.deactivate_requested.connect(self._on_sidebar_deactivate)
         self._sidebar.new_specimen_requested.connect(self._on_new_specimen)
         self._sidebar.collab_manager_requested.connect(self._on_open_collab_manager)
+        self._sidebar.print_labels_requested.connect(self._on_print_labels)
         outer.addWidget(self._sidebar)
 
         # Wire collab service signals → sidebar strip refresh
@@ -160,6 +162,7 @@ class WorkbenchView(BaseView):
         self._grouping.add_selection_to_group_requested.connect(self._on_add_selection_to_group)
         self._grouping.free_compose_requested.connect(self._on_free_compose)
         self._grouping.retroactive_requested.connect(self._on_retroactive_scan)
+        self._grouping.import_tiff_requested.connect(self._on_import_tiff)  # #cursor
         centre.addWidget(self._grouping)
 
         centre.setSizes([300, 250])
@@ -231,6 +234,7 @@ class WorkbenchView(BaseView):
         # Track current UID for grouping edits
         self._current_uid: Optional[str] = None
         self._pending_grouping = None  # SpecimenGrouping awaiting save
+        self.ctx.worms_fill_specimen = self.worms_fill_specimen
 
     # ── Header chrome builders ─────────────────────────────────────────────────
 
@@ -382,6 +386,20 @@ class WorkbenchView(BaseView):
             self._metadata.clear()
         except Exception:
             pass
+
+    def _on_print_labels(self, uid: str) -> None:
+        """Open the labels page with exactly *uid* selected."""
+        if not uid:
+            return
+        self.ctx.pending_label_uid = uid
+        win = self.window()
+        nav = getattr(win, "navigate_to", None)
+        if callable(nav):
+            nav("labels")
+            labels_view = getattr(win, "_views", {}).get("labels")
+            selector = getattr(labels_view, "select_uid", None)
+            if callable(selector):
+                selector(uid)
 
     def _on_naming_save(self) -> None:
         """Persist the naming panel's current UID into the specimens table.
@@ -830,6 +848,17 @@ class WorkbenchView(BaseView):
                     )
                     return
 
+            # ── Pre-compose preview dialog  #cursor renderComposePreviewModal ─
+            # Mirrors web renderComposePreviewModal() app.js:6597.
+            # Shows JPG list so user can confirm / deselect before Helicon runs.
+            selected_jpgs = self._show_compose_preview(group.jpg_paths)
+            if selected_jpgs is None:
+                return  # User cancelled
+            if len(selected_jpgs) < 2:
+                QMessageBox.warning(self, "合成", "选中的 JPG 不足 2 张，无法合成。")
+                return
+            group.jpg_paths = selected_jpgs
+
             # Check Helicon availability first
             exe = detect_helicon()
             if not exe:
@@ -1031,6 +1060,28 @@ class WorkbenchView(BaseView):
         except Exception as exc:
             QMessageBox.warning(self, "整理失败", f"意外错误：{exc}")
 
+    def _on_import_tiff(self, uid: str, group_index: int) -> None:
+        """Persist the imported TIFF association from grouping panel to DB.
+
+        Called after grouping_panel._on_import_tiff successfully updated the
+        in-memory grouping.  Flushes the updated grouping to DB and refreshes
+        the results column.
+
+        Oracle: app.js groupingImportTiff() app.js:6057.
+        """
+        db = self.ctx.get_db()
+        if not db or not uid:
+            return
+        try:
+            from app.services.grouping_service import save_grouping
+            grouping = getattr(self._grouping, "_grouping", None)
+            if grouping:
+                save_grouping(db, uid, grouping.groups)
+                self._refresh_results_column(uid, grouping)
+                self._refresh_monitor()
+        except Exception as exc:
+            QMessageBox.warning(self, "导入 TIFF", f"保存失败：{exc}")
+
     def _on_undo_compose(self, uid: str, group_index: int) -> None:
         """Undo compose: clear composedTiffPath, move TIFF to _retired-tiff/."""
         db = self.ctx.get_db()
@@ -1152,6 +1203,68 @@ class WorkbenchView(BaseView):
         # Refresh naming panel with latest values if storage changed
         self._load_specimen(uid)
 
+    # ── WoRMS fill hook ───────────────────────────────────────────────────────
+
+    def worms_fill_specimen(self, rec: dict) -> str:
+        """Fill current specimen with WoRMS Latin taxonomy fields.
+
+        Mirrors web ``wormsFillToSpecimen``: Latin class/order/family/genus/
+        species are updated, ``taxonomyConfirmed`` is reset in raw_json, and
+        Chinese fields are left untouched.
+        """
+        uid = self._current_uid or self._get_active_uid()
+        if not uid:
+            raise RuntimeError("需先在工作区选择或激活标本")
+        db = self.ctx.get_db()
+        if not db:
+            raise RuntimeError("请先打开项目工作区")
+
+        row = db.execute("SELECT * FROM specimens WHERE uid = ?", (uid,)).fetchone()
+        if row is None:
+            raise RuntimeError(f"当前标本不存在: {uid}")
+
+        try:
+            raw = json.loads(row["raw_json"]) if row["raw_json"] else {}
+            if not isinstance(raw, dict):
+                raw = {}
+        except Exception:
+            raw = {}
+
+        from app.services.worms_service import WormsService
+        raw = WormsService.merge_worms_into_record(raw, rec)
+        if rec.get("class"):
+            raw["taxonGroup"] = rec["class"]
+        if rec.get("order"):
+            raw["order"] = rec["order"]
+        if rec.get("family"):
+            raw["family"] = rec["family"]
+        if rec.get("genus"):
+            raw["genus"] = rec["genus"]
+        if rec.get("scientificname"):
+            raw["scientificName"] = rec["scientificname"]
+        raw["taxonomyConfirmed"] = False
+
+        db.execute(
+            """
+            UPDATE specimens
+            SET taxon_group = ?, order_name = ?, family = ?, genus = ?,
+                scientific_name = ?, raw_json = ?
+            WHERE uid = ?
+            """,
+            (
+                rec.get("class") or row["taxon_group"],
+                rec.get("order") or row["order_name"],
+                rec.get("family") or row["family"],
+                rec.get("genus") or row["genus"],
+                rec.get("scientificname") or row["scientific_name"],
+                json.dumps(raw, ensure_ascii=False),
+                uid,
+            ),
+        )
+        db.commit()
+        self._load_specimen(uid)
+        return uid
+
     # ── Results column ────────────────────────────────────────────────────────
 
     def _refresh_results_column(self, uid: str, grouping=None) -> None:
@@ -1237,6 +1350,83 @@ class WorkbenchView(BaseView):
             ]
         except Exception:
             return []
+
+    def _show_compose_preview(self, jpg_paths: list[str]) -> Optional[list[str]]:
+        """Pre-compose JPG checklist dialog.
+
+        Mirrors web renderComposePreviewModal() app.js:6597 — simplified Qt
+        version: shows all JPG filenames as a checkable list so the user can
+        confirm or deselect files before Helicon runs.
+
+        Returns:
+            list[str]: selected (checked) JPG paths if user confirms.
+            None:      if the user cancelled.
+        """
+        from PyQt6.QtWidgets import (
+            QCheckBox,
+            QDialog,
+            QDialogButtonBox,
+            QScrollArea,
+        )
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("合成预览 — 确认原片")
+        dlg.setMinimumWidth(460)
+
+        root_lay = QVBoxLayout(dlg)
+        root_lay.setContentsMargins(16, 16, 16, 16)
+        root_lay.setSpacing(10)
+
+        info = QLabel(
+            f"即将合成 {len(jpg_paths)} 张 JPG。\n取消勾选可从本次合成中排除："
+        )
+        info.setObjectName("Muted")
+        info.setWordWrap(True)
+        root_lay.addWidget(info)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setMaximumHeight(260)
+        inner = QWidget()
+        inner_lay = QVBoxLayout(inner)
+        inner_lay.setContentsMargins(4, 4, 4, 4)
+        inner_lay.setSpacing(4)
+
+        checkboxes: list[tuple[QCheckBox, str]] = []
+        for p in jpg_paths:
+            cb = QCheckBox(Path(p).name)
+            cb.setChecked(True)
+            cb.setToolTip(p)
+            inner_lay.addWidget(cb)
+            checkboxes.append((cb, p))
+        inner_lay.addStretch()
+        scroll.setWidget(inner)
+        root_lay.addWidget(scroll)
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        ok_btn = btns.button(QDialogButtonBox.StandardButton.Ok)
+        if ok_btn:
+            ok_btn.setText("✓ 开始合成")
+        cancel_btn = btns.button(QDialogButtonBox.StandardButton.Cancel)
+        if cancel_btn:
+            cancel_btn.setText("取消")
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        root_lay.addWidget(btns)
+
+        # Center on parent screen (dual-monitor safe)
+        try:
+            from app.utils.ui import center_on
+            center_on(dlg, self)
+        except Exception:
+            pass
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return None
+
+        return [path for cb, path in checkboxes if cb.isChecked()]
 
     def _on_open_collab_manager(self) -> None:
         """Open the CollabManagerDialog from the sidebar 'collab_manager_requested' signal."""

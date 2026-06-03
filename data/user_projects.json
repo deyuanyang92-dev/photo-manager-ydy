@@ -1,0 +1,59 @@
+{
+  "version": 1,
+  "projects": [
+    {
+      "id": 3,
+      "projectCode": "PRJ-2026-01",
+      "name": "ce",
+      "year": "2026",
+      "dateRange": "20260602",
+      "location": "f",
+      "collector": "d",
+      "directory": "/mnt/n/claude/ceshi6",
+      "directoryDisplay": "/mnt/n/claude/ceshi6",
+      "incomingJpgSubdir": "incoming-jpg",
+      "resultsSubdir": "results",
+      "incomingJpgDir": "/mnt/n/claude/ceshi6/incoming-jpg",
+      "resultsDir": "/mnt/n/claude/ceshi6/results",
+      "lastEnteredAt": "2026-06-02T11:15:42.413Z",
+      "specimens": [
+        18,
+        19
+      ]
+    },
+    {
+      "id": 4,
+      "projectCode": "",
+      "name": "dd",
+      "year": "2026",
+      "dateRange": "20260602",
+      "location": "",
+      "collector": "",
+      "directory": "/mnt/n/claude/ceshi7",
+      "directoryDisplay": "/mnt/n/claude/ceshi7",
+      "incomingJpgSubdir": "incoming-jpg",
+      "resultsSubdir": "results",
+      "incomingJpgDir": "/mnt/n/claude/ceshi7/incoming-jpg",
+      "resultsDir": "/mnt/n/claude/ceshi7/results",
+      "lastEnteredAt": "2026-06-02T11:16:57.477Z",
+      "specimens": [
+        20
+      ]
+    },
+    {
+      "id": "183abcbe-55e0-43db-a560-9deb6ef82bba",
+      "name": "ydy",
+      "dir": "/mnt/n/claude/cehi8",
+      "directory": "/mnt/n/claude/cehi8",
+      "incomingJpgDir": "/mnt/n/claude/cehi8/incoming-jpg",
+      "resultsDir": "/mnt/n/claude/cehi8/results",
+      "projectCode": "DYY",
+      "location": "dyy",
+      "collector": "ydy",
+      "year": "2026",
+      "dateRange": "20260604",
+      "incomingJpgSubdir": "incoming-jpg",
+      "resultsSubdir": "results"
+    }
+  ]
+}

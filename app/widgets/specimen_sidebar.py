@@ -12,12 +12,14 @@ from typing import TYPE_CHECKING, Optional
 
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
+    QApplication,
     QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -59,6 +61,7 @@ class SpecimenSidebar(QWidget):
     deactivate_requested = pyqtSignal(str)
     new_specimen_requested = pyqtSignal()
     collab_manager_requested = pyqtSignal()   # "协作管理" button clicked
+    print_labels_requested = pyqtSignal(str)
 
     def __init__(self, ctx: "AppContext", parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -121,6 +124,8 @@ class SpecimenSidebar(QWidget):
         self._list.setAlternatingRowColors(True)
         self._list.setSpacing(1)
         self._list.itemClicked.connect(self._on_item_clicked)
+        self._list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._list.customContextMenuRequested.connect(self._on_context_menu)
         root.addWidget(self._list)
 
         # Activate / Deactivate + Refresh buttons
@@ -317,6 +322,49 @@ class SpecimenSidebar(QWidget):
         uid = self.current_uid()
         if uid:
             self.deactivate_requested.emit(uid)
+
+    def _on_context_menu(self, pos) -> None:
+        """Right-click specimen actions: copy UID / print labels / activate."""
+        item = self._list.itemAt(pos)
+        if item is None:
+            return
+        self._list.setCurrentItem(item)
+        uid = item.data(Qt.ItemDataRole.UserRole)
+        if not uid:
+            return
+
+        menu = QMenu(self)
+        copy_act = menu.addAction("复制编号")
+        print_act = menu.addAction("打印标签...")
+        menu.addSeparator()
+        activate_act = menu.addAction("激活")
+        deactivate_act = menu.addAction("去激活")
+
+        chosen = menu.exec(self._list.viewport().mapToGlobal(pos))
+        if chosen == copy_act:
+            QApplication.clipboard().setText(uid)
+        elif chosen == print_act:
+            self.print_labels_requested.emit(uid)
+        elif chosen == activate_act:
+            self.activate_requested.emit(uid)
+        elif chosen == deactivate_act:
+            self.deactivate_requested.emit(uid)
+
+    def copy_current_uid(self) -> bool:
+        """Copy selected UID to clipboard. Returns False when nothing selected."""
+        uid = self.current_uid()
+        if not uid:
+            return False
+        QApplication.clipboard().setText(uid)
+        return True
+
+    def print_current_labels(self) -> bool:
+        """Request label printing for the selected UID."""
+        uid = self.current_uid()
+        if not uid:
+            return False
+        self.print_labels_requested.emit(uid)
+        return True
 
     # ── Collab strip update ───────────────────────────────────────────────────
 

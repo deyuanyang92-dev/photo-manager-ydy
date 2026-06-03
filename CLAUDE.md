@@ -20,6 +20,9 @@ self-contradictory or impossible, **stop and report; do not redesign unilaterall
 pip install -r requirements.txt
 
 python main.py                                   # normal launch (needs a display)
+QT_QPA_PLATFORM=xcb python main.py               # WSL2/WSLg: force X11 — Wayland socket is flaky
+                                                 #   ("Failed to create wl_display"); window shows
+                                                 #   on the Windows desktop via WSLg, no browser.
 QT_QPA_PLATFORM=offscreen python main.py         # headless smoke check (CI / WSL)
 
 pytest tests/ -v                                 # full suite

@@ -27,6 +27,8 @@ from typing import TYPE_CHECKING, Optional
 
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
+    QDialog,
+    QDialogButtonBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -118,6 +120,7 @@ class _DraftGroupRow(QFrame):
     jpg_remove_requested = pyqtSignal(int, str)  # group_index, jpg_path
     clear_group_requested = pyqtSignal(int)   # group_index  #cursor
     delete_group_requested = pyqtSignal(int)  # group_index  #cursor
+    import_tiff_requested = pyqtSignal(int)   # group_index  #cursor groupingImportTiff
 
     def __init__(self, group: "Group", parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -164,7 +167,18 @@ class _DraftGroupRow(QFrame):
         )
         header.addWidget(add_sel_btn)
 
-        # ── 清空 / 删组 按钮  #cursor ──────────────────────────────────────
+        # ── 导入 TIFF / 清空 / 删组 按钮  #cursor ─────────────────────────
+        import_tiff_btn = QPushButton()
+        import_tiff_btn.setObjectName("Ghost")
+        import_tiff_btn.setFixedSize(26, 26)
+        icons.set_button_icon(import_tiff_btn, "mdi6.file-import-outline",
+                              color=icons.TONE_MUTED, size=13)
+        import_tiff_btn.setToolTip("导入已有 TIFF 关联到本组（跳过 Helicon 直接整理）")
+        import_tiff_btn.clicked.connect(
+            lambda: self.import_tiff_requested.emit(self._group.group_index)
+        )
+        header.addWidget(import_tiff_btn)
+
         clear_btn = QPushButton()
         clear_btn.setObjectName("Ghost")
         clear_btn.setFixedSize(26, 26)
@@ -250,6 +264,7 @@ class GroupingPanel(QWidget):
     add_selection_to_group_requested = pyqtSignal(int)  # group_index
     free_compose_requested = pyqtSignal()
     retroactive_requested = pyqtSignal()
+    import_tiff_requested = pyqtSignal(str, int)  # uid, group_index  #cursor groupingImportTiff
 
     def __init__(self, ctx: "AppContext", parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -496,8 +511,9 @@ class GroupingPanel(QWidget):
                 row.label_changed.connect(self._on_label_changed)
                 row.add_selected_to_group.connect(self._on_add_selected_to_group)
                 row.jpg_remove_requested.connect(self._on_jpg_remove)
-                row.clear_group_requested.connect(self._on_clear_group)   # #cursor
-                row.delete_group_requested.connect(self._on_delete_group) # #cursor
+                row.clear_group_requested.connect(self._on_clear_group)      # #cursor
+                row.delete_group_requested.connect(self._on_delete_group)    # #cursor
+                row.import_tiff_requested.connect(self._on_import_tiff)      # #cursor
                 self._content_lay.addWidget(row)
 
         if composed:
@@ -608,3 +624,190 @@ class GroupingPanel(QWidget):
     def _on_delete_group(self, group_index: int) -> None:  # #cursor
         """Handle delete-group button from _DraftGroupRow."""
         self.delete_group(group_index)
+
+    def _on_import_tiff(self, group_index: int) -> None:  # #cursor groupingImportTiff
+        """Open TIFF-import dialog and update the group composedTiffPath."""
+        if not self._uid or not self._grouping:
+            return
+        target = next(
+            (g for g in self._grouping.groups if g.group_index == group_index), None
+        )
+        if target is None:
+            return
+
+        # Collect TIFF candidates from the project's results/ and incoming-jpg/
+        tiff_candidates: list[str] = []
+        try:
+            import os
+            project_dir = getattr(self.ctx, "current_project_dir", None)
+            if project_dir:
+                for sub in ("results", "incoming-jpg"):
+                    d = os.path.join(project_dir, sub)
+                    if os.path.isdir(d):
+                        for f in sorted(os.listdir(d)):
+                            if f.lower().endswith((".tif", ".tiff")):
+                                tiff_candidates.append(os.path.join(d, f))
+        except Exception:
+            pass
+
+        # Show picker dialog
+        dlg = _TiffImportDialog(
+            group_index=group_index,
+            tiff_candidates=tiff_candidates,
+            existing_tiff=target.composed_tiff_path or "",
+            parent=self,
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        tiff_path = dlg.selected_path()
+        if not tiff_path:
+            return
+
+        # Guard: group already has a different TIFF  (mirrors web check)
+        if target.composed_tiff_path and target.composed_tiff_path != tiff_path:
+            from PyQt6.QtWidgets import QMessageBox
+            reply = QMessageBox.question(
+                self,
+                "替换 TIFF？",
+                f"本组已有 TIFF：{Path(target.composed_tiff_path).name}\n\n"
+                f"是否替换为：{Path(tiff_path).name}？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+        # Apply
+        from datetime import datetime, timezone
+        target.composed_tiff_path = tiff_path
+        target.status = "composed"
+        target.source = target.source or "external-tif"
+        target.updated_at = datetime.now(tz=timezone.utc).isoformat()
+
+        self._rebuild()
+        self.grouping_changed.emit()
+        # Propagate to workbench view as well
+        if self._uid:
+            self.import_tiff_requested.emit(self._uid, group_index)
+
+
+# ── TIFF Import Dialog ────────────────────────────────────────────────────────
+
+class _TiffImportDialog(QDialog):
+    """Dialog to pick an existing TIFF file and associate it to a group.
+
+    Mirrors web renderTiffImportModal() app.js:6124.
+    Shows:
+      1. A scrollable list of TIF/TIFF files found in results/ and incoming-jpg/
+      2. A text field to paste an arbitrary absolute path
+    """
+
+    def __init__(
+        self,
+        group_index: int,
+        tiff_candidates: list[str],
+        existing_tiff: str = "",
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self._selected: str = ""
+        self.setWindowTitle(f"导入 TIF → 组 {group_index}")
+        self.setMinimumWidth(520)
+        self.setMinimumHeight(380)
+        self._setup_ui(group_index, tiff_candidates, existing_tiff)
+
+    def _setup_ui(
+        self,
+        group_index: int,
+        candidates: list[str],
+        existing_tiff: str,
+    ) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 16, 16,16)
+        root.setSpacing(10)
+
+        note = QLabel(
+            "选择一张已有 TIF（如在 Helicon 手动合成的）挂到本组，"
+            "随后点「整理」把对应 JPG 打包归档，不重跑 Helicon。"
+        )
+        note.setObjectName("Muted")
+        note.setWordWrap(True)
+        root.addWidget(note)
+
+        sec = QLabel("检测到的 TIF 文件")
+        sec.setObjectName("Section")
+        root.addWidget(sec)
+
+        self._list = QListWidget()
+        self._list.setMaximumHeight(200)
+        for path in candidates:
+            item = QListWidgetItem(Path(path).name)
+            item.setData(Qt.ItemDataRole.UserRole, path)
+            item.setToolTip(path)
+            self._list.addItem(item)
+        if not candidates:
+            placeholder = QListWidgetItem("（项目目录暂无 TIF 文件）")
+            placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
+            self._list.addItem(placeholder)
+        self._list.itemDoubleClicked.connect(self._on_list_double_clicked)
+        root.addWidget(self._list)
+
+        paste_row = QHBoxLayout()
+        paste_lbl = QLabel("或粘贴绝对路径：")
+        paste_lbl.setObjectName("Muted")
+        paste_row.addWidget(paste_lbl)
+        self._path_edit = QLineEdit()
+        self._path_edit.setPlaceholderText("粘贴 TIF 文件的完整路径")
+        if existing_tiff:
+            self._path_edit.setText(existing_tiff)
+        paste_row.addWidget(self._path_edit, stretch=1)
+        root.addLayout(paste_row)
+
+        # Browse button
+        browse_row = QHBoxLayout()
+        browse_btn = QPushButton("浏览…")
+        browse_btn.setObjectName("Ghost")
+        browse_btn.setFixedHeight(28)
+        browse_btn.clicked.connect(self._on_browse)
+        browse_row.addWidget(browse_btn)
+        browse_row.addStretch()
+        root.addLayout(browse_row)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+
+    def _on_list_double_clicked(self, item: QListWidgetItem) -> None:
+        path = item.data(Qt.ItemDataRole.UserRole)
+        if path:
+            self._path_edit.setText(path)
+
+    def _on_browse(self) -> None:
+        from app.utils.ui import get_open_file_name
+        path = get_open_file_name(
+            self, "选择 TIF 文件", filter="TIFF 文件 (*.tif *.tiff *.TIF *.TIFF)"
+        )
+        if path:
+            self._path_edit.setText(path)
+
+    def _on_accept(self) -> None:
+        # Prefer path_edit; fall back to list selection
+        path = self._path_edit.text().strip()
+        if not path:
+            item = self._list.currentItem()
+            if item:
+                path = item.data(Qt.ItemDataRole.UserRole) or ""
+        import re
+        if path and not re.search(r"\.(tif|tiff)$", path, re.IGNORECASE):
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "格式错误", "请选择 .tif / .tiff 文件。")
+            return
+        self._selected = path
+        self.accept()
+
+    def selected_path(self) -> str:
+        return self._selected

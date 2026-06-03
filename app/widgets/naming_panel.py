@@ -228,12 +228,19 @@ class NamingPanel(QWidget):
         self._rna_warning.hide()
         root.addWidget(self._rna_warning)
 
-        # Duplicate-UID warning (naming-dup-warn, hidden by default)
+        # Duplicate-UID warning (naming-dup-warn, hidden by default)  #cursor
         self._dup_warn = QLabel("⚠ 编号重复 — 该编号已存在")
         self._dup_warn.setObjectName("UnattributedWarning")
         self._dup_warn.setWordWrap(True)
         self._dup_warn.hide()
         root.addWidget(self._dup_warn)
+
+        # Design-compliance warning (7-segment format issues)  #cursor
+        self._compliance_warn = QLabel("")
+        self._compliance_warn.setObjectName("UnattributedWarning")
+        self._compliance_warn.setWordWrap(True)
+        self._compliance_warn.hide()
+        root.addWidget(self._compliance_warn)
 
         # naming-action-row: 📌 添加到侧栏 + copy shortcuts
         action_row = QHBoxLayout()
@@ -364,6 +371,8 @@ class NamingPanel(QWidget):
             self.result_id_generated.emit(result_id)
 
         self._update_sequence_hint(species_id)
+        self._check_duplicate(uid)    # #cursor findDuplicateSpecimen
+        self._check_compliance(uid)   # #cursor designComplianceCheck
 
     def _update_sequence_hint(self, species_text: str) -> None:
         """Refresh the per-prefix next-number hint from the project DB."""
@@ -424,6 +433,79 @@ class NamingPanel(QWidget):
         self._seq_apply_btn.setText(f"填入 {suggested}")
         self._seq_apply_btn.setProperty("suggested_id", suggested)
         self._seq_apply_btn.setEnabled(True)
+
+    def _check_duplicate(self, uid: str) -> None:
+        """Check if *uid* already exists in the DB.
+
+        Mirrors web findDuplicateSpecimen() app.js:3853.
+        Shows/hides self._dup_warn accordingly.
+        """
+        if not uid:
+            self._dup_warn.hide()
+            return
+        db = None
+        try:
+            db = self.ctx.get_db()
+        except Exception:
+            db = None
+        if not db:
+            self._dup_warn.hide()
+            return
+        # Check if this uid already has a specimens row
+        try:
+            row = db.execute(
+                "SELECT owner_project_dir FROM specimens WHERE uid = ?", (uid,)
+            ).fetchone()
+        except Exception:
+            self._dup_warn.hide()
+            return
+        if row:
+            owner = row[0] if row[0] else "未知项目"
+            from pathlib import Path as _Path
+            project_name = _Path(owner).name if owner else "标本库"
+            self._dup_warn.setText(
+                f"⚠ 编号重复 — 该唯一编号已存在（项目「{project_name}」），请修改字段后再保存"
+            )
+            self._dup_warn.show()
+        else:
+            self._dup_warn.hide()
+
+    def _check_compliance(self, uid: str) -> None:
+        """Light 7-segment format compliance check for the live preview UID.
+
+        Mirrors web designComplianceCheck() app.js:1954.
+        Shows self._compliance_warn if the UID is partially filled but
+        has obvious format issues (empty required segments).
+        """
+        province = self._province.text().strip()
+        site = self._site.text().strip()
+        station = self._station.text().strip()
+        species_id = self._species_id.text().strip()
+        storage = self._storage.text().strip()
+        col_date = self._collection_date.text().strip()
+
+        issues: list[str] = []
+
+        # Only check when the user has started filling in fields
+        any_filled = any([province, site, station, species_id, storage, col_date])
+        if not any_filled:
+            self._compliance_warn.hide()
+            return
+
+        if province and not province.isalpha():
+            issues.append("地区应为字母（如 FJ）")
+        if site and len(site) < 2:
+            issues.append("样地代码太短")
+        if col_date and len(col_date) != 8:
+            issues.append("采集日期应为 8 位 YYYYMMDD")
+        if storage and not any(storage.upper().startswith(c) for c in ("T", "D", "R")):
+            issues.append("保存方式应以 T/D/R 开头")
+
+        if issues:
+            self._compliance_warn.setText("⚠ 格式提示：" + "；".join(issues))
+            self._compliance_warn.show()
+        else:
+            self._compliance_warn.hide()
 
     def _apply_sequence_suggestion(self) -> None:
         suggested = self.current_sequence_suggestion()

@@ -471,6 +471,21 @@ class _Step1Widget(QWidget):
     def specimens(self) -> list[dict]:
         return self._specimens
 
+    def select_only_uid(self, uid: str) -> bool:
+        """Select exactly the specimen whose generated uniqueId equals *uid*."""
+        match_idx: Optional[int] = None
+        for i, sp in enumerate(self._specimens):
+            data = specimen_to_label_data(sp)
+            if data.get("uniqueId") == uid:
+                match_idx = i
+                break
+        if match_idx is None:
+            return False
+        self._selected = {match_idx}
+        self._sync_checkboxes()
+        self._update_bucket_cards()
+        return True
+
     # ── Internal helpers ──────────────────────────────────────────────
 
     def _rebuild_grid(self) -> None:
@@ -1949,6 +1964,13 @@ class LabelsView(BaseView):
     def on_activate(self) -> None:
         """Called when user navigates to this page."""
         self._load_specimens()
+        pending_uid = getattr(self.ctx, "pending_label_uid", None)
+        if isinstance(pending_uid, str) and pending_uid:
+            self.select_uid(pending_uid)
+            try:
+                self.ctx.pending_label_uid = None
+            except Exception:
+                pass
 
     # ── Navigation ────────────────────────────────────────────────────
 
@@ -2016,6 +2038,23 @@ class LabelsView(BaseView):
         # Update status bar with fresh selection count
         sel = len(self._step1.selected_indices())
         self._update_status_bar(sel, 0, 0, 1)
+
+    def select_uid(self, uid: str) -> bool:
+        """Select one specimen by UID and refresh downstream label steps."""
+        ok = self._step1.select_only_uid(uid)
+        if not ok:
+            return False
+        sel = len(self._step1.selected_indices())
+        self._update_status_bar(sel, 0, 0, 1)
+        if self._current_step == 1:
+            self._refresh_step2()
+        elif self._current_step == 2:
+            self._refresh_step2()
+            self._refresh_step3()
+        elif self._current_step == 3:
+            self._refresh_step2()
+            self._refresh_step4()
+        return True
 
     # ── Step 2 refresh ─────────────────────────────────────────────────
 
