@@ -123,7 +123,22 @@ class WorkbenchView(BaseView):
         self._sidebar.activate_requested.connect(self._on_sidebar_activate)
         self._sidebar.deactivate_requested.connect(self._on_sidebar_deactivate)
         self._sidebar.new_specimen_requested.connect(self._on_new_specimen)
+        self._sidebar.collab_manager_requested.connect(self._on_open_collab_manager)
         outer.addWidget(self._sidebar)
+
+        # Wire collab service signals → sidebar strip refresh
+        svc = getattr(self.ctx, "collab_service", None)
+        if svc is not None:
+            svc.peers_changed.connect(
+                lambda: self._sidebar.update_collab_status(svc)
+            )
+            svc.tasks_changed.connect(
+                lambda: self._sidebar.update_collab_status(svc)
+            )
+            svc.server_ready.connect(
+                lambda _port: self._sidebar.update_collab_status(svc)
+            )
+        self._sidebar.update_collab_status(svc)
 
         # ── Centre ①: vertical splitter (monitor top, grouping bottom) ───────
         centre = QSplitter(Qt.Orientation.Vertical)
@@ -791,10 +806,29 @@ class WorkbenchView(BaseView):
                 return
 
             if len(group.jpg_paths) < 2:
-                QMessageBox.warning(
-                    self, "合成", "该组 JPG 不足 2 张，无法合成。"
-                )
-                return
+                # ── Implicit-batch fallback  #cursor ─────────────────────────
+                # Mirrors web composeImplicitActiveBatch() app.js:5660–5706.
+                # If group is empty/insufficient, offer to use all JPGs
+                # currently attributed to this specimen in the monitor scan.
+                attributed_paths = self._get_attributed_jpg_paths(uid)
+                if len(attributed_paths) >= 2:
+                    reply = QMessageBox.question(
+                        self,
+                        "该组 JPG 不足",
+                        f"该分组 JPG 不足 2 张，但检测到 {len(attributed_paths)} 张"
+                        f" 已归属到此标本的 JPG。\n\n"
+                        "是否用这些照片作为隐式批次执行合成？",
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                        QMessageBox.StandardButton.No,
+                    )
+                    if reply != QMessageBox.StandardButton.Yes:
+                        return
+                    group.jpg_paths = attributed_paths
+                else:
+                    QMessageBox.warning(
+                        self, "合成", "该组 JPG 不足 2 张，无法合成。"
+                    )
+                    return
 
             # Check Helicon availability first
             exe = detect_helicon()
@@ -942,6 +976,23 @@ class WorkbenchView(BaseView):
                 )
             except Exception:
                 pass
+
+            # ── Collision guard: if ZIP already exists at the target path,  #cursor
+            #    warn and let user choose overwrite / skip. ──────────────
+            tiff_stem = Path(group.composed_tiff_path).stem
+            results_dir_for_check = str(Path(project_dir) / "results")
+            existing_zip = os.path.join(results_dir_for_check, tiff_stem + ".zip")
+            if os.path.isfile(existing_zip):
+                reply_col = QMessageBox.question(
+                    self,
+                    "归档文件已存在",
+                    f"同名归档 ZIP 已存在：\n{Path(existing_zip).name}\n\n"
+                    "是否覆盖并重新归档？",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if reply_col != QMessageBox.StandardButton.Yes:
+                    return
 
             # Run archive
             result = archive_group(
@@ -1147,6 +1198,52 @@ class WorkbenchView(BaseView):
             return get_active_uid(db)
         except Exception:
             return None
+
+    def _get_attributed_jpg_paths(self, uid: str) -> list[str]:
+        """Return paths of all JPGs currently attributed to *uid* in the monitor.
+
+        Used as implicit-batch fallback when a group has < 2 JPGs.
+        Mirrors web composeImplicitActiveBatch() app.js:5660–5706.
+        """
+        project_dir = self.ctx.current_project_dir
+        db = self.ctx.get_db()
+        if not project_dir or not db:
+            return []
+        try:
+            from app.services.monitor_service import scan_project
+            from app.services.grouping_service import get_explicit_unassigns
+            from app.services.activation_service import read_activations
+            import json as _json
+
+            attr = read_activations(project_dir)
+            try:
+                attr.explicit_unassigns = get_explicit_unassigns(db)
+            except Exception:
+                pass
+            try:
+                rows = db.execute("SELECT uid, jpg_paths FROM grouping").fetchall()
+                for row in rows:
+                    row_uid = row[0]
+                    paths = _json.loads(row[1] or "[]")
+                    for p in paths:
+                        attr.path_to_uid[str(Path(p).resolve())] = row_uid
+            except Exception:
+                pass
+
+            result = scan_project(project_dir, db, attr=attr)
+            return [
+                f.path for f in result.jpg_files
+                if f.attributed_specimen_id == uid and f.path
+            ]
+        except Exception:
+            return []
+
+    def _on_open_collab_manager(self) -> None:
+        """Open the CollabManagerDialog from the sidebar 'collab_manager_requested' signal."""
+        from app.widgets.collab_manager_dialog import CollabManagerDialog
+        svc = getattr(self.ctx, "collab_service", None)
+        dlg = CollabManagerDialog(svc, parent=self)
+        dlg.exec()
 
     def _on_open_settings(self) -> None:
         """Show project settings drawer positioned at the right edge."""

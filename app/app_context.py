@@ -7,10 +7,13 @@ import each other directly.
 from __future__ import annotations
 
 import sqlite3
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from app.config.settings import AppSettings
 from app.db.db_manager import get_db, open_project_db
+
+if TYPE_CHECKING:
+    from app.services.collab_service import CollabService
 
 
 class AppContext:
@@ -26,11 +29,17 @@ class AppContext:
         Persistent app preferences (QSettings wrapper).
     current_project_dir:
         The currently open project directory. None = no project loaded.
+    collab_service:
+        P2P LAN collaboration service (CollabService).  Set by main.py after
+        QApplication is created (FastAPI / uvicorn require a running event
+        loop in a QThread, so service is started *after* QApp exists).
+        May be None if the service fails to start (no uvicorn / no network).
     """
 
     def __init__(self) -> None:
         self.settings = AppSettings()
         self._project_dir: Optional[str] = None
+        self.collab_service: Optional["CollabService"] = None
 
     # ── Project dir ───────────────────────────────────────────────────
 

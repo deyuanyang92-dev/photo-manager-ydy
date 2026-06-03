@@ -27,6 +27,7 @@ from app.config import icons
 
 if TYPE_CHECKING:
     from app.app_context import AppContext
+    from app.services.collab_service import CollabService
 
 
 # ── Badge colours matching the 5 file-state palette ─────────────────────────
@@ -57,6 +58,7 @@ class SpecimenSidebar(QWidget):
     activate_requested = pyqtSignal(str)
     deactivate_requested = pyqtSignal(str)
     new_specimen_requested = pyqtSignal()
+    collab_manager_requested = pyqtSignal()   # "协作管理" button clicked
 
     def __init__(self, ctx: "AppContext", parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -182,10 +184,11 @@ class SpecimenSidebar(QWidget):
         self._collab_sync.setObjectName("MutedSmall")
         cs_lay.addWidget(self._collab_sync)
 
-        collab_mgr_btn = QPushButton("协作管理")
-        collab_mgr_btn.setObjectName("Ghost")
-        collab_mgr_btn.setFixedHeight(26)
-        cs_lay.addWidget(collab_mgr_btn)
+        self._collab_mgr_btn = QPushButton("协作管理")
+        self._collab_mgr_btn.setObjectName("Ghost")
+        self._collab_mgr_btn.setFixedHeight(26)
+        self._collab_mgr_btn.clicked.connect(self.collab_manager_requested.emit)
+        cs_lay.addWidget(self._collab_mgr_btn)
 
         root.addWidget(collab_strip)
 
@@ -314,3 +317,33 @@ class SpecimenSidebar(QWidget):
         uid = self.current_uid()
         if uid:
             self.deactivate_requested.emit(uid)
+
+    # ── Collab strip update ───────────────────────────────────────────────────
+
+    def update_collab_status(self, service: Optional["CollabService"]) -> None:
+        """Refresh the sidebar collab strip from *service*.
+
+        Designed to be called on CollabService.peers_changed and
+        CollabService.server_ready signals.  Safe to call with service=None
+        (shows static placeholder values).
+        """
+        if service is None:
+            self._collab_addr.setText("分享地址: —")
+            self._collab_device.setText("匿名·本机")
+            self._collab_members.setText("成员: 0")
+            self._collab_sync.setText("同步编号: —")
+            return
+
+        addr = service.local_address()
+        self._collab_addr.setText(f"分享地址: {addr}")
+
+        peers = service.peers()
+        n_peers = len(peers)
+        self._collab_members.setText(f"成员: {n_peers}")
+
+        import socket as _socket
+        hostname = _socket.gethostname()
+        self._collab_device.setText(f"{hostname}")
+
+        task_count = len(service.store.all())
+        self._collab_sync.setText(f"同步编号: {task_count} 条")

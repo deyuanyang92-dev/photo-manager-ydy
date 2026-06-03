@@ -31,6 +31,18 @@ def main() -> int:
     # ── App context (shared state + DI container) ─────────────────────
     ctx = AppContext()
 
+    # ── Collaboration service (P2P mDNS + FastAPI) ────────────────────
+    # Started before the window is shown so mDNS discovery has a head
+    # start.  Failures are silently swallowed — collab is optional.
+    try:
+        from app.services.collab_service import CollabService
+        svc = CollabService()
+        ctx.collab_service = svc
+        project_name = ctx.settings.last_project_dir or ""
+        svc.start(project_name=project_name)
+    except Exception:  # noqa: BLE001
+        pass  # fastapi/uvicorn not installed or network unavailable
+
     # ── Main window ───────────────────────────────────────────────────
     win = MainWindow(ctx)
 

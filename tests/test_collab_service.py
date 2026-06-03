@@ -472,6 +472,181 @@ class TestTaskRecordSerialization:
         assert t.status == TaskStatus.VOID
 
 
+# ── CollabManagerDialog offscreen smoke tests ────────────────────────────────
+
+class TestCollabManagerDialog:
+    """Smoke tests for CollabManagerDialog — no service attached and with service."""
+
+    @pytest.fixture(autouse=True)
+    def _qapp(self, qt_app):
+        return qt_app
+
+    def test_dialog_opens_without_service(self):
+        from app.widgets.collab_manager_dialog import CollabManagerDialog
+        dlg = CollabManagerDialog(service=None)
+        assert dlg.windowTitle() == "协作管理"
+        # No-service: task table shows placeholder
+        assert dlg._task_table.rowCount() >= 1
+        dlg.close()
+
+    def test_dialog_share_addr_without_service(self):
+        from app.widgets.collab_manager_dialog import CollabManagerDialog
+        dlg = CollabManagerDialog(service=None)
+        assert "服务未启动" in dlg._share_addr.text()
+        dlg.close()
+
+    def test_dialog_with_service_populates_task_table(self):
+        from app.widgets.collab_manager_dialog import CollabManagerDialog
+        svc = CollabService()
+        svc.store.create("DLGTEST-001", assignee="Alice")
+        svc.store.create("DLGTEST-002")
+        dlg = CollabManagerDialog(service=svc)
+        # 2 real tasks → 2 rows (no placeholder span)
+        assert dlg._task_table.rowCount() == 2
+        uids = {dlg._task_table.item(r, 0).text() for r in range(2)}
+        assert {"DLGTEST-001", "DLGTEST-002"}.issubset(uids)
+        dlg.close()
+        svc.stop()
+
+    def test_dialog_with_service_shows_address(self):
+        from app.widgets.collab_manager_dialog import CollabManagerDialog
+        svc = CollabService()
+        dlg = CollabManagerDialog(service=svc)
+        # Should show a real IP or 127.0.0.1 + port
+        assert "—" not in dlg._share_addr.text() or "5050" in dlg._share_addr.text()
+        dlg.close()
+        svc.stop()
+
+    def test_dialog_conflict_banner_on_signal(self):
+        from app.widgets.collab_manager_dialog import CollabManagerDialog
+        svc = CollabService()
+        dlg = CollabManagerDialog(service=svc)
+        assert dlg._banner.isHidden()
+        svc.conflict_detected.emit("CTEST-001")
+        assert not dlg._banner.isHidden()
+        assert "CTEST-001" in dlg._banner.text()
+        dlg.close()
+        svc.stop()
+
+    def test_dialog_debug_drawer_toggle(self):
+        from app.widgets.collab_manager_dialog import CollabManagerDialog
+        dlg = CollabManagerDialog(service=None)
+        assert dlg._debug_drawer.isHidden()
+        dlg._debug_btn.setChecked(True)
+        assert not dlg._debug_drawer.isHidden()
+        dlg._debug_btn.setChecked(False)
+        assert dlg._debug_drawer.isHidden()
+        dlg.close()
+
+    def test_dialog_no_service_summary_label(self):
+        from app.widgets.collab_manager_dialog import CollabManagerDialog
+        dlg = CollabManagerDialog(service=None)
+        assert "未启动" in dlg._summary_label.text() or dlg._summary_label.text() != ""
+        dlg.close()
+
+
+# ── SpecimenSidebar collab strip wiring ──────────────────────────────────────
+
+class TestSidebarCollabStrip:
+    """SpecimenSidebar.update_collab_status updates labels correctly."""
+
+    @pytest.fixture(autouse=True)
+    def _qapp(self, qt_app):
+        return qt_app
+
+    def _make_sidebar(self):
+        from app.widgets.specimen_sidebar import SpecimenSidebar
+        ctx = MagicMock()
+        ctx.get_db.return_value = None
+        ctx.current_project_dir = None
+        return SpecimenSidebar(ctx)
+
+    def test_update_with_none_shows_dashes(self):
+        sb = self._make_sidebar()
+        sb.update_collab_status(None)
+        assert sb._collab_addr.text() == "分享地址: —"
+        assert sb._collab_members.text() == "成员: 0"
+        sb.close()
+
+    def test_update_with_service_shows_addr(self):
+        sb = self._make_sidebar()
+        svc = CollabService()
+        sb.update_collab_status(svc)
+        # Should contain ":" for ip:port
+        assert ":" in sb._collab_addr.text()
+        sb.close()
+        svc.stop()
+
+    def test_update_task_count(self):
+        sb = self._make_sidebar()
+        svc = CollabService()
+        svc.store.create("SB-TEST-001")
+        svc.store.create("SB-TEST-002")
+        sb.update_collab_status(svc)
+        assert "2" in sb._collab_sync.text()
+        sb.close()
+        svc.stop()
+
+    def test_collab_manager_signal_emitted(self):
+        sb = self._make_sidebar()
+        received: list[int] = []
+        sb.collab_manager_requested.connect(lambda: received.append(1))
+        sb._collab_mgr_btn.click()
+        assert len(received) == 1
+        sb.close()
+
+
+# ── CollabService.broadcast via CollabManagerDialog ─────────────────────────
+
+class TestStatusBroadcast:
+    """CollabManagerDialog._broadcast_status_update POSTs to peers (mocked)."""
+
+    @pytest.fixture(autouse=True)
+    def _qapp(self, qt_app):
+        return qt_app
+
+    def test_broadcast_update_calls_httpx(self):
+        from app.widgets.collab_manager_dialog import CollabManagerDialog
+        from app.services.collab_service import PeerInfo
+
+        svc = CollabService()
+        svc.store.create("BCAST-001")
+        svc._peers["10.0.0.5:5050"] = PeerInfo(ip="10.0.0.5", port=5050)
+
+        dlg = CollabManagerDialog(service=svc)
+
+        posted_urls: list[str] = []
+        import httpx
+        original_post = httpx.post
+
+        def fake_post(url: str, **kwargs):
+            posted_urls.append(url)
+            m = MagicMock()
+            m.status_code = 200
+            return m
+
+        with patch("httpx.post", side_effect=fake_post):
+            dlg._broadcast_status_update("BCAST-001", "shooting")
+
+        assert any("10.0.0.5" in u for u in posted_urls)
+        dlg.close()
+        svc.stop()
+
+    def test_broadcast_no_peers_no_httpx_call(self):
+        from app.widgets.collab_manager_dialog import CollabManagerDialog
+
+        svc = CollabService()  # no peers
+        svc.store.create("BCAST-NOPEER-001")
+        dlg = CollabManagerDialog(service=svc)
+
+        with patch("httpx.post") as mock_post:
+            dlg._broadcast_status_update("BCAST-NOPEER-001", "shooting")
+            mock_post.assert_not_called()
+
+        dlg.close()
+        svc.stop()
+
+
 # ── Needs-network placeholder tests ──────────────────────────────────────────
 
 @needs_network

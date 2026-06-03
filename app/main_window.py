@@ -79,6 +79,7 @@ class MainWindow(QMainWindow):
 
         self._build_shell()
         self._build_status_bar()
+        self._wire_collab_status_bar()
 
     # ── Shell layout ──────────────────────────────────────────────────────
 
@@ -454,7 +455,42 @@ class MainWindow(QMainWindow):
         self.ctx.settings.save_geometry(self.saveGeometry())
         self.ctx.settings.save_window_state(self.saveState())
         self.ctx.settings.sync()
+        # Gracefully stop collaboration service so mDNS un-registers before exit
+        svc = getattr(self.ctx, "collab_service", None)
+        if svc is not None:
+            try:
+                svc.stop()
+            except Exception:  # noqa: BLE001
+                pass
         super().closeEvent(event)
+
+    def _wire_collab_status_bar(self) -> None:
+        """Connect CollabService signals to the status bar segment.
+
+        Called once from __init__ after the status bar is built.  Safe to
+        call when collab_service is None — becomes a no-op.
+        """
+        svc = getattr(self.ctx, "collab_service", None)
+        if svc is None:
+            return
+        svc.server_ready.connect(
+            lambda port: self.set_status_collab(f"协作: 端口 {port}")
+        )
+        svc.peers_changed.connect(self._refresh_collab_status)
+        svc.sync_error.connect(
+            lambda msg: self.set_status_collab(f"协作: 错误")
+        )
+
+    def _refresh_collab_status(self) -> None:
+        svc = getattr(self.ctx, "collab_service", None)
+        if svc is None:
+            self.set_status_collab("协作: 未启动")
+            return
+        n = len(svc.peers())
+        if n:
+            self.set_status_collab(f"协作: 🟢 {n} 台在线")
+        else:
+            self.set_status_collab("协作: ⚪ 未发现其他设备")
 
 
 # ── Nav glyphs (view_id → qtawesome Material Design Icon) ───────────────────
