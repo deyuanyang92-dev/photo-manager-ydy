@@ -1,4 +1,4 @@
-"""label_service.py — Build print-jobs from Specimen records.
+"""label_service.py — Build print-jobs from Specimen records + template library CRUD.
 
 Consumes ``app.utils.label_core`` pure functions.  The only business logic
 added here on top of the core is:
@@ -6,17 +6,29 @@ added here on top of the core is:
   1. Converting PyQt-side ``Specimen`` dataclass instances (or plain dicts)
      to the camelCase dicts that label_core expects.
   2. Routing specimens into the correct bucket via ``bucket_specimens``.
+  3. ``LabelTemplateLibrary`` — QSettings-backed named multi-template store,
+     mirrors JS readLabelTemplateLibrary / writeLabelTemplateLibrary / etc.
 
 Usage
 -----
     from app.services.label_service import LabelService, BUILTIN_TEMPLATES
+    from app.services.label_service import LabelTemplateLibrary
 
-    items, tissues = LabelService.build_print_job(specimens, template, bucket="sample")
+    lib = LabelTemplateLibrary("sample")
+    rec = lib.upsert({"name": "My Label", "template": {...}})
+    lib.select(rec["id"])          # persists choice to QSettings
 """
 
 from __future__ import annotations
 
+import copy
+import time
+import random
+import string
+from datetime import datetime, timezone
 from typing import Optional, Union
+
+from PyQt6.QtCore import QSettings
 
 from app.models.specimen import Specimen
 from app.utils.label_core import (
@@ -238,3 +250,297 @@ class LabelService:
             "bucket": bucket,
             "printerMargin": printer_margin,
         })
+
+
+# ── Template library (QSettings-backed) ───────────────────────────────────────
+# Mirrors web JS: readLabelTemplateLibrary / writeLabelTemplateLibrary /
+# normalizeLibraryRecord / upsertLabelTemplateRecord / getLabelTemplateRecord /
+# labelTemplateRecords / createLabelTemplateId / migrateLegacyLabelTemplate
+
+# QSettings keys mirror web localStorage keys exactly.
+_QSETTINGS_ORG = "PhotoPlatform"
+_QSETTINGS_APP = "LabelTemplates"
+
+_LIBRARY_QSETTINGS_KEY = {
+    "sample": "labelSampleTemplateLibrary",
+    "tissue": "labelTissueTemplateLibrary",
+}
+_SELECTED_QSETTINGS_KEY = {
+    "sample": "labelSampleTemplateKey",
+    "tissue": "labelTissueTemplateKey",
+}
+_SIZE_QSETTINGS_KEY = {
+    "sample": "labelSampleSizeKey",
+    "tissue": "labelTissueSizeKey",
+}
+_MIGRATION_QSETTINGS_KEY = {
+    "sample": "labelSampleTemplateLibraryMigrated",
+    "tissue": "labelTissueTemplateLibraryMigrated",
+}
+_LEGACY_CUSTOM_QSETTINGS_KEY = {
+    "sample": "labelCustomTemplate",
+    "tissue": "labelTissueCustomTemplate",
+}
+
+
+def _create_template_id() -> str:
+    """Mirror JS createLabelTemplateId()."""
+    ts = format(int(time.time() * 1000), "x")  # base-36-ish via hex approximation
+    rnd = "".join(random.choices(string.ascii_lowercase + string.digits, k=5))
+    return f"custom-{ts}-{rnd}"
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _is_library_key(key: str) -> bool:
+    """Mirror JS isLabelLibraryKey(key) — True when key starts with 'custom:'."""
+    return str(key or "").startswith("custom:")
+
+
+def _id_from_key(key: str) -> str:
+    return str(key)[7:] if _is_library_key(key) else ""
+
+
+def _key_from_id(template_id: str) -> str:
+    return f"custom:{template_id}"
+
+
+class LabelTemplateLibrary:
+    """QSettings-backed named multi-template store for one bucket.
+
+    Mirrors JS functions: readLabelTemplateLibrary / writeLabelTemplateLibrary /
+    normalizeLibraryRecord / upsertLabelTemplateRecord / getLabelTemplateRecord /
+    labelTemplateRecords / migrateLegacyLabelTemplate.
+
+    Parameters
+    ----------
+    bucket : "sample" | "tissue"
+    """
+
+    def __init__(self, bucket: str) -> None:
+        if bucket not in ("sample", "tissue"):
+            raise ValueError(f"bucket must be 'sample' or 'tissue', got {bucket!r}")
+        self._bucket = bucket
+        self._qs = QSettings(_QSETTINGS_ORG, _QSETTINGS_APP)
+        self._migrate_legacy()
+
+    # ── Persistence helpers ───────────────────────────────────────────────────
+
+    def _read_raw(self) -> dict:
+        """Load library dict from QSettings.  Always returns {version:1, templates:[...]}."""
+        key = _LIBRARY_QSETTINGS_KEY[self._bucket]
+        import json as _json
+        raw = self._qs.value(key, None)
+        if raw:
+            try:
+                lib = _json.loads(raw) if isinstance(raw, str) else raw
+                if isinstance(lib, dict) and isinstance(lib.get("templates"), list):
+                    return lib
+            except Exception:
+                pass
+        return {"version": 1, "templates": []}
+
+    def _write_raw(self, lib: dict) -> None:
+        import json as _json
+        lib.setdefault("version", 1)
+        if not isinstance(lib.get("templates"), list):
+            lib["templates"] = []
+        key = _LIBRARY_QSETTINGS_KEY[self._bucket]
+        self._qs.setValue(key, _json.dumps(lib))
+
+    # ── Migration (JS migrateLegacyLabelTemplate) ─────────────────────────────
+
+    def _migrate_legacy(self) -> None:
+        """One-time migration of old single-custom-template slot into the library."""
+        mkey = _MIGRATION_QSETTINGS_KEY[self._bucket]
+        if self._qs.value(mkey) == "1":
+            return
+        import json as _json
+        lkey = _LEGACY_CUSTOM_QSETTINGS_KEY[self._bucket]
+        raw = self._qs.value(lkey, None)
+        if raw:
+            try:
+                tmpl = _json.loads(raw) if isinstance(raw, str) else raw
+                lib = self._read_raw()
+                if not lib["templates"]:
+                    default_name = (
+                        "我的 RNAlater 模板" if self._bucket == "tissue"
+                        else "我的样品瓶模板"
+                    )
+                    rec = self._normalize_record({
+                        "name": (tmpl.get("name") if isinstance(tmpl, dict) else None)
+                               or default_name,
+                        "source": "legacy",
+                        "template": tmpl,
+                    })
+                    lib["templates"].append(rec)
+                    self._write_raw(lib)
+            except Exception:
+                pass
+        self._qs.setValue(mkey, "1")
+
+    # ── normalizeLibraryRecord ────────────────────────────────────────────────
+
+    def _normalize_record(self, rec: dict) -> dict:
+        """Mirror JS normalizeLibraryRecord(bucket, rec)."""
+        if not rec or not rec.get("template"):
+            raise ValueError("record must have a 'template' key")
+        now = _now_iso()
+        template_id = rec.get("id") or _create_template_id()
+        tmpl = copy.deepcopy(rec["template"])
+        if self._bucket == "tissue":
+            tmpl["flavor"] = "tissue"
+        if not tmpl.get("name"):
+            tmpl["name"] = rec.get("name") or (
+                "我的 RNAlater 模板" if self._bucket == "tissue"
+                else "我的样品瓶模板"
+            )
+        return {
+            "id": template_id,
+            "name": rec.get("name") or tmpl["name"],
+            "bucket": self._bucket,
+            "source": rec.get("source") or "",
+            "createdAt": rec.get("createdAt") or now,
+            "updatedAt": rec.get("updatedAt") or now,
+            "template": tmpl,
+        }
+
+    # ── Public CRUD API ───────────────────────────────────────────────────────
+
+    def records(self) -> list[dict]:
+        """Return all normalized records.  Mirror JS labelTemplateRecords(bucket)."""
+        lib = self._read_raw()
+        result = []
+        for r in lib["templates"]:
+            try:
+                result.append(self._normalize_record(r))
+            except Exception:
+                pass
+        return result
+
+    def get(self, template_id: str) -> Optional[dict]:
+        """Return a single record by id, or None.  Mirror JS getLabelTemplateRecord."""
+        lib = self._read_raw()
+        for r in lib["templates"]:
+            if r.get("id") == template_id:
+                try:
+                    return self._normalize_record(r)
+                except Exception:
+                    return None
+        return None
+
+    def upsert(self, rec: dict) -> dict:
+        """Insert or update a record.  Mirror JS upsertLabelTemplateRecord.
+
+        If rec has no 'id', a new id is generated (insert).
+        If rec has an 'id' that already exists, it is updated.
+        Returns the normalized record.
+        """
+        normalized = self._normalize_record(rec)
+        lib = self._read_raw()
+        idx = next(
+            (i for i, x in enumerate(lib["templates"]) if x.get("id") == normalized["id"]),
+            -1,
+        )
+        if idx >= 0:
+            normalized["updatedAt"] = _now_iso()
+            lib["templates"][idx] = normalized
+        else:
+            lib["templates"].append(normalized)
+        self._write_raw(lib)
+        return normalized
+
+    def clone_from_builtin(self, src_tmpl: dict, src_name: str) -> dict:
+        """Clone a built-in template into the library as a new custom record.
+
+        Mirror JS cloneLabelTemplateToCustom(bucket, srcTmpl, srcName).
+        """
+        clone = copy.deepcopy(src_tmpl)
+        clone["name"] = f"自定义（基于 {src_name}）"
+        if self._bucket == "tissue":
+            clone["flavor"] = "tissue"
+        return self.upsert({
+            "name": clone["name"],
+            "source": src_name or "",
+            "template": clone,
+        })
+
+    def rename(self, template_id: str, new_name: str) -> Optional[dict]:
+        """Rename a template record."""
+        rec = self.get(template_id)
+        if not rec:
+            return None
+        rec["name"] = new_name
+        rec["template"]["name"] = new_name
+        return self.upsert(rec)
+
+    def delete(self, template_id: str) -> bool:
+        """Delete a template record by id.  Returns True if deleted."""
+        lib = self._read_raw()
+        before = len(lib["templates"])
+        lib["templates"] = [r for r in lib["templates"] if r.get("id") != template_id]
+        if len(lib["templates"]) < before:
+            self._write_raw(lib)
+            return True
+        return False
+
+    def duplicate(self, template_id: str) -> Optional[dict]:
+        """Duplicate an existing record with a new id."""
+        rec = self.get(template_id)
+        if not rec:
+            return None
+        new_rec = copy.deepcopy(rec)
+        new_rec.pop("id", None)          # force new id
+        new_rec["name"] = rec["name"] + " (副本)"
+        new_rec["template"]["name"] = new_rec["name"]
+        new_rec["source"] = f"copy of {template_id}"
+        new_rec.pop("createdAt", None)
+        new_rec.pop("updatedAt", None)
+        return self.upsert(new_rec)
+
+    # ── Per-bucket selected template key ──────────────────────────────────────
+
+    def selected_key(self) -> str:
+        """Return the persisted selected template key (builtin name or 'custom:<id>')."""
+        qkey = _SELECTED_QSETTINGS_KEY[self._bucket]
+        default = "tissueCompact" if self._bucket == "tissue" else "standard"
+        return str(self._qs.value(qkey, default) or default)
+
+    def set_selected_key(self, key: str) -> None:
+        """Persist the selected template key."""
+        qkey = _SELECTED_QSETTINGS_KEY[self._bucket]
+        self._qs.setValue(qkey, key)
+
+    def select_record(self, template_id: str) -> None:
+        """Set active template to a library record.  Mirrors JS chooseCustomLabelTemplate."""
+        self.set_selected_key(_key_from_id(template_id))
+
+    # ── Per-bucket size key ───────────────────────────────────────────────────
+
+    def selected_size_key(self) -> str:
+        """Return the persisted selected paper size key."""
+        qkey = _SIZE_QSETTINGS_KEY[self._bucket]
+        default = "label_30x15" if self._bucket == "tissue" else "label_50x30"
+        return str(self._qs.value(qkey, default) or default)
+
+    def set_selected_size_key(self, size_key: str) -> None:
+        """Persist the selected paper size key."""
+        qkey = _SIZE_QSETTINGS_KEY[self._bucket]
+        self._qs.setValue(qkey, size_key)
+
+
+# ── Module-level helpers (used by labels_view) ────────────────────────────────
+
+def is_library_key(key: str) -> bool:
+    """True when key is a custom:<id> library key."""
+    return _is_library_key(key)
+
+
+def key_from_id(template_id: str) -> str:
+    return _key_from_id(template_id)
+
+
+def id_from_key(key: str) -> str:
+    return _id_from_key(key)

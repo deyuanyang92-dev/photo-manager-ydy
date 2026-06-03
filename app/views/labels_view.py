@@ -40,17 +40,20 @@ Red lines (never relax):
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import tempfile
 from typing import Optional
 
-from PyQt6.QtCore import Qt, QMarginsF, QSizeF
+from PyQt6.QtCore import Qt, QMarginsF, QSizeF, QTimer
 from PyQt6.QtGui import QPainter, QPageSize, QColor, QFont
 from PyQt6.QtPrintSupport import QPrinter, QPrintDialog, QAbstractPrintDialog
 from PyQt6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QGroupBox,
     QHBoxLayout,
@@ -58,6 +61,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QMessageBox,
     QPushButton,
     QRadioButton,
@@ -70,6 +74,7 @@ from PyQt6.QtWidgets import (
     QWidget,
     QComboBox,
     QFrame,
+    QInputDialog,
 )
 
 from app.views.base_view import BaseView
@@ -77,6 +82,10 @@ from app.services.label_service import (
     BUILTIN_TEMPLATES,
     PAPER_SIZES,
     LabelService,
+    LabelTemplateLibrary,
+    is_library_key,
+    key_from_id,
+    id_from_key,
 )
 from app.utils.label_core import (
     normalize_template,
@@ -618,14 +627,17 @@ class _BucketColWidget(QWidget):
         super().__init__(parent)
         self._bucket = bucket
         self._is_tissue = bucket == "tissue"
-        self._selected_template_key: str = "tissueCompact" if self._is_tissue else "standard"
-        self._selected_size_key: str = "label_30x15" if self._is_tissue else "label_50x30"
+        # Use QSettings-backed library for persistence
+        self._lib = LabelTemplateLibrary(bucket)
+        # Load persisted selections
+        self._selected_template_key: str = self._lib.selected_key()
+        self._selected_size_key: str = self._lib.selected_size_key()
         self._custom_w: int = 30 if self._is_tissue else 50
         self._custom_h: int = 15 if self._is_tissue else 30
         self._specimens: list[dict] = []
         self._selected_indices: list[int] = []
-        self._custom_template: Optional[dict] = None  # user-imported JSON
-        self._field_edits: dict[str, str] = {}  # field overrides for first specimen
+        # Per-specimen labelEdits: {spec_idx: {field_key: value}}
+        self._label_edits: dict[int, dict[str, str]] = {}
 
         self._build_ui()
 
@@ -667,7 +679,7 @@ class _BucketColWidget(QWidget):
         self._import_btn.setFixedHeight(24)
         self._manage_btn.setFixedHeight(24)
         self._import_btn.clicked.connect(self._import_json)
-        self._manage_btn.clicked.connect(self._show_manage_hint)
+        self._manage_btn.clicked.connect(self._open_manage_dialog)
         head_row.addWidget(self._import_btn)
         head_row.addWidget(self._manage_btn)
         root.addWidget(head)
@@ -822,13 +834,10 @@ class _BucketColWidget(QWidget):
             return {"w": size["w"], "h": size["h"]}
         return {"w": 50, "h": 30}
 
-    def field_edits(self) -> dict[str, str]:
-        return dict(self._field_edits)
-
     # ── Internal: rebuild template cards ─────────────────────────────
 
     def _rebuild_template_picker(self) -> None:
-        # Remove all except stretch at end
+        # Remove all items
         while self._picker_layout.count() > 0:
             item = self._picker_layout.takeAt(0)
             if item.widget():
@@ -843,24 +852,26 @@ class _BucketColWidget(QWidget):
 
         dims = self.selected_dims()
 
+        # ── Built-in templates ────────────────────────────────────────
         for key, tmpl in BUILTIN_TEMPLATES.items():
             is_tissue_tmpl = tmpl.get("flavor") == "tissue"
             if self._is_tissue and not is_tissue_tmpl:
                 continue
             if not self._is_tissue and is_tissue_tmpl:
                 continue
-
             card = self._make_template_card(key, tmpl, first_data, dims)
             self._picker_layout.addWidget(card)
 
-        # Custom template card (from import)
-        if self._custom_template:
-            custom_card = self._make_template_card(
-                "custom", self._custom_template, first_data, dims, badge="自定义"
+        # ── Library custom templates ──────────────────────────────────
+        for rec in self._lib.records():
+            rec_key = key_from_id(rec["id"])
+            card = self._make_template_card(
+                rec_key, rec["template"], first_data, dims,
+                badge="自定义", lib_rec=rec,
             )
-            self._picker_layout.addWidget(custom_card)
+            self._picker_layout.addWidget(card)
 
-        # 新建自定义 card
+        # ── 新建自定义 card ───────────────────────────────────────────
         add_card = QFrame()
         add_card.setObjectName("TmplCard")
         add_card.setProperty("selected", "false")
@@ -870,24 +881,27 @@ class _BucketColWidget(QWidget):
         add_layout = QVBoxLayout(add_card)
         add_layout.setContentsMargins(6, 6, 6, 6)
         add_layout.setSpacing(4)
-        title_row = QHBoxLayout()
-        title_row.addWidget(QLabel("<b>新建自定义</b>"))
-        title_row.addStretch()
-        add_layout.addLayout(title_row)
-        hint = QLabel("从当前默认模板复制一份，可独立保存管理")
-        hint.setStyleSheet("color: #5f7d7a; font-size: 10px;")
-        hint.setWordWrap(True)
-        add_layout.addWidget(hint)
+        title_row2 = QHBoxLayout()
+        title_row2.addWidget(QLabel("<b>新建自定义</b>"))
+        title_row2.addStretch()
+        add_layout.addLayout(title_row2)
+        hint2 = QLabel("从默认模板复制一份，可独立保存管理")
+        hint2.setStyleSheet("color: #5f7d7a; font-size: 10px;")
+        hint2.setWordWrap(True)
+        add_layout.addWidget(hint2)
         add_layout.addStretch()
 
-        def _new_custom() -> None:
-            QMessageBox.information(
-                self, "新建自定义",
-                "请使用「导入 JSON」上传自定义模板文件，\n"
-                "或在第 3 步 WYSIWYG 编辑器中直接编辑当前模板。"
-            )
+        def _new_custom_click(_e: object) -> None:
+            base_key = "tissueCompact" if self._is_tissue else "standard"
+            base = BUILTIN_TEMPLATES.get(base_key, {})
+            rec = self._lib.clone_from_builtin(base, base.get("name", base_key))
+            self._selected_template_key = key_from_id(rec["id"])
+            self._lib.select_record(rec["id"])
+            self._rebuild_template_picker()
+            if not self._is_tissue:
+                self._rebuild_field_editor()
 
-        add_card.mousePressEvent = lambda _e: _new_custom()  # type: ignore[method-assign]
+        add_card.mousePressEvent = _new_custom_click  # type: ignore[method-assign]
         self._picker_layout.addWidget(add_card)
         self._picker_layout.addStretch()
 
@@ -898,45 +912,88 @@ class _BucketColWidget(QWidget):
         first_data: dict,
         dims: dict,
         badge: str = "内置",
+        lib_rec: Optional[dict] = None,
     ) -> QFrame:
         is_selected = key == self._selected_template_key
         card = QFrame()
         card.setObjectName("TmplCard")
         card.setProperty("selected", str(is_selected).lower())
         card.setStyleSheet(_CSS_TMPL_CARD)
-        card.setFixedWidth(130)
+        card.setFixedWidth(140)
         card.setCursor(Qt.CursorShape.PointingHandCursor)
 
         layout = QVBoxLayout(card)
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(4)
 
-        # Header row: badge + name + 编辑 button
+        # Header row: badge + name + action button
         header_row = QHBoxLayout()
         header_row.setSpacing(4)
         badge_lbl = QLabel(badge)
+        badge_color = "#4a90d9" if badge == "自定义" else "#29b9ab"
         badge_lbl.setStyleSheet(
-            "background: rgba(41,185,171,0.15); color:#29b9ab; border-radius:3px;"
-            " font-size:10px; padding: 1px 4px;"
+            f"background: rgba({badge_color.replace('#','')},0.15);"  # fallback raw color
+            f" color:{badge_color}; border-radius:3px; font-size:10px; padding: 1px 4px;"
         )
+        # Use fixed colors for cleaner look
+        if badge == "自定义":
+            badge_lbl.setStyleSheet(
+                "background: rgba(74,144,217,0.18); color:#4a90d9; border-radius:3px;"
+                " font-size:10px; padding: 1px 4px;"
+            )
         header_row.addWidget(badge_lbl)
         name_lbl = QLabel(f"<b>{tmpl.get('name', key)}</b>")
-        name_lbl.setStyleSheet("color:#eef3ef; font-size:11px;")
+        name_lbl.setStyleSheet("color:#eef3ef; font-size:10px;")
         header_row.addWidget(name_lbl, stretch=1)
-        edit_btn = QPushButton("编辑")
-        edit_btn.setFixedHeight(20)
-        edit_btn.setFixedWidth(36)
-        edit_btn.setStyleSheet(
-            "QPushButton { background:transparent; border:1px solid rgba(145,182,181,0.25);"
-            " border-radius:3px; color:#87a2a1; font-size:10px; padding:0; }"
-            "QPushButton:hover { color:#29b9ab; border-color:#29b9ab; }"
-        )
-        edit_btn.setToolTip("复制为可编辑（不污染预设）")
-        edit_btn.clicked.connect(lambda checked, k=key, t=tmpl: self._clone_to_custom(k, t))
-        header_row.addWidget(edit_btn)
+
+        if lib_rec is not None:
+            # Library record: show a "管理" button with dropdown menu
+            mgmt_btn = QPushButton("管理")
+            mgmt_btn.setFixedHeight(18)
+            mgmt_btn.setFixedWidth(38)
+            mgmt_btn.setStyleSheet(
+                "QPushButton { background:transparent; border:1px solid rgba(145,182,181,0.25);"
+                " border-radius:3px; color:#87a2a1; font-size:9px; padding:0; }"
+                "QPushButton:hover { color:#29b9ab; border-color:#29b9ab; }"
+            )
+            mgmt_btn.setToolTip("重命名、复制、导出、删除")
+            rec_id = lib_rec["id"]
+            rec_name = lib_rec["name"]
+
+            def _show_mgmt_menu(checked: bool, _rid: str = rec_id, _rname: str = rec_name) -> None:
+                menu = QMenu(self)
+                menu.setStyleSheet(
+                    "QMenu { background:#10242a; color:#cfe0db; border:1px solid rgba(145,182,181,0.18); }"
+                    "QMenu::item:selected { background: rgba(41,185,171,0.25); }"
+                )
+                menu.addAction("✓ 选用", lambda: self._lib_use(_rid))
+                menu.addAction("重命名", lambda: self._lib_rename(_rid, _rname))
+                menu.addAction("复制", lambda: self._lib_copy(_rid))
+                menu.addAction("导出 JSON", lambda: self._lib_export(_rid))
+                menu.addSeparator()
+                act_del = menu.addAction("删除", lambda: self._lib_delete(_rid, _rname))
+                act_del.setEnabled(True)
+                menu.exec(mgmt_btn.mapToGlobal(mgmt_btn.rect().bottomLeft()))
+
+            mgmt_btn.clicked.connect(_show_mgmt_menu)
+            header_row.addWidget(mgmt_btn)
+        else:
+            # Built-in template: show "编辑" (clone to library)
+            edit_btn = QPushButton("编辑")
+            edit_btn.setFixedHeight(18)
+            edit_btn.setFixedWidth(36)
+            edit_btn.setStyleSheet(
+                "QPushButton { background:transparent; border:1px solid rgba(145,182,181,0.25);"
+                " border-radius:3px; color:#87a2a1; font-size:9px; padding:0; }"
+                "QPushButton:hover { color:#29b9ab; border-color:#29b9ab; }"
+            )
+            edit_btn.setToolTip("复制为可编辑（不污染预设）")
+            edit_btn.clicked.connect(lambda checked, k=key, t=tmpl: self._clone_to_lib(k, t))
+            header_row.addWidget(edit_btn)
+
         layout.addLayout(header_row)
 
-        # Mini preview (simple text lines — no live QGraphics for performance)
+        # Mini preview
         preview_frame = QFrame()
         preview_frame.setStyleSheet(
             "QFrame { background: white; border: 1px solid #ccc; border-radius: 2px; }"
@@ -964,9 +1021,19 @@ class _BucketColWidget(QWidget):
         preview_layout.addStretch()
         layout.addWidget(preview_frame)
 
+        if lib_rec is not None:
+            upd = lib_rec.get("updatedAt", "")[:10]
+            meta_lbl = QLabel(f"自定义 · {upd}")
+            meta_lbl.setStyleSheet("color:#5f7d7a; font-size:9px;")
+            layout.addWidget(meta_lbl)
+
         # Click to select
-        def _select(event: object, k: str = key) -> None:
+        def _select(event: object, k: str = key, _lr: Optional[dict] = lib_rec) -> None:
             self._selected_template_key = k
+            if _lr is not None:
+                self._lib.select_record(_lr["id"])
+            else:
+                self._lib.set_selected_key(k)
             self._rebuild_template_picker()
             if not self._is_tissue:
                 self._rebuild_field_editor()
@@ -980,8 +1047,18 @@ class _BucketColWidget(QWidget):
         clone["name"] = f"自定义（基于 {src_tmpl.get('name', src_key)}）"
         if self._is_tissue:
             clone["flavor"] = "tissue"
-        self._custom_template = clone
-        self._selected_template_key = "custom"
+        # Legacy path used only if someone calls this directly; prefer _clone_to_lib
+        rec = self._lib.upsert({"name": clone["name"], "source": src_key, "template": clone})
+        self._selected_template_key = key_from_id(rec["id"])
+        self._lib.select_record(rec["id"])
+        self._rebuild_template_picker()
+        if not self._is_tissue:
+            self._rebuild_field_editor()
+
+    def _clone_to_lib(self, src_key: str, src_tmpl: dict) -> None:
+        """Clone a built-in template into the library."""
+        rec = self._lib.clone_from_builtin(src_tmpl, src_tmpl.get("name", src_key))
+        self._selected_template_key = key_from_id(rec["id"])
         self._rebuild_template_picker()
         if not self._is_tissue:
             self._rebuild_field_editor()
@@ -997,20 +1074,74 @@ class _BucketColWidget(QWidget):
                 data = json.load(fh)
             if not isinstance(data, dict) or "rows" not in data:
                 raise ValueError("JSON 结构不正确，缺少 'rows' 字段")
-            if self._is_tissue:
-                data["flavor"] = "tissue"
-            self._custom_template = data
-            self._selected_template_key = "custom"
+            tmpl_name = data.get("name") or os.path.basename(path).replace(".json", "")
+            rec = self._lib.upsert({
+                "name": tmpl_name,
+                "source": "import",
+                "template": data,
+            })
+            self._selected_template_key = key_from_id(rec["id"])
+            self._lib.select_record(rec["id"])
             self._rebuild_template_picker()
         except Exception as e:
             QMessageBox.warning(self, "导入失败", f"无法解析模板 JSON:\n{e}")
 
-    def _show_manage_hint(self) -> None:
-        QMessageBox.information(
-            self, "模板管理",
-            "当前版本支持「导入 JSON」上传自定义模板。\n"
-            "模板导入后可在第 3 步 WYSIWYG 编辑器中预览与微调。"
+    def _open_manage_dialog(self) -> None:
+        dlg = _TemplateManageDialog(self._lib, parent=self)
+        dlg.exec()
+        # Refresh picker after dialog closes (user may have renamed/deleted)
+        self._rebuild_template_picker()
+
+    # ── Library record quick-actions (called from card menus) ─────────
+
+    def _lib_use(self, rec_id: str) -> None:
+        self._selected_template_key = key_from_id(rec_id)
+        self._lib.select_record(rec_id)
+        self._rebuild_template_picker()
+        if not self._is_tissue:
+            self._rebuild_field_editor()
+
+    def _lib_rename(self, rec_id: str, current_name: str) -> None:
+        new_name, ok = QInputDialog.getText(self, "重命名", "新名称:", text=current_name)
+        if ok and new_name.strip():
+            self._lib.rename(rec_id, new_name.strip())
+            self._rebuild_template_picker()
+
+    def _lib_copy(self, rec_id: str) -> None:
+        new_rec = self._lib.duplicate(rec_id)
+        if new_rec:
+            self._rebuild_template_picker()
+
+    def _lib_export(self, rec_id: str) -> None:
+        rec = self._lib.get(rec_id)
+        if not rec:
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "导出模板 JSON",
+            rec["name"].replace(" ", "_") + ".json",
+            "JSON 文件 (*.json)",
         )
+        if path:
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(rec["template"], f, ensure_ascii=False, indent=2)
+            except Exception as e:
+                QMessageBox.warning(self, "导出失败", str(e))
+
+    def _lib_delete(self, rec_id: str, name: str) -> None:
+        resp = QMessageBox.question(
+            self, "删除确认",
+            f"确定删除自定义模板「{name}」？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if resp == QMessageBox.StandardButton.Yes:
+            self._lib.delete(rec_id)
+            # If deleted template was active, fall back to default
+            if self._selected_template_key == key_from_id(rec_id):
+                default = "tissueCompact" if self._is_tissue else "standard"
+                self._selected_template_key = default
+                self._lib.set_selected_key(default)
+            self._rebuild_template_picker()
 
     # ── Internal: rebuild field editor ───────────────────────────────
 
@@ -1065,25 +1196,36 @@ class _BucketColWidget(QWidget):
             lbl.setFixedWidth(72)
             lbl.setStyleSheet("color:#cfe0db; font-size:11px;")
 
-            current_val = self._field_edits.get(field_key, first_data.get(field_key) or "")
+            # Per-specimen edits: {idx: {field: val}}
+            sp_edits = self._label_edits.get(idx, {})
+            current_val = sp_edits.get(field_key, first_data.get(field_key) or "")
             inp = QLineEdit(str(current_val))
             inp.setStyleSheet(
                 "QLineEdit { background:#0f2127; border:1px solid rgba(145,182,181,0.18);"
                 " border-radius:4px; color:#eef3ef; padding:2px 6px; font-size:11px; }"
                 "QLineEdit:focus { border-color:#29b9ab; }"
             )
-            inp.textChanged.connect(
-                lambda text, k=field_key: self._field_edits.update({k: text})
-            )
+
+            def _on_field_change(text: str, _k: str = field_key, _idx: int = idx) -> None:
+                if _idx not in self._label_edits:
+                    self._label_edits[_idx] = {}
+                self._label_edits[_idx][_k] = text
+
+            inp.textChanged.connect(_on_field_change)
             row_layout.addWidget(lbl)
             row_layout.addWidget(inp)
             self._field_inputs[field_key] = inp
             self._edit_fields_layout.addWidget(row_w)
 
+    def label_edits(self) -> dict[int, dict[str, str]]:
+        """Return per-specimen field edits dict {idx: {field: value}}."""
+        return dict(self._label_edits)
+
     # ── Internal: size selection ──────────────────────────────────────
 
     def _select_size(self, key: str) -> None:
         self._selected_size_key = key
+        self._lib.set_selected_size_key(key)  # persist
         self._apply_size_selection()
 
     def _apply_size_selection(self) -> None:
@@ -1091,6 +1233,166 @@ class _BucketColWidget(QWidget):
             btn.setChecked(k == self._selected_size_key)
         is_custom = self._selected_size_key == "custom"
         self._custom_dims_widget.setVisible(is_custom)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Template library management dialog
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _TemplateManageDialog(QDialog):
+    """Modal dialog for CRUD management of the custom template library.
+
+    Mirrors web openLabelTemplateManageMenu(bucket, x, y, rec.id).
+    Operations: 选用 / 重命名 / 复制 / 导出 JSON / 删除.
+    """
+
+    def __init__(self, lib: LabelTemplateLibrary, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._lib = lib
+        self._selected_id: Optional[str] = None
+        self.setWindowTitle(
+            f"模板库管理 — {'样品瓶' if lib._bucket == 'sample' else 'RNAlater 组织管'}"
+        )
+        self.setMinimumWidth(480)
+        self.setStyleSheet(
+            "QDialog { background: #08161b; color: #eef3ef; }"
+            "QListWidget { background: #0c2027; border: 1px solid rgba(145,182,181,0.15);"
+            " color: #eef3ef; border-radius:4px; }"
+            "QListWidget::item:selected { background: rgba(41,185,171,0.25); }"
+            "QPushButton { background:#10242a; border:1px solid rgba(145,182,181,0.20);"
+            " border-radius:4px; color:#cfe0db; padding:4px 10px; }"
+            "QPushButton:hover { border-color:#29b9ab; color:#29b9ab; }"
+            "QPushButton:disabled { color:#4d6b68; border-color:rgba(145,182,181,0.08); }"
+            "QLabel { color:#cfe0db; }"
+        )
+        self._build_ui()
+        self._refresh_list()
+
+    def _build_ui(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 14, 16, 14)
+        root.setSpacing(10)
+
+        root.addWidget(QLabel("自定义模板库（点击选中，再使用下方操作）:"))
+
+        self._list = QListWidget()
+        self._list.setAlternatingRowColors(True)
+        self._list.setMinimumHeight(180)
+        self._list.itemSelectionChanged.connect(self._on_selection)
+        root.addWidget(self._list)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(6)
+        self._btn_use    = QPushButton("✓ 选用")
+        self._btn_rename = QPushButton("重命名")
+        self._btn_copy   = QPushButton("复制")
+        self._btn_export = QPushButton("导出 JSON")
+        self._btn_delete = QPushButton("删除")
+        self._btn_delete.setStyleSheet(
+            "QPushButton { background:#10242a; border:1px solid rgba(230,110,99,0.30);"
+            " border-radius:4px; color:#e66e63; padding:4px 10px; }"
+            "QPushButton:hover { border-color:#e66e63; }"
+            "QPushButton:disabled { color:#4d6b68; border-color:rgba(145,182,181,0.08); }"
+        )
+        for b in [self._btn_use, self._btn_rename, self._btn_copy,
+                  self._btn_export, self._btn_delete]:
+            b.setEnabled(False)
+            btn_row.addWidget(b)
+        btn_row.addStretch()
+        root.addLayout(btn_row)
+
+        self._btn_use.clicked.connect(self._do_use)
+        self._btn_rename.clicked.connect(self._do_rename)
+        self._btn_copy.clicked.connect(self._do_copy)
+        self._btn_export.clicked.connect(self._do_export)
+        self._btn_delete.clicked.connect(self._do_delete)
+
+        bottom = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        bottom.setStyleSheet(
+            "QDialogButtonBox QPushButton { background:#10242a; border:1px solid rgba(145,182,181,0.18);"
+            " color:#cfe0db; border-radius:4px; padding:4px 14px; }"
+        )
+        bottom.rejected.connect(self.accept)
+        root.addWidget(bottom)
+
+    def _refresh_list(self) -> None:
+        self._list.clear()
+        for rec in self._lib.records():
+            item = QListWidgetItem(
+                f"  {rec['name']}  ·  {rec.get('updatedAt', '')[:10]}"
+            )
+            item.setData(Qt.ItemDataRole.UserRole, rec["id"])
+            self._list.addItem(item)
+        self._on_selection()
+
+    def _on_selection(self) -> None:
+        items = self._list.selectedItems()
+        has = bool(items)
+        self._selected_id = items[0].data(Qt.ItemDataRole.UserRole) if has else None
+        for b in [self._btn_use, self._btn_rename, self._btn_copy,
+                  self._btn_export, self._btn_delete]:
+            b.setEnabled(has)
+
+    def _do_use(self) -> None:
+        if self._selected_id:
+            self._lib.select_record(self._selected_id)
+            QMessageBox.information(self, "选用", "已选用该模板。")
+            self._refresh_list()
+
+    def _do_rename(self) -> None:
+        if not self._selected_id:
+            return
+        rec = self._lib.get(self._selected_id)
+        if not rec:
+            return
+        new_name, ok = QInputDialog.getText(
+            self, "重命名", "新名称:", text=rec["name"]
+        )
+        if ok and new_name.strip():
+            self._lib.rename(self._selected_id, new_name.strip())
+            self._refresh_list()
+
+    def _do_copy(self) -> None:
+        if not self._selected_id:
+            return
+        new_rec = self._lib.duplicate(self._selected_id)
+        if new_rec:
+            QMessageBox.information(self, "复制", f"已复制为：{new_rec['name']}")
+        self._refresh_list()
+
+    def _do_export(self) -> None:
+        if not self._selected_id:
+            return
+        rec = self._lib.get(self._selected_id)
+        if not rec:
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "导出模板 JSON",
+            rec["name"].replace(" ", "_") + ".json",
+            "JSON 文件 (*.json)",
+        )
+        if path:
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(rec["template"], f, ensure_ascii=False, indent=2)
+                QMessageBox.information(self, "导出", f"已导出到：{path}")
+            except Exception as e:
+                QMessageBox.warning(self, "导出失败", str(e))
+
+    def _do_delete(self) -> None:
+        if not self._selected_id:
+            return
+        rec = self._lib.get(self._selected_id)
+        name = rec["name"] if rec else self._selected_id
+        resp = QMessageBox.question(
+            self, "删除确认",
+            f"确定删除自定义模板「{name}」？\n此操作不可恢复。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if resp == QMessageBox.StandardButton.Yes:
+            self._lib.delete(self._selected_id)
+            self._selected_id = None
+            self._refresh_list()
 
 
 class _Step2Widget(QWidget):
@@ -1183,8 +1485,9 @@ class _Step2Widget(QWidget):
     def selected_tissue_dims(self) -> dict:
         return self._tissue_col.selected_dims()
 
-    def field_edits(self) -> dict[str, str]:
-        return self._sample_col.field_edits()
+    def label_edits(self) -> dict[int, dict[str, str]]:
+        """Return per-specimen field edits from the sample bucket column."""
+        return self._sample_col.label_edits()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1596,6 +1899,35 @@ class LabelsView(BaseView):
         bottom_bar.addWidget(self._btn_next)
         root.addWidget(bottom_frame)
 
+        # ── Status bar ────────────────────────────────────────────────
+        status_frame = QFrame()
+        status_frame.setStyleSheet(
+            "QFrame { background: #060f12; border-top: 1px solid rgba(145,182,181,0.08); }"
+        )
+        status_layout = QHBoxLayout(status_frame)
+        status_layout.setContentsMargins(12, 4, 12, 4)
+        status_layout.setSpacing(14)
+
+        self._status_mode = QLabel("批量打印")
+        self._status_mode.setStyleSheet("color: #5f7d7a; font-size: 11px;")
+        self._status_selected = QLabel("选中 0 个")
+        self._status_selected.setStyleSheet("color: #87a2a1; font-size: 11px;")
+        self._status_sample = QLabel("样品 0")
+        self._status_sample.setStyleSheet("color: #29b9ab; font-size: 11px;")
+        self._status_tissue = QLabel("RNAlater 0")
+        self._status_tissue.setStyleSheet("color: #4a90d9; font-size: 11px;")
+        self._status_total = QLabel("共 0 张")
+        self._status_total.setStyleSheet("color: #87a2a1; font-size: 11px;")
+        self._status_warn = QLabel("")
+        self._status_warn.setStyleSheet("color: #f1bd57; font-size: 11px;")
+
+        for w in [self._status_mode, self._status_selected,
+                  self._status_sample, self._status_tissue,
+                  self._status_total, self._status_warn]:
+            status_layout.addWidget(w)
+        status_layout.addStretch()
+        root.addWidget(status_frame)
+
         # Wire print buttons
         self._step4.sample_button.clicked.connect(lambda: self._print("sample"))
         self._step4.tissue_button.clicked.connect(lambda: self._print("tissue"))
@@ -1672,6 +2004,9 @@ class LabelsView(BaseView):
 
         self._specimens = specimens
         self._step1.set_specimens(specimens)
+        # Update status bar with fresh selection count
+        sel = len(self._step1.selected_indices())
+        self._update_status_bar(sel, 0, 0, 1)
 
     # ── Step 2 refresh ─────────────────────────────────────────────────
 
@@ -1714,23 +2049,56 @@ class LabelsView(BaseView):
         sample_dims = self._step2.selected_sample_dims()
         tissue_dims = self._step2.selected_tissue_dims()
         copies = self._step4.copies
+        # Pass per-specimen label edits to both jobs
+        edits = self._step2.label_edits()
 
         self._sample_job = LabelService.build_print_job(
             self._specimens, sample_tmpl, "sample",
             selected_indices=indices, dims=sample_dims, copies=copies,
+            edits=edits,
         )
         self._tissue_job = LabelService.build_print_job(
             self._specimens, tissue_tmpl, "tissue",
             selected_indices=indices, dims=tissue_dims, copies=copies,
+            edits=edits,
         )
 
+        sample_n = len(self._sample_job["items"])
+        tissue_n = len(self._tissue_job["items"])
+
         self._step4.update_counts(
-            len(self._sample_job["items"]),
-            len(self._tissue_job["items"]),
+            sample_n,
+            tissue_n,
             self._sample_job.get("warnings") or [],
             self._tissue_job.get("warnings") or [],
             copies=copies,
         )
+        self._update_status_bar(len(indices), sample_n, tissue_n, copies)
+
+    # ── Status bar ────────────────────────────────────────────────────
+
+    def _update_status_bar(
+        self, selected: int, sample_n: int, tissue_n: int, copies: int
+    ) -> None:
+        """Update status bar labels.  Mirrors renderLabelStatusBar()."""
+        total = (sample_n + tissue_n) * copies
+        self._status_selected.setText(f"选中 {selected} 个编号")
+        self._status_sample.setText(f"样品 {sample_n}")
+        self._status_tissue.setText(f"RNAlater {tissue_n}")
+        self._status_total.setText(f"共 {total} 张")
+
+        # First non-empty warning from both jobs
+        all_warnings = []
+        if self._sample_job:
+            all_warnings += (self._sample_job.get("warnings") or [])
+        if self._tissue_job:
+            all_warnings += (self._tissue_job.get("warnings") or [])
+        # Filter out "empty" code (not useful in status bar)
+        all_warnings = [w for w in all_warnings if w.get("code") != "empty"]
+        if all_warnings:
+            self._status_warn.setText(f"⚠ {all_warnings[0].get('message', '')}")
+        else:
+            self._status_warn.setText("")
 
     # ── Printing ───────────────────────────────────────────────────────
 
