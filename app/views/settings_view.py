@@ -1,16 +1,21 @@
-"""settings_view.py — Global settings panel with five tabs.
+"""settings_view.py — Global settings panel mirroring the real web 「配置」page.
 
-Tabs
-----
-项目      Project directory, incoming-jpg / results sub-dirs, recent projects.
-Helicon   Exe path (auto-detect + manual override), synthesis preset params.
-归档      JXL effort level, delete-JPG toggle (default OFF — hard rule).
-操作人    currentUser name (modifiedBy in specimen records).
-关于      App version string, log directory path.
+Primary layout (Helicon tab) is a faithful reconstruction of the web
+``renderConfigPage()`` DOM (pages_dom.json 「配置」):
 
-All settings are stored and retrieved via ``AppContext.settings`` (QSettings
-wrapper). Key namespace follows the ``section/key`` convention already in use
-by AppSettings.
+  config-page
+    config-header  (h2 "配置" + p.config-subtitle)
+    section.config-section.helicon-config-section
+      h3.config-section-title  "Helicon Focus"
+      div.config-row            自动探测结果  (code + status badge)
+      div.config-row            当前生效路径  (code)
+      div.config-row.config-row--input  自定义路径
+        input.config-path-input
+        div.config-btn-row  [检测] [保存] [清除自定义] [重新探测]
+      div.config-hint           exploration priority list
+
+Additional tabs (归档 / 项目 / 操作人 / 关于) carry settings that live in
+project-settings drawers in the web prototype and are required by the test suite.
 
 Hard rule: delete_jpg default = False.  This is enforced here and in tests.
 """
@@ -25,7 +30,6 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
-    QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
     QFrame,
@@ -71,12 +75,53 @@ _K_CURRENT_USER = "user/current_user"
 
 _RECENT_MAX = 10
 
+# ── Theme colours (mirrors CSS :root tokens) ──────────────────────────────────
+
+_C_BG = "#08161b"
+_C_PANEL = "#10242a"
+_C_TEXT = "#eef3ef"
+_C_MUTED = "#87a2a1"
+_C_ACCENT = "#29b9ab"
+_C_SUCCESS = "#36c98f"
+_C_WARN = "#f1bd57"
+_C_DANGER = "#e66e63"
+_C_BORDER = "rgba(145, 182, 181, 0.18)"
+
+
+def _btn_style(variant: str = "outline") -> str:
+    """Return inline QSS for small action buttons."""
+    if variant == "primary":
+        return (
+            "QPushButton {"
+            "  background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            "    stop:0 #33c8ba, stop:1 #23a99c);"
+            "  color: #08161b; border: none; border-radius: 4px;"
+            "  padding: 3px 10px; font-weight: 600; font-size: 12px;"
+            "}"
+            "QPushButton:hover { background: #31d4c4; }"
+            "QPushButton:pressed { background: #1f9288; }"
+        )
+    return (
+        "QPushButton {"
+        "  background: transparent;"
+        "  color: #29b9ab;"
+        "  border: 1px solid rgba(145,182,181,0.34);"
+        "  border-radius: 4px;"
+        "  padding: 3px 10px; font-size: 12px;"
+        "}"
+        "QPushButton:hover { background: rgba(41,185,171,0.10); }"
+        "QPushButton:pressed { background: rgba(41,185,171,0.18); }"
+    )
+
+
+# ── Main view ─────────────────────────────────────────────────────────────────
+
 
 class SettingsView(BaseView):
-    """Full-width settings panel with tabbed sections.
+    """Settings panel: Helicon tab mirrors web 配置 page DOM exactly.
 
     view_id   = "settings"
-    nav_title = "全局设置"  (registered in registry.py)
+    nav_title = "配置"
     nav_icon  = "⚙️"
     """
 
@@ -92,17 +137,33 @@ class SettingsView(BaseView):
     def _setup_ui(self) -> None:
         """Build the full widget tree."""
         root = QVBoxLayout(self)
-        root.setContentsMargins(20, 16, 20, 16)
-        root.setSpacing(12)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        # Title row
-        title = QLabel("全局设置")
-        title.setObjectName("Title")
-        root.addWidget(title)
-
-        # Tab widget
+        # Tab widget — Helicon is first (the web 配置 page)
         self._tabs = QTabWidget()
         self._tabs.setObjectName("SettingsTabs")
+        self._tabs.setStyleSheet(
+            "QTabWidget::pane {"
+            "  background: #10242a;"
+            "  border: 1px solid rgba(145,182,181,0.18);"
+            "  border-top: none;"
+            "}"
+            "QTabBar::tab {"
+            "  background: #0c2027;"
+            "  color: #87a2a1;"
+            "  border: 1px solid rgba(145,182,181,0.14);"
+            "  border-bottom: none;"
+            "  padding: 6px 16px;"
+            "  min-width: 60px;"
+            "}"
+            "QTabBar::tab:selected {"
+            "  background: #10242a;"
+            "  color: #eef3ef;"
+            "  border-bottom: 2px solid #29b9ab;"
+            "}"
+            "QTabBar::tab:hover:!selected { background: #0e2b34; color: #cfe0db; }"
+        )
         root.addWidget(self._tabs, stretch=1)
 
         self._build_tab_project()
@@ -116,6 +177,302 @@ class SettingsView(BaseView):
         self._load_all()
 
     # ── Tab builders ──────────────────────────────────────────────────────
+
+    def _build_tab_helicon(self) -> None:
+        """Helicon tab — faithful 1:1 mirror of web renderConfigPage() DOM.
+
+        DOM classes reproduced:
+          config-page > config-header, config-section.helicon-config-section
+          config-section > config-section-title, config-row (×3), config-hint
+          config-row--input: label / input.config-path-input / config-btn-row
+          config-btn-row: [检测] [保存] [清除自定义] [重新探测]
+        """
+        tab = _ScrollTab()
+        tab.body.setContentsMargins(24, 20, 24, 20)
+        tab.body.setSpacing(0)
+
+        # ── config-header ─────────────────────────────────────────────────
+        header_frame = QFrame()
+        header_frame.setObjectName("ConfigHeader")
+        header_frame.setStyleSheet("QFrame#ConfigHeader { background: transparent; }")
+        header_v = QVBoxLayout(header_frame)
+        header_v.setContentsMargins(0, 0, 0, 16)
+        header_v.setSpacing(4)
+
+        h2 = QLabel("配置")
+        h2.setStyleSheet(
+            f"font-size: 20px; font-weight: 700; color: {_C_TEXT}; background: transparent;"
+        )
+        header_v.addWidget(h2)
+
+        subtitle = QLabel("Helicon Focus CLI 路径与探测设置。")
+        subtitle.setStyleSheet(
+            f"font-size: 13px; color: {_C_MUTED}; background: transparent;"
+        )
+        header_v.addWidget(subtitle)
+        tab.body.addWidget(header_frame)
+
+        # ── config-section.helicon-config-section ────────────────────────
+        section = QFrame()
+        section.setObjectName("HeliconConfigSection")
+        section.setStyleSheet(
+            "QFrame#HeliconConfigSection {"
+            f"  background: {_C_PANEL};"
+            f"  border: 1px solid {_C_BORDER};"
+            "  border-radius: 6px;"
+            "  padding: 0px;"
+            "}"
+        )
+        section_v = QVBoxLayout(section)
+        section_v.setContentsMargins(20, 16, 20, 16)
+        section_v.setSpacing(0)
+
+        # config-section-title
+        section_title = QLabel("Helicon Focus")
+        section_title.setStyleSheet(
+            f"font-size: 15px; font-weight: 600; color: {_C_TEXT};"
+            "margin-bottom: 12px; background: transparent;"
+        )
+        section_v.addWidget(section_title)
+
+        # ── Row 1: 自动探测结果 ────────────────────────────────────────
+        detected_row = _ConfigRow()
+        detected_row.add_label("自动探测结果")
+        self._detected_path_label = QLabel("（未检测到）")
+        self._detected_path_label.setObjectName("ConfigPathValue")
+        self._detected_path_label.setStyleSheet(
+            f"font-family: monospace; font-size: 12px; color: {_C_TEXT};"
+            f"background: rgba(0,0,0,0.25); border-radius: 3px;"
+            "padding: 2px 6px;"
+        )
+        detected_row.add_widget(self._detected_path_label, stretch=1)
+
+        # status badge (config-status-ok / config-status-warn)
+        self._detect_status_badge = QLabel("未检测到")
+        self._detect_status_badge.setObjectName("ConfigStatusWarn")
+        self._detect_status_badge.setStyleSheet(
+            f"font-size: 12px; font-weight: 600; color: {_C_WARN};"
+            "background: transparent;"
+        )
+        detected_row.add_widget(self._detect_status_badge)
+        section_v.addWidget(detected_row)
+        section_v.addSpacing(6)
+
+        # ── Row 2: 当前生效路径 ────────────────────────────────────────
+        effective_row = _ConfigRow()
+        effective_row.add_label("当前生效路径")
+        self._effective_path_label = QLabel("—")
+        self._effective_path_label.setObjectName("ConfigPathValue")
+        self._effective_path_label.setStyleSheet(
+            f"font-family: monospace; font-size: 12px; color: {_C_TEXT};"
+            "background: rgba(0,0,0,0.25); border-radius: 3px;"
+            "padding: 2px 6px;"
+        )
+        effective_row.add_widget(self._effective_path_label, stretch=1)
+        section_v.addWidget(effective_row)
+        section_v.addSpacing(6)
+
+        # ── Row 3: 自定义路径 (config-row--input) ─────────────────────
+        custom_row_frame = QFrame()
+        custom_row_frame.setStyleSheet("QFrame { background: transparent; }")
+        custom_v = QVBoxLayout(custom_row_frame)
+        custom_v.setContentsMargins(0, 0, 0, 0)
+        custom_v.setSpacing(6)
+
+        custom_label = QLabel("自定义路径")
+        custom_label.setStyleSheet(
+            f"font-size: 12px; font-weight: 600; color: {_C_MUTED};"
+            "background: transparent;"
+        )
+        custom_v.addWidget(custom_label)
+
+        # config-path-input
+        self._helicon_exe_edit = QLineEdit()
+        self._helicon_exe_edit.setObjectName("ConfigPathInput")
+        self._helicon_exe_edit.setPlaceholderText(
+            r"如 I:\Helicon Focus 8 或完整 HeliconFocus.exe 路径"
+        )
+        self._helicon_exe_edit.setStyleSheet(
+            "QLineEdit#ConfigPathInput {"
+            f"  background: #0a1e24;"
+            f"  color: {_C_TEXT};"
+            f"  border: 1px solid {_C_BORDER};"
+            "  border-radius: 4px;"
+            "  padding: 5px 10px;"
+            "  font-family: monospace; font-size: 12px;"
+            "}"
+            "QLineEdit#ConfigPathInput:focus {"
+            f"  border-color: {_C_ACCENT};"
+            "}"
+        )
+        self._helicon_exe_edit.editingFinished.connect(self._save_helicon)
+        custom_v.addWidget(self._helicon_exe_edit)
+
+        # config-btn-row: [检测] [保存] [清除自定义] [重新探测]
+        btn_row = QHBoxLayout()
+        btn_row.setContentsMargins(0, 0, 0, 0)
+        btn_row.setSpacing(8)
+
+        self._test_btn = QPushButton("检测")
+        self._test_btn.setStyleSheet(_btn_style("outline"))
+        self._test_btn.clicked.connect(self._on_test_click)
+
+        self._save_btn = QPushButton("保存")
+        self._save_btn.setStyleSheet(_btn_style("primary"))
+        self._save_btn.clicked.connect(self._on_save_click)
+
+        self._clear_btn = QPushButton("清除自定义")
+        self._clear_btn.setStyleSheet(_btn_style("outline"))
+        self._clear_btn.clicked.connect(self._on_clear_click)
+
+        self._refresh_btn = QPushButton("重新探测")
+        self._refresh_btn.setStyleSheet(_btn_style("outline"))
+        self._refresh_btn.clicked.connect(self._detect_helicon)
+
+        btn_row.addWidget(self._test_btn)
+        btn_row.addWidget(self._save_btn)
+        btn_row.addWidget(self._clear_btn)
+        btn_row.addWidget(self._refresh_btn)
+        btn_row.addStretch()
+        custom_v.addLayout(btn_row)
+        section_v.addWidget(custom_row_frame)
+        section_v.addSpacing(12)
+
+        # ── config-hint ────────────────────────────────────────────────
+        hint_frame = QFrame()
+        hint_frame.setStyleSheet(
+            "QFrame {"
+            f"  background: rgba(41,185,171,0.06);"
+            f"  border: 1px solid rgba(41,185,171,0.14);"
+            "  border-radius: 4px;"
+            "}"
+        )
+        hint_v = QVBoxLayout(hint_frame)
+        hint_v.setContentsMargins(12, 10, 12, 10)
+        hint_v.setSpacing(3)
+
+        hint_title = QLabel("探测优先级：")
+        hint_title.setStyleSheet(
+            f"font-weight: 600; color: {_C_TEXT}; font-size: 12px;"
+            "background: transparent;"
+        )
+        hint_v.addWidget(hint_title)
+
+        for line in [
+            "1. 自定义路径（上方填写）",
+            "2. HELICON_FOCUS_PATH 环境变量",
+            "3. HELICON_FOCUS_DIR 环境变量",
+            "4. Windows 注册表",
+            "5. 已知安装目录（I:\\Helicon Focus 8 等）",
+        ]:
+            lbl = QLabel(line)
+            lbl.setStyleSheet(
+                f"font-size: 12px; color: {_C_MUTED}; background: transparent;"
+            )
+            hint_v.addWidget(lbl)
+
+        section_v.addWidget(hint_frame)
+        tab.body.addWidget(section)
+        tab.body.addSpacing(16)
+
+        # ── 合成参数预设 (synthesis preset params — kept for QSettings round-trip) ─
+        preset_box = QGroupBox("合成参数预设")
+        preset_form = QFormLayout(preset_box)
+        preset_form.setHorizontalSpacing(16)
+        preset_form.setVerticalSpacing(8)
+
+        # Method (A / B / C strings matching Helicon CLI 1/2/3)
+        self._method_combo = QComboBox()
+        self._method_combo.addItems(["A — 加权平均 (1)", "B — 景深图 (2)", "C — 金字塔 (3)"])
+        self._method_combo.setToolTip("-mp: 参数，A=1 B=2 C=3")
+        self._method_combo.currentIndexChanged.connect(self._save_helicon)
+        preset_form.addRow("合成方式 (-mp)", self._method_combo)
+
+        # Radius
+        self._radius_spin = QSpinBox()
+        self._radius_spin.setRange(1, 16)
+        self._radius_spin.setValue(4)
+        self._radius_spin.setToolTip("-rp: 参数，范围 1–16，推荐 4")
+        self._radius_spin.valueChanged.connect(self._save_helicon)
+        preset_form.addRow("半径 (-rp)", self._radius_spin)
+
+        # Smoothing
+        self._smoothing_spin = QSpinBox()
+        self._smoothing_spin.setRange(0, 8)
+        self._smoothing_spin.setValue(4)
+        self._smoothing_spin.setToolTip("-sp: 参数，范围 0–8，推荐 4")
+        self._smoothing_spin.valueChanged.connect(self._save_helicon)
+        preset_form.addRow("平滑度 (-sp)", self._smoothing_spin)
+
+        # JPEG quality (for -j flag)
+        self._quality_spin = QSpinBox()
+        self._quality_spin.setRange(70, 100)
+        self._quality_spin.setValue(95)
+        self._quality_spin.setToolTip("-j: JPEG 质量，仅当输出格式为 JPEG 时有效")
+        self._quality_spin.valueChanged.connect(self._save_helicon)
+        preset_form.addRow("JPEG 质量 (-j)", self._quality_spin)
+
+        tab.body.addWidget(preset_box)
+        tab.body.addStretch()
+
+        # Legacy status label alias (kept for _detect_helicon compat)
+        self._helicon_status_label = self._detect_status_badge
+
+        self._tabs.addTab(tab, "Helicon")
+
+    def _build_tab_archive(self) -> None:
+        """归档 tab — JXL effort + delete-JPG (default OFF, hard rule)."""
+        tab = _ScrollTab()
+        form = QFormLayout()
+        form.setHorizontalSpacing(16)
+        form.setVerticalSpacing(10)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        # JXL effort
+        self._jxl_effort_combo = QComboBox()
+        self._jxl_effort_combo.addItems([
+            "standard — cjxl -e 7（推荐）",
+            "maximum  — cjxl -e 9（慢，文件更小）",
+        ])
+        self._jxl_effort_combo.setToolTip("对应 compress.js EFFORT_MAP：standard=7，maximum=9")
+        self._jxl_effort_combo.currentIndexChanged.connect(self._save_archive)
+        form.addRow("JXL 压缩等级", self._jxl_effort_combo)
+
+        tab.body.addLayout(form)
+        tab.body.addSpacing(16)
+
+        # Delete-JPG section with prerequisite description
+        del_box = QGroupBox("删除原片 JPG")
+        del_v = QVBoxLayout(del_box)
+
+        prereq_label = QLabel(
+            "⚠️ 只有同时满足以下四项前置条件，才允许开启删除：\n"
+            "  1. cjxl 可用（JPEG XL 无损压缩工具已安装）\n"
+            "  2. ZIP 已生成且大小 > 32 字节\n"
+            "  3. 清单完整（文件数 + 名称 + 大小全部核验通过）\n"
+            "  4. JXL 可恢复（djxl 能重解码每一帧，输出大小 > 0）"
+        )
+        prereq_label.setObjectName("Muted")
+        prereq_label.setWordWrap(True)
+        prereq_label.setStyleSheet("font-size: 12px; line-height: 1.5;")
+        del_v.addWidget(prereq_label)
+
+        del_v.addSpacing(8)
+
+        # The actual checkbox — DEFAULT OFF (hard rule)
+        self._delete_jpg_chk = QCheckBox("归档完成后删除原片 JPG（危险操作，默认关闭）")
+        self._delete_jpg_chk.setObjectName("DeleteJpgCheckbox")
+        self._delete_jpg_chk.setChecked(False)  # default = False — hard rule
+        self._delete_jpg_chk.setStyleSheet(
+            f"QCheckBox {{ color: {_C_DANGER}; font-weight: 600; }}"
+            f"QCheckBox::indicator:checked {{ background-color: {_C_DANGER}; border-color: {_C_DANGER}; }}"
+        )
+        self._delete_jpg_chk.stateChanged.connect(self._save_archive)
+        del_v.addWidget(self._delete_jpg_chk)
+
+        tab.body.addWidget(del_box)
+        tab.body.addStretch()
+        self._tabs.addTab(tab, "归档")
 
     def _build_tab_project(self) -> None:
         """项目 tab — directory, sub-dirs, recent projects."""
@@ -178,137 +535,6 @@ class SettingsView(BaseView):
         tab.body.addStretch()
 
         self._tabs.addTab(tab, "项目")
-
-    def _build_tab_helicon(self) -> None:
-        """Helicon tab — exe path, composite params."""
-        tab = _ScrollTab()
-        form = QFormLayout()
-        form.setHorizontalSpacing(16)
-        form.setVerticalSpacing(10)
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-
-        # ── Exe path ────────────────────────────────────────────────
-        exe_row = QWidget()
-        exe_hl = QHBoxLayout(exe_row)
-        exe_hl.setContentsMargins(0, 0, 0, 0)
-        exe_hl.setSpacing(8)
-        self._helicon_exe_edit = QLineEdit()
-        self._helicon_exe_edit.setPlaceholderText("（自动探测）")
-        self._helicon_exe_edit.editingFinished.connect(self._save_helicon)
-        exe_browse = QPushButton("浏览…")
-        exe_browse.setFixedWidth(72)
-        exe_browse.clicked.connect(self._browse_helicon_exe)
-        exe_hl.addWidget(self._helicon_exe_edit, stretch=1)
-        exe_hl.addWidget(exe_browse)
-
-        detect_btn = QPushButton("自动探测")
-        detect_btn.clicked.connect(self._detect_helicon)
-        exe_hl.addWidget(detect_btn)
-        form.addRow("HeliconFocus 路径", exe_row)
-
-        # Detection status label
-        self._helicon_status_label = QLabel("未探测")
-        self._helicon_status_label.setObjectName("Muted")
-        form.addRow("探测状态", self._helicon_status_label)
-
-        tab.body.addLayout(form)
-        tab.body.addSpacing(12)
-
-        # ── Synthesis preset group ───────────────────────────────────
-        preset_box = QGroupBox("合成参数预设")
-        preset_form = QFormLayout(preset_box)
-        preset_form.setHorizontalSpacing(16)
-        preset_form.setVerticalSpacing(8)
-
-        # Method (A / B / C strings matching Helicon CLI 1/2/3)
-        self._method_combo = QComboBox()
-        self._method_combo.addItems(["A — 加权平均 (1)", "B — 景深图 (2)", "C — 金字塔 (3)"])
-        self._method_combo.setToolTip("-mp: 参数，A=1 B=2 C=3")
-        self._method_combo.currentIndexChanged.connect(self._save_helicon)
-        preset_form.addRow("合成方式 (-mp)", self._method_combo)
-
-        # Radius
-        self._radius_spin = QSpinBox()
-        self._radius_spin.setRange(1, 16)
-        self._radius_spin.setValue(4)
-        self._radius_spin.setToolTip("-rp: 参数，范围 1–16，推荐 4")
-        self._radius_spin.valueChanged.connect(self._save_helicon)
-        preset_form.addRow("半径 (-rp)", self._radius_spin)
-
-        # Smoothing
-        self._smoothing_spin = QSpinBox()
-        self._smoothing_spin.setRange(0, 8)
-        self._smoothing_spin.setValue(4)
-        self._smoothing_spin.setToolTip("-sp: 参数，范围 0–8，推荐 4")
-        self._smoothing_spin.valueChanged.connect(self._save_helicon)
-        preset_form.addRow("平滑度 (-sp)", self._smoothing_spin)
-
-        # JPEG quality (for -j flag)
-        self._quality_spin = QSpinBox()
-        self._quality_spin.setRange(70, 100)
-        self._quality_spin.setValue(95)
-        self._quality_spin.setToolTip("-j: JPEG 质量，仅当输出格式为 JPEG 时有效")
-        self._quality_spin.valueChanged.connect(self._save_helicon)
-        preset_form.addRow("JPEG 质量 (-j)", self._quality_spin)
-
-        tab.body.addWidget(preset_box)
-        tab.body.addStretch()
-        self._tabs.addTab(tab, "Helicon")
-
-    def _build_tab_archive(self) -> None:
-        """归档 tab — JXL effort + delete-JPG (default OFF, hard rule)."""
-        tab = _ScrollTab()
-        form = QFormLayout()
-        form.setHorizontalSpacing(16)
-        form.setVerticalSpacing(10)
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-
-        # JXL effort
-        self._jxl_effort_combo = QComboBox()
-        self._jxl_effort_combo.addItems([
-            "standard — cjxl -e 7（推荐）",
-            "maximum  — cjxl -e 9（慢，文件更小）",
-        ])
-        self._jxl_effort_combo.setToolTip("对应 compress.js EFFORT_MAP：standard=7，maximum=9")
-        self._jxl_effort_combo.currentIndexChanged.connect(self._save_archive)
-        form.addRow("JXL 压缩等级", self._jxl_effort_combo)
-
-        tab.body.addLayout(form)
-        tab.body.addSpacing(16)
-
-        # Delete-JPG section with prerequisite description
-        del_box = QGroupBox("删除原片 JPG")
-        del_v = QVBoxLayout(del_box)
-
-        # Four prerequisite bullets (red line conditions)
-        prereq_label = QLabel(
-            "⚠️ 只有同时满足以下四项前置条件，才允许开启删除：\n"
-            "  1. cjxl 可用（JPEG XL 无损压缩工具已安装）\n"
-            "  2. ZIP 已生成且大小 > 32 字节\n"
-            "  3. 清单完整（文件数 + 名称 + 大小全部核验通过）\n"
-            "  4. JXL 可恢复（djxl 能重解码每一帧，输出大小 > 0）"
-        )
-        prereq_label.setObjectName("Muted")
-        prereq_label.setWordWrap(True)
-        prereq_label.setStyleSheet("font-size: 12px; line-height: 1.5;")
-        del_v.addWidget(prereq_label)
-
-        del_v.addSpacing(8)
-
-        # The actual checkbox — DEFAULT OFF (hard rule)
-        self._delete_jpg_chk = QCheckBox("归档完成后删除原片 JPG（危险操作，默认关闭）")
-        self._delete_jpg_chk.setObjectName("DeleteJpgCheckbox")
-        self._delete_jpg_chk.setChecked(False)  # default = False — hard rule
-        self._delete_jpg_chk.setStyleSheet(
-            "QCheckBox { color: #e66e63; font-weight: 600; }"
-            "QCheckBox::indicator:checked { background-color: #e66e63; border-color: #e66e63; }"
-        )
-        self._delete_jpg_chk.stateChanged.connect(self._save_archive)
-        del_v.addWidget(self._delete_jpg_chk)
-
-        tab.body.addWidget(del_box)
-        tab.body.addStretch()
-        self._tabs.addTab(tab, "归档")
 
     def _build_tab_user(self) -> None:
         """操作人 tab — currentUser name used as modifiedBy in taxonomy edits."""
@@ -390,15 +616,9 @@ class SettingsView(BaseView):
         """Read all settings from QSettings and populate widgets."""
         qs = self.ctx.settings._qs  # direct QSettings access
 
-        # Project tab
-        proj_dir = self.ctx.current_project_dir or ""
-        self._project_dir_edit.setText(proj_dir)
-        self._incoming_edit.setText(qs.value(_K_INCOMING_SUBDIR, "incoming-jpg"))
-        self._results_edit.setText(qs.value(_K_RESULTS_SUBDIR, "results"))
-        self._load_recent_projects()
-
-        # Helicon tab
-        self._helicon_exe_edit.setText(qs.value(_K_HELICON_EXE, ""))
+        # Helicon tab — exe path + preset params
+        exe_val = qs.value(_K_HELICON_EXE, "")
+        self._helicon_exe_edit.setText(exe_val)
         method_idx = int(qs.value(_K_HELICON_METHOD, 0))
         self._method_combo.setCurrentIndex(
             method_idx if 0 <= method_idx < self._method_combo.count() else 0
@@ -406,6 +626,8 @@ class SettingsView(BaseView):
         self._radius_spin.setValue(int(qs.value(_K_HELICON_RADIUS, 4)))
         self._smoothing_spin.setValue(int(qs.value(_K_HELICON_SMOOTHING, 4)))
         self._quality_spin.setValue(int(qs.value(_K_HELICON_QUALITY, 95)))
+        # Refresh detected / effective display
+        self._refresh_helicon_display()
 
         # Archive tab
         effort_idx = int(qs.value(_K_JXL_EFFORT, 0))
@@ -417,8 +639,36 @@ class SettingsView(BaseView):
         delete_jpg = str(raw_del).lower() == "true"
         self._delete_jpg_chk.setChecked(delete_jpg)
 
+        # Project tab
+        proj_dir = self.ctx.current_project_dir or ""
+        self._project_dir_edit.setText(proj_dir)
+        self._incoming_edit.setText(qs.value(_K_INCOMING_SUBDIR, "incoming-jpg"))
+        self._results_edit.setText(qs.value(_K_RESULTS_SUBDIR, "results"))
+        self._load_recent_projects()
+
         # User tab
         self._current_user_edit.setText(qs.value(_K_CURRENT_USER, ""))
+
+    def _refresh_helicon_display(self) -> None:
+        """Update auto-detected and effective path labels from stored/detected state."""
+        qs = self.ctx.settings._qs
+        stored_exe = qs.value(_K_HELICON_EXE, "") or ""
+        if stored_exe and os.path.isfile(stored_exe):
+            self._detected_path_label.setText(stored_exe)
+            self._effective_path_label.setText(stored_exe)
+            self._detect_status_badge.setText("✓ 可用")
+            self._detect_status_badge.setStyleSheet(
+                f"font-size: 12px; font-weight: 600; color: {_C_SUCCESS};"
+                "background: transparent;"
+            )
+        else:
+            self._detected_path_label.setText("（未检测到）")
+            self._effective_path_label.setText("—")
+            self._detect_status_badge.setText("未检测到")
+            self._detect_status_badge.setStyleSheet(
+                f"font-size: 12px; font-weight: 600; color: {_C_WARN};"
+                "background: transparent;"
+            )
 
     def _load_recent_projects(self) -> None:
         self._recent_list.clear()
@@ -457,6 +707,52 @@ class SettingsView(BaseView):
         name = self._current_user_edit.text().strip()
         qs.setValue(_K_CURRENT_USER, name)
         self.ctx.settings.sync()
+
+    # ── Helicon button handlers (web: 检测 / 保存 / 清除自定义 / 重新探测) ───
+
+    def _on_test_click(self) -> None:
+        """检测 — save path then auto-detect (mirrors web testBtn handler)."""
+        self._save_helicon()
+        self._detect_helicon()
+
+    def _on_save_click(self) -> None:
+        """保存 — persist custom path."""
+        self._save_helicon()
+        self._refresh_helicon_display()
+
+    def _on_clear_click(self) -> None:
+        """清除自定义 — wipe custom path and re-detect."""
+        self._helicon_exe_edit.clear()
+        self._save_helicon()
+        self._detect_helicon()
+
+    def _detect_helicon(self) -> None:
+        """重新探测 / auto-detect — calls helicon_service.detect_helicon()."""
+        try:
+            from app.services.helicon_service import detect_helicon, reset_helicon_cache
+            reset_helicon_cache()
+            found = detect_helicon()
+        except Exception:
+            found = None
+
+        if found:
+            self._helicon_exe_edit.setText(found)
+            self._save_helicon()
+            self._detected_path_label.setText(found)
+            self._effective_path_label.setText(found)
+            self._detect_status_badge.setText("✓ 可用")
+            self._detect_status_badge.setStyleSheet(
+                f"font-size: 12px; font-weight: 600; color: {_C_SUCCESS};"
+                "background: transparent;"
+            )
+        else:
+            self._detected_path_label.setText("（未检测到）")
+            self._effective_path_label.setText("—")
+            self._detect_status_badge.setText("未检测到")
+            self._detect_status_badge.setStyleSheet(
+                f"font-size: 12px; font-weight: 600; color: {_C_WARN};"
+                "background: transparent;"
+            )
 
     # ── Project directory ─────────────────────────────────────────────────
 
@@ -497,7 +793,7 @@ class SettingsView(BaseView):
         self.ctx.settings.sync()
         self._recent_list.clear()
 
-    # ── Helicon detection ─────────────────────────────────────────────────
+    # ── Legacy helicon exe accessors (kept for round-trip tests) ──────────
 
     def _browse_helicon_exe(self) -> None:
         chosen, _ = QFileDialog.getOpenFileName(
@@ -509,22 +805,34 @@ class SettingsView(BaseView):
             self._helicon_exe_edit.setText(chosen)
             self._save_helicon()
 
-    def _detect_helicon(self) -> None:
-        from app.services.helicon_service import detect_helicon, reset_helicon_cache
-        reset_helicon_cache()
-        found = detect_helicon()
-        if found:
-            self._helicon_exe_edit.setText(found)
-            self._helicon_status_label.setText(f"✅ 已找到：{found}")
-            self._helicon_status_label.setObjectName("Accent")
-            self._save_helicon()
-        else:
-            self._helicon_status_label.setText("❌ 未检测到 Helicon Focus")
-            self._helicon_status_label.setStyleSheet("color: #e66e63;")
-        self._helicon_status_label.update()
-
 
 # ── Private helpers ───────────────────────────────────────────────────────────
+
+
+class _ConfigRow(QWidget):
+    """Horizontal row mirroring web .config-row (label + value widgets)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setStyleSheet("background: transparent;")
+        self._hl = QHBoxLayout(self)
+        self._hl.setContentsMargins(0, 4, 0, 4)
+        self._hl.setSpacing(12)
+        self._hl.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+
+    def add_label(self, text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setFixedWidth(110)
+        lbl.setStyleSheet(
+            f"font-size: 12px; font-weight: 600; color: {_C_MUTED};"
+            "background: transparent;"
+        )
+        lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self._hl.addWidget(lbl)
+        return lbl
+
+    def add_widget(self, widget: QWidget, stretch: int = 0) -> None:
+        self._hl.addWidget(widget, stretch=stretch)
 
 
 class _ScrollTab(QWidget):
@@ -544,8 +852,13 @@ class _ScrollTab(QWidget):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setStyleSheet(
+            f"QScrollArea {{ background: {_C_BG}; border: none; }}"
+            f"QWidget {{ background: {_C_BG}; }}"
+        )
 
         inner = QWidget()
+        inner.setStyleSheet(f"background: {_C_BG};")
         self.body = QVBoxLayout(inner)
         self.body.setContentsMargins(12, 16, 12, 16)
         self.body.setSpacing(8)
