@@ -27,8 +27,10 @@ from pathlib import Path
 from typing import Optional
 
 from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QApplication,
+    QDialog,
     QFrame,
     QHBoxLayout,
     QInputDialog,
@@ -38,6 +40,8 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSplitter,
+    QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -50,6 +54,42 @@ from app.widgets.monitor_panel import MonitorPanel
 from app.widgets.naming_panel import NamingPanel
 from app.widgets.results_column import ResultsColumn
 from app.widgets.specimen_sidebar import SpecimenSidebar
+
+
+class _BatchResultDialog(QDialog):
+    """Batch retroactive archive result detail dialog.
+
+    Shows a per-file table with status, size, and error column.
+    Replaces the plain QMessageBox.information summary after batch archiving.
+    """
+
+    def __init__(self, results: list, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("批量归档结果")
+        self.resize(700, 400)
+        layout = QVBoxLayout(self)
+
+        ok_count = sum(1 for r in results if r.ok)
+        fail_count = len(results) - ok_count
+        self._summary = QLabel(f"✓ {ok_count} 成功  ✗ {fail_count} 失败")
+        layout.addWidget(self._summary)
+
+        self._table = QTableWidget(len(results), 4)
+        self._table.setHorizontalHeaderLabels(["文件名", "状态", "大小", "错误"])
+        self._table.horizontalHeader().setStretchLastSection(True)
+        for i, r in enumerate(results):
+            self._table.setItem(i, 0, QTableWidgetItem(r.name))
+            status_item = QTableWidgetItem("✓" if r.ok else "✗")
+            status_item.setForeground(QColor("green" if r.ok else "red"))
+            self._table.setItem(i, 1, status_item)
+            size_str = f"{r.size_bytes // 1024} KB" if r.size_bytes else "-"
+            self._table.setItem(i, 2, QTableWidgetItem(size_str))
+            self._table.setItem(i, 3, QTableWidgetItem(r.error or ""))
+        layout.addWidget(self._table)
+
+        btn = QPushButton("关闭")
+        btn.clicked.connect(self.accept)
+        layout.addWidget(btn)
 
 
 def _free_compose_output_name(incoming_dir: str, user_name: Optional[str]) -> str:
