@@ -344,7 +344,7 @@ class CoordsView(BaseView):
     # ── BaseView ─────────────────────────────────────────────────────────────
 
     def _setup_ui(self) -> None:
-        # Outer scroll area so long pages scroll
+        # Outer scroll area so long pages scroll without widget overlap
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
@@ -352,12 +352,18 @@ class CoordsView(BaseView):
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
         self._scroll.setFrameShape(QFrame.Shape.NoFrame)
+        # Match theme background so the scroll area blends in
+        self._scroll.setStyleSheet(
+            f"QScrollArea {{ background: {_C['bg']}; border: none; }}"
+            f"QScrollArea > QWidget > QWidget {{ background: {_C['bg']}; }}"
+        )
         outer.addWidget(self._scroll)
 
-        # Content container
+        # Content container — generous horizontal padding for readability
         self._content = QWidget()
+        self._content.setStyleSheet(f"background: {_C['bg']};")
         self._content_layout = QVBoxLayout(self._content)
-        self._content_layout.setContentsMargins(20, 20, 20, 20)
+        self._content_layout.setContentsMargins(28, 24, 28, 32)
         self._content_layout.setSpacing(0)
         self._scroll.setWidget(self._content)
 
@@ -378,14 +384,14 @@ class CoordsView(BaseView):
     def _build_header(self) -> None:
         header = QWidget()
         header.setObjectName("CoordHeader")
-        header.setStyleSheet("QWidget#CoordHeader { margin-bottom: 16px; }")
+        header.setStyleSheet("QWidget#CoordHeader { background: transparent; }")
         lay = QVBoxLayout(header)
         lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(4)
+        lay.setSpacing(6)
 
         h2 = QLabel("坐标工具")
         h2.setStyleSheet(
-            f"font-size: 19px; font-weight: 600; color: {_C['text']}; background: transparent;"
+            f"font-size: 20px; font-weight: 600; color: {_C['text']}; background: transparent;"
         )
         lay.addWidget(h2)
 
@@ -395,11 +401,12 @@ class CoordsView(BaseView):
         )
         sub.setWordWrap(True)
         sub.setStyleSheet(
-            f"font-size: 12px; color: {_C['muted']}; background: transparent; line-height: 1.5;"
+            f"font-size: 12px; color: {_C['muted']}; background: transparent;"
         )
         lay.addWidget(sub)
 
         self._content_layout.addWidget(header)
+        self._content_layout.addSpacing(20)
 
     # ── Single-coord panel ────────────────────────────────────────────────────
 
@@ -408,16 +415,15 @@ class CoordsView(BaseView):
         panel.setObjectName("CoordPanel")
         panel.setStyleSheet(
             f"QWidget#CoordPanel {{ background: {_C['panel']};"
-            f" border: 1px solid {_C['border_med']}; border-radius: 10px;"
-            f" padding: 16px; margin-bottom: 12px; }}"
+            f" border: 1px solid {_C['border_med']}; border-radius: 10px; }}"
         )
         lay = QVBoxLayout(panel)
-        lay.setContentsMargins(16, 16, 16, 16)
+        lay.setContentsMargins(20, 20, 20, 20)
         lay.setSpacing(0)
 
         # ── Input row (coord-input-wrap) ──────────────────────────────────────
         input_row = QHBoxLayout()
-        input_row.setSpacing(6)
+        input_row.setSpacing(8)
 
         self._input_edit = QLineEdit()
         self._input_edit.setPlaceholderText(
@@ -441,7 +447,7 @@ class CoordsView(BaseView):
         input_row.addWidget(map_btn)
 
         lay.addLayout(input_row)
-        lay.addSpacing(8)
+        lay.addSpacing(10)
 
         # ── Format badge (coord-format-badge) ─────────────────────────────────
         self._badge = QLabel("")
@@ -454,6 +460,7 @@ class CoordsView(BaseView):
         lay.addWidget(self._badge)
 
         # ── CS tab bar + CS cards container ───────────────────────────────────
+        lay.addSpacing(4)
         self._cs_section = QWidget()
         self._cs_section_lay = QVBoxLayout(self._cs_section)
         self._cs_section_lay.setContentsMargins(0, 0, 0, 0)
@@ -475,22 +482,22 @@ class CoordsView(BaseView):
             tab_row.addWidget(btn)
         tab_row.addStretch()
         self._cs_section_lay.addLayout(tab_row)
-        self._cs_section_lay.addSpacing(6)
+        self._cs_section_lay.addSpacing(8)
 
         # CS cards container
         self._cs_cards_widget = QWidget()
         self._cs_cards_lay = QVBoxLayout(self._cs_cards_widget)
         self._cs_cards_lay.setContentsMargins(0, 0, 0, 0)
-        self._cs_cards_lay.setSpacing(6)
+        self._cs_cards_lay.setSpacing(8)
         self._cs_section_lay.addWidget(self._cs_cards_widget)
 
         self._cs_section.setVisible(False)
         lay.addWidget(self._cs_section)
-        lay.addSpacing(12)
+        lay.addSpacing(16)
 
         # ── Place search (coord-place-wrap) ────────────────────────────────────
         place_row = QHBoxLayout()
-        place_row.setSpacing(6)
+        place_row.setSpacing(8)
         self._place_input = QLineEdit()
         self._place_input.setPlaceholderText("输入地名搜索坐标，如 三门湾、北京、舟山")
         place_row.addWidget(self._place_input, 1)
@@ -518,7 +525,7 @@ class CoordsView(BaseView):
         self._place_results_widget.setVisible(False)
         lay.addWidget(self._place_results_widget)
 
-        lay.addSpacing(8)
+        lay.addSpacing(14)
 
         # ── Structured DMS toggle (coord-struct-toggle) ────────────────────────
         self._struct_toggle = QPushButton("▶ 结构化输入 (DMS)")
@@ -613,6 +620,7 @@ class CoordsView(BaseView):
     # ── Batch section ─────────────────────────────────────────────────────────
 
     def _build_batch_section(self) -> None:
+        self._content_layout.addSpacing(8)
         batch_wrap = QWidget()
         batch_wrap.setObjectName("CoordBatchSection")
         batch_lay = QVBoxLayout(batch_wrap)
@@ -633,8 +641,8 @@ class CoordsView(BaseView):
         # Body (hidden by default)
         self._batch_body = QWidget()
         self._batch_body_lay = QVBoxLayout(self._batch_body)
-        self._batch_body_lay.setContentsMargins(0, 10, 0, 0)
-        self._batch_body_lay.setSpacing(8)
+        self._batch_body_lay.setContentsMargins(0, 14, 0, 0)
+        self._batch_body_lay.setSpacing(10)
         self._batch_body.setVisible(False)
 
         # Textarea
