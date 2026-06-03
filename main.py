@@ -40,7 +40,7 @@ def main() -> int:
 
     # Restore last window state + nav selection
     win.restore_state()
-    win.show()
+    win.showMaximized()   # open full-screen so the columns get room to breathe
 
     return app.exec()
 

@@ -35,6 +35,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QProgressDialog,
     QPushButton,
+    QScrollArea,
     QSplitter,
     QVBoxLayout,
     QWidget,
@@ -127,22 +128,31 @@ class WorkbenchView(BaseView):
         self._results.setMinimumWidth(200)
         outer.addWidget(self._results)
 
-        # ── Right: naming + metadata ────────────────────────────────────────
+        # ── Right: naming + metadata (scrollable — never compress/overlap) ──
         right = QWidget()
-        right.setMinimumWidth(220)
         right_lay = QVBoxLayout(right)
-        right_lay.setContentsMargins(0, 0, 0, 0)
+        right_lay.setContentsMargins(0, 0, 6, 0)
         right_lay.setSpacing(18)
 
         self._naming = NamingPanel(self.ctx)
         self._naming.save_requested.connect(self._on_naming_save)
-        right_lay.addWidget(self._naming, stretch=2)
+        right_lay.addWidget(self._naming)           # natural height, no compress
 
         self._metadata = MetadataPanel(self.ctx)
         self._metadata.save_requested.connect(self._on_save_metadata)
-        right_lay.addWidget(self._metadata, stretch=3)
+        right_lay.addWidget(self._metadata)
+        right_lay.addStretch(1)
 
-        outer.addWidget(right)
+        right_scroll = QScrollArea()
+        right_scroll.setObjectName("ColumnScroll")
+        right_scroll.setWidget(right)
+        right_scroll.setWidgetResizable(True)
+        right_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        right_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        right_scroll.setMinimumWidth(320)
+        outer.addWidget(right_scroll)
 
         # Initial splitter proportions: sidebar : capture : results : right-panel
         outer.setSizes([220, 480, 240, 320])
