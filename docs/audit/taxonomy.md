@@ -72,47 +72,56 @@ inputs were never back-filled on blur.
 | Web function | Line | Qt location | Status | Notes |
 |---|---|---|---|---|
 | `getVisibleTaxonColumns` | 11505 | `_TaxonTableModel._rebuild_columns` | ✓ | chips control level+lang |
-| `renderTaxonChart` | 11523 | `_on_chart_toggle` (info stub) | ◐ | chart not implemented; info dialog shown |
-| `taxonQueryPayload` / `fetchTaxonomyTable` | 11569 | `TaxonomyView._load_page` | ✓ | |
+| `renderTaxonChart` | 11523 | `_chart_entries` + `_open_chart_dialog` | ✓ | QPainter bar chart; Top-12 orders; respects filter |
+| `taxonQueryPayload` / `fetchTaxonomyTable` | 11569 | `TaxonomyView._load_page` | ✓ | client-side filter + facet + sort |
 | `clearTaxonRowSelection` | 11621 | `_on_deselect` | ✓ | |
 | `cloneTaxonPredicate` | 11626 | N/A | N/A | server-side predicate cloning; Qt does client filter |
-| `fetchTaxonFacetValues` | 11633 | **MISSING** | ✗ | facet dropdowns per-column with value counts |
-| `openTaxonFacetMenu` | 11656 | **MISSING** | ✗ | pop-up facet filter menu per column header |
-| `taxonFacetValueChecked` / `toggleTaxonFacetValue` | 11673 | **MISSING** | ✗ | facet checkbox state |
-| `renderTaxonFacetMenu` | 11897 | **MISSING** | ✗ | facet menu rendering |
-| `startTaxonomyWormsJob` | 11701 | `_on_worms_update` (info stub) | ◐ | triggers WoRMS service job; GUI shows placeholder info |
+| `fetchTaxonFacetValues` | 11633 | `_TaxonFacetPanel._unique_values` | ✓ | value+count list from all_records |
+| `openTaxonFacetMenu` | 11656 | `_on_header_context_menu` + `_open_facet_for_column` | ✓ | right-click header → `_TaxonFacetPanel` |
+| `taxonFacetValueChecked` / `toggleTaxonFacetValue` | 11673 | `_TaxonFacetPanel._value_checked` + `_on_item_changed` | ✓ | include/exclude/search/all modes |
+| `renderTaxonFacetMenu` | 11897 | `_TaxonFacetPanel` | ✓ | sort buttons + search + checkbox list + actions |
+| `startTaxonomyWormsJob` | 11701 | `_on_worms_update` + `_worms_update_record_ids` | ✓ | creates WormsService job, navigates to WoRMS view |
 | `taxonExport` | 11718 | `_on_export` | ✓ | xlsx + csv |
-| `resolveTaxonMapping` | 11742 | **MISSING** | ✗ | maps WoRMS result back to a taxonomy row |
-| `openTaxonRowMenu` / `renderTaxonRowMenu` | 11755 | **MISSING** | ✗ | per-row context menu (WoRMS search, review, etc.) |
-| `searchWormsForTaxonRow` | 11777 | **MISSING** | ✗ | fires WoRMS lookup for selected row |
-| `renderTaxonJobPanel` | 11979 | **MISSING** | ✗ | shows in-progress WoRMS batch job panel |
-| `renderTaxonReviewModal` | 12012 | **MISSING** | ✗ | review modal for WoRMS match results |
+| `resolveTaxonMapping` | 11742 | `_on_resolve_mapping` | ✓ | calls `WormsService.resolve_mapping` |
+| `openTaxonRowMenu` / `renderTaxonRowMenu` | 11755 | `_on_row_context_menu` | ✓ | QMenu with WoRMS match, review, bulk update, edit/delete |
+| `searchWormsForTaxonRow` | 11777 | `_WormsSearchWorker` + `_WormsMatchDialog._do_search` | ✓ | background QThread |
+| `renderTaxonJobPanel` | 11979 | `_refresh_job_panel` + job panel frame in `_setup_ui` | ✓ | progress label + bar + pause/resume/retry buttons |
+| `renderTaxonReviewModal` | 12012 | `_TaxonReviewDialog` | ✓ | candidates list + 采用 + 标记未找到 |
 | `openTaxonomyTableModal` | 12036 | `_RecordDialog` | ✓ | add/edit dialog |
 | `renderTaxonomyPage` | 12058 | `TaxonomyView` | ✓ | full page with header/toolbar/table/pager |
-| `selectWormsTaxon` | 12654 | **MISSING** | ✗ | applies selected WoRMS candidate to taxonomy row |
+| `selectWormsTaxon` | 12654 | `_WormsMatchDialog._on_save` → `_on_resolve_mapping` | ✓ | save WoRMS candidate via resolve_mapping |
 
 ---
 
-## What was implemented in this audit
+## What was implemented in this (second) audit session (2026-06-04)
 
-### Added to `taxonomy_service.py`
-1. `find_seed_by_level(level, value)` — find first seed entry matching a level/value pair (mirrors `findSeedByLevel`)
-2. `validate_taxonomy_chain(sp_fields)` — check 4-level self-consistency; returns `{ok, mismatches}` (mirrors `validateTaxonomyChain`)
-3. `apply_taxonomy_authority(sp_fields, validation)` — overwrite upper fields from best seed match (mirrors `applyTaxonomyAuthority`)
-4. `taxon_entry_cn(entry, key, cn_key)` — return CN from entry or look up seed (mirrors `taxonEntryCn`)
-5. `find_user_entry_for_current(sp_fields)` — find user record matching specimen's 4-tuple (mirrors `findUserEntryForCurrent`)
-6. `apply_draft_to_specimen(sp_fields, draft)` — copy 8 draft fields back to specimen dict (mirrors `applyTaxonDraftToSpecimen`)
+### Added to `taxonomy_view.py`
+1. `_TaxonFacetPanel` — per-column facet filter popup (mirrors renderTaxonFacetMenu + support functions)
+2. `_WormsSearchWorker` — background QThread for WoRMS search + classification chain
+3. `_WormsMatchDialog` — full WoRMS match dialog (mirrors renderWormsMatchModal)
+4. `_TaxonReviewDialog` — review auto-found WoRMS candidates (mirrors renderTaxonReviewModal)
+5. `_on_row_context_menu` — right-click row context menu (mirrors openTaxonRowMenu/renderTaxonRowMenu)
+6. `_on_header_context_menu` + `_open_facet_for_column` — column header → facet panel
+7. `_on_facet_filter_applied` + `_on_facet_sort` — facet state management
+8. `_on_worms_update` (full) + `_worms_update_record_ids` + `_navigate_to_worms` — WoRMS job creation
+9. `_on_worms_match_row` + `_on_review_worms_row` — per-row WoRMS dialogs
+10. `_on_resolve_mapping` — apply WoRMS decision (mirrors resolveTaxonMapping)
+11. `_refresh_job_panel` — update job progress panel (mirrors renderTaxonJobPanel)
+12. `_chart_entries` + `_open_chart_dialog` + `_on_chart_dialog_finished` — real bar chart implementation
+13. `_load_page` enhanced — applies `_col_filters`, `_sort_col`/`_sort_dir`, calls `_refresh_job_panel`
+14. Job panel frame added to `_setup_ui` layout
 
-### Fixed in `taxonomy_input.py`
-7. `_on_editing_finished` — on exact-match hit now calls `_commit_candidate` (ancestor fill), not just `_on_editing_finished` no-op path
+### Previously added to `taxonomy_service.py` (audit session 1)
+`find_seed_by_level`, `validate_taxonomy_chain`, `apply_taxonomy_authority`,
+`taxon_entry_cn`, `find_user_entry_for_current`, `apply_draft_to_specimen`
+
+### Previously fixed in `taxonomy_input.py` (audit session 1)
+`_on_editing_finished` — exact-match now calls `_commit_candidate` (ancestor fill)
 
 ---
 
-## Honest remaining gaps (not fixed here)
+## Honest remaining gaps
 
-| Gap | Reason not fixed |
+| Gap | Status |
 |---|---|
-| Facet filter UI (4 functions) | Complex server-side feature; requires dedicated `_TaxonFacetPanel` widget; out of single-session scope |
-| WoRMS row context menu / job panel / review modal / `selectWormsTaxon` | WoRMS module scope; stubs acceptable until WoRMS view is wired |
-| `renderTaxonChart` — actual chart | Needs data aggregation + charting widget (e.g., pyqtgraph); stub is honest |
-| Workbench inline edit modal (workbench → taxonomy panel link) | Cross-module wiring; taxonomy panel emits `value_committed`; consumer wires it |
+| Workbench inline edit modal (workbench → taxonomy panel link) | ◐ — taxonomy panel emits `value_committed`; workbench_view must wire it; out of taxonomy scope |
