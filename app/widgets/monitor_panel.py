@@ -38,6 +38,7 @@ from PyQt6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -82,11 +83,16 @@ _ATTR = {
 
 
 class _FileCard(QFrame):
-    """A capture-stream card: gradient preview + caption + attribution pill."""
+    """A capture-stream card: gradient preview + caption + attribution pill.
+
+    Cards support selection (toggle via _set_selected) for multi-select
+    delete.  Selected cards get a highlight border via object name "CardSelected".
+    """
 
     activate_requested = pyqtSignal(str)      # path
     deactivate_requested = pyqtSignal(str)    # path
     assign_requested = pyqtSignal(str)        # path
+    selection_toggled = pyqtSignal(str, bool) # path, selected
 
     def __init__(self, entry, active_uid: Optional[str] = None,
                  parent: Optional[QWidget] = None) -> None:
@@ -94,6 +100,7 @@ class _FileCard(QFrame):
         self.setObjectName("Card")
         self._entry = entry
         self._active_uid = active_uid
+        self._selected = False
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -196,6 +203,25 @@ class _FileCard(QFrame):
         from app.config.effects import apply_card_shadow
         apply_card_shadow(self, blur=16, y=3, alpha=55)
 
+    def mousePressEvent(self, event) -> None:
+        """Toggle selection on left-click."""
+        super().mousePressEvent(event)
+        self._selected = not self._selected
+        self._update_selection_style()
+        self.selection_toggled.emit(getattr(self._entry, "path", ""), self._selected)
+
+    def _update_selection_style(self) -> None:
+        self.setObjectName("CardSelected" if self._selected else "Card")
+        self.style().unpolish(self)
+        self.style().polish(self)
+
+    def is_selected(self) -> bool:
+        return self._selected
+
+    def set_selected(self, val: bool) -> None:
+        self._selected = val
+        self._update_selection_style()
+
 
 class MonitorPanel(QWidget):
     """Incoming-JPG + results-TIFF capture stream with batch identity header.
@@ -216,6 +242,7 @@ class MonitorPanel(QWidget):
         self.ctx = ctx
         self._scan_result: Optional["ScanResult"] = None
         self._active_uid: Optional[str] = None
+        self._cards: list[_FileCard] = []  # all current cards (for selection ops)
         self._setup_ui()
 
     # ── UI ────────────────────────────────────────────────────────────────────
@@ -252,6 +279,45 @@ class MonitorPanel(QWidget):
         b_lay.addWidget(self._activate_state)
         sec.addWidget(batch)
 
+        # ── Phase pills: 拍摄中 / 已拍完 / 整理中 / 完成 ──
+        phase_row = QHBoxLayout()
+        phase_row.setContentsMargins(2, 0, 2, 0)
+        phase_row.setSpacing(6)
+        _phase_label = QLabel("阶段：")
+        _phase_label.setObjectName("MutedSmall")
+        phase_row.addWidget(_phase_label)
+        self._phase_pills: dict[str, QPushButton] = {}
+        for phase, obj in (
+            ("拍摄中", "PhasePillActive"),
+            ("已拍完", "PhasePill"),
+            ("整理中", "PhasePill"),
+            ("完成",   "PhasePill"),
+        ):
+            btn = QPushButton(phase)
+            btn.setObjectName(obj)
+            btn.setCheckable(True)
+            btn.setFixedHeight(22)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            if phase == "拍摄中":
+                btn.setChecked(True)
+            phase_row.addWidget(btn)
+            self._phase_pills[phase] = btn
+        phase_row.addStretch()
+        sec.addLayout(phase_row)
+
+        # ── Compose-mode hints ──
+        hints_row = QHBoxLayout()
+        hints_row.setContentsMargins(2, 0, 2, 0)
+        hints_row.setSpacing(16)
+        hint_auto = QLabel("自动合成 提交后后台执行")
+        hint_auto.setObjectName("MutedSmall")
+        hints_row.addWidget(hint_auto)
+        hint_manual = QLabel("手动 Helicon 选中本组原片拖入外部软件")
+        hint_manual.setObjectName("MutedSmall")
+        hints_row.addWidget(hint_manual)
+        hints_row.addStretch()
+        sec.addLayout(hints_row)
+
         # ── Activity stats ──
         stats = QHBoxLayout()
         stats.setContentsMargins(2, 0, 2, 0)
@@ -270,6 +336,11 @@ class MonitorPanel(QWidget):
         controls = QHBoxLayout()
         controls.setContentsMargins(0, 0, 0, 0)
         controls.setSpacing(8)
+        settings_btn = QPushButton("⚙ 项目设置")
+        settings_btn.setObjectName("Ghost")
+        settings_btn.setFixedHeight(26)
+        settings_btn.setToolTip("打开项目设置")
+        controls.addWidget(settings_btn)
         self._auto_toggle = QPushButton("新 TIFF 自动压缩")
         self._auto_toggle.setObjectName("Outline")
         self._auto_toggle.setCheckable(True)
@@ -277,16 +348,21 @@ class MonitorPanel(QWidget):
                               color=icons.TONE_MUTED, size=15)
         self._auto_toggle.toggled.connect(self._on_auto_toggled)
         controls.addWidget(self._auto_toggle)
-        refresh_btn = QPushButton("刷新目录")
+        refresh_btn = QPushButton("↻ 刷新目录")
         refresh_btn.setObjectName("Outline")
         icons.set_button_icon(refresh_btn, "mdi6.refresh", color=icons.TONE_MUTED, size=15)
         refresh_btn.clicked.connect(self._on_refresh)
         controls.addWidget(refresh_btn)
-        add_btn = QPushButton("添加照片")
+        add_btn = QPushButton("+ 添加照片")
         add_btn.setObjectName("Outline")
         icons.set_button_icon(add_btn, "mdi6.image-plus-outline", color=icons.TONE_MUTED, size=15)
         add_btn.setToolTip("把已有照片添加进来（导入 incoming-jpg/）")
         controls.addWidget(add_btn)
+        dir_btn = QPushButton("📁 选目录")
+        dir_btn.setObjectName("Ghost")
+        dir_btn.setFixedHeight(26)
+        dir_btn.setToolTip("选择工作目录")
+        controls.addWidget(dir_btn)
         self._raw_count = QLabel("本组原片 0 张")
         self._raw_count.setObjectName("MutedSmall")
         controls.addWidget(self._raw_count)
@@ -309,18 +385,30 @@ class MonitorPanel(QWidget):
         self._sel_count = QLabel("未选中")
         self._sel_count.setObjectName("MutedSmall")
         sh.addWidget(self._sel_count)
-        for label, obj in (("全选", "Tiny"), ("清除", "Tiny")):
-            btn = QPushButton(label)
-            btn.setObjectName(obj)
-            btn.setFixedHeight(22)
-            sh.addWidget(btn)
-        del_btn = QPushButton("删除")
-        del_btn.setObjectName("Danger")
-        del_btn.setFixedHeight(24)
-        del_btn.setEnabled(False)
-        icons.set_button_icon(del_btn, "mdi6.delete-outline", color=icons.TONE_DANGER, size=14)
-        del_btn.setToolTip("删除选中的 JPG（TIFF 成片不可删）")
-        sh.addWidget(del_btn)
+        sel_all_btn = QPushButton("全选")
+        sel_all_btn.setObjectName("Tiny")
+        sel_all_btn.setFixedHeight(22)
+        sel_all_btn.clicked.connect(self._on_select_all)
+        sh.addWidget(sel_all_btn)
+        sel_none_btn = QPushButton("清除")
+        sel_none_btn.setObjectName("Tiny")
+        sel_none_btn.setFixedHeight(22)
+        sel_none_btn.clicked.connect(self._on_select_none)
+        sh.addWidget(sel_none_btn)
+        self._del_btn = QPushButton("🗑 删除")
+        self._del_btn.setObjectName("Danger")
+        self._del_btn.setFixedHeight(24)
+        self._del_btn.setEnabled(False)
+        icons.set_button_icon(self._del_btn, "mdi6.delete-outline", color=icons.TONE_DANGER, size=14)
+        self._del_btn.setToolTip("删除选中文件（含 TIFF 时二次确认）")
+        self._del_btn.clicked.connect(self._on_delete_clicked)
+        sh.addWidget(self._del_btn)
+        # Also add ↩ 撤销归属 from spec
+        undo_attr_btn = QPushButton("↩ 撤销归属")
+        undo_attr_btn.setObjectName("Tiny")
+        undo_attr_btn.setFixedHeight(22)
+        undo_attr_btn.setToolTip("撤销选中 JPG 的归属")
+        sh.addWidget(undo_attr_btn)
         sec.addLayout(sh)
 
         # ── Capture stream (scrollable grid) ──
@@ -392,11 +480,14 @@ class MonitorPanel(QWidget):
     def clear(self) -> None:
         """Remove all cards and show empty state."""
         self._scan_result = None
+        self._cards = []
         self._clear_grid()
         self._stat_label.setText("无项目")
         self._stat_today.setText("0 张")
         self._stat_untidy.setText("0 张")
         self._raw_count.setText("本组原片 0 张")
+        self._del_btn.setEnabled(False)
+        self._sel_count.setText("未选中")
         self._unattr_warning.hide()
         self._empty_label.show()
 
@@ -404,6 +495,7 @@ class MonitorPanel(QWidget):
 
     def _rebuild_grid(self) -> None:
         self._clear_grid()
+        self._cards = []
         if not self._scan_result:
             self._empty_label.show()
             return
@@ -423,7 +515,9 @@ class MonitorPanel(QWidget):
                 card = _FileCard(entry, self._active_uid, self)
                 card.assign_requested.connect(self.assign_requested)
                 card.deactivate_requested.connect(self.unassign_requested)
+                card.selection_toggled.connect(self._on_card_selection_toggled)
                 self._grid.addWidget(card, idx // cols, idx % cols)
+                self._cards.append(card)
             for c in range(cols):
                 self._grid.setColumnStretch(c, 1)
 
@@ -449,6 +543,103 @@ class MonitorPanel(QWidget):
             item = self._grid.takeAt(0)
             if item and item.widget():
                 item.widget().deleteLater()
+
+    # ── Selection helpers ─────────────────────────────────────────────────────
+
+    def _selected_cards(self) -> list[_FileCard]:
+        return [c for c in self._cards if c.is_selected()]
+
+    def _on_card_selection_toggled(self, path: str, selected: bool) -> None:
+        """Update selection count label and delete button state."""
+        sel = self._selected_cards()
+        n = len(sel)
+        if n:
+            self._sel_count.setText(f"已选 {n} 个")
+            self._del_btn.setEnabled(True)
+        else:
+            self._sel_count.setText("未选中")
+            self._del_btn.setEnabled(False)
+
+    def _on_select_all(self) -> None:
+        for card in self._cards:
+            card.set_selected(True)
+        n = len(self._cards)
+        self._sel_count.setText(f"已选 {n} 个" if n else "未选中")
+        self._del_btn.setEnabled(bool(self._cards))
+
+    def _on_select_none(self) -> None:
+        for card in self._cards:
+            card.set_selected(False)
+        self._sel_count.setText("未选中")
+        self._del_btn.setEnabled(False)
+
+    def _on_delete_clicked(self) -> None:
+        """Delete selected files.
+
+        If any selected file is a TIFF (composed result), show a QMessageBox
+        warning before proceeding.  Pure-JPG selections delete directly after
+        assert_safe validation.
+
+        Hard rule: TIFF auto-archiving never triggers this path (only user
+        manual delete does).  JPG-only auto-delete from archive_service is
+        separate and never calls this method.
+        """
+        sel = self._selected_cards()
+        if not sel:
+            return
+
+        paths = [getattr(c._entry, "path", "") for c in sel]
+        tiff_paths = [p for p in paths if p.lower().endswith((".tif", ".tiff"))]
+        jpg_paths  = [p for p in paths if not p.lower().endswith((".tif", ".tiff"))]
+
+        # TIFF warning gate
+        if tiff_paths:
+            msg = QMessageBox(self)
+            msg.setWindowTitle("删除确认")
+            msg.setIcon(QMessageBox.Icon.Warning)
+            msg.setText(
+                f"选中包含 {len(tiff_paths)} 个合成成果 TIFF（不可自动恢复），确定删除？"
+            )
+            msg.setStandardButtons(
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel
+            )
+            msg.setDefaultButton(QMessageBox.StandardButton.Cancel)
+            if msg.exec() != QMessageBox.StandardButton.Yes:
+                return
+
+        # Validate paths via default_registry.assert_safe
+        try:
+            from app.utils.path_utils import default_registry
+        except ImportError:
+            default_registry = None
+
+        import os
+        deleted: list[str] = []
+        errors: list[str] = []
+        for p in (tiff_paths + jpg_paths):
+            if not p:
+                continue
+            try:
+                if default_registry is not None:
+                    default_registry.assert_safe(p, "delete")
+                if os.path.isfile(p):
+                    os.remove(p)
+                    deleted.append(p)
+            except PermissionError as exc:
+                errors.append(f"{p}: {exc}")
+            except OSError as exc:
+                errors.append(f"{p}: {exc}")
+
+        if errors:
+            QMessageBox.warning(
+                self,
+                "部分删除失败",
+                "\n".join(errors[:5]),
+            )
+
+        if deleted:
+            self._on_select_none()
+            self.refresh_requested.emit()
 
     # ── Slots ─────────────────────────────────────────────────────────────────
 

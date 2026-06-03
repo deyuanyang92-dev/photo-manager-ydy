@@ -21,10 +21,12 @@ save_requested(uid: str)
 """
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
-from PyQt6.QtCore import pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QPainter, QPen
 from PyQt6.QtWidgets import (
     QFormLayout,
     QFrame,
@@ -33,6 +35,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -41,6 +44,86 @@ from PyQt6.QtWidgets import (
 if TYPE_CHECKING:
     from app.app_context import AppContext
     from app.models.specimen import Specimen
+
+
+class MetaScoreRing(QWidget):
+    """Circular progress ring showing metadata completeness (0-100 %).
+
+    Mirrors the web prototype's ``meta-score-ring`` element: a thin arc
+    that sweeps from the 12-o'clock position clockwise, coloured by score
+    (green ≥80, amber ≥50, red <50).
+
+    Usage:
+        ring = MetaScoreRing()
+        ring.set_score(75)   # 75 % completeness
+    """
+
+    _RING_DIAMETER = 56
+    _RING_WIDTH = 6   # pen width
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._score: int = 0
+        size = self._RING_DIAMETER + self._RING_WIDTH * 2
+        self.setFixedSize(size, size)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+
+    def set_score(self, score: int) -> None:
+        """Set completeness percentage (0-100) and repaint."""
+        self._score = max(0, min(100, score))
+        self.update()
+
+    def score(self) -> int:
+        return self._score
+
+    def paintEvent(self, event) -> None:  # noqa: ARG002
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        w = self._RING_WIDTH
+        d = self._RING_DIAMETER
+        # Leave room for pen width on all sides
+        rect_x = w
+        rect_y = w
+        rect_w = d
+        rect_h = d
+
+        # Track ring (muted background arc)
+        track_pen = QPen(QColor("#1e3a40"))
+        track_pen.setWidth(w)
+        track_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(track_pen)
+        painter.drawArc(rect_x, rect_y, rect_w, rect_h, 0, 360 * 16)
+
+        # Score arc
+        if self._score > 0:
+            if self._score >= 80:
+                color = "#36c98f"   # green
+            elif self._score >= 50:
+                color = "#e8aa60"   # amber
+            else:
+                color = "#e05a5a"   # red
+
+            score_pen = QPen(QColor(color))
+            score_pen.setWidth(w)
+            score_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(score_pen)
+            # Qt arc: startAngle in 1/16th degrees; positive = counter-clockwise.
+            # Start at 12 o'clock (90°); sweep clockwise = negative angle.
+            start_angle = 90 * 16
+            span_angle = -int(round(self._score / 100.0 * 360 * 16))
+            painter.drawArc(rect_x, rect_y, rect_w, rect_h, start_angle, span_angle)
+
+        # Percentage text centred
+        painter.setPen(QPen(QColor("#b0ccd0")))
+        font = painter.font()
+        font.setPointSize(9)
+        font.setBold(True)
+        painter.setFont(font)
+        full_rect = self.rect()
+        painter.drawText(full_rect, Qt.AlignmentFlag.AlignCenter, f"{self._score}%")
+
+        painter.end()
 
 
 class MetadataPanel(QWidget):
@@ -77,13 +160,17 @@ class MetadataPanel(QWidget):
         root.setContentsMargins(20, 16, 20, 16)
         root.setSpacing(12)
 
-        # Header
+        # Header: title + score ring + UID badge
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(10)
         title = QLabel("标本与拍摄元数据")
         title.setObjectName("CardTitle")
         header.addWidget(title)
         header.addStretch()
+        self._score_ring = MetaScoreRing()
+        self._score_ring.setToolTip("元数据完整度（5 项核心字段）")
+        header.addWidget(self._score_ring)
         self._uid_badge = QLabel("—")
         self._uid_badge.setObjectName("Mono")
         header.addWidget(self._uid_badge)
@@ -213,12 +300,21 @@ class MetadataPanel(QWidget):
 
     # ── Public API ────────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _compute_score(specimen: "Specimen") -> int:
+        """Metadata completeness 0-100; mirrors server.js _spMetaScore (5 fields)."""
+        fields = [specimen.scientific_name, specimen.family,
+                  specimen.collector, specimen.lon, specimen.lat]
+        filled = sum(1 for f in fields if f is not None and str(f).strip() != "")
+        return round(filled / len(fields) * 100)
+
     def load_specimen(self, specimen: "Specimen") -> None:
         """Populate all fields from a Specimen dataclass instance."""
         self._uid = specimen.uid
         self._dirty = False
         self._uid_badge.setText(specimen.uid[:25] + ("…" if len(specimen.uid) > 25 else ""))
         self._save_btn.setEnabled(False)
+        self._score_ring.set_score(self._compute_score(specimen))
 
         def _set(edit: QLineEdit, val) -> None:
             edit.blockSignals(True)
@@ -270,6 +366,7 @@ class MetadataPanel(QWidget):
         self._uid = None
         self._uid_badge.setText("—")
         self._save_btn.setEnabled(False)
+        self._score_ring.set_score(0)
         for edit in self._all_edits():
             edit.blockSignals(True)
             edit.clear()

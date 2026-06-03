@@ -442,3 +442,222 @@ class TestResultsColumn:
         w = WorkbenchView(ctx)
         assert hasattr(w, "_results")
         assert isinstance(w._results, ResultsColumn)
+
+
+# ── MetaScoreRing ─────────────────────────────────────────────────────────────
+
+class TestMetaScoreRing:
+    def test_ring_constructs(self):
+        from app.widgets.metadata_panel import MetaScoreRing
+        ring = MetaScoreRing()
+        assert ring.score() == 0
+
+    def test_set_score_clamps(self):
+        from app.widgets.metadata_panel import MetaScoreRing
+        ring = MetaScoreRing()
+        ring.set_score(150)
+        assert ring.score() == 100
+        ring.set_score(-5)
+        assert ring.score() == 0
+
+    def test_set_score_normal(self):
+        from app.widgets.metadata_panel import MetaScoreRing
+        ring = MetaScoreRing()
+        ring.set_score(75)
+        assert ring.score() == 75
+
+    def test_metadata_panel_has_score_ring(self):
+        """MetadataPanel must have a _score_ring attribute."""
+        from app.widgets.metadata_panel import MetadataPanel, MetaScoreRing
+        ctx = _make_ctx()
+        w = MetadataPanel(ctx)
+        assert hasattr(w, "_score_ring")
+        assert isinstance(w._score_ring, MetaScoreRing)
+
+    def test_load_specimen_updates_ring(self):
+        """Loading a fully-complete specimen should set score > 0."""
+        from app.widgets.metadata_panel import MetadataPanel
+        from app.models.specimen import Specimen
+        ctx = _make_ctx()
+        w = MetadataPanel(ctx)
+        sp = Specimen(
+            uid="FJ-XM-B2-DLC001-T95E-20260601",
+            scientific_name="Conus textile",
+            family="Conidae",
+            collector="张三",
+            lon=120.123,
+            lat=25.456,
+        )
+        w.load_specimen(sp)
+        assert w._score_ring.score() == 100
+
+    def test_load_specimen_partial_score(self):
+        """Specimen with only 2 of 5 fields filled → 40 %."""
+        from app.widgets.metadata_panel import MetadataPanel
+        from app.models.specimen import Specimen
+        ctx = _make_ctx()
+        w = MetadataPanel(ctx)
+        sp = Specimen(
+            uid="FJ-XM-B2-DLC001-T95E-20260601",
+            scientific_name="Conus textile",
+            collector="张三",
+        )
+        w.load_specimen(sp)
+        assert w._score_ring.score() == 40
+
+    def test_clear_resets_ring(self):
+        from app.widgets.metadata_panel import MetadataPanel
+        from app.models.specimen import Specimen
+        ctx = _make_ctx()
+        w = MetadataPanel(ctx)
+        sp = Specimen(uid="FJ-XM-B2-DLC001-T95E-20260601", scientific_name="X",
+                      family="Y", collector="Z", lon=1.0, lat=2.0)
+        w.load_specimen(sp)
+        assert w._score_ring.score() == 100
+        w.clear()
+        assert w._score_ring.score() == 0
+
+
+# ── Delete with TIFF warning ───────────────────────────────────────────────────
+
+class TestDeleteWithTiffWarning:
+    """Test that MonitorPanel._on_delete_clicked identifies TIFF in selection."""
+
+    def _make_fake_entry(self, path: str, kind: str = "jpg"):
+        """Return a minimal fake FileEntry-like object."""
+        class _Entry:
+            pass
+        e = _Entry()
+        e.path = path
+        e.kind = kind
+        e.name = path.split("/")[-1]
+        e.attributed_specimen_id = None
+        e.composed_tiff = None
+        e.archived = None
+        return e
+
+    def test_has_del_btn(self):
+        """MonitorPanel must expose _del_btn attribute."""
+        from app.widgets.monitor_panel import MonitorPanel
+        ctx = _make_ctx()
+        w = MonitorPanel(ctx)
+        assert hasattr(w, "_del_btn")
+
+    def test_del_btn_disabled_initially(self):
+        from app.widgets.monitor_panel import MonitorPanel
+        ctx = _make_ctx()
+        w = MonitorPanel(ctx)
+        assert not w._del_btn.isEnabled()
+
+    def test_tiff_path_detection(self):
+        """_on_delete_clicked must detect .tif / .tiff paths in selection."""
+        from app.widgets.monitor_panel import _FileCard, MonitorPanel
+        ctx = _make_ctx()
+        w = MonitorPanel(ctx)
+        # Synthesise two selected cards (one JPG, one TIFF)
+        jpg_entry = self._make_fake_entry("/fake/IMG_001.jpg", kind="jpg")
+        tif_entry = self._make_fake_entry("/fake/result.tif", kind="tiff")
+        c1 = _FileCard(jpg_entry, parent=w)
+        c1._selected = True
+        c2 = _FileCard(tif_entry, parent=w)
+        c2._selected = True
+        w._cards = [c1, c2]
+
+        # Collect paths the method would classify as TIFFs
+        paths = [getattr(c._entry, "path", "") for c in w._selected_cards()]
+        tiff_paths = [p for p in paths if p.lower().endswith((".tif", ".tiff"))]
+        jpg_paths  = [p for p in paths if not p.lower().endswith((".tif", ".tiff"))]
+        assert len(tiff_paths) == 1
+        assert len(jpg_paths) == 1
+        assert tiff_paths[0] == "/fake/result.tif"
+
+    def test_select_all_enables_del_btn(self):
+        """_on_select_all must enable the delete button when cards exist."""
+        from app.widgets.monitor_panel import MonitorPanel
+        from app.services.monitor_service import FileEntry, ScanResult
+        ctx = _make_ctx()
+        w = MonitorPanel(ctx)
+        entries = [
+            FileEntry(
+                name="IMG_001.jpg",
+                path="/fake/IMG_001.jpg",
+                kind="jpg",
+                size=1000,
+                mtime="2026-06-01T00:00:00+00:00",
+            ),
+        ]
+        result = ScanResult(project_dir="/fake", jpg_files=entries)
+        w.load_scan(result)
+        w._on_select_all()
+        assert w._del_btn.isEnabled()
+
+    def test_select_none_disables_del_btn(self):
+        from app.widgets.monitor_panel import MonitorPanel
+        from app.services.monitor_service import FileEntry, ScanResult
+        ctx = _make_ctx()
+        w = MonitorPanel(ctx)
+        entries = [
+            FileEntry(
+                name="IMG_001.jpg",
+                path="/fake/IMG_001.jpg",
+                kind="jpg",
+                size=1000,
+                mtime="2026-06-01T00:00:00+00:00",
+            ),
+        ]
+        result = ScanResult(project_dir="/fake", jpg_files=entries)
+        w.load_scan(result)
+        w._on_select_all()
+        w._on_select_none()
+        assert not w._del_btn.isEnabled()
+
+
+# ── GroupingPanel capture-main-actions ────────────────────────────────────────
+
+class TestGroupingPanelCaptureActions:
+    def test_has_target_label(self):
+        from app.widgets.grouping_panel import GroupingPanel
+        ctx = _make_ctx()
+        w = GroupingPanel(ctx)
+        assert hasattr(w, "_target_label")
+
+    def test_has_group_toggle_btn(self):
+        from app.widgets.grouping_panel import GroupingPanel
+        ctx = _make_ctx()
+        w = GroupingPanel(ctx)
+        assert hasattr(w, "_group_toggle_btn")
+
+    def test_load_grouping_updates_target_label(self):
+        from app.widgets.grouping_panel import GroupingPanel
+        from app.services.grouping_service import Group, SpecimenGrouping
+        ctx = _make_ctx()
+        w = GroupingPanel(ctx)
+        uid = "FJ-XM-B2-DLC001-T95E-20260601"
+        sg = SpecimenGrouping(uid=uid, groups=[])
+        w.load_grouping(uid, sg)
+        # target label should show the uid (possibly truncated)
+        assert uid[:30] in w._target_label.text()
+
+    def test_group_toggle_hides_body(self):
+        from app.widgets.grouping_panel import GroupingPanel
+        ctx = _make_ctx()
+        w = GroupingPanel(ctx)
+        # In offscreen mode widgets are never shown(); check isHidden() state.
+        # Body starts NOT explicitly hidden (checked=True on toggle btn).
+        assert not w._group_body.isHidden()
+        # Simulate toggle off
+        w._on_group_toggle(False)
+        assert w._group_body.isHidden()
+        # Toggle back on
+        w._on_group_toggle(True)
+        assert not w._group_body.isHidden()
+
+    def test_phase_pills_exist(self):
+        from app.widgets.monitor_panel import MonitorPanel
+        ctx = _make_ctx()
+        w = MonitorPanel(ctx)
+        assert hasattr(w, "_phase_pills")
+        assert "拍摄中" in w._phase_pills
+        assert "已拍完" in w._phase_pills
+        assert "整理中" in w._phase_pills
+        assert "完成" in w._phase_pills

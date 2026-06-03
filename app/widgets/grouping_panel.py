@@ -193,6 +193,9 @@ class GroupingPanel(QWidget):
     organise_requested = pyqtSignal(str, int)
     undo_compose_requested = pyqtSignal(str, int)
     grouping_changed = pyqtSignal()
+    # Bulk-action signals (capture-main-actions row)
+    compose_all_requested = pyqtSignal(str)    # uid — compose all pending groups
+    organise_all_requested = pyqtSignal(str)   # uid — organise all composed groups
 
     def __init__(self, ctx: "AppContext", parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -216,31 +219,87 @@ class GroupingPanel(QWidget):
         root.setContentsMargins(20, 16, 20, 16)
         root.setSpacing(12)
 
-        # Toolbar
-        toolbar = QHBoxLayout()
-        toolbar.setContentsMargins(0, 0, 0, 0)
-        toolbar.setSpacing(8)
-        title = QLabel("分组工具 · 成果内容")
-        title.setObjectName("Section")
-        toolbar.addWidget(title)
-        toolbar.addStretch()
+        # ── capture-main-actions row (web parity: ⚡合成/合成+整理/🗜整理/⋯更多) ──
+        main_actions = QHBoxLayout()
+        main_actions.setContentsMargins(0, 0, 0, 0)
+        main_actions.setSpacing(8)
+        compose_btn = QPushButton("⚡ 合成")
+        compose_btn.setObjectName("Primary")
+        compose_btn.setFixedHeight(30)
+        icons.set_button_icon(compose_btn, "fa5s.layer-group",
+                              color=icons.TONE_ON_ACCENT, size=13)
+        compose_btn.setToolTip("对所有待合成组调用 Helicon Focus")
+        compose_btn.clicked.connect(self._on_compose_all)
+        main_actions.addWidget(compose_btn)
+
+        compose_org_btn = QPushButton("合成+整理")
+        compose_org_btn.setObjectName("Primary")
+        compose_org_btn.setFixedHeight(30)
+        compose_org_btn.setToolTip("合成后立即整理归档")
+        compose_org_btn.clicked.connect(self._on_compose_and_organise_all)
+        main_actions.addWidget(compose_org_btn)
+
+        org_btn = QPushButton("🗜 整理")
+        org_btn.setObjectName("Outline")
+        org_btn.setFixedHeight(30)
+        icons.set_button_icon(org_btn, "mdi6.archive-arrow-down-outline",
+                              color=icons.TONE_MUTED, size=13)
+        org_btn.setToolTip("整理所有已合成组（归档 JPG）")
+        org_btn.clicked.connect(self._on_organise_all)
+        main_actions.addWidget(org_btn)
+
+        more_btn = QPushButton("⋯ 更多 ▾")
+        more_btn.setObjectName("Ghost")
+        more_btn.setFixedHeight(30)
+        more_btn.setToolTip("更多操作")
+        main_actions.addWidget(more_btn)
+
+        main_actions.addStretch()
+
+        self._target_label = QLabel("—")
+        self._target_label.setObjectName("Mono")
+        self._target_label.setToolTip("当前目标标本编号")
+        main_actions.addWidget(self._target_label)
+        root.addLayout(main_actions)
+
+        # ── ▸ 分组工具 collapsible header ──
+        group_toggle_row = QHBoxLayout()
+        group_toggle_row.setContentsMargins(0, 0, 0, 0)
+        group_toggle_row.setSpacing(6)
+        self._group_toggle_btn = QPushButton("▸ 分组工具")
+        self._group_toggle_btn.setObjectName("Ghost")
+        self._group_toggle_btn.setFixedHeight(26)
+        self._group_toggle_btn.setCheckable(True)
+        self._group_toggle_btn.setChecked(True)
+        self._group_toggle_btn.clicked.connect(self._on_group_toggle)
+        group_toggle_row.addWidget(self._group_toggle_btn)
+        hint_drag = QLabel("拖入所选 JPG + TIFF 补处理")
+        hint_drag.setObjectName("MutedSmall")
+        group_toggle_row.addWidget(hint_drag)
+        group_toggle_row.addStretch()
 
         self._uid_label = QLabel("无激活标本")
         self._uid_label.setObjectName("Mono")
-        toolbar.addWidget(self._uid_label)
+        group_toggle_row.addWidget(self._uid_label)
 
         add_btn = QPushButton("新组")
         add_btn.setObjectName("Outline")
         add_btn.setFixedHeight(28)
         icons.set_button_icon(add_btn, "mdi6.plus", color=icons.TONE_ACCENT, size=14)
         add_btn.clicked.connect(self._add_group)
-        toolbar.addWidget(add_btn)
-        root.addLayout(toolbar)
+        group_toggle_row.addWidget(add_btn)
+        root.addLayout(group_toggle_row)
 
         line = QFrame()
         line.setObjectName("Divider")
         line.setFixedHeight(1)
         root.addWidget(line)
+
+        # Collapsible body
+        self._group_body = QWidget()
+        body_lay = QVBoxLayout(self._group_body)
+        body_lay.setContentsMargins(0, 0, 0, 0)
+        body_lay.setSpacing(8)
 
         # Scroll area
         scroll = QScrollArea()
@@ -251,13 +310,15 @@ class GroupingPanel(QWidget):
         self._content_lay.setSpacing(8)
         self._content_lay.setAlignment(Qt.AlignmentFlag.AlignTop)
         scroll.setWidget(self._content)
-        root.addWidget(scroll, stretch=1)
+        body_lay.addWidget(scroll, stretch=1)
 
         # Empty state
         self._empty_lbl = QLabel("激活一个标本后查看或编辑分组")
         self._empty_lbl.setObjectName("Muted")
         self._empty_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        root.addWidget(self._empty_lbl)
+        body_lay.addWidget(self._empty_lbl)
+
+        root.addWidget(self._group_body, stretch=1)
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -265,13 +326,16 @@ class GroupingPanel(QWidget):
         """Display all groups for *uid*."""
         self._uid = uid
         self._grouping = grouping
-        self._uid_label.setText(uid[:30] + ("…" if len(uid) > 30 else ""))
+        short = uid[:30] + ("…" if len(uid) > 30 else "")
+        self._uid_label.setText(short)
+        self._target_label.setText(short)
         self._rebuild()
 
     def clear(self) -> None:
         self._uid = None
         self._grouping = None
         self._uid_label.setText("— 无激活标本 —")
+        self._target_label.setText("—")
         self._clear_content()
         self._empty_lbl.show()
 
@@ -336,6 +400,40 @@ class GroupingPanel(QWidget):
         self.grouping_changed.emit()
 
     # ── Slots ─────────────────────────────────────────────────────────────────
+
+    def _on_group_toggle(self, checked: bool) -> None:
+        """Show/hide the group editor body; update toggle button label."""
+        self._group_body.setVisible(checked)
+        self._group_toggle_btn.setText("▾ 分组工具" if checked else "▸ 分组工具")
+
+    def _on_compose_all(self) -> None:
+        """Compose all draft groups for the current specimen."""
+        if not self._uid or not self._grouping:
+            return
+        draft = [g for g in self._grouping.groups if not g.composed_tiff_path]
+        for g in draft:
+            self.compose_requested.emit(self._uid, g.group_index)
+
+    def _on_organise_all(self) -> None:
+        """Organise all composed groups for the current specimen."""
+        if not self._uid or not self._grouping:
+            return
+        composed = [g for g in self._grouping.groups if g.composed_tiff_path]
+        for g in composed:
+            self.organise_requested.emit(self._uid, g.group_index)
+
+    def _on_compose_and_organise_all(self) -> None:
+        """Compose all draft groups then organise — sequential per group."""
+        if not self._uid or not self._grouping:
+            return
+        # Compose all pending first (each emits compose_requested)
+        draft = [g for g in self._grouping.groups if not g.composed_tiff_path]
+        for g in draft:
+            self.compose_requested.emit(self._uid, g.group_index)
+        # Then organise already-composed ones
+        composed = [g for g in self._grouping.groups if g.composed_tiff_path]
+        for g in composed:
+            self.organise_requested.emit(self._uid, g.group_index)
 
     def _on_compose(self, group_index: int) -> None:
         if self._uid:
