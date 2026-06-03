@@ -189,6 +189,40 @@ class TestOnActivate:
         w = WorkbenchView(ctx)
         w.on_activate()  # must not raise
 
+    def test_auto_poll_timer_starts_on_activate(self, tmp_path):
+        """on_activate must start _auto_refresh_timer."""
+        from app.views.workbench_view import WorkbenchView
+        project_dir = str(tmp_path / "proj")
+        Path(project_dir).mkdir(parents=True)
+        (Path(project_dir) / "incoming-jpg").mkdir()
+        (Path(project_dir) / "results").mkdir()
+        (Path(project_dir) / "_data").mkdir()
+        db_path = str(tmp_path / "proj" / "_data" / "project.db")
+        db = _make_db(db_path)
+        ctx = _make_ctx(project_dir=project_dir, db=db)
+        w = WorkbenchView(ctx)
+        w.on_activate()
+        assert hasattr(w, "_auto_refresh_timer")
+        assert w._auto_refresh_timer.isActive()
+        db.close()
+
+    def test_auto_poll_timer_stops_on_deactivate(self, tmp_path):
+        """on_deactivate must stop _auto_refresh_timer."""
+        from app.views.workbench_view import WorkbenchView
+        project_dir = str(tmp_path / "proj2")
+        Path(project_dir).mkdir(parents=True)
+        (Path(project_dir) / "incoming-jpg").mkdir()
+        (Path(project_dir) / "results").mkdir()
+        (Path(project_dir) / "_data").mkdir()
+        db_path = str(tmp_path / "proj2" / "_data" / "project.db")
+        db = _make_db(db_path)
+        ctx = _make_ctx(project_dir=project_dir, db=db)
+        w = WorkbenchView(ctx)
+        w.on_activate()
+        w.on_deactivate()
+        assert not w._auto_refresh_timer.isActive()
+        db.close()
+
     def test_on_activate_with_project(self, tmp_path):
         """on_activate must not crash with a valid (but empty) project."""
         from app.views.workbench_view import WorkbenchView

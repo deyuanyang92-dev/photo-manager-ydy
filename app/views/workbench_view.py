@@ -173,6 +173,11 @@ class WorkbenchView(BaseView):
         self._save_timer.setInterval(500)
         self._save_timer.timeout.connect(self._flush_grouping_save)
 
+        # Auto-refresh monitor directory every 2 s (mirrors web startMonitorPoll)
+        self._auto_refresh_timer = QTimer(self)
+        self._auto_refresh_timer.setInterval(2000)
+        self._auto_refresh_timer.timeout.connect(self._refresh_monitor)
+
         # Track current UID for grouping edits
         self._current_uid: Optional[str] = None
         self._pending_grouping = None  # SpecimenGrouping awaiting save
@@ -281,6 +286,14 @@ class WorkbenchView(BaseView):
             self._sidebar.select_uid(active_uid)
             self._load_specimen(active_uid)
         self._refresh_batch_header()
+
+        # Start auto-poll (mirrors web startMonitorPoll)
+        if not self._auto_refresh_timer.isActive():
+            self._auto_refresh_timer.start()
+
+    def on_deactivate(self) -> None:
+        """Called when navigating away; stop auto-poll."""
+        self._auto_refresh_timer.stop()
 
     # ── Specimen selection ────────────────────────────────────────────────────
 
