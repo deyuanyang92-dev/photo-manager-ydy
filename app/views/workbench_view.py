@@ -45,6 +45,7 @@ from app.widgets.grouping_panel import GroupingPanel
 from app.widgets.metadata_panel import MetadataPanel
 from app.widgets.monitor_panel import MonitorPanel
 from app.widgets.naming_panel import NamingPanel
+from app.widgets.results_column import ResultsColumn
 from app.widgets.specimen_sidebar import SpecimenSidebar
 
 
@@ -100,7 +101,7 @@ class WorkbenchView(BaseView):
         self._sidebar.new_specimen_requested.connect(self._on_new_specimen)
         outer.addWidget(self._sidebar)
 
-        # ── Centre: vertical splitter (monitor top, grouping bottom) ───────
+        # ── Centre ①: vertical splitter (monitor top, grouping bottom) ───────
         centre = QSplitter(Qt.Orientation.Vertical)
         centre.setChildrenCollapsible(False)
         centre.setHandleWidth(18)
@@ -121,6 +122,11 @@ class WorkbenchView(BaseView):
         centre.setSizes([300, 250])
         outer.addWidget(centre)
 
+        # ── Centre ②: 成果内容 column (composed TIFFs + archive ZIPs) ──────
+        self._results = ResultsColumn()
+        self._results.setMinimumWidth(200)
+        outer.addWidget(self._results)
+
         # ── Right: naming + metadata ────────────────────────────────────────
         right = QWidget()
         right.setMinimumWidth(220)
@@ -138,8 +144,8 @@ class WorkbenchView(BaseView):
 
         outer.addWidget(right)
 
-        # Initial splitter proportions: 1 : 3 : 1.5
-        outer.setSizes([220, 640, 320])
+        # Initial splitter proportions: sidebar : capture : results : right-panel
+        outer.setSizes([220, 480, 240, 320])
         body_lay.addWidget(outer, stretch=1)
 
         # ── No-project banner ───────────────────────────────────────────────
@@ -351,13 +357,14 @@ class WorkbenchView(BaseView):
             QMessageBox.warning(self, "保存失败", str(exc))
 
     def _load_specimen(self, uid: str) -> None:
-        """Load grouping + naming + metadata for *uid*."""
+        """Load grouping + naming + metadata + results for *uid*."""
         self._current_uid = uid
         db = self.ctx.get_db()
         if not db:
             return
 
         # Load grouping
+        grouping = None
         try:
             from app.services.grouping_service import load_grouping
             grouping = load_grouping(db, uid)
@@ -385,6 +392,9 @@ class WorkbenchView(BaseView):
                 self._metadata.load_specimen(sp)
         except Exception:
             pass
+
+        # Populate ② 成果内容 column from grouping data
+        self._refresh_results_column(uid, grouping)
 
     # ── Monitor ───────────────────────────────────────────────────────────────
 
@@ -723,6 +733,7 @@ class WorkbenchView(BaseView):
                 save_grouping(db, uid, grouping.groups)
                 self._grouping.load_grouping(uid, grouping)
                 self._refresh_monitor()
+                self._refresh_results_column(uid, grouping)
 
                 msg = (
                     f"归档完成：{Path(result.zip_path).name}\n"
@@ -862,6 +873,40 @@ class WorkbenchView(BaseView):
         # Refresh naming panel with latest values if storage changed
         self._load_specimen(uid)
 
+    # ── Results column ────────────────────────────────────────────────────────
+
+    def _refresh_results_column(self, uid: str, grouping=None) -> None:
+        """Populate the ② 成果内容 column from the specimen's grouping data.
+
+        Collects all composed TIFF paths and archive ZIP paths from every group
+        belonging to *uid*, then passes them to ResultsColumn.load_uid().
+        """
+        composed_tiffs: list[dict] = []
+        archive_zips: list[dict] = []
+
+        if grouping is not None:
+            for g in grouping.groups:
+                tiff_path = getattr(g, "composed_tiff_path", None)
+                if tiff_path:
+                    composed_tiffs.append({
+                        "path": tiff_path,
+                        "name": os.path.basename(tiff_path),
+                    })
+                zip_path = getattr(g, "archive_zip", None)
+                if zip_path:
+                    zip_size = 0
+                    try:
+                        zip_size = os.path.getsize(zip_path)
+                    except OSError:
+                        pass
+                    archive_zips.append({
+                        "path": zip_path,
+                        "name": os.path.basename(zip_path),
+                        "size": zip_size,
+                    })
+
+        self._results.load_uid(uid, composed_tiffs, archive_zips)
+
     # ── Helpers ───────────────────────────────────────────────────────────────
 
     def _get_active_uid(self) -> Optional[str]:
@@ -879,6 +924,7 @@ class WorkbenchView(BaseView):
         self._sidebar.refresh()  # clears list
         self._monitor.clear()
         self._grouping.clear()
+        self._results.clear()
         self._metadata.clear()
         self._refresh_header()
         self._no_project_banner.show()

@@ -1,13 +1,14 @@
 """test_workbench_view.py — Smoke tests for WorkbenchView and its widgets.
 
 These tests run headless (QT_QPA_PLATFORM=offscreen) and verify:
-  - All six files can be imported without error.
+  - All seven files can be imported without error.
   - Each widget can be constructed without crashing.
   - WorkbenchView.on_activate() does not crash when no project is set.
   - WorkbenchView.on_activate() does not crash when a valid project is set.
   - NamingPanel live-preview produces the correct UID / result-ID.
   - SpecimenSidebar.refresh() does not crash on an empty DB.
   - GroupingPanel.clear() is idempotent.
+  - ResultsColumn.clear() is idempotent and load_uid works.
   - MetadataPanel.clear() is idempotent.
   - MonitorPanel.clear() is idempotent.
 """
@@ -121,6 +122,10 @@ class TestImports:
         from app.widgets.metadata_panel import MetadataPanel
         assert MetadataPanel is not None
 
+    def test_import_results_column(self):
+        from app.widgets.results_column import ResultsColumn
+        assert ResultsColumn is not None
+
     def test_import_workbench_view(self):
         from app.views.workbench_view import WorkbenchView
         assert WorkbenchView is not None
@@ -157,6 +162,11 @@ class TestConstruction:
         from app.widgets.metadata_panel import MetadataPanel
         ctx = _make_ctx()
         w = MetadataPanel(ctx)
+        assert w is not None
+
+    def test_results_column_constructs(self):
+        from app.widgets.results_column import ResultsColumn
+        w = ResultsColumn()
         assert w is not None
 
     def test_workbench_view_constructs(self):
@@ -401,3 +411,34 @@ class TestMonitorPanel:
             tiff_files=[entries[1]],
         )
         w.load_scan(result)
+
+
+# ── ResultsColumn ─────────────────────────────────────────────────────────────
+
+class TestResultsColumn:
+    def test_clear_is_idempotent(self):
+        from app.widgets.results_column import ResultsColumn
+        w = ResultsColumn()
+        w.clear()
+        w.clear()
+
+    def test_load_uid_empty(self):
+        from app.widgets.results_column import ResultsColumn
+        w = ResultsColumn()
+        w.load_uid("FJ-XM-B2-DLC001-T95E-20260601", [], [])
+
+    def test_load_uid_with_tiffs_and_zips(self):
+        from app.widgets.results_column import ResultsColumn
+        w = ResultsColumn()
+        tiffs = [{"path": "/fake/result.tif", "name": "result.tif"}]
+        zips = [{"path": "/fake/result.zip", "name": "result.zip", "size": 12345}]
+        w.load_uid("FJ-XM-B2-DLC001-T95E-20260601", tiffs, zips)
+
+    def test_workbench_view_has_results_column(self):
+        """WorkbenchView must expose a _results attribute (ResultsColumn)."""
+        from app.views.workbench_view import WorkbenchView
+        from app.widgets.results_column import ResultsColumn
+        ctx = _make_ctx()
+        w = WorkbenchView(ctx)
+        assert hasattr(w, "_results")
+        assert isinstance(w._results, ResultsColumn)
