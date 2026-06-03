@@ -42,10 +42,10 @@
 | `activateSpecimen(uid, active)` | ✓ | `WorkbenchView._on_sidebar_activate` + `activation_service.activate`；全局互斥 |
 | `activeSpecimenUid` / `activeSpecimenObject` | ✓ | `activation_service.get_active_uid(db)` |
 | `activateSpecimenByUid` | ✓ | `WorkbenchView._on_sidebar_activate` |
-| `openSpecimenContextMenu` / `renderSpecimenContextMenu` | ◐ | `SpecimenSidebar` 有激活/去激活按钮，无完整右键菜单（复制 UID/查重/重命名不在 Qt 版） |
-| `copySpecimenUid` | ✗ | 侧边栏无复制 UID 按钮（web 有） |
+| `openSpecimenContextMenu` / `renderSpecimenContextMenu` | ✓ | `SpecimenSidebar._on_context_menu`：右键菜单含复制编号/打印标签/激活/去激活 |
+| `copySpecimenUid` | ✓ | `SpecimenSidebar._on_context_menu` → `QApplication.clipboard().setText(uid)` + `copy_current_uid()` |
 | `findProjectsForSpecimenIndex` | N/A | Qt 单项目视图，不需要跨项目查找 |
-| `findDuplicateSpecimen` / `formatDuplicateSpecimenHint` | ✗ | 重复标本检测；web 新建时查重并提示，Qt 命名面板无此逻辑 |
+| `findDuplicateSpecimen` / `formatDuplicateSpecimenHint` | ✓ | `NamingPanel._check_duplicate`：实时 DB 查重，撞号显示 ⚠ 警告标签；`_check_compliance` 另做格式校验 |
 | `renameSpecimenCode` | ✗ | web 允许修改物种号（sp.id），Qt 无此功能 |
 | `migrateSpecimenUidReferences` | ✗ | UID 重命名时迁移所有引用（grouping/tasks），Qt 无 UID 重命名 |
 | `applyStorageCorrection` | ✗ | 修正保存方式后重新计算 UID，Qt 无此路径 |
@@ -63,8 +63,8 @@
 | `groupingSave` | ✓ | `WorkbenchView._flush_grouping_save` + `grouping_service.save_grouping` |
 | `groupingAddSelectedToGroup` | ✓ | `WorkbenchView._on_add_selection_to_group` + `GroupingPanel.add_jpgs_to_group`（含互斥移除） |
 | `groupingRemoveFile` | ✓ | `GroupingPanel.remove_jpg_from_group` |
-| `groupingDeleteGroup` | ✗ | web 可以删整组；Qt GroupingPanel 无删组按钮 |
-| `groupingClearGroup` | ✗ | 清空组内所有 JPG；Qt 无此操作 |
+| `groupingDeleteGroup` | ✓ | `GroupingPanel.delete_group` + `_DraftGroupRow` 删组按钮（已合成组阻止删除） |
+| `groupingClearGroup` | ✓ | `GroupingPanel.clear_group` + `_DraftGroupRow` 清空按钮 |
 | `groupingMoveFileBetweenGroups` | ◐ | Qt 只能右键移除再手动加入，无直接拖拽组间移动 |
 | `groupingAddColumn` (新组) | ✓ | `GroupingPanel._add_group` |
 | `groupingDraftGroupOf` | N/A | 内嵌于 save_grouping 路径追踪 |
@@ -73,17 +73,17 @@
 | `groupingSelectedIndexes` / `groupingToggleSelectAll` | ✗ | web 分组区有多选组的复选框；Qt 无批量组操作的多选 UI |
 | `composedJpgSet` / `selectedManualArchiveGroup` | ✗ | 手动归档组选择；Qt 无此流程 |
 | `groupingComposeSelected` (批量) | ✓ | `GroupingPanel._on_compose_all` + `WorkbenchView._on_compose_requested` 循环 |
-| `composeMainAction` + `composeImplicitActiveBatch` | ◐ | Qt 的"⚡合成"按钮调 `_on_compose_all`；缺 web 版的"隐式批次"（无分组时自动用监控归属 JPG） |
+| `composeMainAction` + `composeImplicitActiveBatch` | ✓ | Qt `_on_compose_requested` 含隐式批次回退（`_get_attributed_jpg_paths`）：组内 JPG < 2 时询问用监控归属 JPG |
 | `composeProgressLoop` | ◐ | Qt 用 `QProgressDialog` 显示合成进度（阻塞式）；web 版是非阻塞循环含取消。功能可接受，体验略差 |
-| `renderComposePreviewModal` / `composePreviewItem` | ✗ | web 合成前有预览弹窗（显示每组 JPG 缩略图）；Qt 无此预览步骤，直接执行 |
-| `composePreviewSave` / `composePreviewCancel` / `composePreviewRecompose` | ✗ | 属于上面缺失的预览弹窗 |
+| `renderComposePreviewModal` / `composePreviewItem` | ✓ | `WorkbenchView._show_compose_preview`：合成前显示可勾选 JPG 列表，支持去除不需要的帧 |
+| `composePreviewSave` / `composePreviewCancel` / `composePreviewRecompose` | ◐ | Qt 版含「取消」和「开始合成」；无 web 版的"重合成预览"（调 Helicon 重跑后再显示预览）；Save 等于直接合成 |
 | `renderOccupiedWarnModal` | ✗ | 标本已被其他人占用警告；Qt 无协作锁状态 |
 | `groupingStackRun` | ✓ | 由 `_on_compose_requested` 调 `helicon_service.stack_single_subprocess` 实现 |
 | `groupingOrganizeOnly` | ✓ | `GroupingPanel._on_organise_all` + `WorkbenchView._on_organise_requested` |
 | `groupingStackAndOrganize` | ✓ | `GroupingPanel._on_compose_and_organise_all` |
 | `groupingUndoCompose` | ✓ | `WorkbenchView._on_undo_compose` → `_retire_tiff`（移到 `_retired-tiff/`，TIFF 永不删） |
-| `groupingImportTiff` | ✗ | web 允许从磁盘导入现有 TIFF 关联到分组；Qt 无此功能 |
-| `renderTiffImportModal` | ✗ | 属于上面缺失的 TIFF 导入弹窗 |
+| `groupingImportTiff` | ✓ | `GroupingPanel._on_import_tiff_btn` → `_TiffImportDialog`：列 results/incoming-jpg TIFF + 粘贴路径 + 浏览；更新 composedTiffPath + status="composed" |
+| `renderTiffImportModal` | ✓ | `_TiffImportDialog`：等价实现，含候选文件列表 + 路径输入 + 浏览按钮 |
 | `groupingArchiveSingle` | ✓ | `WorkbenchView._on_organise_requested` 处理单组 |
 | `groupingAutoWatchTrigger` | ✗ | web 监听新 JPG 自动触发分组建议；Qt 无自动触发 |
 | `manualRegisterArchive` | ✗ | 手动注册已有归档（ZIP）到分组记录；Qt 无此功能 |
@@ -102,7 +102,7 @@
 | `renderRetroactiveModal` | ✓ | `app/widgets/retroactive_modal.py`（含 delete-jpg 复选框、group checkboxes） |
 | `organizeBatchPreview` / `organizeBatchRun` / `organizeBatchRunConfirmed` | ◐ | Qt `RetroactiveModal` 覆盖了批量整理；但缺 web 版的批次目录选择（选项 dir） |
 | `organizeSingleRun` | ✓ | `WorkbenchView._on_organise_requested`（单组整理） |
-| `postOrganizeWithCollision` / `showCollisionModal` | ✗ | 整理时同名 TIFF 冲突弹窗；Qt 无此碰撞处理，会直接覆盖 |
+| `postOrganizeWithCollision` / `showCollisionModal` | ✓ | `WorkbenchView._on_organise_requested`：ZIP 已存在时弹确认框（是否覆盖重新归档），拒绝则中止 |
 | `renderBatchResult` | ◐ | Qt 显示 QMessageBox（ok_count/fail_count），无 web 版的详细逐项结果列表 |
 
 ---
@@ -150,7 +150,7 @@
 | `specimenCodeParts` / `specimenCodeGapMessage` | ✓ | `naming_panel._update_sequence_hint`（建议下一个编号 + gap 提示） |
 | `refreshExpectedNameFromBackend` | ◐ | `NamingPanel._update_sequence_hint` 从 DB 查询；但无 web 版实时 HTTP 请求后端推算 |
 | `commitDraftAsSpecimen` / `confirmAndSaveSpecimen` | ✓ | `WorkbenchView._on_naming_save`（upsert specimens 表） |
-| `designComplianceCheck` | ✗ | web 7段校验（未见 Qt 中有对应；命名面板只有实时预览不做强校验） |
+| `designComplianceCheck` | ✓ | `NamingPanel._check_compliance`：格式提示（日期 8 位/省份字母/保存方式前缀）；提示而不阻断 |
 
 ---
 
@@ -160,7 +160,7 @@
 |----------|---------|---------------|
 | `renderMetaCard` | ✓ | `MetadataPanel`（collector/date/photographer/identifier/geo/taxon/notes/coords） |
 | `metadataCompleteness` | ✓ | `MetadataPanel._compute_score` + `MetaScoreRing`（5字段 20分制） |
-| `metaReverseGeocode` | ✗ | web 地理编码反查（Nominatim）；Qt 无此功能 |
+| `metaReverseGeocode` | ✓ | `MetadataPanel._on_reverse_geocode` + `_NominatimWorker` QThread：后台调 Nominatim，填入 geo_area；不覆盖用户已填内容（询问确认） |
 | `renderTaxonNotesCard` | ◐ | `MetadataPanel` 有分类字段（taxon_group/family/genus/scientific_name）；但无 web 版的 WoRMS 验证集成弹出 |
 | `flushRightPanelEdits` / `scheduleRightPanelPersist` | ✓ | `WorkbenchView._on_save_metadata`（save 按钮触发 DB UPDATE） |
 
@@ -201,9 +201,9 @@
 
 | 状态 | 数量 |
 |------|------|
-| ✓ 已实现 | 42 |
-| ◐ 部分 | 17 |
-| ✗ 缺 | 34 |
+| ✓ 已实现 | 55 |
+| ◐ 部分 | 15 |
+| ✗ 缺 | 23 |
 | N/A | 12 |
 
 ---
@@ -239,21 +239,21 @@
 
 ## ◐/✗ 优先补缺建议（按用户价值排序）
 
-### P1 — 高影响（用户在正常流程中会碰到）
+### P1 — 高影响（已全部落地）
 
-1. **✗ 删组 / 清空组** (`groupingDeleteGroup` / `groupingClearGroup`)：用户建错组无法删除，只能手动逐一移除 JPG。
-2. **✗ 碰撞处理** (`postOrganizeWithCollision`)：同名 TIFF 已存在时无提示，直接覆盖。需加检查。
-3. **◐ composeImplicitActiveBatch**：点"⚡合成"时若无分组，web 会用时间窗口归属 JPG 自动生成隐式分组；Qt 版只报"该组 JPG 不足 2 张"。
+1. **✓ 删组 / 清空组** (`groupingDeleteGroup` / `groupingClearGroup`)：`_DraftGroupRow` 内嵌删组 / 清空按钮，已合成组阻止删除。
+2. **✓ 碰撞处理** (`postOrganizeWithCollision`)：`_on_organise_requested` 检查 ZIP 已存在时弹确认，拒绝可中止。
+3. **✓ composeImplicitActiveBatch**：`_on_compose_requested` 含 `_get_attributed_jpg_paths` 隐式批次回退。
 
-### P2 — 中影响
+### P2 — 中影响（已全部落地）
 
-4. **✗ groupingImportTiff**：手动将已有 TIFF 关联到分组（存量整理前置步骤）。
-5. **✗ organizeSelectedJpgsWithTiff**：选中 JPG+TIFF 直接整理，无需先建组。
-6. **◐ 合成预览弹窗** (`renderComposePreviewModal`)：合成前显示将处理的 JPG 列表，让用户确认。
-7. **✗ 复制 UID** (sidebar 右键)：常用操作，用户需要粘贴编号到其他地方。
+4. **✓ groupingImportTiff** + **renderTiffImportModal**：`_TiffImportDialog` 对话框，含候选列表 + 路径输入 + 浏览。
+5. **✗ organizeSelectedJpgsWithTiff**：选中 JPG+TIFF 直接整理（无需先建组）；Qt 无此独立操作。
+6. **✓ 合成预览弹窗** (`renderComposePreviewModal`)：`_show_compose_preview` 可勾选 JPG 列表。
+7. **✓ 复制 UID** (sidebar 右键)：`SpecimenSidebar._on_context_menu` 含「复制编号」。
 
-### P3 — 低影响（高级/较少使用）
+### P3 — 低影响（仍缺）
 
 8. **✗ autoProcessComposite**：新 TIFF 出现时自动弹出命名弹窗。
-9. **✗ mergeResultLightbox**：成果图预览（只有"在文件管理器打开"的快捷键代替）。
+9. **✗ openResultLightbox**：成果图全屏预览（只有"在文件管理器打开"替代）。
 10. **✗ renderProjectSubdirControl**：子目录名编辑（大多数用户不需要改）。
