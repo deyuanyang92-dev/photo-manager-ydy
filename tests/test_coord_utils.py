@@ -593,3 +593,20 @@ class TestNominatimToZh:
         }
         result = nominatim_to_zh(data)
         assert "黄浦区" in result
+
+    def test_nominatim_to_zh_full(self):
+        """Full Chinese display_name string → province·city·district with · separator."""
+        result = nominatim_to_zh("南湖区, 嘉兴市, 浙江省, 中国")
+        assert result == "浙江省·嘉兴市·南湖区"
+
+    def test_nominatim_to_zh_partial(self):
+        """display_name with only province available → returns province."""
+        result = nominatim_to_zh("浙江省, 中国")
+        assert result == "浙江省"
+
+    def test_nominatim_to_zh_non_chinese(self):
+        """English display_name without Chinese → truncated to 60 chars."""
+        long_english = "A" * 80
+        result = nominatim_to_zh(long_english)
+        assert len(result) <= 60
+        assert result == long_english[:60]

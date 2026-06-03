@@ -517,25 +517,35 @@ def bd09_to_wgs84(lon: float, lat: float) -> dict:
 
 # ── Nominatim 响应格式化 ───────────────────────────────────────────────────────
 
-def nominatim_to_zh(data: dict) -> str:
-    """Format a Nominatim reverse-geocode response into a compact Chinese string.
+def nominatim_to_zh(data) -> str:
+    """Format a Nominatim response into a compact Chinese string.
 
-    Mirrors app.js nominatimToZh() (line 13645–13654):
-      省 + 市 + 县/区 + 乡镇/村 + 具体地点，无分隔符。
-    Falls back to data["display_name"] if no address components found.
+    Accepts two forms:
 
-    Parameters
-    ----------
-    data : dict
-        Parsed JSON response from Nominatim /reverse or /search endpoint.
+    dict — full Nominatim JSON response (reverse-geocode or search).
+      Mirrors app.js nominatimToZh() (line 13645–13654):
+        省 + 市 + 县/区 + 乡镇/村 + 具体地点，无分隔符。
+      Falls back to data["display_name"] if no address components found.
+
+    str — comma-separated display_name (e.g. "南湖区, 嘉兴市, 浙江省, 中国").
+      Extracts province (省|自治区), city (市), district (区|县|镇) from the parts
+      and returns them joined by ·, ordered province·city·district.
+      Falls back to display_name[:60] when no Chinese administrative units detected.
 
     Returns
     -------
     str
         Compact Chinese place description, or "" if data is empty/malformed.
     """
-    if not data or not isinstance(data, dict):
+    if not data:
         return ""
+
+    if isinstance(data, str):
+        return _nominatim_display_name_to_zh(data)
+
+    if not isinstance(data, dict):
+        return ""
+
     address = data.get("address") or {}
     parts = [
         address.get("state"),
@@ -554,3 +564,23 @@ def nominatim_to_zh(data: dict) -> str:
     ]
     result = "".join(p for p in parts if p)
     return result or data.get("display_name") or ""
+
+
+def _nominatim_display_name_to_zh(display_name: str) -> str:
+    """Parse a Nominatim display_name string into province·city·district format.
+
+    display_name is comma-separated, typically ordered from specific to general
+    (district, city, province, country).  This function reverses that order
+    and picks the administrative-level tokens.
+    """
+    parts = [p.strip() for p in display_name.split(",") if p.strip()]
+    province = next((p for p in parts if re.search(r"省|自治区", p)), None)
+    city = next((p for p in parts if re.search(r"市$", p) and p != province), None)
+    district = next(
+        (p for p in parts if re.search(r"区$|县$|镇$", p) and p not in (province, city)),
+        None,
+    )
+    tokens = [t for t in (province, city, district) if t]
+    if tokens:
+        return "·".join(tokens)
+    return display_name[:60]
