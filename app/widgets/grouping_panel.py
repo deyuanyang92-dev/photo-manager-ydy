@@ -116,6 +116,8 @@ class _DraftGroupRow(QFrame):
     jpg_removed = pyqtSignal(int, str)        # group_index, jpg_path (kept for compat)
     add_selected_to_group = pyqtSignal(int)   # group_index
     jpg_remove_requested = pyqtSignal(int, str)  # group_index, jpg_path
+    clear_group_requested = pyqtSignal(int)   # group_index  #cursor
+    delete_group_requested = pyqtSignal(int)  # group_index  #cursor
 
     def __init__(self, group: "Group", parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -161,6 +163,24 @@ class _DraftGroupRow(QFrame):
             lambda: self.add_selected_to_group.emit(self._group.group_index)
         )
         header.addWidget(add_sel_btn)
+
+        # ── 清空 / 删组 按钮  #cursor ──────────────────────────────────────
+        clear_btn = QPushButton()
+        clear_btn.setObjectName("Ghost")
+        clear_btn.setFixedSize(26, 26)
+        icons.set_button_icon(clear_btn, "mdi6.eraser", color=icons.TONE_MUTED, size=13)
+        clear_btn.setToolTip("清空此组所有 JPG（不删除文件）")
+        clear_btn.clicked.connect(lambda: self.clear_group_requested.emit(self._group.group_index))
+        header.addWidget(clear_btn)
+
+        del_btn = QPushButton()
+        del_btn.setObjectName("Ghost")
+        del_btn.setFixedSize(26, 26)
+        icons.set_button_icon(del_btn, "mdi6.delete-outline", color=icons.TONE_DANGER, size=13)
+        del_btn.setToolTip("删除此分组（仅删记录，不删文件）")
+        del_btn.clicked.connect(lambda: self.delete_group_requested.emit(self._group.group_index))
+        header.addWidget(del_btn)
+
         root.addLayout(header)
 
         # JPG list (drag-reorderable)
@@ -410,6 +430,38 @@ class GroupingPanel(QWidget):
         self._rebuild()
         self.grouping_changed.emit()
 
+    def clear_group(self, group_index: int) -> None:
+        """Clear all JPGs from *group_index* (does not delete files).
+
+        Mirrors web groupingClearGroup() app.js:5291–5297.
+        """
+        if not self._grouping:
+            return
+        for g in self._grouping.groups:
+            if g.group_index == group_index:
+                g.jpg_paths = []
+                break
+        self._rebuild()
+        self.grouping_changed.emit()
+
+    def delete_group(self, group_index: int) -> None:
+        """Delete the group entirely (in-memory only, no file deletion).
+
+        Mirrors web groupingDeleteGroup() app.js:5283–5289.
+        Composed-TIFF groups cannot be deleted without undo-compose first.
+        """
+        if not self._grouping:
+            return
+        # Guard: refuse deletion of composed groups (caller should undo first)
+        target = next((g for g in self._grouping.groups if g.group_index == group_index), None)
+        if target is None:
+            return
+        if target.composed_tiff_path:
+            return  # composed groups: caller must undo-compose first
+        self._grouping.groups = [g for g in self._grouping.groups if g.group_index != group_index]
+        self._rebuild()
+        self.grouping_changed.emit()
+
     # ── Internal ──────────────────────────────────────────────────────────────
 
     def _build_more_menu(self):
@@ -444,6 +496,8 @@ class GroupingPanel(QWidget):
                 row.label_changed.connect(self._on_label_changed)
                 row.add_selected_to_group.connect(self._on_add_selected_to_group)
                 row.jpg_remove_requested.connect(self._on_jpg_remove)
+                row.clear_group_requested.connect(self._on_clear_group)   # #cursor
+                row.delete_group_requested.connect(self._on_delete_group) # #cursor
                 self._content_lay.addWidget(row)
 
         if composed:
@@ -546,3 +600,11 @@ class GroupingPanel(QWidget):
     def _on_jpg_remove(self, group_index: int, jpg_path: str) -> None:
         """Handle right-click remove from _DraftGroupRow."""
         self.remove_jpg_from_group(group_index, jpg_path)
+
+    def _on_clear_group(self, group_index: int) -> None:  # #cursor
+        """Handle clear-group button from _DraftGroupRow."""
+        self.clear_group(group_index)
+
+    def _on_delete_group(self, group_index: int) -> None:  # #cursor
+        """Handle delete-group button from _DraftGroupRow."""
+        self.delete_group(group_index)

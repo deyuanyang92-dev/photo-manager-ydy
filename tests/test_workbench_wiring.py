@@ -127,3 +127,89 @@ class TestFreeCompose:
         name = _free_compose_output_name(incoming_dir, "my output")
         # Falls back to 自由合成-1.tif since user_name conflicts
         assert name.startswith("自由合成-")
+
+
+# ── Collision guard on organise  #cursor ─────────────────────────────────────
+
+class TestOrganiseCollisionGuard:
+    """archive_service does not overwrite silently — workbench checks for ZIP collision."""
+
+    def test_archive_group_creates_zip(self, tmp_path):
+        """archive_group must create a ZIP next to the TIFF (cjxl fallback path)."""
+        from unittest.mock import patch
+        from app.services.archive_service import archive_group
+        jpg1 = tmp_path / "IMG_001.jpg"
+        jpg2 = tmp_path / "IMG_002.jpg"
+        jpg1.write_bytes(b"\xff\xd8\xff" * 100)
+        jpg2.write_bytes(b"\xff\xd8\xff" * 100)
+        tiff = tmp_path / "result.tif"
+        tiff.write_bytes(b"IIX" * 1000)
+        # Patch cjxl as unavailable so archive falls back to storing original JPG
+        with patch("app.services.archive_service._cjxl_available", False):
+            result = archive_group(
+                jpg_paths=[str(jpg1), str(jpg2)],
+                tiff_path=str(tiff),
+                project_dir=str(tmp_path),
+                delete_jpg=False,
+            )
+        assert result.ok
+        assert os.path.isfile(result.zip_path)
+        zip_name = Path(result.zip_path).name
+        assert zip_name == "result.zip"
+
+    def test_organize_preview_second_seq_avoids_collision(self, tmp_path):
+        """organize_preview must increment seq when seq-1 TIFF already present."""
+        from app.services.organize_service import organize_preview
+        db = _make_db(str(tmp_path / "project.db"))
+        results_dir = str(tmp_path / "results")
+        os.makedirs(results_dir)
+        uid = "FJ-XM-B2-TST001-T95E-20260601"
+        # Create existing seq-1 TIFF
+        (Path(results_dir) / "FJ-XM-B2-TST001-1-T95E-20260601.tif").write_bytes(b"T")
+        prev = organize_preview(db, uid, results_dir=results_dir)
+        assert prev.next_seq == 2
+        db.close()
+
+
+# ── GroupingPanel delete / clear from wiring perspective  #cursor ────────────
+
+class TestGroupingDeleteClearWiring:
+    """Service-layer persistence after delete / clear group."""
+
+    def test_clear_group_persists_via_save_grouping(self, tmp_path):
+        from app.services.grouping_service import (
+            Group, SpecimenGrouping, save_grouping, load_grouping,
+        )
+        db = _make_db(str(tmp_path / "project.db"))
+        uid = "FJ-XM-B2-TST001-T95E-20260601"
+        groups = [
+            Group(group_index=0, jpg_paths=["/a.jpg", "/b.jpg"]),
+        ]
+        save_grouping(db, uid, groups, clean_phantoms=False)
+        # Simulate clear_group
+        loaded = load_grouping(db, uid)
+        loaded.groups[0].jpg_paths = []
+        save_grouping(db, uid, loaded.groups, clean_phantoms=False)
+        reloaded = load_grouping(db, uid)
+        assert reloaded.groups[0].jpg_paths == []
+        db.close()
+
+    def test_delete_group_persists_via_save_grouping(self, tmp_path):
+        from app.services.grouping_service import (
+            Group, save_grouping, load_grouping,
+        )
+        db = _make_db(str(tmp_path / "project.db"))
+        uid = "FJ-XM-B2-TST001-T95E-20260601"
+        groups = [
+            Group(group_index=0, jpg_paths=["/a.jpg"]),
+            Group(group_index=1, jpg_paths=["/c.jpg"]),
+        ]
+        save_grouping(db, uid, groups, clean_phantoms=False)
+        # Simulate delete group 0
+        loaded = load_grouping(db, uid)
+        loaded.groups = [g for g in loaded.groups if g.group_index != 0]
+        save_grouping(db, uid, loaded.groups, clean_phantoms=False)
+        reloaded = load_grouping(db, uid)
+        assert len(reloaded.groups) == 1
+        assert reloaded.groups[0].group_index == 1
+        db.close()

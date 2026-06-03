@@ -295,6 +295,32 @@ class TestNamingPanel:
         w._update_preview()
         assert w._rna_warning.isHidden()
 
+    def test_species_sequence_hint_and_apply_button(self, tmp_path):
+        from app.widgets.naming_panel import NamingPanel
+        project_dir = str(tmp_path)
+        db = _make_db(str(tmp_path / "project.db"))
+        for n in (1, 2, 3):
+            db.execute(
+                """
+                INSERT INTO specimens (uid, id, owner_project_dir)
+                VALUES (?, ?, ?)
+                """,
+                (
+                    f"FJ-XM-B2-DLC{n:03d}-T95E-20260601",
+                    f"DLC{n:03d}",
+                    project_dir,
+                ),
+            )
+        db.commit()
+        ctx = _make_ctx(project_dir=project_dir, db=db)
+        w = NamingPanel(ctx)
+        w._species_id.setText("dlc")
+        assert "建议 DLC004" in w._seq_hint_label.text()
+        assert w.current_sequence_suggestion() == "DLC004"
+        w._seq_apply_btn.click()
+        assert w._species_id.text() == "DLC004"
+        db.close()
+
 
 # ── SpecimenSidebar ───────────────────────────────────────────────────────────
 
@@ -911,3 +937,80 @@ class TestGroupingPanelCaptureActions:
         assert "已拍完" in w._phase_pills
         assert "整理中" in w._phase_pills
         assert "完成" in w._phase_pills
+
+
+# ── GroupingPanel delete / clear group  #cursor ─────────────────────────────
+
+class TestGroupingPanelDeleteClearGroup:
+    """Verify groupingDeleteGroup / groupingClearGroup equivalents."""
+
+    def _make_panel_with_two_groups(self):
+        from app.widgets.grouping_panel import GroupingPanel
+        from app.services.grouping_service import Group, SpecimenGrouping
+        ctx = _make_ctx()
+        w = GroupingPanel(ctx)
+        sg = SpecimenGrouping(
+            uid="UID1",
+            groups=[
+                Group(group_index=0, jpg_paths=["/a.jpg", "/b.jpg"]),
+                Group(group_index=1, jpg_paths=["/c.jpg"]),
+            ],
+        )
+        w.load_grouping("UID1", sg)
+        return w
+
+    def test_clear_group_removes_jpgs(self):
+        w = self._make_panel_with_two_groups()
+        w.clear_group(0)
+        assert w._grouping.groups[0].jpg_paths == []
+        # Group 1 untouched
+        assert "/c.jpg" in w._grouping.groups[1].jpg_paths
+
+    def test_clear_group_emits_changed(self):
+        w = self._make_panel_with_two_groups()
+        received = []
+        w.grouping_changed.connect(lambda: received.append(1))
+        w.clear_group(0)
+        assert received, "grouping_changed must be emitted after clear"
+
+    def test_delete_group_removes_group(self):
+        w = self._make_panel_with_two_groups()
+        assert len(w._grouping.groups) == 2
+        w.delete_group(0)
+        assert len(w._grouping.groups) == 1
+        # Only group 1 remains
+        assert w._grouping.groups[0].group_index == 1
+
+    def test_delete_group_emits_changed(self):
+        w = self._make_panel_with_two_groups()
+        received = []
+        w.grouping_changed.connect(lambda: received.append(1))
+        w.delete_group(0)
+        assert received, "grouping_changed must be emitted after delete"
+
+    def test_delete_composed_group_blocked(self):
+        """delete_group must be a no-op for composed groups."""
+        from app.widgets.grouping_panel import GroupingPanel
+        from app.services.grouping_service import Group, SpecimenGrouping
+        ctx = _make_ctx()
+        w = GroupingPanel(ctx)
+        sg = SpecimenGrouping(
+            uid="UID1",
+            groups=[
+                Group(group_index=0, jpg_paths=["/a.jpg"],
+                      composed_tiff_path="/result.tif"),
+            ],
+        )
+        w.load_grouping("UID1", sg)
+        w.delete_group(0)
+        # Must NOT be deleted (still 1 group)
+        assert len(w._grouping.groups) == 1
+
+    def test_draft_group_row_has_clear_and_delete_buttons(self):
+        """_DraftGroupRow must have clear_group_requested and delete_group_requested signals."""
+        from app.widgets.grouping_panel import _DraftGroupRow
+        from app.services.grouping_service import Group
+        g = Group(group_index=0, jpg_paths=[])
+        row = _DraftGroupRow(g)
+        assert hasattr(row, "clear_group_requested")
+        assert hasattr(row, "delete_group_requested")
