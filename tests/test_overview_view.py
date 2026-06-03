@@ -99,6 +99,14 @@ class TestImports:
         from app.views.overview_view import _NewProjectDialog
         assert _NewProjectDialog is not None
 
+    def test_import_result_lightbox_dialog(self):
+        from app.views.overview_view import _ResultLightboxDialog
+        assert _ResultLightboxDialog is not None
+
+    def test_import_subdir_control_widget(self):
+        from app.views.overview_view import _SubdirControlWidget
+        assert _SubdirControlWidget is not None
+
 
 # ── Construction & identity ───────────────────────────────────────────────────
 
@@ -416,3 +424,200 @@ class TestEnterWorkspaceSignal:
         w._on_enter_workspace(proj)
         assert len(emitted) == 1
         assert emitted[0] == str(tmp_path / "proj_dir")
+
+
+# ── Row stats chip ────────────────────────────────────────────────────────────
+
+class TestRowStatsChip:
+    """Row stats chip: inline stats under project name for real projects."""
+
+    def _make_view_with_real_project(self, tmp_path):
+        """Create a view with one real project that has a directory on disk."""
+        proj_dir = tmp_path / "real_proj"
+        proj_dir.mkdir()
+        (proj_dir / "incoming-jpg").mkdir()
+        (proj_dir / "results").mkdir()
+        proj = {
+            "id": "chip001",
+            "name": "真实项目测试",
+            "directory": str(proj_dir),
+            "year": "2026",
+        }
+        json_path = tmp_path / "user_projects.json"
+        json_path.write_text(
+            json.dumps({"version": 1, "projects": [proj]}), encoding="utf-8"
+        )
+        from app.views.overview_view import OverviewView
+        ctx = _make_ctx()
+        with patch("app.views.overview_view._resolve_projects_json",
+                   return_value=json_path):
+            w = OverviewView(ctx)
+            with patch("app.views.overview_view._resolve_projects_json",
+                       return_value=json_path):
+                w._load_projects()
+        return w
+
+    def test_chip_text_in_name_cell(self, tmp_path):
+        """Name cell text includes stats chip when project has directory."""
+        w = self._make_view_with_real_project(tmp_path)
+        assert w._table.rowCount() == 1
+        cell_text = w._table.item(0, 0).text()
+        # Stats chip: must include "标本" or "成片" keywords
+        assert "标本" in cell_text or "成片" in cell_text
+
+    def test_chip_contains_numeric_counts(self, tmp_path):
+        """Stats chip values are numeric counts (typically 0 for empty dir)."""
+        w = self._make_view_with_real_project(tmp_path)
+        cell_text = w._table.item(0, 0).text()
+        # chip line: "N 标本 · N 成片 · N 待处理"
+        assert "0 标本" in cell_text or "标本" in cell_text
+
+    def test_no_chip_for_demo_project(self, tmp_path):
+        """Demo projects (isDemo=True) do NOT get the stats chip."""
+        demo_proj = {
+            "id": "demo001",
+            "name": "演示项目",
+            "directory": str(tmp_path / "demo_dir"),
+            "year": "2026",
+            "isDemo": True,
+        }
+        json_path = tmp_path / "user_projects.json"
+        json_path.write_text(
+            json.dumps({"version": 1, "projects": [demo_proj]}), encoding="utf-8"
+        )
+        from app.views.overview_view import OverviewView
+        ctx = _make_ctx()
+        with patch("app.views.overview_view._resolve_projects_json",
+                   return_value=json_path):
+            w = OverviewView(ctx)
+            with patch("app.views.overview_view._resolve_projects_json",
+                       return_value=json_path):
+                w._load_projects()
+        cell_text = w._table.item(0, 0).text()
+        # Demo project: no chip line
+        assert "待处理" not in cell_text
+
+
+# ── Detail dialog — results section + subdir controls ──────────────────────
+
+class TestDetailDialogResultsSection:
+    """_ProjectDetailDialog results section and subdir controls."""
+
+    def test_detail_dialog_with_directory_constructs(self, tmp_path):
+        """Detail dialog must not crash when project has a real directory."""
+        from app.views.overview_view import _ProjectDetailDialog
+        proj_dir = tmp_path / "proj_with_results"
+        proj_dir.mkdir()
+        (proj_dir / "results").mkdir()
+        (proj_dir / "incoming-jpg").mkdir()
+        proj = {"id": "dr001", "name": "有成果项目", "directory": str(proj_dir)}
+        dlg = _ProjectDetailDialog(proj)
+        assert dlg is not None
+
+    def test_detail_dialog_results_section_no_tifs(self, tmp_path):
+        """Detail dialog shows empty-state message when no TIFs in results."""
+        from app.views.overview_view import _ProjectDetailDialog
+        from PyQt6.QtWidgets import QLabel
+        proj_dir = tmp_path / "empty_results"
+        proj_dir.mkdir()
+        (proj_dir / "results").mkdir()
+        proj = {"id": "dr002", "name": "无成果项目", "directory": str(proj_dir)}
+        dlg = _ProjectDetailDialog(proj)
+        labels = dlg.findChildren(QLabel)
+        texts = " ".join(lbl.text() for lbl in labels)
+        assert "成果" in texts
+
+    def test_detail_dialog_results_section_with_tifs(self, tmp_path):
+        """Detail dialog shows UID list and total count when TIFs present."""
+        from app.views.overview_view import _ProjectDetailDialog
+        from PyQt6.QtWidgets import QLabel
+        proj_dir = tmp_path / "proj_tifs"
+        proj_dir.mkdir()
+        results = proj_dir / "results"
+        results.mkdir()
+        (results / "FJ-YGLZ-B2-DLC001-1-RD75E-20260506.tif").write_bytes(b"")
+        (results / "FJ-YGLZ-B2-DLC001-2-RD75E-20260506.tif").write_bytes(b"")
+        proj = {"id": "dr003", "name": "有TIF项目", "directory": str(proj_dir)}
+        dlg = _ProjectDetailDialog(proj)
+        labels = dlg.findChildren(QLabel)
+        texts = " ".join(lbl.text() for lbl in labels)
+        assert "2" in texts  # total count = 2
+
+    def test_subdir_controls_present_when_directory_given(self, tmp_path):
+        """Subdir control widgets should be present when directory is set."""
+        from app.views.overview_view import _ProjectDetailDialog, _SubdirControlWidget
+        proj_dir = tmp_path / "subdir_proj"
+        proj_dir.mkdir()
+        proj = {"id": "sd001", "name": "子目录测试", "directory": str(proj_dir)}
+        dlg = _ProjectDetailDialog(proj)
+        ctrls = dlg.findChildren(_SubdirControlWidget)
+        # Should have exactly 2: incoming + results
+        assert len(ctrls) == 2
+
+    def test_subdir_controls_absent_without_directory(self):
+        """Subdir controls should NOT appear when no directory."""
+        from app.views.overview_view import _ProjectDetailDialog, _SubdirControlWidget
+        proj = {"id": "sd002", "name": "无目录项目"}
+        dlg = _ProjectDetailDialog(proj)
+        ctrls = dlg.findChildren(_SubdirControlWidget)
+        assert len(ctrls) == 0
+
+    def test_lightbox_constructs(self, tmp_path):
+        """_ResultLightboxDialog constructs without error with empty item list."""
+        from app.views.overview_view import _ResultLightboxDialog
+        dlg = _ResultLightboxDialog(items=[], start_idx=0)
+        assert dlg is not None
+
+    def test_lightbox_constructs_with_items(self, tmp_path):
+        """_ResultLightboxDialog with items must not crash."""
+        from app.views.overview_view import _ResultLightboxDialog
+        items = [
+            {"path": str(tmp_path / "fake.tif"), "name": "fake.tif", "seq": 1},
+        ]
+        dlg = _ResultLightboxDialog(items=items, start_idx=0)
+        assert dlg is not None
+
+
+# ── defaultToRecentRealProject on_activate ────────────────────────────────────
+
+class TestDefaultToRecentRealProject:
+    """on_activate auto-selects the most recent real project when ctx has none."""
+
+    def test_auto_selects_recent_project(self, tmp_path):
+        """on_activate must set ctx.current_project_dir to the last real project."""
+        json_path = tmp_path / "user_projects.json"
+        proj_dir = tmp_path / "auto_proj"
+        proj_dir.mkdir()
+        projs = [{"id": "ap001", "name": "自动选择项目", "directory": str(proj_dir)}]
+        json_path.write_text(
+            json.dumps({"version": 1, "projects": projs}), encoding="utf-8"
+        )
+        from app.views.overview_view import OverviewView
+        ctx = _make_ctx(project_dir=None)
+        ctx.current_project_dir = None
+        with patch("app.views.overview_view._resolve_projects_json",
+                   return_value=json_path):
+            w = OverviewView(ctx)
+            w.on_activate()
+        # ctx.current_project_dir should be set to the project directory
+        assert ctx.current_project_dir == str(proj_dir)
+
+    def test_no_override_if_already_set(self, tmp_path):
+        """on_activate must NOT override ctx.current_project_dir if already set."""
+        json_path = tmp_path / "user_projects.json"
+        proj_dir = tmp_path / "another_proj"
+        proj_dir.mkdir()
+        projs = [{"id": "ap002", "name": "另一个项目", "directory": str(proj_dir)}]
+        json_path.write_text(
+            json.dumps({"version": 1, "projects": projs}), encoding="utf-8"
+        )
+        from app.views.overview_view import OverviewView
+        existing_dir = "/tmp/already_set"
+        ctx = _make_ctx(project_dir=existing_dir)
+        ctx.current_project_dir = existing_dir
+        with patch("app.views.overview_view._resolve_projects_json",
+                   return_value=json_path):
+            w = OverviewView(ctx)
+            w.on_activate()
+        # Must remain unchanged
+        assert ctx.current_project_dir == existing_dir

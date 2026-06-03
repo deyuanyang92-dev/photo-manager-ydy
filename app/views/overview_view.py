@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
@@ -42,10 +43,14 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSplitter,
+    QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -100,6 +105,226 @@ def _save_projects(projects: list[dict]) -> None:
     )
 
 
+# ── Lightbox dialog ───────────────────────────────────────────────────────────
+
+class _ResultLightboxDialog(QDialog):
+    """Fullscreen lightbox for viewing result TIF files.
+
+    Shows one image at a time; ← / → buttons navigate between items.
+    Images are loaded from disk via QPixmap (TIF support on platforms with
+    libtiff plugin; falls back to a grey placeholder when the image cannot
+    be decoded).
+
+    Oracle: app.js renderResultLightboxModal (lines 13819-13853).
+    """
+
+    def __init__(
+        self,
+        items: list[dict],
+        start_idx: int = 0,
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("成果预览")
+        self.setMinimumSize(860, 640)
+        self._items = items
+        self._idx = max(0, min(start_idx, len(items) - 1))
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        # ── Header: filename + counter + close ────────────────────────────────
+        hdr = QHBoxLayout()
+        hdr.setContentsMargins(14, 10, 14, 10)
+        hdr.setSpacing(12)
+        self._name_lbl = QLabel()
+        self._name_lbl.setStyleSheet("font-family: monospace; font-size: 13px;")
+        self._name_lbl.setMinimumWidth(0)
+        self._name_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        hdr.addWidget(self._name_lbl, stretch=1)
+        self._pos_lbl = QLabel()
+        self._pos_lbl.setStyleSheet("opacity: 0.6; font-size: 12px; color: #888;")
+        hdr.addWidget(self._pos_lbl)
+        close_btn = QPushButton("✕ 关闭")
+        close_btn.setObjectName("Outline")
+        close_btn.clicked.connect(self.reject)
+        hdr.addWidget(close_btn)
+
+        hdr_widget = QWidget()
+        hdr_widget.setLayout(hdr)
+        hdr_widget.setStyleSheet("border-bottom: 1px solid #ddd;")
+        layout.addWidget(hdr_widget)
+
+        # ── Image area ────────────────────────────────────────────────────────
+        self._img_lbl = QLabel()
+        self._img_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._img_lbl.setMinimumSize(640, 440)
+        self._img_lbl.setStyleSheet("background: #111; color: #888;")
+        self._img_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        layout.addWidget(self._img_lbl, stretch=1)
+
+        # ── Footer: prev / next ───────────────────────────────────────────────
+        ftr = QHBoxLayout()
+        ftr.setContentsMargins(14, 8, 14, 8)
+        ftr.setSpacing(14)
+        ftr.addStretch()
+        self._prev_btn = QPushButton("← 上一张")
+        self._prev_btn.setObjectName("Outline")
+        self._prev_btn.clicked.connect(self._prev)
+        ftr.addWidget(self._prev_btn)
+        self._next_btn = QPushButton("下一张 →")
+        self._next_btn.setObjectName("Outline")
+        self._next_btn.clicked.connect(self._next)
+        ftr.addWidget(self._next_btn)
+        ftr.addStretch()
+        ftr_widget = QWidget()
+        ftr_widget.setLayout(ftr)
+        ftr_widget.setStyleSheet("border-top: 1px solid #ddd;")
+        layout.addWidget(ftr_widget)
+
+        self._refresh()
+
+    def _refresh(self) -> None:
+        if not self._items:
+            self._name_lbl.setText("（无成果）")
+            self._pos_lbl.setText("")
+            self._img_lbl.setText("无成果")
+            self._prev_btn.setEnabled(False)
+            self._next_btn.setEnabled(False)
+            return
+        item = self._items[self._idx]
+        self._name_lbl.setText(item.get("name", ""))
+        self._pos_lbl.setText(f"{self._idx + 1} / {len(self._items)}")
+        self._prev_btn.setEnabled(self._idx > 0)
+        self._next_btn.setEnabled(self._idx < len(self._items) - 1)
+        # Load image
+        path = item.get("path", "")
+        px = QPixmap(path) if path else QPixmap()
+        if px.isNull():
+            self._img_lbl.setText(f"无法预览\n{item.get('name', path)}")
+        else:
+            self._img_lbl.setPixmap(
+                px.scaled(
+                    self._img_lbl.size(),
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        self._refresh()
+
+    def _prev(self) -> None:
+        if self._idx > 0:
+            self._idx -= 1
+            self._refresh()
+
+    def _next(self) -> None:
+        if self._idx < len(self._items) - 1:
+            self._idx += 1
+            self._refresh()
+
+
+# ── Subdir control widget ─────────────────────────────────────────────────────
+
+class _SubdirControlWidget(QWidget):
+    """Inline subdir selector for incoming-jpg/ or results/ paths.
+
+    Mirrors web ``renderProjectSubdirControl(project, which)``
+    (app.js:1809-1870):
+      - Shows current subdir name as a QLabel.
+      - Clicking 「修改…」 opens a small inline QLineEdit for custom input.
+      - Applies the change by calling ``ensure_project_dirs`` to create
+        the new directory.
+
+    Oracle: app.js:1809 (renderProjectSubdirControl).
+
+    Parameters
+    ----------
+    project_dir:
+        Root directory of the project.
+    which:
+        ``"incoming"`` → ``incoming-jpg/``; ``"results"`` → ``results/``.
+    parent:
+        Parent widget.
+    """
+
+    def __init__(
+        self,
+        project_dir: str,
+        which: str = "incoming",
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        from app.services.project_service import (
+            INCOMING_JPG_DIR,
+            RESULTS_DIR,
+            get_incoming_jpg_dir,
+            get_results_dir,
+        )
+
+        self._project_dir = project_dir
+        self._which = which
+        self._default = INCOMING_JPG_DIR if which == "incoming" else RESULTS_DIR
+
+        # Determine current subdir name
+        if which == "incoming":
+            current_path = get_incoming_jpg_dir(project_dir)
+        else:
+            current_path = get_results_dir(project_dir)
+        self._current = Path(current_path).name
+
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(8)
+
+        label = QLabel("子目录：")
+        label.setStyleSheet("font-size: 12px; color: #6a7a8a;")
+        lay.addWidget(label)
+
+        self._name_lbl = QLabel(f"{self._current}/")
+        self._name_lbl.setStyleSheet("font-family: monospace; font-size: 12px;")
+        lay.addWidget(self._name_lbl)
+
+        edit_btn = QPushButton("修改…")
+        edit_btn.setObjectName("Outline")
+        edit_btn.setFixedHeight(24)
+        edit_btn.setStyleSheet("font-size: 11px; padding: 0 8px;")
+        edit_btn.clicked.connect(self._on_edit)
+        lay.addWidget(edit_btn)
+
+        self._inp = QLabel("")  # placeholder; replaced with QLineEdit when editing
+        lay.addWidget(self._inp)
+        lay.addStretch()
+
+    def _on_edit(self) -> None:
+        from PyQt6.QtWidgets import QInputDialog
+        new_name, ok = QInputDialog.getText(
+            self,
+            "修改子目录",
+            f"{'接收目录' if self._which == 'incoming' else '成果目录'} 名称：",
+            text=self._current,
+        )
+        if not ok or not new_name.strip():
+            return
+        new_name = new_name.strip()
+        # Validate: no path separators or '..'
+        if any(c in new_name for c in ("/", "\\", "..")) or not new_name:
+            QMessageBox.warning(self, "子目录", "目录名不合法（不能含 / \\ ..）。")
+            return
+        self._current = new_name
+        self._name_lbl.setText(f"{new_name}/")
+        # Create the directory on disk
+        try:
+            from app.services.project_service import ensure_project_dirs
+            target = Path(self._project_dir) / new_name
+            target.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            QMessageBox.warning(self, "子目录", f"无法创建目录：{exc}")
+
+
 # ── Detail dialog ─────────────────────────────────────────────────────────────
 
 class _ProjectDetailDialog(QDialog):
@@ -116,12 +341,25 @@ class _ProjectDetailDialog(QDialog):
     def __init__(self, proj: dict, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("项目详情")
-        self.setMinimumWidth(540)
-        self.setMinimumHeight(320)
+        self.setMinimumWidth(700)
+        self.setMinimumHeight(460)
+        self._proj = proj
 
-        layout = QVBoxLayout(self)
+        # ── Outer layout wraps everything in a scroll area ────────────────────
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        outer.addWidget(scroll, stretch=1)
+
+        inner = QWidget()
+        layout = QVBoxLayout(inner)
         layout.setContentsMargins(28, 24, 28, 20)
         layout.setSpacing(12)
+        scroll.setWidget(inner)
 
         # ── Title ─────────────────────────────────────────────────────────────
         name_lbl = QLabel(f"{proj.get('name', '—')}  {proj.get('year', '')}")
@@ -134,8 +372,9 @@ class _ProjectDetailDialog(QDialog):
 
         layout.addSpacing(6)
 
-        # ── Live stat cards (mirrors app.js stat-row / stat-card) ─────────────
         directory = proj.get("directory") or proj.get("dir") or ""
+
+        # ── Live stat cards (mirrors app.js stat-row / stat-card) ─────────────
         if directory:
             try:
                 from app.services.project_service import get_project_summary
@@ -195,12 +434,197 @@ class _ProjectDetailDialog(QDialog):
             row.addWidget(val_w, stretch=1)
             layout.addLayout(row)
 
-        layout.addStretch()
+        layout.addSpacing(4)
 
+        # ── Subdir controls (mirrors renderProjectSubdirControl) ──────────────
+        if directory:
+            subdir_group = QFrame()
+            subdir_group.setFrameShape(QFrame.Shape.StyledPanel)
+            subdir_group.setStyleSheet(
+                "QFrame { border: 1px solid #e0e8f0; border-radius: 5px;"
+                " background: #f8fafd; padding: 4px 8px; }"
+            )
+            sg_lay = QVBoxLayout(subdir_group)
+            sg_lay.setContentsMargins(10, 8, 10, 8)
+            sg_lay.setSpacing(6)
+
+            sg_title = QLabel("子目录设置")
+            sg_title.setStyleSheet("font-size: 12px; font-weight: 600; color: #4a5a7a;")
+            sg_lay.addWidget(sg_title)
+
+            incoming_ctrl = _SubdirControlWidget(directory, which="incoming", parent=subdir_group)
+            sg_lay.addWidget(incoming_ctrl)
+            results_ctrl = _SubdirControlWidget(directory, which="results", parent=subdir_group)
+            sg_lay.addWidget(results_ctrl)
+
+            layout.addWidget(subdir_group)
+            layout.addSpacing(8)
+
+            # Store refs for tests
+            self._incoming_ctrl = incoming_ctrl
+            self._results_ctrl = results_ctrl
+
+        # ── Results section (mirrors renderProjectResultsSection) ─────────────
+        if directory:
+            self._build_results_section(layout, directory)
+
+        # ── Close button ──────────────────────────────────────────────────────
         btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         btns.rejected.connect(self.reject)
         btns.accepted.connect(self.accept)
         layout.addWidget(btns)
+
+    # ── Results section builder ───────────────────────────────────────────────
+
+    def _build_results_section(self, layout: QVBoxLayout, directory: str) -> None:
+        """Build the 项目成果 preview section below metadata.
+
+        Left column: list of specimen UIDs.
+        Right column: thumbnail-like labels for each TIF in the selected UID.
+
+        Mirrors app.js renderProjectResultsSection (lines 13730-13816).
+        """
+        try:
+            from app.services.project_service import get_project_results
+            data = get_project_results(directory)
+        except Exception:
+            data = {"total": 0, "groups": [], "ungrouped": []}
+
+        # Section header
+        results_hdr = QHBoxLayout()
+        results_hdr.setSpacing(10)
+        title_lbl = QLabel("项目成果")
+        title_lbl.setStyleSheet("font-size: 15px; font-weight: 600;")
+        results_hdr.addWidget(title_lbl)
+        total = data.get("total", 0)
+        cnt_lbl = QLabel(f"共 {total} 片" if total else "暂无成片")
+        cnt_lbl.setStyleSheet("font-size: 13px; color: #888;")
+        results_hdr.addWidget(cnt_lbl)
+        results_hdr.addStretch()
+        layout.addLayout(results_hdr)
+
+        if total == 0:
+            empty_lbl = QLabel(
+                "暂无成片。在工作区合成后，这里按编号显示每片 TIF 成果。"
+            )
+            empty_lbl.setStyleSheet("color: #aaa; font-size: 13px;")
+            empty_lbl.setWordWrap(True)
+            layout.addWidget(empty_lbl)
+            return
+
+        # Build entries list (groups + ungrouped)
+        groups = data.get("groups", [])
+        ungrouped = data.get("ungrouped", [])
+        entries = [{"key": g["uid"], "label": g["uid"], "items": g["items"], "is_ungrouped": False}
+                   for g in groups]
+        if ungrouped:
+            entries.append({"key": "__ungrouped__", "label": "自由合成 / 未命名",
+                             "items": ungrouped, "is_ungrouped": True})
+
+        # Two-column layout: UID list (left) + thumbnail list (right)
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setMinimumHeight(220)
+
+        # Left: UID list
+        uid_list = QListWidget()
+        uid_list.setMaximumWidth(240)
+        uid_list.setStyleSheet(
+            "QListWidget { font-size: 12px; border: 1px solid #ddd; }"
+            "QListWidget::item:selected { background: #d4e8f8; }"
+        )
+        for e in entries:
+            label = e["label"]
+            if not e["is_ungrouped"] and len(label) > 28:
+                label = "…" + label[-24:]
+            item_w = QListWidgetItem(f"{label}  ({len(e['items'])} 片)")
+            uid_list.addItem(item_w)
+        splitter.addWidget(uid_list)
+
+        # Right: thumbnail area (QScrollArea with names)
+        right_scroll = QScrollArea()
+        right_scroll.setWidgetResizable(True)
+        right_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._thumb_area = QWidget()
+        self._thumb_layout = QVBoxLayout(self._thumb_area)
+        self._thumb_layout.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        self._thumb_layout.setSpacing(4)
+        right_scroll.setWidget(self._thumb_area)
+        splitter.addWidget(right_scroll)
+        splitter.setSizes([200, 400])
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+
+        self._entries = entries
+        self._uid_list = uid_list
+
+        def _show_entry(idx: int) -> None:
+            entry = entries[idx]
+            # Clear thumb area
+            while self._thumb_layout.count():
+                item = self._thumb_layout.takeAt(0)
+                if item.widget():
+                    item.widget().deleteLater()
+            # Build thumb widgets (text-based since TIF rendering may not work headless)
+            flat = entry["items"]
+            row_widget = QWidget()
+            row_lay = QHBoxLayout(row_widget)
+            row_lay.setContentsMargins(6, 4, 6, 4)
+            row_lay.setSpacing(10)
+            row_lay.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+            for i, it in enumerate(flat):
+                thumb_frame = QFrame()
+                thumb_frame.setFixedWidth(150)
+                thumb_frame.setStyleSheet(
+                    "QFrame { border: 1px solid #c0ccd8; border-radius: 6px;"
+                    " background: #1a2a2a; padding: 4px; cursor: pointer; }"
+                )
+                t_lay = QVBoxLayout(thumb_frame)
+                t_lay.setContentsMargins(4, 4, 4, 4)
+                t_lay.setSpacing(3)
+
+                # Image (try to load)
+                img_lbl = QLabel()
+                img_lbl.setFixedSize(140, 100)
+                img_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                img_lbl.setStyleSheet("background: #0c1a17; border-radius: 4px; color: #6a9a8a;")
+                path = it.get("path", "")
+                px = QPixmap(path) if path else QPixmap()
+                if not px.isNull():
+                    img_lbl.setPixmap(
+                        px.scaled(140, 100,
+                                  Qt.AspectRatioMode.KeepAspectRatio,
+                                  Qt.TransformationMode.SmoothTransformation)
+                    )
+                else:
+                    seq = it.get("seq")
+                    img_lbl.setText(f"成片 {seq}" if seq is not None else it.get("name", ""))
+
+                cap_lbl = QLabel(f"成片 {it.get('seq')}" if it.get("seq") is not None else it.get("name", ""))
+                cap_lbl.setStyleSheet("font-size: 11px; color: #aaa;")
+                cap_lbl.setMaximumWidth(140)
+                cap_lbl.setWordWrap(False)
+
+                t_lay.addWidget(img_lbl)
+                t_lay.addWidget(cap_lbl)
+
+                # Click → open lightbox
+                local_i = i
+                local_flat = flat
+                thumb_frame.mousePressEvent = lambda _ev, idx=local_i, fl=local_flat: (
+                    _ResultLightboxDialog(fl, idx, self).exec()
+                )
+
+                row_lay.addWidget(thumb_frame)
+
+            row_lay.addStretch()
+            self._thumb_layout.addWidget(row_widget)
+
+        uid_list.currentRowChanged.connect(_show_entry)
+        if entries:
+            uid_list.setCurrentRow(0)
+            _show_entry(0)
+
+        layout.addWidget(splitter)
 
 
 # ── New-project dialog ─────────────────────────────────────────────────────────
@@ -463,8 +887,23 @@ class OverviewView(BaseView):
         root.addWidget(self._status_lbl)
 
     def on_activate(self) -> None:
-        """Reload project list from disk each time the user navigates here."""
+        """Reload project list from disk each time the user navigates here.
+
+        Also mirrors ``defaultToRecentRealProject()`` (app.js:2670): if the
+        context has no current project yet, auto-select the most recent
+        non-demo project so that entering the workbench just works.
+        """
         self._load_projects()
+        # defaultToRecentRealProject: pre-set context project if none active
+        if not (self.ctx.current_project_dir):
+            try:
+                from app.services.project_service import default_to_recent_real_project
+                path = _resolve_projects_json()
+                recent = default_to_recent_real_project(str(path))
+                if recent:
+                    self.ctx.current_project_dir = recent
+            except Exception:
+                pass
 
     # ── Data loading ───────────────────────────────────────────────────────────
 
@@ -550,10 +989,27 @@ class OverviewView(BaseView):
             self._table.insertRow(row)
 
             # 项目名称  — bold, mirrors tdName style fontWeight 600
+            # #cursor begin 2026-06-04 由 Claude 编写：row stats chip，
+            # 对真实项目（有 directory 且非 demo）同步读取 get_project_summary 统计，
+            # 追加 "N 标本 · N 成片 · N 待处理" 小字副行，与 web 行内 chip 对应。
             name_text = proj.get("name", "—")
             year = str(proj.get("year", ""))
             if year and year not in name_text:
                 name_text = f"{name_text}  {year}"
+            directory = proj.get("directory") or proj.get("dir") or ""
+            if directory and not proj.get("isDemo", False):
+                try:
+                    from app.services.project_service import get_project_summary
+                    _sum = get_project_summary(directory)
+                    chip = (
+                        f"{_sum['specimenCount']} 标本 · "
+                        f"{_sum['resultCount']} 成片 · "
+                        f"{_sum['pendingJpgCount']} 待处理"
+                    )
+                    name_text = f"{name_text}\n{chip}"
+                except Exception:
+                    pass
+            # #cursor end
             name_item = QTableWidgetItem(name_text)
             name_item.setFont(self._bold_font())
             self._table.setItem(row, 0, name_item)

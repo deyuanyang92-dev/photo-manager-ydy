@@ -225,3 +225,143 @@ def get_project_summary(project_dir: str) -> dict:
         "resultCount": result_count,
         "pendingJpgCount": pending_jpg_count,
     }
+
+
+def get_project_results(project_dir: str) -> dict:
+    """Return a grouped listing of result TIF files under *project_dir*.
+
+    Scans ``results/`` and ``results/freeform/`` for .tif/.tiff files,
+    parses the 7-segment filename to extract the specimen UID, then
+    groups the items by UID.  Files that cannot be parsed go into
+    ``ungrouped``.
+
+    Returns a dict matching the shape of server.js ``/api/project/results``::
+
+        {
+            "projectDir": str,
+            "total": int,
+            "groups": [{"uid": str, "items": [item, ...]}, ...],   # sorted by uid
+            "ungrouped": [item, ...],
+        }
+
+    Each *item* is::
+
+        {"path": str, "name": str, "uid": str | None,
+         "seq": int | None, "mtime": str | None}
+
+    Always returns a dict; never raises.
+
+    Oracle: server.js GET /api/project/results (lines 2874-2922).
+    """
+    import re as _re
+    import sqlite3 as _sqlite3
+
+    root = Path(project_dir).resolve()
+    results_root = root / RESULTS_DIR
+    freeform_dir = results_root / "freeform"
+
+    _tif_re = _re.compile(r"\.tiff?$", _re.IGNORECASE)
+
+    # ── Name-parsing (mirrors parseTiffBasename in server.js) ─────────────────
+    # Pattern: region-site-station-speciesId-seq-storage-dateSegment(.tif)
+    # seq and storage can be absent (6-segment = uniqueId, 7-segment = resultId).
+    _TIFF_7 = _re.compile(
+        r"^([^-]+)-([^-]+)-([^-]+)-([^-]+)-(\d+)-([^-]+)-([^-.]+)\.tiff?$",
+        _re.IGNORECASE,
+    )
+    _TIFF_6 = _re.compile(
+        r"^([^-]+)-([^-]+)-([^-]+)-([^-]+)-([^-]+)-([^-.]+)\.tiff?$",
+        _re.IGNORECASE,
+    )
+
+    def _parse(name: str):
+        """Return (uid, seq) or (None, None)."""
+        m = _TIFF_7.match(name)
+        if m:
+            province, site, station, species_id, seq_s, storage, date_seg = m.groups()
+            uid = f"{province}-{site}-{station}-{species_id}-{storage}-{date_seg}"
+            try:
+                return uid, int(seq_s)
+            except (ValueError, TypeError):
+                return uid, None
+        m = _TIFF_6.match(name)
+        if m:
+            province, site, station, species_id, storage, date_seg = m.groups()
+            uid = f"{province}-{site}-{station}-{species_id}-{storage}-{date_seg}"
+            return uid, None
+        return None, None
+
+    def _collect(directory: Path) -> list:
+        if not directory.is_dir():
+            return []
+        items = []
+        try:
+            for entry in directory.iterdir():
+                if not _tif_re.search(entry.name):
+                    continue
+                try:
+                    if not entry.is_file():
+                        continue
+                except OSError:
+                    continue
+                uid, seq = _parse(entry.name)
+                mtime = None
+                try:
+                    mtime = entry.stat().st_mtime
+                    from datetime import datetime, timezone
+                    mtime = datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()
+                except OSError:
+                    pass
+                items.append({
+                    "path": str(entry),
+                    "name": entry.name,
+                    "uid": uid,
+                    "seq": seq,
+                    "mtime": mtime,
+                })
+        except OSError:
+            pass
+        return items
+
+    all_items = _collect(results_root) + _collect(freeform_dir)
+
+    # Group by UID
+    group_map: dict = {}
+    ungrouped: list = []
+    for item in all_items:
+        if item["uid"]:
+            group_map.setdefault(item["uid"], []).append(item)
+        else:
+            ungrouped.append(item)
+
+    # Sort each group by seq, then sort groups by uid
+    groups = [
+        {
+            "uid": uid,
+            "items": sorted(items, key=lambda x: (x["seq"] is None, x["seq"] or 0)),
+        }
+        for uid, items in sorted(group_map.items())
+    ]
+
+    return {
+        "projectDir": str(root),
+        "total": len(all_items),
+        "groups": groups,
+        "ungrouped": ungrouped,
+    }
+
+
+def default_to_recent_real_project(user_projects_json_path: str) -> Optional[str]:
+    """Return the directory of the most recent non-demo project, or None.
+
+    Mirrors web ``defaultToRecentRealProject()``: picks the last project
+    in the list that has a ``directory`` field and is not marked ``isDemo``.
+
+    Oracle: app.js:2670 (defaultToRecentRealProject).
+    """
+    projects = list_projects(user_projects_json_path)
+    for proj in reversed(projects):
+        directory = proj.get("directory") or proj.get("dir") or ""
+        if directory and not proj.get("isDemo", False):
+            return directory
+    return None

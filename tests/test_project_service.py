@@ -291,3 +291,169 @@ class TestGetProjectSummary:
         assert result["specimenCount"] == 0
         assert result["resultCount"] == 0
         assert result["pendingJpgCount"] == 0
+
+
+# ── get_project_results ────────────────────────────────────────────────────
+
+class TestGetProjectResults:
+    """Oracle: server.js GET /api/project/results (lines 2874-2922)."""
+
+    def test_returns_dict_with_required_keys(self, tmp_path):
+        from app.services.project_service import get_project_results
+        result = get_project_results(str(tmp_path / "empty_proj"))
+        assert isinstance(result, dict)
+        for key in ("projectDir", "total", "groups", "ungrouped"):
+            assert key in result, f"missing key: {key}"
+
+    def test_empty_dir_returns_zero_total(self, tmp_path):
+        from app.services.project_service import get_project_results
+        result = get_project_results(str(tmp_path / "noproj"))
+        assert result["total"] == 0
+        assert result["groups"] == []
+        assert result["ungrouped"] == []
+
+    def test_never_raises_on_nonexistent_dir(self, tmp_path):
+        from app.services.project_service import get_project_results
+        result = get_project_results(str(tmp_path / "ghost"))
+        assert result["total"] == 0
+
+    def test_counts_tifs_in_results(self, tmp_path):
+        """7-segment TIF files appear as items with uid and seq parsed."""
+        from app.services.project_service import ensure_project_dirs, get_project_results
+        proj = tmp_path / "proj"
+        ensure_project_dirs(str(proj))
+        results = proj / "results"
+        # valid 7-segment name: province-site-station-speciesId-seq-storage-dateSeg.tif
+        (results / "FJ-YGLZ-B2-DLC001-1-RD75E-20260506.tif").write_bytes(b"")
+        (results / "FJ-YGLZ-B2-DLC001-2-RD75E-20260506.tif").write_bytes(b"")
+        (results / "other.jpg").write_bytes(b"")   # should NOT count
+        result = get_project_results(str(proj))
+        assert result["total"] == 2
+
+    def test_groups_by_uid(self, tmp_path):
+        """Two TIFs with the same UID should appear in the same group."""
+        from app.services.project_service import ensure_project_dirs, get_project_results
+        proj = tmp_path / "proj"
+        ensure_project_dirs(str(proj))
+        results = proj / "results"
+        (results / "FJ-YGLZ-B2-DLC001-1-RD75E-20260506.tif").write_bytes(b"")
+        (results / "FJ-YGLZ-B2-DLC001-2-RD75E-20260506.tif").write_bytes(b"")
+        result = get_project_results(str(proj))
+        assert len(result["groups"]) == 1
+        assert result["groups"][0]["uid"] == "FJ-YGLZ-B2-DLC001-RD75E-20260506"
+        assert len(result["groups"][0]["items"]) == 2
+
+    def test_different_uids_produce_separate_groups(self, tmp_path):
+        """TIFs with different UIDs produce separate groups."""
+        from app.services.project_service import ensure_project_dirs, get_project_results
+        proj = tmp_path / "proj"
+        ensure_project_dirs(str(proj))
+        results = proj / "results"
+        (results / "FJ-YGLZ-B2-DLC001-1-RD75E-20260506.tif").write_bytes(b"")
+        (results / "FJ-YGLZ-B2-DLC002-1-RD75E-20260506.tif").write_bytes(b"")
+        result = get_project_results(str(proj))
+        assert len(result["groups"]) == 2
+
+    def test_unparseable_tif_goes_to_ungrouped(self, tmp_path):
+        """TIFs with non-standard names go into ungrouped."""
+        from app.services.project_service import ensure_project_dirs, get_project_results
+        proj = tmp_path / "proj"
+        ensure_project_dirs(str(proj))
+        (proj / "results" / "freeform_result.tif").write_bytes(b"")
+        result = get_project_results(str(proj))
+        assert result["total"] == 1
+        assert len(result["ungrouped"]) == 1
+        assert result["ungrouped"][0]["uid"] is None
+
+    def test_freeform_dir_tifs_included(self, tmp_path):
+        """TIFs in results/freeform/ are counted in total."""
+        from app.services.project_service import ensure_project_dirs, get_project_results
+        proj = tmp_path / "proj"
+        ensure_project_dirs(str(proj))
+        freeform = proj / "results" / "freeform"
+        freeform.mkdir(parents=True, exist_ok=True)
+        (freeform / "free001.tif").write_bytes(b"")
+        result = get_project_results(str(proj))
+        assert result["total"] == 1
+
+    def test_item_has_path_name_seq_fields(self, tmp_path):
+        """Each item dict must contain path, name, uid, seq, mtime fields."""
+        from app.services.project_service import ensure_project_dirs, get_project_results
+        proj = tmp_path / "proj"
+        ensure_project_dirs(str(proj))
+        results = proj / "results"
+        (results / "FJ-YGLZ-B2-DLC001-3-RD75E-20260506.tif").write_bytes(b"")
+        result = get_project_results(str(proj))
+        items = result["groups"][0]["items"]
+        assert len(items) == 1
+        item = items[0]
+        assert "path" in item
+        assert "name" in item
+        assert "uid" in item
+        assert item["seq"] == 3
+
+    def test_groups_sorted_by_uid(self, tmp_path):
+        """Groups are returned sorted by uid string."""
+        from app.services.project_service import ensure_project_dirs, get_project_results
+        proj = tmp_path / "proj"
+        ensure_project_dirs(str(proj))
+        results = proj / "results"
+        (results / "ZZ-SITE-S1-ZZZ001-1-D75E-20260101.tif").write_bytes(b"")
+        (results / "AA-SITE-S1-AAA001-1-D75E-20260101.tif").write_bytes(b"")
+        result = get_project_results(str(proj))
+        uids = [g["uid"] for g in result["groups"]]
+        assert uids == sorted(uids)
+
+
+# ── default_to_recent_real_project ─────────────────────────────────────────
+
+class TestDefaultToRecentRealProject:
+    """Oracle: app.js:2670 (defaultToRecentRealProject)."""
+
+    def test_returns_none_for_empty_list(self, tmp_path):
+        import json
+        from app.services.project_service import default_to_recent_real_project
+        json_path = tmp_path / "user_projects.json"
+        json_path.write_text(json.dumps({"version": 1, "projects": []}), encoding="utf-8")
+        assert default_to_recent_real_project(str(json_path)) is None
+
+    def test_returns_directory_of_last_real_project(self, tmp_path):
+        import json
+        from app.services.project_service import default_to_recent_real_project
+        json_path = tmp_path / "user_projects.json"
+        projs = [
+            {"id": "1", "name": "A", "directory": "/tmp/projA"},
+            {"id": "2", "name": "B", "directory": "/tmp/projB"},
+        ]
+        json_path.write_text(json.dumps({"version": 1, "projects": projs}), encoding="utf-8")
+        result = default_to_recent_real_project(str(json_path))
+        assert result == "/tmp/projB"
+
+    def test_skips_demo_projects(self, tmp_path):
+        import json
+        from app.services.project_service import default_to_recent_real_project
+        json_path = tmp_path / "user_projects.json"
+        projs = [
+            {"id": "1", "name": "Real", "directory": "/tmp/real"},
+            {"id": "2", "name": "Demo", "directory": "/tmp/demo", "isDemo": True},
+        ]
+        json_path.write_text(json.dumps({"version": 1, "projects": projs}), encoding="utf-8")
+        result = default_to_recent_real_project(str(json_path))
+        assert result == "/tmp/real"
+
+    def test_returns_none_for_missing_file(self, tmp_path):
+        from app.services.project_service import default_to_recent_real_project
+        result = default_to_recent_real_project(str(tmp_path / "nonexistent.json"))
+        assert result is None
+
+    def test_skips_projects_without_directory(self, tmp_path):
+        import json
+        from app.services.project_service import default_to_recent_real_project
+        json_path = tmp_path / "user_projects.json"
+        projs = [
+            {"id": "1", "name": "NoDir"},
+            {"id": "2", "name": "HasDir", "directory": "/tmp/hasdir"},
+        ]
+        json_path.write_text(json.dumps({"version": 1, "projects": projs}), encoding="utf-8")
+        result = default_to_recent_real_project(str(json_path))
+        assert result == "/tmp/hasdir"

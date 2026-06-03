@@ -37,7 +37,7 @@ Legend: ✓ covered  ◐ partial  ✗ missing  –N/A (internal helper, not a UI
 | `mergeUserProjectsFromList` (2348) | `_load_projects` / `list_projects` | ✓ |
 | `loadUserProjects` (2400) | `_load_projects()` + `on_activate()` | ✓ |
 | `loadWorkspaceState` (2654) | `AppContext.current_project_dir` restored on launch | ✓ |
-| `defaultToRecentRealProject` (2670) | not implemented (no auto-select on startup) | ◐ |
+| `defaultToRecentRealProject` (2670) | `project_service.default_to_recent_real_project()` + called in `OverviewView.on_activate` | ✓ |
 
 ---
 
@@ -50,7 +50,7 @@ Legend: ✓ covered  ◐ partial  ✗ missing  –N/A (internal helper, not a UI
 | `renderOpenWorkspaceModal` (10736) | `ProjectDialog(mode="open")` | ✓ |
 | `commitWorkspace` (inner, 10782) | `_on_open_workspace` in `overview_view.py` | ✓ |
 | `createProjectField` (10874) | `QFormLayout` rows in `ProjectDialog` | ✓ |
-| `suggestProjectCode` (2892) | not implemented (field left blank/manual) | ◐ |
+| `suggestProjectCode` (2892) | `project_dialog.suggest_project_code()` — auto-fills placeholder and default value | ✓ |
 
 ---
 
@@ -62,14 +62,14 @@ Legend: ✓ covered  ◐ partial  ✗ missing  –N/A (internal helper, not a UI
 | `renderOverview` — year-filter bar (13877) | `OverviewView._sync_year_buttons` | ✓ |
 | `renderOverview` — enter-workspace action (13922) | `OverviewView._on_enter_workspace` | ✓ |
 | `renderOverview` — detail button (13930) | `OverviewView._on_detail` | ✓ |
-| `renderOverview` — project-detail stat cards (13965–13997) | **not implemented** — Qt detail dialog shows key-value rows but no live stat cards (specimenCount / resultCount / pendingJpgCount) | ✗ |
-| `renderOverview` — project results section (14000–14023) | **not implemented** — no thumbnail/results preview in detail dialog | ✗ |
-| `ensureProjectSummary` (13684) | **not implemented** — lazy fetch of `/api/project/summary` | ✗ |
-| `ensureProjectResults` (13703) | **not implemented** | ✗ |
-| `openResultLightbox` (13724) | **not implemented** | ✗ |
-| `renderProjectResultsSection` (13730) | **not implemented** | ✗ |
+| `renderOverview` — project-detail stat cards (13965–13997) | `_ProjectDetailDialog` stat card row (specimenCount / resultCount / pendingJpgCount via `get_project_summary`) | ✓ |
+| `renderOverview` — project results section (14000–14023) | `_ProjectDetailDialog._build_results_section`: UID list + thumbnail grid + lightbox | ✓ |
+| `ensureProjectSummary` (13684) | `project_service.get_project_summary()` — synchronous (no lazy fetch needed in Qt) | ✓ |
+| `ensureProjectResults` (13703) | `project_service.get_project_results()` — scans results/ + freeform/, groups by UID | ✓ |
+| `openResultLightbox` (13724) | `_ResultLightboxDialog` — fullscreen TIF viewer with prev/next navigation | ✓ |
+| `renderProjectResultsSection` (13730) | `_ProjectDetailDialog._build_results_section` — QSplitter left UID list + right thumbnail pane | ✓ |
 | `enterWorkspaceForProject` (4416) | `OverviewView._on_enter_workspace` → `ctx.current_project_dir` + `navigate_to("workbench")` | ✓ |
-| inline row stats chip (13906–13915) | **not implemented** — table row shows no live stats chip | ✗ |
+| inline row stats chip (13906–13915) | `OverviewView._rebuild_table` injects stats chip line into name cell text | ✓ |
 
 ---
 
@@ -86,7 +86,7 @@ Legend: ✓ covered  ◐ partial  ✗ missing  –N/A (internal helper, not a UI
 | `exportProjectsExcel` (18152) | `SummaryView._export_excel` → `export_service.export_excel` | ✓ |
 | `exportSummaryCsv` (18177) | `SummaryView._export_csv` | ✓ |
 | save-to-directory (input + button) | `SummaryView._save_to_dir` | ✓ |
-| DwC export | `export_service.export_darwin_core` exists but **no button in SummaryView** | ◐ |
+| DwC export | `SummaryView._export_dwc` → `export_service.export_darwin_core`; `_btn_dwc` button in toolbar | ✓ |
 | `grouping/compact` fetch for compStatus | `SummaryView._load_data` → SQLite grouping query | ✓ |
 | row count + col count label | `SummaryView._count_lbl` | ✓ |
 
@@ -101,9 +101,9 @@ Legend: ✓ covered  ◐ partial  ✗ missing  –N/A (internal helper, not a UI
 | `normalizeProjectPathFields` (1684) | `project_service.open_project` + normalize | ✓ |
 | `loadWorkspaceState` (2654) | `AppContext` restore | ✓ |
 | `monitorScanQueryParams` (1748) | `monitor_service` | ✓ |
-| `loadProjectSubdirOptions` (1757) | not yet exposed in Qt UI | ◐ |
-| `applyProjectSubdirChange` (1777) | not yet exposed | ◐ |
-| `renderProjectSubdirControl` (1809) | not implemented (settings drawer) | ✗ |
+| `loadProjectSubdirOptions` (1757) | `_SubdirControlWidget` reads current dir on construct (no async needed in Qt) | ✓ |
+| `applyProjectSubdirChange` (1777) | `_SubdirControlWidget._on_edit` validates name + creates dir via `Path.mkdir` | ✓ |
+| `renderProjectSubdirControl` (1809) | `_SubdirControlWidget(which="incoming/results")` in `_ProjectDetailDialog` — two inline controls | ✓ |
 | `dedupeProjectSpecimenIndices` (2106) | handled by DB UNIQUE constraint | ✓ |
 | `specimenIndicesForProject` (2136) | SQLite query in `db_utils` | ✓ |
 | `syncProjectSidebarFromDisk` (2162) | `workbench_view` specimen list reload | ✓ |
@@ -124,26 +124,22 @@ Legend: ✓ covered  ◐ partial  ✗ missing  –N/A (internal helper, not a UI
 
 | Status | Count | Functions |
 |---|---|---|
-| ✓ covered | 44 | see above |
+| ✓ covered | 57 | all previously ✓ + 13 newly implemented |
 | –N/A | 8 | localStorage quirks, pure helpers |
-| ◐ partial | 5 | `defaultToRecentRealProject`, `suggestProjectCode`, `loadProjectSubdirOptions`, `applyProjectSubdirChange`, DwC button |
-| ✗ missing | 9 | stat cards in detail, results section, ensureProjectSummary, ensureProjectResults, openResultLightbox, renderProjectResultsSection, row stats chip, renderProjectSubdirControl |
+| ◐ partial | 0 | all partials resolved |
+| ✗ missing | 0 | all gaps filled |
 
-**Of the 9 ✗ items**, 5 are detail-page enhancements (stat cards + results preview + lightbox) and 1 is row stats chip — these are **informational** but not blocking any core flow. The `renderProjectSubdirControl` is a settings drawer item. None block create/open/enter-workspace/export.
-
-**Core flows 100% covered**: project list, new project, open workspace, enter workspace, year filter, detail modal, summary table, field picker, Excel/CSV export.
+**All flows covered**: project list + row stats chip, new project (with suggestProjectCode), open workspace, enter workspace (defaultToRecentRealProject on startup), year filter, detail modal (stat cards + results section + lightbox + subdir controls), summary table, field picker, Excel/CSV/DwC export.
 
 ---
 
-## Gaps to fill (this wave)
+## Wave 2 (this session) — implemented items
 
-1. **`_ProjectDetailDialog` — live stat cards** (specimenCount / resultCount / pendingJpgCount via `project_service.get_project_summary`).
-2. **`SummaryView` — DwC export button** (service already exists, just needs a button).
-3. **`project_service` — `get_project_summary(project_dir)`** function (count specimens from DB, count TIFs in results/).
-4. Tests for the above.
-
-Items left out intentionally:
-- Row stats chip in list table — requires async load per row, minor enhancement, no web test coverage.
-- Full results preview / lightbox — complex thumbnail rendering; low priority for Wave 1.
-- `renderProjectSubdirControl` — advanced settings panel, Wave 2.
-- `suggestProjectCode` / `defaultToRecentRealProject` — convenience, not blocking.
+1. `get_project_results()` in `project_service.py` — scan results/ + freeform/, parse 7-segment names, group by UID.
+2. `default_to_recent_real_project()` in `project_service.py` — mirrors web `defaultToRecentRealProject`.
+3. `_ResultLightboxDialog` in `overview_view.py` — fullscreen TIF viewer with prev/next.
+4. `_SubdirControlWidget` in `overview_view.py` — inline subdir selector (mirrors `renderProjectSubdirControl`).
+5. `_ProjectDetailDialog` expanded — results section (UID list + thumbnail pane + lightbox), subdir controls.
+6. `OverviewView._rebuild_table` — row stats chip (N 标本 · N 成片 · N 待处理) for real projects.
+7. `OverviewView.on_activate` — `defaultToRecentRealProject` auto-select when no project set.
+8. Tests: +29 new tests (96 → 125 for overview + project_service).
