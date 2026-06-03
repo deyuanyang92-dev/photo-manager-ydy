@@ -60,6 +60,7 @@ from app.utils.coord_utils import (
     to_dms_zh,
     to_ddm_zh,
     to_dms,
+    to_ddm,
     wgs84_to_gcj02,
     wgs84_to_bd09,
     gcj02_to_wgs84,
@@ -1239,16 +1240,54 @@ class CoordsView(BaseView):
         self._batch_table.resizeColumnsToContents()
         self._batch_table.setColumnWidth(0, 32)
 
+    def _batch_convert_row_full(self, row: dict) -> str:
+        """Return full Chinese-formatted converted string (mirrors batchConvertRow in JS).
+
+        Maps to app.js:13580–13594 batchConvertRow().
+        """
+        lat, lon = row["lat"], row["lon"]
+        if self._batch_cs == "gcj02":
+            g = wgs84_to_gcj02(lon, lat)
+            lat, lon = g["lat"], g["lon"]
+        elif self._batch_cs == "bd09":
+            b = wgs84_to_bd09(lon, lat)
+            lat, lon = b["lat"], b["lon"]
+        if self._batch_fmt == "dms":
+            return to_dms_zh(lat, lon)
+        if self._batch_fmt == "ddm":
+            return to_ddm_zh(lat, lon)
+        return to_dd_zh(lat, lon)
+
     def _batch_to_csv(self) -> str:
+        """7-column CSV with UTF-8 BOM, mirrors batchToCsv() in app.js:13613–13629."""
+        # BOM prefix (﻿) for Excel compatibility — mirrors JS '﻿' prefix
         buf = io.StringIO()
+        buf.write("﻿")
         writer = csv.writer(buf)
-        writer.writerow(["#", "输入", "北纬", "东经"])
+        writer.writerow(["序号", "原始", "格式", "纬度", "经度", "转换结果", "错误"])
         for i, row in enumerate(self._batch_rows):
             if row["error"]:
-                writer.writerow([i + 1, row["raw"], f"✗ {row['error']}", ""])
+                writer.writerow([
+                    i + 1,
+                    row["raw"],
+                    "",
+                    "",
+                    "",
+                    "",
+                    row["error"],
+                ])
             else:
                 clat, clon = self._convert_coord(row["lat"], row["lon"])
-                writer.writerow([i + 1, row["raw"], self._format_val(clat, True), self._format_val(clon, False)])
+                converted = self._batch_convert_row_full(row)
+                writer.writerow([
+                    i + 1,
+                    row["raw"],
+                    row.get("format_label") or "",
+                    f"{row['lat']:.6f}",
+                    f"{row['lon']:.6f}",
+                    converted,
+                    "",
+                ])
         return buf.getvalue()
 
     def _on_copy_csv(self) -> None:
@@ -1454,14 +1493,25 @@ class CoordsView(BaseView):
 
                 @pyqtSlot(str)
                 def onMarkerMoved(self_b, payload: str) -> None:  # noqa: N802
+                    """Mirrors coordUpdateMapDisplay (app.js:13469–13476).
+
+                    Display line: WGS-84: lat, lon  (GCJ-02: lat, lon)
+                    Formats line: DMS: ...  |  DDM: ...
+                    """
                     try:
                         data = json.loads(payload)
                         self_b._view._map_selected_wgs = data
                         self_b._confirm.setEnabled(True)
                         lat = data.get("lat", 0)
                         lon = data.get("lon", 0)
+                        # GCJ-02 coords for display (matches JS coordUpdateMapDisplay)
+                        gcj = wgs84_to_gcj02(lon, lat)
                         self_b._display.setText(
                             f"WGS-84: {lat:.6f}, {lon:.6f}"
+                            f"  (GCJ-02: {gcj['lat']:.6f}, {gcj['lon']:.6f})"
+                        )
+                        self_b._formats.setText(
+                            f"DMS: {to_dms(lat, lon)}  |  DDM: {to_ddm(lat, lon)}"
                         )
                     except Exception:
                         pass

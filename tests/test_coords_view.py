@@ -361,12 +361,19 @@ class TestBatch:
         assert abs(lat_wgs - lat_bd) > 0.001
 
     def test_csv_export_has_header(self):
+        """CSV header must contain 7-column web-spec fields (app.js:13615).
+
+        Header: ﻿序号,原始,格式,纬度,经度,转换结果,错误 (with UTF-8 BOM).
+        """
         v = _view()
         v._batch_textarea.setPlainText(self._VALID_INPUT)
         v._on_batch_parse()
         csv_text = v._batch_to_csv()
-        first_line = csv_text.splitlines()[0]
-        assert "输入" in first_line or "#" in first_line
+        # Strip BOM for assertion
+        first_line = csv_text.lstrip("﻿").splitlines()[0]
+        assert "序号" in first_line
+        assert "原始" in first_line
+        assert "转换结果" in first_line
 
     def test_csv_export_row_count(self):
         v = _view()
