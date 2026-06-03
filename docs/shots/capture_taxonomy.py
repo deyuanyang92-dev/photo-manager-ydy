@@ -128,7 +128,7 @@ def main() -> int:
     win = QMainWindow()
     win.setWindowTitle("内置分类库 — 设计评审截图")
     win.setCentralWidget(view)
-    win.resize(1440, 900)
+    win.resize(1920, 1080)
     win.show()
 
     # Trigger on_activate to load data
