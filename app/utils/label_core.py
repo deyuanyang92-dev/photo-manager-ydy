@@ -513,6 +513,24 @@ def validate_print_job(job: dict) -> list[dict]:
     return warnings
 
 
+def label_data_text(data: Optional[dict]) -> str:
+    """Return a plain-text summary of label data (used for clipboard / accessibility).
+
+    Mirror: ``labelDataText`` in app.js.
+
+    Format: uniqueId, speciesName (or latin), region, collectorLabel
+    — non-empty values joined by newline.
+    """
+    d = data or {}
+    parts = [
+        str(d.get("uniqueId") or ""),
+        str(d.get("speciesName") or d.get("latin") or ""),
+        str(d.get("region") or ""),
+        str(d.get("collectorLabel") or ""),
+    ]
+    return "\n".join(p for p in parts if p)
+
+
 def create_print_job(opts: Optional[dict] = None) -> dict:
     """Build a complete print-job dict from options.
 

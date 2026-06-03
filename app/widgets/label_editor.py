@@ -30,6 +30,8 @@ from PyQt6.QtGui import (
     QUndoCommand,
     QFont,
     QPainter,
+    QKeySequence,
+    QShortcut,
 )
 from PyQt6.QtWidgets import (
     QGraphicsScene,
@@ -405,6 +407,12 @@ class LabelEditorWidget(QWidget):
         # Connect undo stack state
         self._undo_stack.canUndoChanged.connect(self._undo_btn.setEnabled)
         self._undo_stack.canRedoChanged.connect(self._redo_btn.setEnabled)
+
+        # Keyboard shortcuts — mirrors handleLabelsKeydown() in app.js
+        undo_sc = QShortcut(QKeySequence.StandardKey.Undo, self)
+        undo_sc.activated.connect(self._undo_stack.undo)
+        redo_sc = QShortcut(QKeySequence.StandardKey.Redo, self)
+        redo_sc.activated.connect(self._undo_stack.redo)
 
     # ── Public API ─────────────────────────────────────────────────────────
 

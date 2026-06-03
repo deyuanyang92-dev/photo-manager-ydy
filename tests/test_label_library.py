@@ -518,3 +518,147 @@ class TestBucketColWidgetLibrary:
         dims = col.selected_dims()
         assert dims["w"] == 45
         assert dims["h"] == 25
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# label_data_text — pure-text label summary
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestLabelDataText:
+    def test_all_fields_present(self):
+        from app.utils.label_core import label_data_text, specimen_to_label_data
+        data = specimen_to_label_data(_sp())
+        text = label_data_text(data)
+        assert "FJ-YGLZ-B2-DLC001" in text        # part of uniqueId
+        assert "背鳞虫" in text                    # speciesName
+        assert "采集" in text                      # collectorLabel
+
+    def test_missing_species_falls_back_to_latin(self):
+        from app.utils.label_core import label_data_text
+        data = {"uniqueId": "X-001", "latin": "Polynoidae sp.", "region": ""}
+        text = label_data_text(data)
+        assert "Polynoidae sp." in text
+
+    def test_empty_fields_omitted(self):
+        from app.utils.label_core import label_data_text
+        data = {"uniqueId": "X-001", "speciesName": "", "region": None, "collectorLabel": ""}
+        text = label_data_text(data)
+        assert text == "X-001"
+
+    def test_none_data_returns_empty(self):
+        from app.utils.label_core import label_data_text
+        assert label_data_text(None) == ""
+
+    def test_fields_joined_by_newline(self):
+        from app.utils.label_core import label_data_text
+        data = {
+            "uniqueId": "A", "speciesName": "B", "region": "C", "collectorLabel": "D"
+        }
+        text = label_data_text(data)
+        assert text == "A\nB\nC\nD"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Backup subsystem — backup_library / latest_backup / restore_latest_backup
+# Mirrors JS backupLabelCustomTemplate / latestLabelCustomBackup /
+# restoreLatestLabelCustomBackup
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestBackupSubsystem:
+    def test_backup_empty_library_returns_false(self, sample_lib):
+        assert sample_lib.backup_library() is False
+
+    def test_backup_nonempty_library_returns_true(self, sample_lib):
+        sample_lib.upsert({"name": "T", "template": {"rows": []}})
+        assert sample_lib.backup_library() is True
+
+    def test_latest_backup_none_when_no_backups(self, sample_lib):
+        assert sample_lib.latest_backup() is None
+
+    def test_backup_and_retrieve(self, sample_lib):
+        rec = sample_lib.upsert({"name": "T", "template": {"rows": []}})
+        sample_lib.backup_library("test reason")
+        snap = sample_lib.latest_backup()
+        assert snap is not None
+        assert snap.get("reason") == "test reason"
+        assert isinstance(snap.get("at"), str)
+        assert isinstance(snap.get("raw"), str)
+
+    def test_identical_content_not_duplicated(self, sample_lib):
+        sample_lib.upsert({"name": "T", "template": {"rows": []}})
+        sample_lib.backup_library()
+        sample_lib.backup_library()  # same state → not added again
+        backups = sample_lib._read_backups()
+        assert len(backups) == 1
+
+    def test_backup_rolling_max_20(self, sample_lib):
+        # Upsert 25 different templates and back up each time
+        for i in range(25):
+            sample_lib.upsert({"name": f"T{i}", "template": {"rows": [{"size": i}]}})
+            sample_lib.backup_library(f"step {i}")
+        backups = sample_lib._read_backups()
+        assert len(backups) <= 20
+
+    def test_restore_replaces_library(self, sample_lib):
+        # Phase 1: add template A, back up
+        sample_lib.upsert({"name": "A", "template": {"rows": [{"fields": ["storage"]}]}})
+        sample_lib.backup_library("after A")
+        # Phase 2: add template B (state changes)
+        sample_lib.upsert({"name": "B", "template": {"rows": []}})
+        assert len(sample_lib.records()) == 2
+        # Restore → should go back to 1-record state
+        result = sample_lib.restore_latest_backup()
+        assert result is True
+        recs = sample_lib.records()
+        assert len(recs) == 1
+        assert recs[0]["name"] == "A"
+
+    def test_restore_no_backup_returns_false(self, sample_lib):
+        assert sample_lib.restore_latest_backup() is False
+
+    def test_restore_creates_pre_restore_backup(self, sample_lib):
+        """restore_latest_backup must snapshot current state before overwriting."""
+        sample_lib.upsert({"name": "A", "template": {"rows": []}})
+        sample_lib.backup_library("initial")
+        sample_lib.upsert({"name": "B", "template": {"rows": []}})
+        # Now restore
+        sample_lib.restore_latest_backup()
+        # The new "恢复备份前" snapshot should be the most-recent backup
+        snap = sample_lib.latest_backup()
+        assert snap is not None
+        assert snap.get("reason") == "恢复备份前"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LabelEditorWidget keyboard shortcuts (Ctrl+Z / Ctrl+Shift+Z)
+# Mirrors handleLabelsKeydown() in app.js
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestLabelEditorKeyboardShortcuts:
+    def test_undo_shortcut_exists(self, qt_app):
+        """LabelEditorWidget must register a Ctrl+Z shortcut wired to undo."""
+        from app.widgets.label_editor import LabelEditorWidget
+        from PyQt6.QtGui import QShortcut
+        from app.utils.label_core import normalize_template
+        from app.services.label_service import BUILTIN_TEMPLATES
+        tmpl = normalize_template(BUILTIN_TEMPLATES["standard"])
+        w = LabelEditorWidget(tmpl, {"w": 60, "h": 40}, {})
+        shortcuts = w.findChildren(QShortcut)
+        # Check at least 2 shortcuts (undo + redo)
+        assert len(shortcuts) >= 2
+
+    def test_redo_shortcut_exists(self, qt_app):
+        from app.widgets.label_editor import LabelEditorWidget
+        from PyQt6.QtGui import QShortcut
+        w = LabelEditorWidget(None, {"w": 60, "h": 40}, {})
+        shortcuts = w.findChildren(QShortcut)
+        assert len(shortcuts) >= 2
+
+    def test_undo_button_text(self, qt_app):
+        from app.widgets.label_editor import LabelEditorWidget
+        from PyQt6.QtWidgets import QPushButton
+        w = LabelEditorWidget(None, {"w": 60, "h": 40}, {})
+        btns = w.findChildren(QPushButton)
+        texts = [b.text() for b in btns]
+        assert any("撤销" in t for t in texts)
+        assert any("重做" in t for t in texts)

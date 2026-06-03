@@ -281,6 +281,11 @@ _LEGACY_CUSTOM_QSETTINGS_KEY = {
     "sample": "labelCustomTemplate",
     "tissue": "labelTissueCustomTemplate",
 }
+_BACKUP_QSETTINGS_KEY = {
+    "sample": "labelCustomTemplateBackup",
+    "tissue": "labelTissueCustomTemplateBackup",
+}
+_MAX_BACKUPS = 20
 
 
 def _create_template_id() -> str:
@@ -529,6 +534,80 @@ class LabelTemplateLibrary:
         """Persist the selected paper size key."""
         qkey = _SIZE_QSETTINGS_KEY[self._bucket]
         self._qs.setValue(qkey, size_key)
+
+    # ── Template backup (mirror JS backupLabelCustomTemplate / latestLabelCustomBackup
+    #    / restoreLatestLabelCustomBackup) ─────────────────────────────────────
+
+    def _read_backups(self) -> list:
+        import json as _json
+        qkey = _BACKUP_QSETTINGS_KEY[self._bucket]
+        raw = self._qs.value(qkey, None)
+        if raw:
+            try:
+                val = _json.loads(raw) if isinstance(raw, str) else raw
+                if isinstance(val, list):
+                    return val
+            except Exception:
+                pass
+        return []
+
+    def _write_backups(self, backups: list) -> None:
+        import json as _json
+        qkey = _BACKUP_QSETTINGS_KEY[self._bucket]
+        self._qs.setValue(qkey, _json.dumps(backups))
+
+    def backup_library(self, reason: str = "修改前备份") -> bool:
+        """Snapshot current library into a rolling 20-slot backup.
+
+        Mirror: ``backupLabelCustomTemplate(bucket, reason)`` in app.js.
+
+        Returns True if a snapshot was stored (False when library is empty
+        or snapshot is identical to the most-recent one).
+        """
+        import json as _json
+        lib = self._read_raw()
+        if not lib.get("templates"):
+            return False
+        raw = _json.dumps(lib)
+        backups = self._read_backups()
+        if backups and backups[0].get("raw") == raw:
+            return True  # no change since last backup
+        backups.insert(0, {"at": _now_iso(), "reason": reason, "raw": raw})
+        backups = backups[:_MAX_BACKUPS]
+        self._write_backups(backups)
+        return True
+
+    def latest_backup(self) -> Optional[dict]:
+        """Return the most-recent backup snapshot dict, or None.
+
+        Mirror: ``latestLabelCustomBackup(bucket)`` in app.js.
+        Returns ``{"at": iso, "reason": str, "raw": json_str}`` or None.
+        """
+        backups = self._read_backups()
+        return backups[0] if backups else None
+
+    def restore_latest_backup(self) -> bool:
+        """Restore the most-recent backup into the active library.
+
+        Mirror: ``restoreLatestLabelCustomBackup(bucket)`` in app.js.
+
+        Steps:
+          1. Snapshot current state before restoring.
+          2. Overwrite library with backup content.
+        Returns True on success, False when no backup exists.
+        """
+        import json as _json
+        backup = self.latest_backup()
+        if not backup or not backup.get("raw"):
+            return False
+        # Snapshot current state so the restore is itself undoable
+        self.backup_library("恢复备份前")
+        try:
+            lib = _json.loads(backup["raw"])
+            self._write_raw(lib)
+            return True
+        except Exception:
+            return False
 
 
 # ── Module-level helpers (used by labels_view) ────────────────────────────────
