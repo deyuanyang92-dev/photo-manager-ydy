@@ -52,13 +52,16 @@
 ## 仍缺、需双机真测
 
 - **mDNS 发现**：`CollabDiscoveryThread` 代码完整，但 WSL 网络栈对组播支持有限；建议实机 Windows 10/11 + zeroconf 安装后测试
-- **离线草稿**：本次不实现（简化决策：P2P 架构中网络失败=节点不在线，Qt app 会话内不持久化草稿）
-- **Photo index 上报**：`collabPostPhotoIndex` 未实现，需 `HeliconcService` / `ArchiveService` 完成后调用钩子，跨模块，本次不动
 - **L3 文件传输**（`/api/collab/files/*`）：collab.md 规格已定，不在本次范围
 
 ---
 
 ## 测试情况
 
-- 982 passed, 2 skipped（needs_network 跳过）——补缺前基线
-- 补缺后新增测试：`test_collab_service.py` 追加 `TestCollabSidebarWiring`、`TestCollabManagerDialog`、`TestStatusBroadcast`
+- **1244 passed, 2 skipped**（needs_network 跳过）——全套绿
+- `test_collab_service.py` 包含：
+  - `TestOfflineDraftQueue` (10) — loadCollabOfflineDrafts/save/mark/retry round-trip
+  - `TestPhotoIndexReporting` (4) — post_photo_index / PhotoIndexRecord.to_dict
+  - `TestSidebarCollabStrip` (4) — update_collab_status 接线
+  - `TestCollabManagerDialog` (7) — 弹窗 smoke + conflict banner + debug drawer
+  - `TestStatusBroadcast` (2) — broadcast_status_update httpx 调用校验

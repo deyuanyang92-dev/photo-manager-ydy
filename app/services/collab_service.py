@@ -56,6 +56,25 @@ from PyQt6.QtCore import QObject, QThread, QTimer, pyqtSignal
 
 logger = logging.getLogger(__name__)
 
+
+# ── Module-level helpers (defined early — used in dataclass field defaults) ───
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _get_local_ip() -> str:
+    """Best-effort LAN IP (not loopback).  Falls back to 127.0.0.1."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except OSError:
+        return "127.0.0.1"
+
+
 # ── Task state machine ────────────────────────────────────────────────────────
 
 class TaskStatus(str, Enum):
@@ -286,6 +305,22 @@ def _build_fastapi_app(store: TaskStore, node_info_fn: Callable[[], dict]) -> An
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return task.to_dict()
 
+    @app.post("/api/collab/photo-index")
+    async def receive_photo_index(request: Request) -> dict:
+        """Receive photo-index report from a peer after helicon/archive completion.
+
+        Mirrors web collabPostPhotoIndex — peers call this to inform us that
+        their specimen has jpg/tiff/zip files ready.  We acknowledge and let
+        the UI subscribe to signals for richer handling.
+        """
+        body = await request.json()
+        uid = body.get("uid", "")
+        kind = body.get("kind", "")
+        count = int(body.get("count", 0))
+        logger.debug("collab: photo-index received uid=%s kind=%s count=%d",
+                     uid, kind, count)
+        return {"ok": True, "uid": uid, "kind": kind, "count": count}
+
     @app.post("/api/collab/specimens/push")
     async def receive_specimen_push(request: Request) -> dict:
         """Accept specimen record pushed from a peer (L2 sync).
@@ -514,6 +549,62 @@ class _BrowserHandler:
 
 # ── Main service object ───────────────────────────────────────────────────────
 
+@dataclass
+class OfflineDraft:
+    """Queued create-task that failed to reach at least one peer (network unavailable).
+
+    Mirrors web ``collabMarkOfflineDraft`` / ``collabRetryOfflineDrafts``:
+        loadCollabOfflineDrafts()   → CollabService.load_offline_drafts()
+        saveCollabOfflineDrafts()   → CollabService.save_offline_drafts()
+        collabMarkOfflineDraft()    → CollabService.mark_offline_draft()
+        collabRetryOfflineDrafts()  → CollabService.retry_offline_drafts()
+    """
+    uid: str
+    assignee: Optional[str]
+    device_id: Optional[str]
+    queued_at: str = field(default_factory=_now_iso)
+
+    def to_dict(self) -> dict:
+        return {
+            "uid":       self.uid,
+            "assignee":  self.assignee,
+            "deviceId":  self.device_id,
+            "queuedAt":  self.queued_at,
+        }
+
+    @staticmethod
+    def from_dict(d: dict) -> "OfflineDraft":
+        return OfflineDraft(
+            uid=d["uid"],
+            assignee=d.get("assignee"),
+            device_id=d.get("deviceId"),
+            queued_at=d.get("queuedAt", _now_iso()),
+        )
+
+
+@dataclass
+class PhotoIndexRecord:
+    """Photo-index entry reported after helicon/archive completion.
+
+    Mirrors web ``collabPostPhotoIndex(uid, kind)``:
+        kind = "jpg" | "tiff" | "zip"
+    """
+    uid: str
+    kind: str          # "jpg" | "tiff" | "zip"
+    count: int = 0
+    reported_at: str = field(default_factory=_now_iso)
+    device_id: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "uid":        self.uid,
+            "kind":       self.kind,
+            "count":      self.count,
+            "reportedAt": self.reported_at,
+            "deviceId":   self.device_id,
+        }
+
+
 class CollabService(QObject):
     """Top-level collaboration service owned by the main window / AppContext.
 
@@ -524,6 +615,7 @@ class CollabService(QObject):
     conflict_detected(str):   uid that triggered a 409
     sync_error(str):          human-readable sync error message
     server_ready(int):        FastAPI server is up, listening on given port
+    offline_drafts_changed(): offline draft queue updated
     """
 
     peers_changed    = pyqtSignal()
@@ -531,6 +623,7 @@ class CollabService(QObject):
     conflict_detected = pyqtSignal(str)        # uid
     sync_error       = pyqtSignal(str)
     server_ready     = pyqtSignal(int)         # port
+    offline_drafts_changed = pyqtSignal()      # draft queue added/cleared
 
     def __init__(self, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
@@ -541,11 +634,19 @@ class CollabService(QObject):
         self._port: Optional[int] = None
         self._project_name: str = ""
 
+        # Offline draft queue (mirrors loadCollabOfflineDrafts / saveCollabOfflineDrafts)
+        self._offline_drafts: list[OfflineDraft] = []
+        self._offline_drafts_lock = threading.Lock()
+
         self._server_thread: Optional[CollabServerThread] = None
         self._discovery_thread: Optional[CollabDiscoveryThread] = None
         self._sync_timer = QTimer(self)
         self._sync_timer.setInterval(5000)
         self._sync_timer.timeout.connect(self._sync_all_peers)
+        # Retry timer — attempt to flush offline drafts when peers are present
+        self._retry_timer = QTimer(self)
+        self._retry_timer.setInterval(15000)   # 15 s retry cadence
+        self._retry_timer.timeout.connect(self._maybe_retry_offline_drafts)
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
 
@@ -576,10 +677,12 @@ class CollabService(QObject):
         self._discovery_thread.peer_lost.connect(self._on_peer_lost)
         self._discovery_thread.start()
         self._sync_timer.start()
+        self._retry_timer.start()
 
     def stop(self) -> None:
         """Gracefully shut down all background threads."""
         self._sync_timer.stop()
+        self._retry_timer.stop()
         if self._discovery_thread:
             self._discovery_thread.stop()
         if self._server_thread:
@@ -731,6 +834,143 @@ class CollabService(QObject):
             logger.debug("collab: remote create failed for %s: %s", peer.base_url, exc)
         return True, ""
 
+    # ── Offline draft queue ───────────────────────────────────────────────
+    # Mirrors: loadCollabOfflineDrafts / saveCollabOfflineDrafts /
+    #          collabMarkOfflineDraft / collabRetryOfflineDrafts
+
+    def load_offline_drafts(self) -> list[OfflineDraft]:
+        """Return a snapshot of the current offline draft queue (thread-safe)."""
+        with self._offline_drafts_lock:
+            return list(self._offline_drafts)
+
+    def save_offline_drafts(self, drafts: list[OfflineDraft]) -> None:
+        """Replace the entire offline draft queue (thread-safe).
+
+        In-memory only — mirrors web localStorage writes but avoids filesystem
+        coupling.  Serialisation callers can use ``draft.to_dict()`` themselves.
+        """
+        with self._offline_drafts_lock:
+            self._offline_drafts = list(drafts)
+        self.offline_drafts_changed.emit()
+
+    def mark_offline_draft(self, uid: str,
+                           assignee: Optional[str] = None,
+                           device_id: Optional[str] = None) -> OfflineDraft:
+        """Queue *uid* as an offline draft (mirrors collabMarkOfflineDraft).
+
+        Called when ``create_task`` detects a network failure (at least one
+        peer unreachable — not a 409 conflict).  The draft is stored in-memory
+        and retried when ``retry_offline_drafts`` is called.
+
+        Deduplicates by uid: calling again for the same uid is a no-op.
+        """
+        with self._offline_drafts_lock:
+            if any(d.uid == uid for d in self._offline_drafts):
+                return next(d for d in self._offline_drafts if d.uid == uid)
+            draft = OfflineDraft(uid=uid, assignee=assignee, device_id=device_id)
+            self._offline_drafts.append(draft)
+        logger.debug("collab: offline draft queued uid=%s", uid)
+        self.offline_drafts_changed.emit()
+        return draft
+
+    def retry_offline_drafts(self) -> int:
+        """Attempt to promote offline drafts to real tasks (mirrors collabRetryOfflineDrafts).
+
+        Returns the number of drafts that were successfully promoted.
+        Drafts that fail (still no peers or still conflict) remain in the queue.
+        """
+        with self._offline_drafts_lock:
+            pending = list(self._offline_drafts)
+
+        if not pending:
+            return 0
+
+        with self._peers_lock:
+            has_peers = bool(self._peers)
+
+        if not has_peers:
+            logger.debug("collab: retry skipped — no peers online")
+            return 0
+
+        promoted: list[str] = []
+        for draft in pending:
+            ok, msg = self.create_task(
+                uid=draft.uid,
+                assignee=draft.assignee,
+                device_id=draft.device_id,
+            )
+            if ok:
+                promoted.append(draft.uid)
+                logger.info("collab: offline draft promoted uid=%s", draft.uid)
+            else:
+                logger.debug("collab: offline draft still failing uid=%s msg=%s",
+                             draft.uid, msg)
+
+        if promoted:
+            with self._offline_drafts_lock:
+                self._offline_drafts = [
+                    d for d in self._offline_drafts if d.uid not in promoted
+                ]
+            self.offline_drafts_changed.emit()
+
+        return len(promoted)
+
+    def _maybe_retry_offline_drafts(self) -> None:
+        """Timer slot: silently attempt to flush offline drafts."""
+        try:
+            self.retry_offline_drafts()
+        except Exception:  # noqa: BLE001
+            pass
+
+    # ── Photo-index reporting ─────────────────────────────────────────────
+    # Mirrors: collabPostPhotoIndex(uid, kind)
+    # Called by HeliconeService / ArchiveService after completion.
+
+    def post_photo_index(self, uid: str, kind: str, count: int = 1) -> None:
+        """Report a photo-index update to all online peers (mirrors collabPostPhotoIndex).
+
+        Parameters
+        ----------
+        uid:
+            Specimen UID that was just composed / archived.
+        kind:
+            ``"jpg"`` | ``"tiff"`` | ``"zip"``
+        count:
+            Number of files in the batch (default 1).
+
+        Posts best-effort to each online peer's ``/api/collab/photo-index`` endpoint
+        (if the endpoint does not exist on the remote, the 404 is silently swallowed).
+        No return value — fire-and-forget.
+        """
+        with self._peers_lock:
+            peers_snapshot = list(self._peers.values())
+
+        if not peers_snapshot:
+            return
+
+        record = PhotoIndexRecord(
+            uid=uid,
+            kind=kind,
+            count=count,
+            device_id=self._hostname,
+        )
+        payload = record.to_dict()
+
+        try:
+            import httpx
+        except ImportError:
+            return
+
+        for peer in peers_snapshot:
+            try:
+                httpx.post(
+                    f"{peer.base_url}/api/collab/photo-index",
+                    json=payload,
+                    timeout=3.0,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
     # ── Node info ─────────────────────────────────────────────────────────
 
     def _node_info(self) -> dict:
@@ -748,19 +988,3 @@ class CollabService(QObject):
         return f"{ip}:{port}"
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _get_local_ip() -> str:
-    """Best-effort LAN IP (not loopback).  Falls back to 127.0.0.1."""
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
-    except OSError:
-        return "127.0.0.1"

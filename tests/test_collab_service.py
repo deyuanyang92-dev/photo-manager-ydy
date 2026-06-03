@@ -647,6 +647,164 @@ class TestStatusBroadcast:
         svc.stop()
 
 
+# ── Offline draft queue ───────────────────────────────────────────────────────
+
+
+class TestOfflineDraftQueue:
+    """Mirrors web loadCollabOfflineDrafts / saveCollabOfflineDrafts /
+    collabMarkOfflineDraft / collabRetryOfflineDrafts.
+    """
+
+    def _make_service(self) -> CollabService:
+        svc = CollabService()
+        svc._project_name = "OfflineTest"
+        return svc
+
+    def test_initial_queue_empty(self):
+        svc = self._make_service()
+        assert svc.load_offline_drafts() == []
+
+    def test_mark_offline_draft_adds_entry(self):
+        svc = self._make_service()
+        draft = svc.mark_offline_draft("OD-001", assignee="Alice")
+        assert draft.uid == "OD-001"
+        assert draft.assignee == "Alice"
+        drafts = svc.load_offline_drafts()
+        assert len(drafts) == 1
+        assert drafts[0].uid == "OD-001"
+
+    def test_mark_offline_draft_deduplicates(self):
+        """Marking the same UID twice keeps only one entry."""
+        svc = self._make_service()
+        svc.mark_offline_draft("OD-DUP", assignee="A")
+        svc.mark_offline_draft("OD-DUP", assignee="B")
+        assert len(svc.load_offline_drafts()) == 1
+
+    def test_mark_offline_draft_emits_signal(self):
+        svc = self._make_service()
+        received: list[int] = []
+        svc.offline_drafts_changed.connect(lambda: received.append(1))
+        svc.mark_offline_draft("OD-SIG")
+        assert len(received) >= 1
+
+    def test_save_offline_drafts_replaces_queue(self):
+        from app.services.collab_service import OfflineDraft
+        svc = self._make_service()
+        svc.mark_offline_draft("OD-OLD")
+        new_drafts = [OfflineDraft(uid="OD-NEW", assignee=None, device_id=None)]
+        svc.save_offline_drafts(new_drafts)
+        drafts = svc.load_offline_drafts()
+        assert len(drafts) == 1
+        assert drafts[0].uid == "OD-NEW"
+
+    def test_save_empty_clears_queue(self):
+        svc = self._make_service()
+        svc.mark_offline_draft("OD-CLEAR")
+        svc.save_offline_drafts([])
+        assert svc.load_offline_drafts() == []
+
+    def test_retry_skips_when_no_peers(self):
+        """Without peers, retry returns 0 and queue is unchanged."""
+        svc = self._make_service()
+        svc.mark_offline_draft("OD-NOPEER")
+        promoted = svc.retry_offline_drafts()
+        assert promoted == 0
+        assert len(svc.load_offline_drafts()) == 1
+
+    def test_retry_promotes_when_peer_available(self):
+        """With a peer that accepts, draft is promoted and removed from queue."""
+        svc = self._make_service()
+        svc.mark_offline_draft("OD-RETRY")
+
+        # Add a fake peer so the retry path runs
+        from app.services.collab_service import PeerInfo
+        svc._peers["10.9.9.1:5050"] = PeerInfo(ip="10.9.9.1", port=5050)
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 201
+        mock_resp.json.return_value = {"uid": "OD-RETRY", "status": "created"}
+
+        with patch("httpx.post", return_value=mock_resp):
+            promoted = svc.retry_offline_drafts()
+
+        assert promoted == 1
+        # Should be removed from queue after promotion
+        assert all(d.uid != "OD-RETRY" for d in svc.load_offline_drafts())
+
+    def test_offline_draft_to_dict_round_trip(self):
+        from app.services.collab_service import OfflineDraft
+        d = OfflineDraft(uid="RT-001", assignee="Bob", device_id="DEV-X")
+        rd = OfflineDraft.from_dict(d.to_dict())
+        assert rd.uid == "RT-001"
+        assert rd.assignee == "Bob"
+        assert rd.device_id == "DEV-X"
+
+
+# ── Photo-index reporting ─────────────────────────────────────────────────────
+
+
+class TestPhotoIndexReporting:
+    """Mirrors web collabPostPhotoIndex(uid, kind).
+    Verifies post_photo_index POSTs to peers and the FastAPI endpoint accepts it.
+    """
+
+    def _make_service(self) -> CollabService:
+        svc = CollabService()
+        svc._project_name = "PhotoIndexTest"
+        return svc
+
+    def test_post_photo_index_no_peers_no_http(self):
+        """Without peers, no HTTP call is made."""
+        svc = self._make_service()
+        with patch("httpx.post") as mock_post:
+            svc.post_photo_index("PI-001", "tiff", count=3)
+            mock_post.assert_not_called()
+
+    def test_post_photo_index_calls_peer(self):
+        """With one peer, httpx.post is called with the photo-index endpoint."""
+        svc = self._make_service()
+        from app.services.collab_service import PeerInfo
+        svc._peers["10.9.9.2:5050"] = PeerInfo(ip="10.9.9.2", port=5050)
+
+        posted: list[dict] = []
+
+        def fake_post(url: str, **kwargs):
+            posted.append({"url": url, "json": kwargs.get("json", {})})
+            m = MagicMock()
+            m.status_code = 200
+            return m
+
+        with patch("httpx.post", side_effect=fake_post):
+            svc.post_photo_index("PI-002", "zip", count=1)
+
+        assert len(posted) == 1
+        assert "photo-index" in posted[0]["url"]
+        assert posted[0]["json"]["uid"] == "PI-002"
+        assert posted[0]["json"]["kind"] == "zip"
+        assert posted[0]["json"]["count"] == 1
+
+    def test_post_photo_index_network_error_silent(self):
+        """Network failure is silently swallowed (fire-and-forget)."""
+        svc = self._make_service()
+        from app.services.collab_service import PeerInfo
+        svc._peers["10.9.9.3:5050"] = PeerInfo(ip="10.9.9.3", port=5050)
+
+        import httpx
+        with patch("httpx.post", side_effect=httpx.ConnectError("refused")):
+            # Must not raise
+            svc.post_photo_index("PI-003", "jpg")
+
+    def test_photo_index_record_to_dict(self):
+        from app.services.collab_service import PhotoIndexRecord
+        r = PhotoIndexRecord(uid="R-001", kind="tiff", count=5, device_id="DEV-1")
+        d = r.to_dict()
+        assert d["uid"] == "R-001"
+        assert d["kind"] == "tiff"
+        assert d["count"] == 5
+        assert d["deviceId"] == "DEV-1"
+        assert "reportedAt" in d
+
+
 # ── Needs-network placeholder tests ──────────────────────────────────────────
 
 @needs_network
