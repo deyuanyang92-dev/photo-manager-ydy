@@ -818,8 +818,17 @@ class _BucketColWidget(QWidget):
     def selected_template(self) -> dict:
         """Return the normalized active template dict."""
         key = self._selected_template_key
-        if key == "custom" and self._custom_template:
-            return normalize_template(self._custom_template)
+        # Library record: custom:<id>
+        if is_library_key(key):
+            rec_id = id_from_key(key)
+            rec = self._lib.get(rec_id)
+            if rec and rec.get("template"):
+                return normalize_template(rec["template"])
+            # Fallback if record was deleted
+            default_key = "tissueCompact" if self._is_tissue else "standard"
+            self._selected_template_key = default_key
+            return normalize_template(BUILTIN_TEMPLATES[default_key])
+        # Built-in template
         return normalize_template(BUILTIN_TEMPLATES.get(key, BUILTIN_TEMPLATES.get(
             "tissueCompact" if self._is_tissue else "standard"
         )))
