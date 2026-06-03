@@ -497,6 +497,280 @@ class _HistoryDialog(QDialog):
         return None
 
 
+# ── Facet filter panel (mirrors renderTaxonFacetMenu in app.js) ──────────────
+
+class _TaxonFacetPanel(QFrame):
+    """Per-column facet filter popup (mirrors renderTaxonFacetMenu in app.js)."""
+
+    filter_applied = pyqtSignal(str, object)
+    sort_requested = pyqtSignal(str, str)
+
+    def __init__(self, column_key: str, column_label: str, all_records: list[dict[str, Any]], current_predicate: Optional[dict[str, Any]] = None, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent, Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.setObjectName("TaxonFacetPanel")
+        self._col_key = column_key
+        self._col_label = column_label
+        self._all_records = all_records
+        self._draft: Optional[dict[str, Any]] = dict(current_predicate) if current_predicate else {"mode": "all"}
+        self._search_text = ""
+        self._build_ui()
+        self._fill_values()
+        self.setStyleSheet("QFrame#TaxonFacetPanel { background: #10242a; border: 1px solid rgba(145,182,181,0.25); border-radius: 8px; }")
+        self.setMinimumWidth(280)
+
+    def _build_ui(self) -> None:
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 14, 14, 10)
+        layout.setSpacing(8)
+        layout.addWidget(self._make_label(f"{self._col_label} 筛选", "13px", "600", "#eef3ef"))
+        sort_row = QHBoxLayout()
+        for txt, d in [("升序", "asc"), ("降序", "desc")]:
+            b = QPushButton(txt); b.setObjectName("Outline"); b.setFixedHeight(24)
+            b.clicked.connect(lambda _=False, dd=d: self.sort_requested.emit(self._col_key, dd))
+            sort_row.addWidget(b)
+        sort_row.addStretch(); layout.addLayout(sort_row)
+        self._search_inp = QLineEdit(); self._search_inp.setPlaceholderText("在此列搜索值..."); self._search_inp.setFixedHeight(28)
+        self._search_inp.textChanged.connect(self._on_search_changed); layout.addWidget(self._search_inp)
+        sel_row = QHBoxLayout(); sel_row.setSpacing(6)
+        for txt, fn in [("全选", self._on_select_all), ("全不选", self._on_select_none)]:
+            b = QPushButton(txt); b.setObjectName("Outline"); b.setFixedHeight(22); b.clicked.connect(fn); sel_row.addWidget(b)
+        self._btn_found = QPushButton("选搜索结果"); self._btn_found.setObjectName("Outline"); self._btn_found.setFixedHeight(22)
+        self._btn_found.setEnabled(False); self._btn_found.clicked.connect(self._on_select_found); sel_row.addWidget(self._btn_found); sel_row.addStretch(); layout.addLayout(sel_row)
+        self._meta_label = QLabel(""); self._meta_label.setStyleSheet("color: #87a2a1; font-size: 11px; background: transparent;"); layout.addWidget(self._meta_label)
+        self._values_list = QListWidget(); self._values_list.setMaximumHeight(200)
+        self._values_list.setStyleSheet("QListWidget { background: #061c1e; border: 1px solid rgba(145,182,181,0.12); border-radius: 4px; } QListWidget::item { color: #eef3ef; padding: 3px 6px; }")
+        layout.addWidget(self._values_list, 1)
+        act_row = QHBoxLayout(); act_row.setSpacing(6)
+        btn_ok = QPushButton("确定"); btn_ok.setObjectName("Primary"); btn_ok.setFixedHeight(28); btn_ok.clicked.connect(self._on_apply); act_row.addWidget(btn_ok)
+        btn_cancel = QPushButton("取消"); btn_cancel.setObjectName("Outline"); btn_cancel.setFixedHeight(28); btn_cancel.clicked.connect(self.close); act_row.addWidget(btn_cancel)
+        btn_clear = QPushButton("清除筛选"); btn_clear.setObjectName("Outline"); btn_clear.setFixedHeight(28); btn_clear.clicked.connect(self._on_clear); act_row.addWidget(btn_clear)
+        layout.addLayout(act_row)
+
+    @staticmethod
+    def _make_label(text: str, size: str, weight: str, color: str) -> QLabel:
+        lbl = QLabel(text); lbl.setStyleSheet(f"font-size: {size}; font-weight: {weight}; color: {color}; background: transparent;"); return lbl
+
+    def _unique_values(self) -> list[tuple[str, int]]:
+        counts: dict[str, int] = {}
+        q = self._search_text.strip().lower()
+        for rec in self._all_records:
+            v = str(rec.get(self._col_key, "") or "")
+            if q and q not in v.lower(): continue
+            counts[v] = counts.get(v, 0) + 1
+        return sorted(counts.items(), key=lambda x: (-x[1], x[0]))
+
+    def _fill_values(self) -> None:
+        items = self._unique_values()
+        self._values_list.clear()
+        total_unique = len({str(r.get(self._col_key, "")) for r in self._all_records})
+        self._meta_label.setText(f"匹配 {len(items)} / {total_unique} 个值")
+        try: self._values_list.itemChanged.disconnect()
+        except (RuntimeError, TypeError): pass
+        for value, count in items:
+            item = QListWidgetItem(f"{value or '(空白)'}  ({count})")
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
+            item.setCheckState(Qt.CheckState.Checked if self._value_checked(value) else Qt.CheckState.Unchecked)
+            item.setData(Qt.ItemDataRole.UserRole, value)
+            self._values_list.addItem(item)
+        self._values_list.itemChanged.connect(self._on_item_changed)
+
+    def _value_checked(self, value: str) -> bool:
+        """Mirrors taxonFacetValueChecked(menu, value) in app.js."""
+        draft = self._draft or {"mode": "all"}
+        mode = draft.get("mode", "all")
+        if mode == "include": return value in (draft.get("values") or [])
+        if mode == "exclude": return value not in (draft.get("excluded") or [])
+        if mode == "search":
+            q = draft.get("search", "")
+            return ((not q) or (q.lower() in value.lower())) and value not in (draft.get("excluded") or [])
+        return True
+
+    def _on_search_changed(self, text: str) -> None:
+        self._search_text = text; self._btn_found.setEnabled(bool(text.strip())); self._fill_values()
+
+    def _on_item_changed(self, item: QListWidgetItem) -> None:
+        """Mirrors toggleTaxonFacetValue in app.js."""
+        value: str = item.data(Qt.ItemDataRole.UserRole)
+        checked = item.checkState() == Qt.CheckState.Checked
+        draft = self._draft or {"mode": "all"}; mode = draft.get("mode", "all")
+        if mode == "all":
+            if not checked: self._draft = {"mode": "exclude", "excluded": [value]}
+            return
+        if mode == "include":
+            vals: list = list(draft.get("values") or [])
+            if checked and value not in vals: vals.append(value)
+            elif not checked: vals = [v for v in vals if v != value]
+            self._draft = {"mode": "include", "values": vals}; return
+        excl: list = list(draft.get("excluded") or [])
+        if not checked and value not in excl: excl.append(value)
+        elif checked: excl = [v for v in excl if v != value]
+        self._draft = {**draft, "excluded": excl}
+
+    def _on_select_all(self) -> None: self._draft = {"mode": "all"}; self._fill_values()
+    def _on_select_none(self) -> None: self._draft = {"mode": "include", "values": []}; self._fill_values()
+
+    def _on_select_found(self) -> None:
+        q = self._search_text.strip()
+        if q: self._draft = {"mode": "search", "search": q, "excluded": []}; self._fill_values()
+
+    def _on_apply(self) -> None:
+        draft = self._draft or {"mode": "all"}
+        self.filter_applied.emit(self._col_key, None if draft.get("mode") == "all" else dict(draft))
+        self.close()
+
+    def _on_clear(self) -> None: self.filter_applied.emit(self._col_key, None); self.close()
+
+    def show_below(self, ref_widget: QWidget) -> None:
+        self.move(ref_widget.mapToGlobal(QPoint(0, ref_widget.height() + 2))); self.show(); self.raise_(); self.activateWindow()
+
+
+# ── WoRMS background worker ───────────────────────────────────────────────────
+
+class _WormsSearchWorker(QThread):
+    """Background thread for WoRMS name search + classification lookup."""
+
+    results_ready = pyqtSignal(list)
+    chain_ready = pyqtSignal(list)
+    error_occurred = pyqtSignal(str)
+
+    def __init__(self, worms_svc: "WormsService", query: str, like: bool = True, aphia_id: Optional[int] = None, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._svc = worms_svc; self._query = query; self._like = like; self._aphia_id = aphia_id
+
+    def run(self) -> None:
+        try:
+            if self._aphia_id is not None:
+                self.chain_ready.emit(self._svc.flatten_classification(self._svc.classification(self._aphia_id)))
+            else:
+                self.results_ready.emit(self._svc.search(self._query, like=self._like))
+        except Exception as exc:
+            self.error_occurred.emit(str(exc))
+
+
+# ── WoRMS match dialog (mirrors renderWormsMatchModal in app.js) ──────────────
+
+class _WormsMatchDialog(QDialog):
+    """Search WoRMS and select the correct candidate (mirrors renderWormsMatchModal)."""
+
+    def __init__(self, row: dict[str, Any], worms_svc: "WormsService", parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._row = row; self._svc = worms_svc; self._selected: Optional[dict[str, Any]] = None
+        self._chain: list[dict[str, Any]] = []; self._worker: Optional[_WormsSearchWorker] = None; self._result: Optional[dict[str, Any]] = None
+        self.setWindowTitle("WoRMS 匹配物种"); self.setMinimumWidth(680); self.setMinimumHeight(420)
+        self._build_ui(); self._do_search()
+
+    def _build_ui(self) -> None:
+        layout = QVBoxLayout(self); layout.setContentsMargins(18, 18, 18, 14); layout.setSpacing(10)
+        t = QLabel("WoRMS 匹配物种"); t.setStyleSheet("font-size: 16px; font-weight: 600; color: #eef3ef;"); layout.addWidget(t)
+        o = QLabel(f"原始种名：{self._row.get('species', '')}"); o.setStyleSheet("color: #87a2a1; font-size: 12px;"); layout.addWidget(o)
+        sr = QHBoxLayout(); sr.setSpacing(8)
+        self._search_input = QLineEdit(); self._search_input.setPlaceholderText("输入科学名"); self._search_input.setText(self._row.get("species", "")); self._search_input.returnPressed.connect(self._do_search); sr.addWidget(self._search_input, 1)
+        self._fuzzy_check = QCheckBox("模糊匹配"); self._fuzzy_check.setStyleSheet("color: #87a2a1;"); sr.addWidget(self._fuzzy_check)
+        bs = QPushButton("搜索"); bs.setObjectName("Outline"); bs.setFixedWidth(60); bs.clicked.connect(self._do_search); sr.addWidget(bs); layout.addLayout(sr)
+        self._error_label = QLabel(""); self._error_label.setStyleSheet("color: #e66e63; font-size: 11px;"); self._error_label.hide(); layout.addWidget(self._error_label)
+        self._loading_label = QLabel("正在查询 WoRMS..."); self._loading_label.setStyleSheet("color: #29b9ab; font-size: 12px;"); self._loading_label.hide(); layout.addWidget(self._loading_label)
+        body = QSplitter(Qt.Orientation.Horizontal); body.setHandleWidth(6)
+        self._results_list = QListWidget(); self._results_list.setStyleSheet("QListWidget { background: #0d1e24; border: 1px solid rgba(145,182,181,0.12); border-radius: 4px; } QListWidget::item { color: #eef3ef; padding: 6px 8px; } QListWidget::item:selected { background: #1e3a5f; }")
+        self._results_list.currentItemChanged.connect(self._on_result_selected); body.addWidget(self._results_list)
+        df = QFrame(); df.setStyleSheet("QFrame { background: #0d1e24; border: 1px solid rgba(145,182,181,0.12); border-radius: 4px; }")
+        dl = QVBoxLayout(df); dl.setContentsMargins(10, 10, 10, 10); dl.setSpacing(4)
+        dt = QLabel("采用后保存的 WoRMS 分类链"); dt.setStyleSheet("font-size: 11px; font-weight: 600; color: #87a2a1; background: transparent;"); dl.addWidget(dt)
+        self._chain_label = QLabel("选择候选后预览标准分类阶元"); self._chain_label.setStyleSheet("color: #5f7d7a; font-size: 11px; background: transparent;"); self._chain_label.setWordWrap(True); self._chain_label.setAlignment(Qt.AlignmentFlag.AlignTop); dl.addWidget(self._chain_label)
+        self._chain_loading_label = QLabel("加载分类链..."); self._chain_loading_label.setStyleSheet("color: #29b9ab; font-size: 11px; background: transparent;"); self._chain_loading_label.hide(); dl.addWidget(self._chain_loading_label); dl.addStretch()
+        body.addWidget(df); body.setSizes([340, 300]); layout.addWidget(body, 1)
+        ar = QHBoxLayout(); ar.setSpacing(8)
+        ms = self._row.get("mappingStatus", ""); bl = "重新匹配并保存" if ms and ms != "unprocessed" else "采用并保存"
+        self._btn_save = QPushButton(bl); self._btn_save.setObjectName("Primary"); self._btn_save.setEnabled(False); self._btn_save.clicked.connect(self._on_save); ar.addWidget(self._btn_save)
+        bn = QPushButton("标记未找到"); bn.setObjectName("Outline"); bn.clicked.connect(self._on_no_match); ar.addWidget(bn)
+        bc = QPushButton("取消"); bc.setObjectName("Outline"); bc.clicked.connect(self.reject); ar.addWidget(bc); ar.addStretch(); layout.addLayout(ar)
+
+    def _do_search(self) -> None:
+        query = self._search_input.text().strip()
+        if not query: return
+        if self._worker and self._worker.isRunning(): self._worker.terminate()
+        self._selected = None; self._chain = []; self._error_label.hide(); self._loading_label.show(); self._results_list.clear(); self._chain_label.setText("选择候选后预览标准分类阶元"); self._btn_save.setEnabled(False)
+        self._worker = _WormsSearchWorker(self._svc, query, like=self._fuzzy_check.isChecked(), parent=self)
+        self._worker.results_ready.connect(self._on_results_ready); self._worker.error_occurred.connect(self._on_search_error); self._worker.start()
+
+    def _on_results_ready(self, hits: list[dict[str, Any]]) -> None:
+        self._loading_label.hide(); self._results_list.clear()
+        if not hits:
+            item = QListWidgetItem("未找到候选，请修改关键词或启用模糊匹配。"); item.setFlags(Qt.ItemFlag.NoItemFlags); item.setForeground(QColor("#5f7d7a")); self._results_list.addItem(item); return
+        for rec in hits:
+            name = rec.get("valid_name") or rec.get("scientificname") or ""; aphia = rec.get("valid_AphiaID") or rec.get("AphiaID", ""); status = rec.get("status", "")
+            chain_str = " > ".join(p for p in [rec.get("class"), rec.get("order"), rec.get("family"), rec.get("genus")] if p)
+            item = QListWidgetItem(f"{name}\n{status} · AphiaID {aphia}\n{chain_str}"); item.setData(Qt.ItemDataRole.UserRole, rec); self._results_list.addItem(item)
+
+    def _on_search_error(self, msg: str) -> None:
+        self._loading_label.hide(); self._error_label.setText(f"搜索失败：{msg}"); self._error_label.show()
+
+    def _on_result_selected(self, current: Optional[QListWidgetItem], _: Optional[QListWidgetItem]) -> None:
+        if current is None: return
+        rec = current.data(Qt.ItemDataRole.UserRole)
+        if rec is None: return
+        self._selected = rec; aphia_id = rec.get("valid_AphiaID") or rec.get("AphiaID")
+        if not aphia_id: return
+        self._chain_label.hide(); self._chain_loading_label.show(); self._btn_save.setEnabled(False)
+        w = _WormsSearchWorker(self._svc, "", aphia_id=int(aphia_id), parent=self)
+        w.chain_ready.connect(self._on_chain_ready); w.error_occurred.connect(self._on_chain_error); w.start()
+
+    def _on_chain_ready(self, chain: list[dict[str, Any]]) -> None:
+        self._chain = chain; self._chain_loading_label.hide(); self._chain_label.show()
+        self._chain_label.setText("\n".join(f"{n.get('rank','')}  {n.get('scientificname','')}" for n in chain) or "（无分类链数据）")
+        self._btn_save.setEnabled(True)
+
+    def _on_chain_error(self, msg: str) -> None:
+        self._chain_loading_label.hide(); self._chain_label.show(); self._chain_label.setText(f"分类链加载失败：{msg}"); self._btn_save.setEnabled(bool(self._selected))
+
+    def _on_save(self) -> None:
+        if self._selected is None: return
+        aphia = self._selected.get("valid_AphiaID") or self._selected.get("AphiaID")
+        self._result = {"aphia_id": int(aphia) if aphia else None, "worms_record": self._selected, "chain": self._chain}; self.accept()
+
+    def _on_no_match(self) -> None: self._result = {"no_match": True}; self.accept()
+
+    def get_result(self) -> Optional[dict[str, Any]]: return self._result
+
+
+# ── WoRMS review dialog (mirrors renderTaxonReviewModal in app.js) ─────────────
+
+class _TaxonReviewDialog(QDialog):
+    """Review auto-found WoRMS candidates (mirrors renderTaxonReviewModal in app.js)."""
+
+    def __init__(self, row: dict[str, Any], parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._row = row; self._result: Optional[dict[str, Any]] = None
+        self.setWindowTitle("审核 WoRMS 匹配"); self.setMinimumWidth(440); self._build_ui()
+
+    def _build_ui(self) -> None:
+        layout = QVBoxLayout(self); layout.setContentsMargins(18, 18, 18, 14); layout.setSpacing(10)
+        t = QLabel("审核 WoRMS 匹配"); t.setStyleSheet("font-size: 16px; font-weight: 600; color: #eef3ef;"); layout.addWidget(t)
+        o = QLabel(f"原始种名：{self._row.get('species', '')}"); o.setStyleSheet("color: #87a2a1; font-size: 12px;"); layout.addWidget(o)
+        candidates = self._row.get("mappingCandidates") or []
+        if not candidates:
+            e = QLabel("没有自动候选，可标记为未找到后重新运行更新。"); e.setStyleSheet("color: #5f7d7a; font-size: 12px;"); e.setWordWrap(True); layout.addWidget(e)
+        else:
+            for cand in candidates:
+                rf = QFrame(); rf.setStyleSheet("QFrame { background: #0d1e24; border: 1px solid rgba(145,182,181,0.12); border-radius: 4px; }")
+                rl = QHBoxLayout(rf); rl.setContentsMargins(10, 8, 10, 8); rl.setSpacing(8)
+                aphia = cand.get("valid_AphiaID") or cand.get("AphiaID") or ""; name = cand.get("valid_name") or cand.get("scientificname") or ""
+                info = QLabel(f"{name} · AphiaID {aphia}"); info.setStyleSheet("color: #eef3ef; font-size: 12px; background: transparent;"); rl.addWidget(info, 1)
+                bu = QPushButton("采用"); bu.setObjectName("Primary"); bu.setFixedWidth(56)
+                bu.clicked.connect(lambda _=False, c=cand: self._on_use(c)); rl.addWidget(bu); layout.addWidget(rf)
+        ar = QHBoxLayout(); ar.setSpacing(8)
+        bn = QPushButton("标记未找到"); bn.setObjectName("Outline"); bn.clicked.connect(self._on_no_match); ar.addWidget(bn)
+        bc = QPushButton("关闭"); bc.setObjectName("Outline"); bc.clicked.connect(self.reject); ar.addWidget(bc); ar.addStretch(); layout.addLayout(ar)
+
+    def _on_use(self, cand: dict[str, Any]) -> None:
+        aphia = cand.get("valid_AphiaID") or cand.get("AphiaID")
+        self._result = {"aphia_id": int(aphia) if aphia else None}; self.accept()
+
+    def _on_no_match(self) -> None: self._result = {"no_match": True}; self.accept()
+
+    def get_result(self) -> Optional[dict[str, Any]]: return self._result
+
+
 # ── Column-group chip button (taxon-col-chip style) ───────────────────────────
 
 class _ChipButton(QPushButton):
@@ -1517,6 +1791,183 @@ class TaxonomyView(BaseView):
         self._table.clearSelection()
         self._update_selection_note()
 
+    # ── Row context menu (mirrors openTaxonRowMenu / renderTaxonRowMenu) ──────
+
+    def _on_row_context_menu(self, pos: QPoint) -> None:
+        index = self._table.indexAt(pos)
+        if not index.isValid():
+            return
+        rec = self._model.record_at(index.row())
+        if rec is None:
+            return
+        menu = QMenu(self._table)
+        menu.setStyleSheet("QMenu { background: #10242a; color: #eef3ef; border: 1px solid rgba(145,182,181,0.2); border-radius: 6px; } QMenu::item { padding: 6px 18px; font-size: 12px; } QMenu::item:selected { background: rgba(41,185,171,0.15); } QMenu::separator { background: rgba(145,182,181,0.12); height: 1px; margin: 4px 0; }")
+        title_action = menu.addAction(rec.get("species") or rec.get("class") or "当前记录")
+        title_action.setEnabled(False)
+        menu.addSeparator()
+        wm = menu.addAction("WoRMS 匹配当前物种")
+        wm.triggered.connect(lambda: self._on_worms_match_row(rec))
+        mapping_candidates = rec.get("mappingCandidates") or []
+        if mapping_candidates:
+            ra = menu.addAction(f"审核 WoRMS 候选（{len(mapping_candidates)} 个）")
+            ra.triggered.connect(lambda: self._on_review_worms_row(rec))
+        checked_ids = self._model.checked_ids() or self._selected_ids
+        if len(checked_ids) > 1 and rec.get("recordId") in checked_ids:
+            menu.addSeparator()
+            ba = menu.addAction(f"WoRMS 更新已选 {len(checked_ids)} 条")
+            ba.triggered.connect(lambda: self._on_worms_update(selected_only=True))
+        if self._select_all_filtered:
+            menu.addSeparator()
+            fa = menu.addAction(f"WoRMS 更新全部筛选结果 {self._total} 条")
+            fa.triggered.connect(lambda: self._on_worms_update(selected_only=False))
+        if rec.get("recordId", "").startswith("user:"):
+            menu.addSeparator()
+            ea = menu.addAction("编辑"); ea.triggered.connect(lambda: self._edit_record(rec))
+            da = menu.addAction("删除"); da.triggered.connect(lambda: self._delete_record(rec))
+        menu.exec(self._table.viewport().mapToGlobal(pos))
+
+    # ── Column header facet filter (mirrors openTaxonFacetMenu) ──────────────
+
+    def _on_header_context_menu(self, pos: QPoint) -> None:
+        self._open_facet_for_column(self._table.horizontalHeader().logicalIndexAt(pos))
+
+    def _open_facet_for_column(self, logical_col: int) -> None:
+        if self._svc is None:
+            return
+        data_idx = logical_col - _COL_DATA_START
+        cols = self._model.columns()
+        if data_idx < 0 or data_idx >= len(cols):
+            return
+        col_def = cols[data_idx]
+        all_recs, total = self._svc.all_records(page=0, page_size=1_000_000)
+        if len(all_recs) < total:
+            all_recs, _ = self._svc.all_records(page=0, page_size=max(total, 1))
+        if self._facet_panel is not None:
+            self._facet_panel.close()
+        panel = _TaxonFacetPanel(col_def["key"], col_def["label"], all_recs, current_predicate=self._col_filters.get(col_def["key"]), parent=self)
+        panel.filter_applied.connect(self._on_facet_filter_applied)
+        panel.sort_requested.connect(self._on_facet_sort)
+        header = self._table.horizontalHeader()
+        x = header.sectionViewportPosition(logical_col)
+        panel.move(self._table.mapToGlobal(QPoint(x, header.height())))
+        panel.show(); panel.raise_(); panel.activateWindow()
+        self._facet_panel = panel
+
+    def _on_facet_filter_applied(self, col_key: str, predicate: Optional[dict[str, Any]]) -> None:
+        if predicate is None: self._col_filters.pop(col_key, None)
+        else: self._col_filters[col_key] = predicate
+        self._page = 1; self._selected_ids.clear(); self._select_all_filtered = False
+        self._model.clear_checked(); self._facet_panel = None; self._load_page()
+
+    def _on_facet_sort(self, col_key: str, direction: str) -> None:
+        self._sort_col = col_key; self._sort_dir = direction; self._page = 1; self._load_page()
+
+    # ── WoRMS service helpers ─────────────────────────────────────────────────
+
+    def _worms_data_dir(self) -> Path:
+        project_dir = getattr(self.ctx, "current_project_dir", None)
+        if project_dir: return Path(project_dir) / "_data"
+        return Path.home() / ".photo_workbench" / "data"
+
+    def _ensure_worms_svc(self) -> Optional[WormsService]:
+        if self._worms_svc is not None: return self._worms_svc
+        data_dir = self._worms_data_dir(); data_dir.mkdir(parents=True, exist_ok=True)
+        self._worms_svc = WormsService(cache_path=str(data_dir / "worms_cache.json"), jobs_path=str(data_dir / "worms_jobs.json"))
+        return self._worms_svc
+
+    # ── WoRMS match / review / resolve ────────────────────────────────────────
+
+    # ── WoRMS update (mirrors startTaxonomyWormsJob in app.js) ───────────────
+
+    def _on_worms_update(self, selected_only: bool) -> None:
+        record_ids = self._worms_update_record_ids(selected_only)
+        if not record_ids: QMessageBox.information(self, "WoRMS 更新", "没有可更新的分类条目。"); return
+        service = self._ensure_worms_svc()
+        if service is None: return
+        try:
+            job = service.create_job(record_ids, source="selected" if selected_only and not self._select_all_filtered else "filtered")
+        except Exception as exc: QMessageBox.warning(self, "WoRMS 更新", f"创建任务失败：{exc}"); return
+        setattr(self.ctx, "pending_worms_job_id", job.id)
+        self._navigate_to_worms()
+        QMessageBox.information(self, "WoRMS 更新", f"已创建 WoRMS 批量任务 {job.id[:8]}…，共 {len(record_ids)} 条。")
+
+    def _worms_update_record_ids(self, selected_only: bool) -> list[str]:
+        if self._svc is None: return []
+        if selected_only and not self._select_all_filtered:
+            return list(dict.fromkeys(rid for rid in (self._model.checked_ids() or self._selected_ids) if rid))
+        source_filter = "seed" if self._view == "worms" else None
+        rows, total = self._svc.all_records(source_filter=source_filter, page=0, page_size=1_000_000)
+        if len(rows) < total: rows, _ = self._svc.all_records(source_filter=source_filter, page=0, page_size=max(total, 1))
+        ids: list[str] = []
+        for idx, rec in enumerate(rows):
+            if self._filter_text and not self._record_matches_filter(rec): continue
+            ids.append(self._taxonomy_record_id(rec, idx, source_filter))
+        return ids
+
+    def _taxonomy_record_id(self, rec: dict[str, Any], index: int, source_filter: Optional[str] = None) -> str:
+        rid = str(rec.get("recordId") or "").strip()
+        if rid: return rid
+        return f"{source_filter or ('user' if str(rec.get('recordId', '')).startswith('user:') else 'seed')}:{index}"
+
+    def _navigate_to_worms(self) -> None:
+        win = self.window()
+        nav = getattr(win, "navigate_to", None)
+        if callable(nav): nav("worms")
+        wv = getattr(win, "_views", {}).get("worms") if hasattr(win, "_views") else None
+        ref = getattr(wv, "_refresh_jobs", None)
+        if callable(ref): ref()
+
+    def _on_worms_match_row(self, rec: dict[str, Any]) -> None:
+        worms_svc = self._ensure_worms_svc()
+        if worms_svc is None: QMessageBox.warning(self, "WoRMS", "WoRMS 服务不可用"); return
+        dlg = _WormsMatchDialog(rec, worms_svc, parent=self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            result = dlg.get_result()
+            if result: self._on_resolve_mapping(rec, result)
+
+    def _on_review_worms_row(self, rec: dict[str, Any]) -> None:
+        dlg = _TaxonReviewDialog(rec, parent=self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            result = dlg.get_result()
+            if result: self._on_resolve_mapping(rec, result)
+
+    def _on_resolve_mapping(self, rec: dict[str, Any], result: dict[str, Any]) -> None:
+        """Apply WoRMS resolution decision (mirrors resolveTaxonMapping in app.js)."""
+        worms_svc = self._ensure_worms_svc()
+        if worms_svc is None: return
+        record_id = rec.get("recordId", "")
+        if not record_id: return
+        try:
+            if result.get("no_match"):
+                worms_svc.resolve_mapping(record_id, None, no_match=True)
+            else:
+                aphia_id = result.get("aphia_id")
+                worms_svc.resolve_mapping(record_id, int(aphia_id) if aphia_id else None, worms_record=result.get("worms_record") or {}, chain=result.get("chain") or [])
+            QMessageBox.information(self, "WoRMS", "审核结果已保存")
+        except Exception as exc:
+            QMessageBox.warning(self, "WoRMS 错误", f"审核失败：{exc}")
+        self._load_page()
+
+    # ── Job panel (mirrors renderTaxonJobPanel in app.js) ─────────────────────
+
+    def _refresh_job_panel(self) -> None:
+        worms_svc = self._ensure_worms_svc()
+        if worms_svc is None: self._job_panel_frame.hide(); return
+        jobs = worms_svc.list_jobs()
+        if not jobs: self._job_panel_frame.hide(); return
+        active = next((j for j in jobs if j.get("status") in ("running", "paused")), None)
+        job = active or jobs[0]
+        record_ids = job.get("record_ids") or []; total = len(record_ids); cursor = job.get("cursor", 0); status = job.get("status", ""); source = job.get("source", "")
+        _SL = {"running": "运行中", "paused": "已暂停", "completed": "已完成", "cancelled": "已取消"}
+        self._job_title_label.setText(f"WoRMS 任务 · {'选中条目' if source == 'selected' else '筛选结果'}")
+        self._job_progress_label.setText(f"{cursor} / {total} · {_SL.get(status, status)}")
+        self._job_bar.setRange(0, max(total, 1)); self._job_bar.setValue(cursor)
+        counts = job.get("counts") or {}
+        _CL = {"matched": "匹配", "renamed": "改名", "review": "待审", "not_found": "未找到", "error": "错误", "stale": "旧缓存"}
+        self._job_counts_label.setText("  ".join(f"{_CL.get(k, k)} {v}" for k, v in counts.items() if v))
+        self._btn_job_pause.setVisible(status == "running"); self._btn_job_resume.setVisible(status == "paused")
+        self._btn_job_retry.setVisible(bool(counts.get("error"))); self._job_panel_frame.show()
+
     # ── Double-click edit ─────────────────────────────────────────────────────
 
     def _on_row_double_click(self, index: QModelIndex) -> None:
@@ -1575,292 +2026,6 @@ class TaxonomyView(BaseView):
             return
         self._svc.delete(rec["recordId"])
         self._load_page()
-
-    # ── WoRMS service helpers ─────────────────────────────────────────────────
-
-    def _worms_data_dir(self) -> Path:
-        """Return data dir for WoRMS files (project-scoped or global)."""
-        project_dir = getattr(self.ctx, "current_project_dir", None)
-        if project_dir:
-            return Path(project_dir) / "_data"
-        return Path.home() / ".photo_workbench" / "data"
-
-    def _ensure_worms_svc(self) -> Optional[WormsService]:
-        """Lazily create (or re-use) the WoRMS service."""
-        if self._worms_svc is not None:
-            return self._worms_svc
-        data_dir = self._worms_data_dir()
-        data_dir.mkdir(parents=True, exist_ok=True)
-        self._worms_svc = WormsService(
-            cache_path=str(data_dir / "worms_cache.json"),
-            jobs_path=str(data_dir / "worms_jobs.json"),
-        )
-        return self._worms_svc
-
-    # ── Row context menu (mirrors openTaxonRowMenu / renderTaxonRowMenu) ──────
-
-    def _on_row_context_menu(self, pos: QPoint) -> None:
-        """Right-click on a row → context menu with WoRMS actions."""
-        index = self._table.indexAt(pos)
-        if not index.isValid():
-            return
-        rec = self._model.record_at(index.row())
-        if rec is None:
-            return
-
-        menu = QMenu(self._table)
-        menu.setStyleSheet(
-            "QMenu { background: #10242a; color: #eef3ef;"
-            " border: 1px solid rgba(145,182,181,0.2); border-radius: 6px; }"
-            "QMenu::item { padding: 6px 18px; font-size: 12px; }"
-            "QMenu::item:selected { background: rgba(41,185,171,0.15); }"
-            "QMenu::separator { background: rgba(145,182,181,0.12); height: 1px; margin: 4px 0; }"
-        )
-
-        species_name = rec.get("species") or rec.get("class") or "当前记录"
-        title_action = menu.addAction(species_name)
-        title_action.setEnabled(False)
-        menu.addSeparator()
-
-        worms_match = menu.addAction("WoRMS 匹配当前物种")
-        worms_match.triggered.connect(lambda: self._on_worms_match_row(rec))
-
-        mapping_candidates = rec.get("mappingCandidates") or []
-        if mapping_candidates:
-            review_action = menu.addAction(f"审核 WoRMS 候选（{len(mapping_candidates)} 个）")
-            review_action.triggered.connect(lambda: self._on_review_worms_row(rec))
-
-        checked_ids = self._model.checked_ids() or self._selected_ids
-        if len(checked_ids) > 1 and rec.get("recordId") in checked_ids:
-            menu.addSeparator()
-            bulk_action = menu.addAction(f"WoRMS 更新已选 {len(checked_ids)} 条")
-            bulk_action.triggered.connect(lambda: self._on_worms_update(selected_only=True))
-
-        if self._select_all_filtered:
-            menu.addSeparator()
-            filt_action = menu.addAction(f"WoRMS 更新全部筛选结果 {self._total} 条")
-            filt_action.triggered.connect(lambda: self._on_worms_update(selected_only=False))
-
-        is_user = rec.get("recordId", "").startswith("user:")
-        if is_user:
-            menu.addSeparator()
-            edit_action = menu.addAction("编辑")
-            edit_action.triggered.connect(lambda: self._edit_record(rec))
-            del_action = menu.addAction("删除")
-            del_action.triggered.connect(lambda: self._delete_record(rec))
-
-        menu.exec(self._table.viewport().mapToGlobal(pos))
-
-    # ── Column header facet filter (mirrors openTaxonFacetMenu) ──────────────
-
-    def _on_header_context_menu(self, pos: QPoint) -> None:
-        """Right-click on a column header → open facet filter panel."""
-        logical_col = self._table.horizontalHeader().logicalIndexAt(pos)
-        self._open_facet_for_column(logical_col)
-
-    def _open_facet_for_column(self, logical_col: int) -> None:
-        if self._svc is None:
-            return
-        data_idx = logical_col - _COL_DATA_START
-        cols = self._model.columns()
-        if data_idx < 0 or data_idx >= len(cols):
-            return
-        col_def = cols[data_idx]
-
-        all_recs, total = self._svc.all_records(page=0, page_size=1_000_000)
-        if len(all_recs) < total:
-            all_recs, _ = self._svc.all_records(page=0, page_size=max(total, 1))
-
-        current_pred = self._col_filters.get(col_def["key"])
-
-        if self._facet_panel is not None:
-            self._facet_panel.close()
-
-        panel = _TaxonFacetPanel(
-            col_def["key"],
-            col_def["label"],
-            all_recs,
-            current_predicate=current_pred,
-            parent=self,
-        )
-        panel.filter_applied.connect(self._on_facet_filter_applied)
-        panel.sort_requested.connect(self._on_facet_sort)
-
-        header = self._table.horizontalHeader()
-        x = header.sectionViewportPosition(logical_col)
-        gp = self._table.mapToGlobal(QPoint(x, header.height()))
-        panel.move(gp)
-        panel.show()
-        panel.raise_()
-        panel.activateWindow()
-        self._facet_panel = panel
-
-    def _on_facet_filter_applied(self, col_key: str, predicate: Optional[dict[str, Any]]) -> None:
-        """Store facet predicate and reload."""
-        if predicate is None:
-            self._col_filters.pop(col_key, None)
-        else:
-            self._col_filters[col_key] = predicate
-        self._page = 1
-        self._selected_ids.clear()
-        self._select_all_filtered = False
-        self._model.clear_checked()
-        self._facet_panel = None
-        self._load_page()
-
-    def _on_facet_sort(self, col_key: str, direction: str) -> None:
-        self._sort_col = col_key
-        self._sort_dir = direction
-        self._page = 1
-        self._load_page()
-
-    # ── WoRMS update (mirrors startTaxonomyWormsJob in app.js) ───────────────
-
-    def _on_worms_update(self, selected_only: bool) -> None:
-        record_ids = self._worms_update_record_ids(selected_only)
-        if not record_ids:
-            QMessageBox.information(self, "WoRMS 更新", "没有可更新的分类条目。")
-            return
-
-        service = self._ensure_worms_svc()
-        if service is None:
-            return
-        try:
-            job = service.create_job(
-                record_ids,
-                source="selected" if selected_only and not self._select_all_filtered else "filtered",
-            )
-        except Exception as exc:
-            QMessageBox.warning(self, "WoRMS 更新", f"创建任务失败：{exc}")
-            return
-
-        setattr(self.ctx, "pending_worms_job_id", job.id)
-        self._navigate_to_worms()
-        QMessageBox.information(
-            self, "WoRMS 更新",
-            f"已创建 WoRMS 批量任务 {job.id[:8]}…，共 {len(record_ids)} 条。",
-        )
-
-    def _worms_update_record_ids(self, selected_only: bool) -> list[str]:
-        if self._svc is None:
-            return []
-        if selected_only and not self._select_all_filtered:
-            ids = self._model.checked_ids() or self._selected_ids
-            return list(dict.fromkeys(rid for rid in ids if rid))
-
-        source_filter = "seed" if self._view == "worms" else None
-        rows, total = self._svc.all_records(source_filter=source_filter, page=0, page_size=1_000_000)
-        if len(rows) < total:
-            rows, _ = self._svc.all_records(source_filter=source_filter, page=0, page_size=max(total, 1))
-        ids: list[str] = []
-        for idx, rec in enumerate(rows):
-            if self._filter_text and not self._record_matches_filter(rec):
-                continue
-            ids.append(self._taxonomy_record_id(rec, idx, source_filter))
-        return ids
-
-    def _taxonomy_record_id(self, rec: dict[str, Any], index: int, source_filter: Optional[str] = None) -> str:
-        rid = str(rec.get("recordId") or "").strip()
-        if rid:
-            return rid
-        source = source_filter or ("user" if str(rec.get("recordId", "")).startswith("user:") else "seed")
-        return f"{source}:{index}"
-
-    def _navigate_to_worms(self) -> None:
-        win = self.window()
-        nav = getattr(win, "navigate_to", None)
-        if callable(nav):
-            nav("worms")
-        worms_view = getattr(win, "_views", {}).get("worms") if hasattr(win, "_views") else None
-        refresh = getattr(worms_view, "_refresh_jobs", None)
-        if callable(refresh):
-            refresh()
-
-    # ── WoRMS match for single row (mirrors openWormsMatchModal) ─────────────
-
-    def _on_worms_match_row(self, rec: dict[str, Any]) -> None:
-        worms_svc = self._ensure_worms_svc()
-        if worms_svc is None:
-            QMessageBox.warning(self, "WoRMS", "WoRMS 服务不可用")
-            return
-        dlg = _WormsMatchDialog(rec, worms_svc, parent=self)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-        result = dlg.get_result()
-        if result:
-            self._on_resolve_mapping(rec, result)
-
-    def _on_review_worms_row(self, rec: dict[str, Any]) -> None:
-        """Open review modal for auto-found WoRMS candidates."""
-        dlg = _TaxonReviewDialog(rec, parent=self)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-        result = dlg.get_result()
-        if result:
-            self._on_resolve_mapping(rec, result)
-
-    def _on_resolve_mapping(self, rec: dict[str, Any], result: dict[str, Any]) -> None:
-        """Apply WoRMS resolution decision (mirrors resolveTaxonMapping in app.js)."""
-        worms_svc = self._ensure_worms_svc()
-        if worms_svc is None:
-            return
-        record_id = rec.get("recordId", "")
-        if not record_id:
-            return
-        try:
-            if result.get("no_match"):
-                worms_svc.resolve_mapping(record_id, None, no_match=True)
-            else:
-                aphia_id = result.get("aphia_id")
-                worms_svc.resolve_mapping(
-                    record_id,
-                    int(aphia_id) if aphia_id else None,
-                    worms_record=result.get("worms_record") or {},
-                    chain=result.get("chain") or [],
-                )
-            QMessageBox.information(self, "WoRMS", "审核结果已保存")
-        except Exception as exc:
-            QMessageBox.warning(self, "WoRMS 错误", f"审核失败：{exc}")
-        self._load_page()
-
-    # ── Job panel (mirrors renderTaxonJobPanel in app.js) ─────────────────────
-
-    def _refresh_job_panel(self) -> None:
-        """Update the WoRMS job progress panel."""
-        worms_svc = self._ensure_worms_svc()
-        if worms_svc is None:
-            self._job_panel_frame.hide()
-            return
-
-        jobs = worms_svc.list_jobs()
-        if not jobs:
-            self._job_panel_frame.hide()
-            return
-
-        active = next((j for j in jobs if j.get("status") in ("running", "paused")), None)
-        job = active or jobs[0]
-        record_ids = job.get("record_ids") or []
-        total = len(record_ids)
-        cursor = job.get("cursor", 0)
-        status = job.get("status", "")
-        source = job.get("source", "")
-
-        _STATUS_LABELS = {"running": "运行中", "paused": "已暂停", "completed": "已完成", "cancelled": "已取消"}
-        source_label = "选中条目" if source == "selected" else "筛选结果"
-        self._job_title_label.setText(f"WoRMS 任务 · {source_label}")
-        self._job_progress_label.setText(f"{cursor} / {total} · {_STATUS_LABELS.get(status, status)}")
-        self._job_bar.setRange(0, max(total, 1))
-        self._job_bar.setValue(cursor)
-
-        counts = job.get("counts") or {}
-        _COUNT_LABELS = {"matched": "匹配", "renamed": "改名", "review": "待审", "not_found": "未找到", "error": "错误", "stale": "旧缓存"}
-        count_parts = [f"{_COUNT_LABELS.get(k, k)} {v}" for k, v in counts.items() if v]
-        self._job_counts_label.setText("  ".join(count_parts))
-
-        self._btn_job_pause.setVisible(status == "running")
-        self._btn_job_resume.setVisible(status == "paused")
-        self._btn_job_retry.setVisible(bool(counts.get("error")))
-        self._job_panel_frame.show()
 
     # ── Export ────────────────────────────────────────────────────────────────
 
