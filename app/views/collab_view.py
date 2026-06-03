@@ -80,8 +80,8 @@ class CollabView(BaseView):
     """
 
     view_id   = "collab"
-    nav_title = "协作"
-    nav_icon  = "👥"
+    nav_title = "项目汇总"
+    nav_icon  = "📋"
 
     def __init__(self, ctx: "AppContext") -> None:
         # Service is optional — the view degrades gracefully when absent

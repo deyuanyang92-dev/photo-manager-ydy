@@ -106,8 +106,9 @@ def test_context_bar_no_project():
     win.refresh_context_bar()
     assert "（未选）" in win._project_switcher.text()
     assert win._active_badge.objectName() == "ActiveBadgeOff"
-    # Quick actions disabled without a project.
-    assert not win._btn_compose.isEnabled()
+    # Quick actions (智能压缩 / 🎬Helicon) disabled without a project.
+    assert not win._btn_compress.isEnabled()
+    assert not win._btn_helicon.isEnabled()
 
 
 def test_context_bar_with_project(tmp_path):
@@ -116,7 +117,8 @@ def test_context_bar_with_project(tmp_path):
     win = MainWindow(ctx)
     win.refresh_context_bar()
     assert "FJ-YGLZ-2026" in win._project_switcher.text()
-    assert win._btn_compose.isEnabled()
+    assert win._btn_compress.isEnabled()
+    assert win._btn_helicon.isEnabled()
 
 
 # ── restore_state selects a default segment ────────────────────────────────

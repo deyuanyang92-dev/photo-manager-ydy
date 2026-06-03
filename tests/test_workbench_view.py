@@ -165,7 +165,7 @@ class TestConstruction:
         w = WorkbenchView(ctx)
         assert w is not None
         assert w.view_id == "workbench"
-        assert w.nav_title == "工作台"
+        assert w.nav_title == "照片工作区"
         assert w.nav_icon == "🔬"
 
 

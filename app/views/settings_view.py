@@ -81,7 +81,7 @@ class SettingsView(BaseView):
     """
 
     view_id = "settings"
-    nav_title = "全局设置"
+    nav_title = "配置"
     nav_icon = "⚙️"
 
     def __init__(self, ctx: "AppContext") -> None:  # noqa: D107

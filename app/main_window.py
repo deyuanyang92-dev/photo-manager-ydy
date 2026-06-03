@@ -107,7 +107,7 @@ class MainWindow(QMainWindow):
         bar.setObjectName("TopBar")
         bar.setFixedHeight(58)
         lay = QHBoxLayout(bar)
-        lay.setContentsMargins(22, 0, 18, 0)
+        lay.setContentsMargins(22, 0, 14, 0)
         lay.setSpacing(0)
 
         # Brand: vector microscope mark + serif wordmark
@@ -118,62 +118,13 @@ class MainWindow(QMainWindow):
         )
         lay.addWidget(brand_mark)
         lay.addSpacing(8)
-        brand = QLabel("标本影像")
+        brand = QLabel("标本影像管理")
         brand.setObjectName("BrandWord")
         lay.addWidget(brand)
 
-        lay.addSpacing(32)
+        lay.addSpacing(16)
 
-        # Segmented nav row (buttons added by register_view)
-        self._nav_row = QHBoxLayout()
-        self._nav_row.setContentsMargins(0, 0, 0, 0)
-        self._nav_row.setSpacing(2)
-        nav_wrap = QWidget()
-        nav_wrap.setLayout(self._nav_row)
-        lay.addWidget(nav_wrap)
-
-        lay.addStretch()
-
-        # Right side: theme toggle + settings cog (vector glyphs)
-        self._theme_btn = QPushButton()
-        self._theme_btn.setObjectName("IconGhost")
-        self._theme_btn.setToolTip("切换主题")
-        self._theme_btn.setFixedSize(34, 34)
-        self._theme_btn.setIcon(
-            icons.icon("mdi6.weather-night", color=icons.TONE_MUTED,
-                       color_active=icons.TONE_ACCENT_HOVER)
-        )
-        self._theme_btn.setIconSize(QSize(18, 18))
-        self._theme_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        lay.addWidget(self._theme_btn)
-
-        self._settings_btn = QPushButton()
-        self._settings_btn.setObjectName("IconGhost")
-        self._settings_btn.setToolTip("全局设置")
-        self._settings_btn.setFixedSize(34, 34)
-        self._settings_btn.setIcon(
-            icons.icon("mdi6.cog-outline", color=icons.TONE_MUTED,
-                       color_active=icons.TONE_ACCENT_HOVER)
-        )
-        self._settings_btn.setIconSize(QSize(18, 18))
-        self._settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._settings_btn.clicked.connect(lambda: self.navigate_to("settings"))
-        lay.addWidget(self._settings_btn)
-
-        return bar
-
-    def _build_context_bar(self) -> QFrame:
-        bar = QFrame()
-        bar.setObjectName("ContextBar")
-        bar.setFixedHeight(50)
-        lay = QHBoxLayout(bar)
-        lay.setContentsMargins(22, 0, 22, 0)
-        lay.setSpacing(12)
-
-        proj_label = QLabel("项目")
-        proj_label.setObjectName("ContextLabel")
-        lay.addWidget(proj_label)
-
+        # Project switcher in topbar (left side)
         self._project_switcher = QPushButton("（未选）")
         self._project_switcher.setObjectName("ProjectSwitcher")
         self._project_switcher.setToolTip("切换当前工作区项目")
@@ -184,9 +135,82 @@ class MainWindow(QMainWindow):
         self._project_switcher.setCursor(Qt.CursorShape.PointingHandCursor)
         lay.addWidget(self._project_switcher)
 
-        lay.addSpacing(8)
+        lay.addSpacing(20)
 
-        active_label = QLabel("激活")
+        # Segmented nav row (buttons added by register_view)
+        self._nav_row = QHBoxLayout()
+        self._nav_row.setContentsMargins(0, 0, 0, 0)
+        self._nav_row.setSpacing(1)
+        nav_wrap = QWidget()
+        nav_wrap.setLayout(self._nav_row)
+        lay.addWidget(nav_wrap)
+
+        lay.addStretch()
+
+        # Right side: + 新建项目 | + 打开工作区 | 智能压缩 | ⚙ | 🎬 Helicon
+        self._btn_new_project = QPushButton("+ 新建项目")
+        self._btn_new_project.setObjectName("Outline")
+        self._btn_new_project.setToolTip("新建一个项目工作区目录")
+        self._btn_new_project.clicked.connect(lambda: self.navigate_to("overview"))
+        self._btn_new_project.setCursor(Qt.CursorShape.PointingHandCursor)
+        lay.addWidget(self._btn_new_project)
+
+        lay.addSpacing(6)
+
+        self._btn_open_ws = QPushButton("+ 打开工作区")
+        self._btn_open_ws.setObjectName("Outline")
+        self._btn_open_ws.setToolTip("打开已有项目工作区目录")
+        self._btn_open_ws.clicked.connect(lambda: self.navigate_to("overview"))
+        self._btn_open_ws.setCursor(Qt.CursorShape.PointingHandCursor)
+        lay.addWidget(self._btn_open_ws)
+
+        lay.addSpacing(6)
+
+        self._btn_compress = QPushButton("智能压缩")
+        self._btn_compress.setObjectName("Outline")
+        self._btn_compress.setToolTip("智能压缩归档（JPG→JXL→ZIP）")
+        icons.set_button_icon(self._btn_compress, "mdi6.archive-outline",
+                              color=icons.TONE_MUTED, size=15)
+        self._btn_compress.clicked.connect(lambda: self.navigate_to("workbench"))
+        self._btn_compress.setCursor(Qt.CursorShape.PointingHandCursor)
+        lay.addWidget(self._btn_compress)
+
+        lay.addSpacing(6)
+
+        self._settings_btn = QPushButton()
+        self._settings_btn.setObjectName("IconGhost")
+        self._settings_btn.setToolTip("配置")
+        self._settings_btn.setFixedSize(34, 34)
+        self._settings_btn.setIcon(
+            icons.icon("mdi6.cog-outline", color=icons.TONE_MUTED,
+                       color_active=icons.TONE_ACCENT_HOVER)
+        )
+        self._settings_btn.setIconSize(QSize(18, 18))
+        self._settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._settings_btn.clicked.connect(lambda: self.navigate_to("settings"))
+        lay.addWidget(self._settings_btn)
+
+        lay.addSpacing(6)
+
+        self._btn_helicon = QPushButton("🎬 Helicon")
+        self._btn_helicon.setObjectName("Primary")
+        self._btn_helicon.setToolTip("Helicon Focus 景深合成")
+        self._btn_helicon.clicked.connect(lambda: self.navigate_to("workbench"))
+        self._btn_helicon.setCursor(Qt.CursorShape.PointingHandCursor)
+        lay.addWidget(self._btn_helicon)
+
+        return bar
+
+    def _build_context_bar(self) -> QFrame:
+        """Slim active-specimen context strip below the topbar."""
+        bar = QFrame()
+        bar.setObjectName("ContextBar")
+        bar.setFixedHeight(42)
+        lay = QHBoxLayout(bar)
+        lay.setContentsMargins(22, 0, 22, 0)
+        lay.setSpacing(10)
+
+        active_label = QLabel("激活标本")
         active_label.setObjectName("ContextLabel")
         lay.addWidget(active_label)
 
@@ -196,29 +220,20 @@ class MainWindow(QMainWindow):
 
         lay.addStretch()
 
-        # Quick actions — wired to the workbench view's handlers when present.
-        self._btn_new = QPushButton("新建标本")
+        # Quick new-specimen shortcut (wired in _quick_new_specimen)
+        self._btn_new = QPushButton("+ 新增标本唯一编号")
         self._btn_new.setObjectName("Outline")
-        self._btn_new.setToolTip("新建一个标本草稿")
-        icons.set_button_icon(self._btn_new, "mdi6.plus", color=icons.TONE_ACCENT, size=15)
+        self._btn_new.setToolTip("开始填写新标本唯一编号")
+        icons.set_button_icon(self._btn_new, "mdi6.dna", color=icons.TONE_ACCENT, size=15)
         self._btn_new.clicked.connect(self._quick_new_specimen)
         lay.addWidget(self._btn_new)
 
-        self._btn_compose = QPushButton("合成")
-        self._btn_compose.setObjectName("Primary")
-        self._btn_compose.setToolTip("Helicon 景深合成")
-        icons.set_button_icon(self._btn_compose, "fa5s.layer-group",
-                              color=icons.TONE_ON_ACCENT, size=14)
-        self._btn_compose.clicked.connect(lambda: self.navigate_to("workbench"))
-        lay.addWidget(self._btn_compose)
-
-        self._btn_organize = QPushButton("整理")
-        self._btn_organize.setObjectName("Outline")
-        self._btn_organize.setToolTip("整理归档（JPG→JXL→ZIP）")
-        icons.set_button_icon(self._btn_organize, "mdi6.archive-outline",
-                              color=icons.TONE_MUTED, size=15)
-        self._btn_organize.clicked.connect(lambda: self.navigate_to("workbench"))
-        lay.addWidget(self._btn_organize)
+        # Provide stub attributes so refresh_context_bar doesn't crash
+        # (it checks isEnabled on _btn_compose / _btn_organize)
+        self._btn_compose = QPushButton()
+        self._btn_compose.hide()
+        self._btn_organize = QPushButton()
+        self._btn_organize.hide()
 
         return bar
 
@@ -322,11 +337,12 @@ class MainWindow(QMainWindow):
     # ── Context bar ────────────────────────────────────────────────────────
 
     def refresh_context_bar(self) -> None:
-        """Sync the context bar (project + active badge) with current state."""
+        """Sync topbar project switcher + context bar active badge with current state."""
         from pathlib import Path
 
         project_dir = getattr(self.ctx, "current_project_dir", None)
         name = Path(project_dir).name if project_dir else "（未选）"
+        # Project switcher lives in the topbar now
         self._project_switcher.setText(f"{name}  ▾")
 
         active_uid = self._lookup_active_uid()
@@ -343,8 +359,9 @@ class MainWindow(QMainWindow):
         self._active_badge.style().polish(self._active_badge)
 
         has_proj = bool(project_dir)
-        for b in (self._btn_new, self._btn_compose, self._btn_organize):
-            b.setEnabled(has_proj)
+        self._btn_new.setEnabled(has_proj)
+        self._btn_compress.setEnabled(has_proj)
+        self._btn_helicon.setEnabled(has_proj)
 
     def _lookup_active_uid(self) -> Optional[str]:
         try:
@@ -405,11 +422,11 @@ class MainWindow(QMainWindow):
 _NAV_GLYPHS: dict[str, str] = {
     "workbench": "mdi6.microscope",
     "overview":  "mdi6.view-dashboard-outline",
-    "taxonomy":  "mdi6.dna",
-    "worms":     "mdi6.waves",
-    "coords":    "mdi6.map-marker-outline",
     "labels":    "mdi6.tag-outline",
-    "collab":    "mdi6.account-group-outline",
+    "worms":     "mdi6.waves",
+    "taxonomy":  "mdi6.dna",
+    "coords":    "mdi6.map-marker-outline",
+    "collab":    "mdi6.chart-bar-stacked",
     "settings":  "mdi6.cog-outline",
 }
 

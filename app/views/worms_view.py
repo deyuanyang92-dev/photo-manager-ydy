@@ -114,7 +114,7 @@ class WormsView(BaseView):
     """
 
     view_id   = "worms"
-    nav_title = "WoRMS"
+    nav_title = "WoRMS 分类库"
     nav_icon  = "🌊"
 
     def __init__(self, ctx: "AppContext") -> None:

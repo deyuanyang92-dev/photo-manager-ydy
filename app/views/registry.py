@@ -18,14 +18,14 @@ from app.views.labels_view import LabelsView
 from app.views.collab_view import CollabView
 from app.views.settings_view import SettingsView
 
-# Order = nav order
+# Order = nav order (mirrors web prototype topbar exactly)
 ALL_VIEWS: list[type] = [
-    WorkbenchView,   # 工作台（含 监控/分组/命名/合成/整理/成果 面板）
+    WorkbenchView,   # 照片工作区（含 监控/分组/命名/合成/整理/成果 面板）
     OverviewView,    # 项目总览（+ 导出 Excel/CSV/DwC）
-    TaxonomyView,    # 分类库（+ 4 级补全浮层）
-    WormsView,       # WoRMS 海洋物种验证
-    CoordsView,      # 坐标工具（交互地图）
     LabelsView,      # 标签打印（双桶 + 二维码 WYSIWYG）
-    CollabView,      # 多人协作
-    SettingsView,    # 全局设置
+    WormsView,       # WoRMS 分类库（海洋物种验证）
+    TaxonomyView,    # 内置分类库（+ 4 级补全浮层）
+    CoordsView,      # 坐标工具（交互地图）
+    CollabView,      # 项目汇总
+    SettingsView,    # 配置
 ]

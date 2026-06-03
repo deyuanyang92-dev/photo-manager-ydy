@@ -57,7 +57,7 @@ class WorkbenchView(BaseView):
     """
 
     view_id = "workbench"
-    nav_title = "工作台"
+    nav_title = "照片工作区"
     nav_icon = "🔬"
 
     # ── Build UI ──────────────────────────────────────────────────────────────

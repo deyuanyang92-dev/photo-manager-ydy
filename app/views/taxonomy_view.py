@@ -219,7 +219,7 @@ class TaxonomyView(BaseView):
     """
 
     view_id = "taxonomy"
-    nav_title = "分类库"
+    nav_title = "内置分类库"
     nav_icon = "🧬"
 
     def __init__(self, ctx: "AppContext") -> None:
