@@ -13,6 +13,7 @@ Mirrors:
 """
 
 import re
+from dataclasses import dataclass, field
 from typing import Optional, Union
 
 
@@ -57,6 +58,134 @@ def derive_uid(sp: dict) -> str:
         date_seg,
     ]
     return "-".join(str(p) for p in parts if p)
+
+
+@dataclass(frozen=True)
+class SpeciesSequenceSummary:
+    """Current numbering state for one species code prefix.
+
+    The prefix is case-insensitive and displayed uppercase.  Gaps are reported
+    for human review, but the default next id never reuses a gap.
+    """
+
+    prefix: str
+    used_numbers: tuple[int, ...] = field(default_factory=tuple)
+    max_number: int = 0
+    next_number: int = 0
+    next_id: str = ""
+    width: int = 3
+    gaps: list[int] = field(default_factory=list)
+
+
+_SPECIES_CODE_RE = re.compile(r"^\s*([A-Za-z]+)(\d*)\s*$")
+
+
+def species_code_parts(value: Optional[str]) -> tuple[str, Optional[int], int]:
+    """Return (uppercase prefix, numeric suffix, suffix width) for ``DLC003``.
+
+    ``DLC`` returns ``("DLC", None, 3)`` so suggestions still use three digits.
+    Values that do not begin with letters return an empty prefix.
+    """
+    m = _SPECIES_CODE_RE.match(str(value or ""))
+    if not m:
+        return "", None, 3
+    prefix = m.group(1).upper()
+    digits = m.group(2) or ""
+    if not digits:
+        return prefix, None, 3
+    return prefix, int(digits), max(3, len(digits))
+
+
+def _species_id_from_uid(uid: Optional[str]) -> str:
+    parsed = parse_uid(uid)
+    if parsed:
+        return str(parsed.get("speciesId") or "")
+    return ""
+
+
+def _iter_species_ids(conn, project_dir: Optional[str] = None):
+    """Yield species ids from local project tables, tolerating old schemas."""
+    try:
+        if project_dir:
+            rows = conn.execute(
+                """
+                SELECT id, uid FROM specimens
+                WHERE owner_project_dir IS NULL OR owner_project_dir = ?
+                """,
+                (project_dir,),
+            ).fetchall()
+        else:
+            rows = conn.execute("SELECT id, uid FROM specimens").fetchall()
+        for row in rows:
+            sid = row["id"] if hasattr(row, "keys") else row[0]
+            uid = row["uid"] if hasattr(row, "keys") else row[1]
+            if sid:
+                yield str(sid)
+            from_uid = _species_id_from_uid(uid)
+            if from_uid:
+                yield from_uid
+    except Exception:
+        pass
+
+    for table in ("tasks", "grouping"):
+        try:
+            rows = conn.execute(f"SELECT uid FROM {table}").fetchall()
+        except Exception:
+            continue
+        for row in rows:
+            uid = row["uid"] if hasattr(row, "keys") else row[0]
+            sid = _species_id_from_uid(uid)
+            if sid:
+                yield sid
+
+
+def species_sequence_summary(
+    conn,
+    species_text: Optional[str],
+    *,
+    project_dir: Optional[str] = None,
+) -> SpeciesSequenceSummary:
+    """Summarise used numbering for the typed species code prefix.
+
+    Examples:
+      existing DLC001, DLC003 + input "dlc" -> next_id "DLC004", gaps [2]
+      existing DLC003 + input "DLC003"     -> next_id "DLC004"
+    """
+    prefix, _, typed_width = species_code_parts(species_text)
+    if not prefix:
+        return SpeciesSequenceSummary(prefix="")
+
+    used: set[int] = set()
+    width = typed_width
+    for sid in _iter_species_ids(conn, project_dir=project_dir):
+        sid_prefix, number, sid_width = species_code_parts(sid)
+        if sid_prefix != prefix or number is None:
+            continue
+        used.add(number)
+        width = max(width, sid_width)
+
+    if not used:
+        return SpeciesSequenceSummary(
+            prefix=prefix,
+            max_number=0,
+            next_number=1,
+            next_id=f"{prefix}{1:0{width}d}",
+            width=width,
+        )
+
+    used_sorted = tuple(sorted(used))
+    max_number = used_sorted[-1]
+    gaps = [n for n in range(1, max_number) if n not in used]
+    next_number = max_number + 1
+    return SpeciesSequenceSummary(
+        prefix=prefix,
+        used_numbers=used_sorted,
+        max_number=max_number,
+        next_number=next_number,
+        next_id=f"{prefix}{next_number:0{width}d}",
+        width=width,
+        gaps=gaps,
+    )
 
 
 # ── Regex patterns for UID parsing ────────────────────────────────────────────

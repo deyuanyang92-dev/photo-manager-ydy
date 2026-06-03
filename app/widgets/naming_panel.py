@@ -34,7 +34,12 @@ from PyQt6.QtWidgets import (
 )
 
 from app.config import icons
-from app.utils.naming import build_result_id, build_uid, specimen_date_seg
+from app.utils.naming import (
+    build_result_id,
+    build_uid,
+    species_sequence_summary,
+    specimen_date_seg,
+)
 
 if TYPE_CHECKING:
     from app.app_context import AppContext
@@ -125,10 +130,29 @@ class NamingPanel(QWidget):
         self._site = _field(0, 1, "样地", "如 YGLZ", auto=True)
         self._station = _field(1, 0, "站位", "如 B2", auto=True)
         self._species_id = _field(1, 1, "物种拼音缩写编号", "如 DLC001")
-        self._collection_date = _field(2, 0, "采集日期", "YYYYMMDD")
-        self._photo_date = _field(2, 1, "拍摄日期", "YYYYMMDD（选填）")
 
-        # ── 保存方式 button group (row 3, full width) ──
+        # Current-prefix lookup.  Keep this scoped to the typed prefix instead
+        # of rendering a long global list; projects can have hundreds of taxa.
+        seq_cell = QWidget()
+        seq_lay = QHBoxLayout(seq_cell)
+        seq_lay.setContentsMargins(0, 0, 0, 0)
+        seq_lay.setSpacing(8)
+        self._seq_hint_label = QLabel("输入物种缩写后显示下一个编号")
+        self._seq_hint_label.setObjectName("MutedSmall")
+        self._seq_hint_label.setWordWrap(True)
+        seq_lay.addWidget(self._seq_hint_label, stretch=1)
+        self._seq_apply_btn = QPushButton("填入建议")
+        self._seq_apply_btn.setObjectName("Ghost")
+        self._seq_apply_btn.setFixedHeight(28)
+        self._seq_apply_btn.setEnabled(False)
+        self._seq_apply_btn.clicked.connect(self._apply_sequence_suggestion)
+        seq_lay.addWidget(self._seq_apply_btn)
+        grid.addWidget(seq_cell, 2, 0, 1, 2)
+
+        self._collection_date = _field(3, 0, "采集日期", "YYYYMMDD")
+        self._photo_date = _field(3, 1, "拍摄日期", "YYYYMMDD（选填）")
+
+        # ── 保存方式 button group (row 4, full width) ──
         # Hidden QLineEdit proxy for backward-compat with workbench_view and tests
         self._storage = QLineEdit()
         self._storage.setPlaceholderText("如 T95E / RD75E")
@@ -162,16 +186,16 @@ class NamingPanel(QWidget):
         sc_lay.addLayout(btn_row_storage)
         # Custom/free-text field below the buttons
         sc_lay.addWidget(self._storage)
-        grid.addWidget(storage_cell, 3, 0, 1, 2)  # full row span
+        grid.addWidget(storage_cell, 4, 0, 1, 2)  # full row span
 
-        # Sequence number (row 4)
+        # Sequence number (row 5)
         # auto-虚线: show as dashed QLabel preview, SpinBox for actual input
         self._seq = QSpinBox()
         self._seq.setMinimum(1)
         self._seq.setMaximum(999)
         self._seq.setValue(1)
         self._seq.setFixedHeight(32)
-        grid.addWidget(_cell("成果序号（auto）", self._seq), 4, 0)
+        grid.addWidget(_cell("成果序号（auto）", self._seq), 5, 0)
 
         root.addLayout(grid)
 
@@ -289,6 +313,10 @@ class NamingPanel(QWidget):
         else:
             self._dup_warn.hide()
 
+    def current_sequence_suggestion(self) -> str:
+        """Return the currently suggested species id, e.g. ``DLC004``."""
+        return str(self._seq_apply_btn.property("suggested_id") or "")
+
     # ── Internal ──────────────────────────────────────────────────────────────
 
     def _update_preview(self) -> None:
@@ -334,6 +362,74 @@ class NamingPanel(QWidget):
             self.uid_generated.emit(uid)
         if result_id:
             self.result_id_generated.emit(result_id)
+
+        self._update_sequence_hint(species_id)
+
+    def _update_sequence_hint(self, species_text: str) -> None:
+        """Refresh the per-prefix next-number hint from the project DB."""
+        suggested = ""
+        if not species_text.strip():
+            self._seq_hint_label.setText("输入物种缩写后显示下一个编号")
+            self._seq_apply_btn.setEnabled(False)
+            self._seq_apply_btn.setText("填入建议")
+            self._seq_apply_btn.setProperty("suggested_id", "")
+            return
+
+        db = None
+        try:
+            db = self.ctx.get_db()
+        except Exception:
+            db = None
+        if not db:
+            self._seq_hint_label.setText("打开项目后可检查当前前缀的下一个编号")
+            self._seq_apply_btn.setEnabled(False)
+            self._seq_apply_btn.setText("填入建议")
+            self._seq_apply_btn.setProperty("suggested_id", "")
+            return
+
+        try:
+            summary = species_sequence_summary(
+                db,
+                species_text,
+                project_dir=getattr(self.ctx, "current_project_dir", None),
+            )
+        except Exception:
+            self._seq_hint_label.setText("编号检查暂不可用")
+            self._seq_apply_btn.setEnabled(False)
+            self._seq_apply_btn.setText("填入建议")
+            self._seq_apply_btn.setProperty("suggested_id", "")
+            return
+
+        if not summary.prefix or not summary.next_id:
+            self._seq_hint_label.setText("请输入字母前缀，如 DLC")
+            self._seq_apply_btn.setEnabled(False)
+            self._seq_apply_btn.setText("填入建议")
+            self._seq_apply_btn.setProperty("suggested_id", "")
+            return
+
+        suggested = summary.next_id
+        if summary.max_number:
+            max_id = f"{summary.prefix}{summary.max_number:0{summary.width}d}"
+            text = (
+                f"{summary.prefix} 已用 {len(summary.used_numbers)} 个，"
+                f"最大 {max_id}，建议 {summary.next_id}"
+            )
+            if summary.gaps:
+                shown = ", ".join(f"{n:0{summary.width}d}" for n in summary.gaps[:5])
+                more = "..." if len(summary.gaps) > 5 else ""
+                text += f"；缺号 {shown}{more}"
+        else:
+            text = f"{summary.prefix} 尚未使用，建议 {summary.next_id}"
+        self._seq_hint_label.setText(text)
+        self._seq_apply_btn.setText(f"填入 {suggested}")
+        self._seq_apply_btn.setProperty("suggested_id", suggested)
+        self._seq_apply_btn.setEnabled(True)
+
+    def _apply_sequence_suggestion(self) -> None:
+        suggested = self.current_sequence_suggestion()
+        if suggested:
+            self._species_id.setText(suggested)
+            self._species_id.setFocus()
 
     def _set_preview(self, label: QLabel, value: str) -> None:
         """Set preview text and swap filled/empty styling via object name."""

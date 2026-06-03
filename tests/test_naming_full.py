@@ -20,6 +20,7 @@ from app.utils.naming import (
     # existing (must still pass)
     specimen_date_seg,
     derive_uid,
+    species_sequence_summary,
 )
 
 
@@ -231,6 +232,77 @@ class TestValidateUid:
     def test_valid_legacy_no_station(self):
         # Legacy 5-segment (no station) is still valid
         assert validate_uid("FJ-XM-DLC001-T95E-20260601") is True
+
+
+# ── species sequence summary ─────────────────────────────────────────────
+
+class TestSpeciesSequenceSummary:
+    def _db(self):
+        import sqlite3
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript("""
+            CREATE TABLE specimens (
+                uid TEXT PRIMARY KEY,
+                id TEXT,
+                owner_project_dir TEXT
+            );
+            CREATE TABLE tasks (
+                uid TEXT PRIMARY KEY,
+                raw_json TEXT
+            );
+            CREATE TABLE grouping (
+                uid TEXT,
+                group_index INTEGER,
+                PRIMARY KEY (uid, group_index)
+            );
+        """)
+        return conn
+
+    def test_next_id_from_specimen_ids_case_insensitive(self):
+        db = self._db()
+        db.execute(
+            "INSERT INTO specimens (uid, id, owner_project_dir) VALUES (?, ?, ?)",
+            ("FJ-XM-B2-DLC003-T95E-20260601", "Dlc003", "/p"),
+        )
+        db.commit()
+        s = species_sequence_summary(db, "dlc", project_dir="/p")
+        assert s.prefix == "DLC"
+        assert s.max_number == 3
+        assert s.next_id == "DLC004"
+
+    def test_uses_uid_sources_when_id_column_missing(self):
+        db = self._db()
+        db.execute(
+            "INSERT INTO tasks (uid) VALUES (?)",
+            ("FJ-XM-B2-DLC004-T95E-20260601",),
+        )
+        db.execute(
+            "INSERT INTO grouping (uid, group_index) VALUES (?, 0)",
+            ("FJ-XM-B2-DLC006-T95E-20260601",),
+        )
+        db.commit()
+        s = species_sequence_summary(db, "DLC")
+        assert s.max_number == 6
+        assert s.next_id == "DLC007"
+
+    def test_reports_gaps_without_reusing_by_default(self):
+        db = self._db()
+        for n in (1, 3):
+            db.execute(
+                "INSERT INTO specimens (uid, id) VALUES (?, ?)",
+                (f"FJ-XM-B2-DLC{n:03d}-T95E-20260601", f"DLC{n:03d}"),
+            )
+        db.commit()
+        s = species_sequence_summary(db, "DLC")
+        assert s.next_id == "DLC004"
+        assert s.gaps == [2]
+
+    def test_empty_prefix_returns_empty_summary(self):
+        db = self._db()
+        s = species_sequence_summary(db, "")
+        assert s.prefix == ""
+        assert s.next_id == ""
 
 
 # ── suggested_tiff_name ───────────────────────────────────────────────────
