@@ -45,6 +45,7 @@ from app.utils.label_core import (
     qr_metrics,
     validate_print_job,
     create_print_job,
+    label_data_text,
 )
 from app.services.label_service import LabelService, BUILTIN_TEMPLATES
 
@@ -891,3 +892,64 @@ class TestLabelsView:
         view._go_to_step(2)
         view._go_to_step(3)
         assert view._current_step == 3
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# label_data_text
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestLabelDataText:
+    def test_label_data_text_all_fields(self):
+        data = {
+            "uid": "FJ-YGLZ-B2-001",
+            "scientific_name": "Polynoidae sp.",
+            "scientific_name_cn": "背鳞虫",
+            "province": "福建",
+            "site": "厦门",
+            "station": "B2",
+            "date": "20260506",
+            "collector": "杨德援",
+            "storage": "D95E",
+            "notes": "备注内容",
+        }
+        result = label_data_text(data)
+        assert "编号: FJ-YGLZ-B2-001" in result
+        assert "拉丁名: Polynoidae sp." in result
+        assert "中文名: 背鳞虫" in result
+        assert "省份: 福建" in result
+        assert "采集地: 厦门" in result
+        assert "站号: B2" in result
+        assert "采集日期: 20260506" in result
+        assert "采集人: 杨德援" in result
+        assert "保存方式: D95E" in result
+        assert "备注: 备注内容" in result
+        lines = result.split("\n")
+        assert len(lines) == 10
+
+    def test_label_data_text_skips_empty(self):
+        data = {
+            "uid": "FJ-001",
+            "scientific_name": "",
+            "scientific_name_cn": None,
+            "province": "福建",
+            "site": None,
+            "station": "",
+            "date": "20260506",
+            "collector": None,
+            "storage": "D95E",
+            "notes": "",
+        }
+        result = label_data_text(data)
+        assert "编号: FJ-001" in result
+        assert "拉丁名" not in result
+        assert "中文名" not in result
+        assert "省份: 福建" in result
+        assert "采集地" not in result
+        assert "站号" not in result
+        assert "采集日期: 20260506" in result
+        assert "采集人" not in result
+        assert "保存方式: D95E" in result
+        assert "备注" not in result
+
+    def test_label_data_text_empty_dict(self):
+        assert label_data_text({}) == ""

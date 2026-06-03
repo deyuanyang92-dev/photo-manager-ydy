@@ -513,22 +513,30 @@ def validate_print_job(job: dict) -> list[dict]:
     return warnings
 
 
-def label_data_text(data: Optional[dict]) -> str:
-    """Return a plain-text summary of label data (used for clipboard / accessibility).
+def label_data_text(data: dict) -> str:
+    """Return plain-text summary of label data (for clipboard/export).
 
-    Mirror: ``labelDataText`` in app.js.
-
-    Format: uniqueId, speciesName (or latin), region, collectorLabel
-    — non-empty values joined by newline.
+    Mirrors web labelDataText(). One field per line: "字段名: 值".
+    Skips empty/None fields.
     """
-    d = data or {}
-    parts = [
-        str(d.get("uniqueId") or ""),
-        str(d.get("speciesName") or d.get("latin") or ""),
-        str(d.get("region") or ""),
-        str(d.get("collectorLabel") or ""),
+    FIELD_ORDER = [
+        ("uid", "编号"),
+        ("scientific_name", "拉丁名"),
+        ("scientific_name_cn", "中文名"),
+        ("province", "省份"),
+        ("site", "采集地"),
+        ("station", "站号"),
+        ("date", "采集日期"),
+        ("collector", "采集人"),
+        ("storage", "保存方式"),
+        ("notes", "备注"),
     ]
-    return "\n".join(p for p in parts if p)
+    lines = []
+    for key, label in FIELD_ORDER:
+        val = (data or {}).get(key)
+        if val:
+            lines.append(f"{label}: {val}")
+    return "\n".join(lines)
 
 
 def create_print_job(opts: Optional[dict] = None) -> dict:
