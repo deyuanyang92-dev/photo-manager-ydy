@@ -350,6 +350,43 @@ class TestDetailDialog:
         texts = " ".join(lbl.text() for lbl in labels)
         assert "厦门" in texts
 
+    def test_constructs_without_error_no_directory(self):
+        """Detail dialog must not crash for a project dict with no directory."""
+        from app.views.overview_view import _ProjectDetailDialog
+        proj = {"id": "x", "name": "无目录项目", "year": "2026"}
+        dlg = _ProjectDetailDialog(proj)
+        assert dlg is not None
+
+    def test_constructs_with_real_directory(self, tmp_path):
+        """Stat cards block must not crash even when the directory is empty."""
+        from app.views.overview_view import _ProjectDetailDialog
+        proj = {
+            "id": "y",
+            "name": "有目录项目",
+            "year": "2026",
+            "directory": str(tmp_path),
+        }
+        dlg = _ProjectDetailDialog(proj)
+        assert dlg is not None
+
+    def test_stat_cards_show_numbers(self, tmp_path):
+        """Stat cards should display numeric labels (possibly '0')."""
+        from app.views.overview_view import _ProjectDetailDialog
+        from PyQt6.QtWidgets import QLabel
+        proj = {
+            "id": "z",
+            "name": "统计测试",
+            "year": "2026",
+            "directory": str(tmp_path),
+        }
+        dlg = _ProjectDetailDialog(proj)
+        # Find the stat-value labels: they are QLabel children of QFrame#StatCard.
+        # We look for labels whose text is a digit string or '—'.
+        labels = dlg.findChildren(QLabel)
+        numeric_labels = [l for l in labels if l.text().isdigit() or l.text() == "—"]
+        # Stat cards: 3 value labels expected (specimenCount / resultCount / pending)
+        assert len(numeric_labels) >= 3
+
 
 # ── enter_workspace_requested signal ─────────────────────────────────────────
 

@@ -103,19 +103,27 @@ def _save_projects(projects: list[dict]) -> None:
 # ── Detail dialog ─────────────────────────────────────────────────────────────
 
 class _ProjectDetailDialog(QDialog):
-    """Simple project info modal — mirrors the web 'overview detail' branch."""
+    """Project info modal — mirrors the web 'overview detail' branch.
+
+    Shows key-value metadata rows + live stat cards (specimenCount / resultCount /
+    pendingJpgCount) for real projects that have a directory on disk.
+
+    Oracle: app.js renderOverview detail branch (lines 13944-14023):
+      - stat-card row (13965-13997) with real /api/project/summary stats
+      - key-value metadata block
+    """
 
     def __init__(self, proj: dict, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("项目详情")
-        self.setMinimumWidth(520)
-        self.setMinimumHeight(300)
+        self.setMinimumWidth(540)
+        self.setMinimumHeight(320)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(28, 24, 28, 20)
         layout.setSpacing(12)
 
-        # Title
+        # ── Title ─────────────────────────────────────────────────────────────
         name_lbl = QLabel(f"{proj.get('name', '—')}  {proj.get('year', '')}")
         name_lbl.setObjectName("Title")
         layout.addWidget(name_lbl)
@@ -124,11 +132,49 @@ class _ProjectDetailDialog(QDialog):
         loc_lbl.setObjectName("Muted")
         layout.addWidget(loc_lbl)
 
-        layout.addSpacing(10)
+        layout.addSpacing(6)
 
-        # Key–value rows
+        # ── Live stat cards (mirrors app.js stat-row / stat-card) ─────────────
+        directory = proj.get("directory") or proj.get("dir") or ""
+        if directory:
+            try:
+                from app.services.project_service import get_project_summary
+                summary = get_project_summary(directory)
+            except Exception:
+                summary = None
+
+            stat_row = QHBoxLayout()
+            stat_row.setSpacing(10)
+            _stats = [
+                (str(summary["specimenCount"]) if summary else "—", "标本编号"),
+                (str(summary["resultCount"])   if summary else "—", "完成成片"),
+                (str(summary["pendingJpgCount"]) if summary else "—", "待处理 JPG"),
+            ]
+            for value, label in _stats:
+                card = QFrame()
+                card.setObjectName("StatCard")
+                card.setStyleSheet(
+                    "QFrame#StatCard { border: 1px solid #d0d8e8; border-radius: 6px;"
+                    " background: #f8fafd; padding: 8px 16px; }"
+                )
+                card_layout = QVBoxLayout(card)
+                card_layout.setContentsMargins(8, 6, 8, 6)
+                card_layout.setSpacing(2)
+                val_lbl = QLabel(value)
+                val_lbl.setStyleSheet("font-size: 22px; font-weight: 700; color: #1a3a6c;")
+                val_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                lbl_lbl = QLabel(label)
+                lbl_lbl.setStyleSheet("font-size: 11px; color: #6a7a8a;")
+                lbl_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                card_layout.addWidget(val_lbl)
+                card_layout.addWidget(lbl_lbl)
+                stat_row.addWidget(card, stretch=1)
+            layout.addLayout(stat_row)
+            layout.addSpacing(6)
+
+        # ── Key–value rows ────────────────────────────────────────────────────
         rows = [
-            ("磁盘目录", proj.get("directory") or proj.get("dir") or "—"),
+            ("磁盘目录", directory or "—"),
             ("负责人",   proj.get("collector") or "—"),
             ("地点",     proj.get("location") or "—"),
             ("时间",     proj.get("dateRange") or proj.get("date_range") or "—"),

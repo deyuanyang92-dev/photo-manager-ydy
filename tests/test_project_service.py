@@ -201,3 +201,93 @@ class TestEnsureProjectDirs:
         result = ensure_project_dirs(str(proj_dir))
         assert isinstance(result, dict)
         assert "projectDir" in result or "project_dir" in result
+
+
+# ── get_project_summary ────────────────────────────────────────────────────
+
+class TestGetProjectSummary:
+    """Oracle: server.js GET /api/project/summary (lines 2831-2870)."""
+
+    def test_returns_dict_with_required_keys(self, tmp_path):
+        from app.services.project_service import get_project_summary
+        result = get_project_summary(str(tmp_path / "empty_proj"))
+        assert isinstance(result, dict)
+        for key in ("specimenCount", "resultCount", "pendingJpgCount", "projectDir"):
+            assert key in result, f"missing key: {key}"
+
+    def test_empty_dir_returns_zeros(self, tmp_path):
+        from app.services.project_service import get_project_summary
+        result = get_project_summary(str(tmp_path / "noproj"))
+        assert result["specimenCount"] == 0
+        assert result["resultCount"] == 0
+        assert result["pendingJpgCount"] == 0
+
+    def test_counts_tifs_in_results(self, tmp_path):
+        """TIF files in results/ are counted as resultCount."""
+        import sqlite3 as _sqlite3
+        from app.services.project_service import ensure_project_dirs, get_project_summary
+        proj = tmp_path / "proj"
+        ensure_project_dirs(str(proj))
+        results = proj / "results"
+        (results / "A001-1.tif").write_bytes(b"")
+        (results / "A002-1.tiff").write_bytes(b"")
+        (results / "other.jpg").write_bytes(b"")   # should NOT count
+        result = get_project_summary(str(proj))
+        assert result["resultCount"] == 2
+
+    def test_counts_tifs_in_freeform(self, tmp_path):
+        """TIF files in results/freeform/ are also counted."""
+        from app.services.project_service import ensure_project_dirs, get_project_summary
+        proj = tmp_path / "proj"
+        ensure_project_dirs(str(proj))
+        freeform = proj / "results" / "freeform"
+        freeform.mkdir(parents=True, exist_ok=True)
+        (freeform / "free001.tif").write_bytes(b"")
+        result = get_project_summary(str(proj))
+        assert result["resultCount"] == 1
+
+    def test_counts_jpgs_in_incoming(self, tmp_path):
+        """JPG files in incoming-jpg/ are counted as pendingJpgCount."""
+        from app.services.project_service import ensure_project_dirs, get_project_summary
+        proj = tmp_path / "proj"
+        ensure_project_dirs(str(proj))
+        incoming = proj / "incoming-jpg"
+        (incoming / "shot001.jpg").write_bytes(b"")
+        (incoming / "shot002.jpeg").write_bytes(b"")
+        (incoming / "readme.txt").write_bytes(b"")   # should NOT count
+        result = get_project_summary(str(proj))
+        assert result["pendingJpgCount"] == 2
+
+    def test_reads_specimen_count_from_sqlite(self, tmp_path):
+        """specimenCount reflects rows in project.db specimens table."""
+        import sqlite3 as _sqlite3
+        from app.services.project_service import ensure_project_dirs, get_project_summary
+        proj = tmp_path / "proj"
+        ensure_project_dirs(str(proj))
+        db_path = proj / "_data" / "project.db"
+        conn = _sqlite3.connect(str(db_path))
+        conn.execute(
+            "CREATE TABLE specimens (uid TEXT PRIMARY KEY, scientific_name TEXT)"
+        )
+        conn.execute("INSERT INTO specimens VALUES ('SP001', 'Aplysia californica')")
+        conn.execute("INSERT INTO specimens VALUES ('SP002', 'Octopus vulgaris')")
+        conn.commit()
+        conn.close()
+        result = get_project_summary(str(proj))
+        assert result["specimenCount"] == 2
+
+    def test_no_db_returns_zero_specimens(self, tmp_path):
+        from app.services.project_service import ensure_project_dirs, get_project_summary
+        proj = tmp_path / "proj"
+        ensure_project_dirs(str(proj))
+        # _data/ exists but no project.db
+        result = get_project_summary(str(proj))
+        assert result["specimenCount"] == 0
+
+    def test_never_raises_on_nonexistent_dir(self, tmp_path):
+        from app.services.project_service import get_project_summary
+        # Should not raise even when the project dir doesn't exist at all
+        result = get_project_summary(str(tmp_path / "ghost_project"))
+        assert result["specimenCount"] == 0
+        assert result["resultCount"] == 0
+        assert result["pendingJpgCount"] == 0

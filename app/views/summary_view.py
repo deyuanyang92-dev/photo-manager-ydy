@@ -386,6 +386,11 @@ class SummaryView(BaseView):
         self._btn_csv.clicked.connect(self._export_csv)
         bar.addWidget(self._btn_csv)
 
+        self._btn_dwc = QPushButton("⬇ DwC")
+        self._btn_dwc.setToolTip("导出 Darwin Core CSV（需项目数据库）")
+        self._btn_dwc.clicked.connect(self._export_dwc)
+        bar.addWidget(self._btn_dwc)
+
         bar.addSpacing(8)
 
         # Save to directory
@@ -713,6 +718,38 @@ class SummaryView(BaseView):
                         row.append(str(val) if val is not None else "")
                     writer.writerow(row)
             QMessageBox.information(self, "导出成功", f"已保存到：\n{path}")
+        except Exception as exc:
+            QMessageBox.critical(self, "导出失败", str(exc))
+
+    # ── Export: Darwin Core CSV ───────────────────────────────────────────────
+
+    def _export_dwc(self) -> None:
+        """Export Darwin Core CSV using the export_service.export_darwin_core function.
+
+        Requires an open project DB with the darwin_core view.
+        Oracle: export_service.export_darwin_core (mirrors DwC export in server.js).
+        """
+        db = self.ctx.get_db()
+        if db is None:
+            QMessageBox.information(
+                self, "导出 DwC",
+                "当前没有打开的项目数据库。\n请先进入一个工作区项目，再导出 Darwin Core 数据。",
+            )
+            return
+
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "导出 Darwin Core CSV",
+            f"darwin_core_{_date.today().isoformat()}.csv",
+            "CSV 文件 (*.csv)",
+        )
+        if not path:
+            return
+
+        try:
+            from app.services.export_service import export_darwin_core
+            out = export_darwin_core(db, path)
+            QMessageBox.information(self, "导出成功", f"Darwin Core CSV 已保存到：\n{out}")
         except Exception as exc:
             QMessageBox.critical(self, "导出失败", str(exc))
 

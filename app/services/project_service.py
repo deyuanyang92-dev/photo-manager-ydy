@@ -153,3 +153,75 @@ def list_projects(user_projects_json_path: str) -> list:
         return data.get("projects", [])
     except (json.JSONDecodeError, OSError):
         return []
+
+
+def get_project_summary(project_dir: str) -> dict:
+    """Return live statistics for *project_dir*: specimen count, result TIFF count,
+    pending JPG count.
+
+    Oracle: server.js GET /api/project/summary (lines 2831-2870).
+
+    Counts:
+      specimenCount  — rows in ``_data/project.db`` specimens table (or 0 if absent).
+      resultCount    — .tif/.tiff files in ``results/`` and ``results/freeform/``.
+      pendingJpgCount— .jpg/.jpeg files in ``incoming-jpg/`` (or legacy ``新拍JPG/``).
+
+    Always returns a dict; never raises.
+    """
+    import re
+    import sqlite3 as _sqlite3
+
+    root = Path(project_dir).resolve()
+
+    # ── specimen count ────────────────────────────────────────────────────────
+    specimen_count = 0
+    db_path = root / DATA_SUBDIR / "project.db"
+    if db_path.exists():
+        try:
+            conn = _sqlite3.connect(str(db_path))
+            try:
+                (specimen_count,) = conn.execute("SELECT COUNT(*) FROM specimens").fetchone()
+            except Exception:
+                specimen_count = 0
+            finally:
+                conn.close()
+        except Exception:
+            specimen_count = 0
+
+    # ── result TIFF count ─────────────────────────────────────────────────────
+    result_count = 0
+    _tif_re = re.compile(r"\.tiff?$", re.IGNORECASE)
+
+    def _count_tifs(directory: Path) -> int:
+        if not directory.is_dir():
+            return 0
+        try:
+            return sum(
+                1 for n in directory.iterdir()
+                if _tif_re.search(n.name) and n.is_file()
+            )
+        except OSError:
+            return 0
+
+    results_root = root / RESULTS_DIR
+    result_count = _count_tifs(results_root) + _count_tifs(results_root / "freeform")
+
+    # ── pending JPG count ─────────────────────────────────────────────────────
+    pending_jpg_count = 0
+    _jpg_re = re.compile(r"\.jpe?g$", re.IGNORECASE)
+    incoming_path = Path(get_incoming_jpg_dir(project_dir))
+    if incoming_path.is_dir():
+        try:
+            pending_jpg_count = sum(
+                1 for n in incoming_path.iterdir()
+                if _jpg_re.search(n.name) and n.is_file()
+            )
+        except OSError:
+            pending_jpg_count = 0
+
+    return {
+        "projectDir": str(root),
+        "specimenCount": specimen_count,
+        "resultCount": result_count,
+        "pendingJpgCount": pending_jpg_count,
+    }

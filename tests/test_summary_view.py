@@ -304,3 +304,85 @@ class TestAllCols:
         from app.views.summary_view import ALL_COLS, _DEFAULT_KEYS
         all_keys = {c["key"] for c in ALL_COLS}
         assert set(_DEFAULT_KEYS) <= all_keys
+
+
+# ── DwC export button ─────────────────────────────────────────────────────────
+
+class TestDwcExportButton:
+    """Oracle: export_service.export_darwin_core exists; SummaryView must expose it."""
+
+    def test_dwc_button_exists(self, view_no_project) -> None:
+        assert hasattr(view_no_project, "_btn_dwc")
+        assert view_no_project._btn_dwc is not None
+
+    def test_dwc_button_tooltip_set(self, view_no_project) -> None:
+        assert view_no_project._btn_dwc.toolTip() != ""
+
+    def test_dwc_export_no_db_shows_info(self, view_no_project) -> None:
+        """With no project DB, _export_dwc should not crash (dialog would show)."""
+        # No real DB in view_no_project; call _export_dwc with dialog suppressed.
+        from unittest.mock import patch
+        with patch("PyQt6.QtWidgets.QMessageBox.information", return_value=None):
+            # Should not raise
+            view_no_project._export_dwc()
+
+    def test_dwc_export_with_db_writes_file(self, tmp_path) -> None:
+        """When a DB with darwin_core view is present, DwC CSV must be written.
+
+        Uses a fresh SummaryView (no on_activate call that could block),
+        injects a real in-memory DB, and patches getSaveFileName.
+        """
+        import sqlite3
+        from unittest.mock import MagicMock, patch
+        from app.views.summary_view import SummaryView
+
+        # Build a minimal DB with the darwin_core view
+        db = sqlite3.connect(":memory:")
+        db.row_factory = sqlite3.Row
+        db.executescript("""
+            CREATE TABLE specimens (
+                uid TEXT PRIMARY KEY,
+                scientific_name TEXT, family TEXT, genus TEXT, order_name TEXT,
+                lon REAL, lat REAL, collection_date TEXT, collector TEXT,
+                identifier TEXT, geo_area TEXT, storage TEXT,
+                province TEXT, site TEXT
+            );
+            INSERT INTO specimens VALUES (
+                'SP001','Aplysia californica','Aplysiidae','Aplysia','Anaspidea',
+                118.5, 24.5, '2026-06-01', 'Wang', 'Chen', '福建厦门', 'D75E',
+                'FJ', 'XM'
+            );
+            CREATE VIEW darwin_core AS
+            SELECT
+                uid            AS occurrenceID,
+                scientific_name AS scientificName,
+                family, genus, order_name AS "order",
+                lon            AS decimalLongitude,
+                lat            AS decimalLatitude,
+                collection_date AS eventDate,
+                collector      AS recordedBy,
+                identifier     AS identifiedBy,
+                geo_area       AS locality,
+                storage        AS verbatimPreservation
+            FROM specimens;
+        """)
+        db.commit()
+
+        ctx = MagicMock()
+        ctx.get_db.return_value = db
+        ctx.settings = MagicMock()
+        view = SummaryView(ctx)
+
+        out_path = str(tmp_path / "dwc_test.csv")
+        with patch("PyQt6.QtWidgets.QFileDialog.getSaveFileName", return_value=(out_path, "")), \
+             patch("PyQt6.QtWidgets.QMessageBox.information", return_value=None), \
+             patch("PyQt6.QtWidgets.QMessageBox.critical", return_value=None):
+            view._export_dwc()
+
+        assert Path(out_path).exists(), "DwC CSV file was not created"
+        import csv as _csv
+        with open(out_path, encoding="utf-8-sig") as f:
+            reader = _csv.reader(f)
+            header = next(reader)
+        assert "occurrenceID" in header
+        assert "scientificName" in header
