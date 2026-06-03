@@ -46,7 +46,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Optional, TYPE_CHECKING
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject
+from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal, QObject
 from PyQt6.QtGui import QColor, QFont
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -805,6 +805,8 @@ class WormsView(BaseView):
         self._detail_worker: Optional[_DetailWorker] = None
         self._results:       list[dict] = []
         self._selected:      Optional[dict] = None
+        # Auto-poll timer for running batch jobs (oracle: fetchWormsJobs app.js ~11609)
+        self._poll_timer:    Optional[QTimer] = None
         super().__init__(ctx)
 
     # ── Service ────────────────────────────────────────────────────────
@@ -1054,6 +1056,19 @@ class WormsView(BaseView):
         )
         refresh_btn.clicked.connect(self._refresh_jobs)
         ctrl.addWidget(refresh_btn)
+
+        # Retry-failed button (oracle: app.js ~12006 retry-failed action)
+        self._retry_btn = QPushButton("重试失败")
+        self._retry_btn.setFixedWidth(72)
+        self._retry_btn.setEnabled(False)
+        self._retry_btn.setStyleSheet(
+            f"QPushButton {{ background:{_PANEL}; color:{_WARN}; border:1px solid rgba(241,189,87,0.25);"
+            f"  border-radius:6px; padding:6px 8px; font-size:12px; }}"
+            f"QPushButton:hover:enabled {{ border-color:{_WARN}; }}"
+            f"QPushButton:disabled {{ color:{_MUTED_2}; border-color:{_BORDER}; }}"
+        )
+        self._retry_btn.clicked.connect(self._on_retry_failed)
+        ctrl.addWidget(self._retry_btn)
         inner.addLayout(ctrl)
 
         self._jobs_list = QListWidget()
@@ -1269,35 +1284,87 @@ class WormsView(BaseView):
         except Exception as exc:
             self._set_status(f"创建失败: {exc}")
 
+    def _on_retry_failed(self) -> None:
+        """Retry all error-status items in the most recent job.
+
+        Oracle: updateWormsJob(job, "retry-failed") in app.js ~12006 /
+        server.js ~2157: filter record_ids to those with status="error",
+        reset cursor to 0 and status to "running".
+        """
+        if not self._service:
+            return
+        try:
+            jobs = self._service.list_jobs()
+            if not jobs:
+                return
+            # Operate on the most recent job that has errors
+            target = next(
+                (j for j in jobs if j.get("counts", {}).get("error", 0) > 0),
+                jobs[0],  # fallback to newest
+            )
+            self._service.retry_failed_job(target["id"])
+            self._set_status(f"已重试失败项: {(target.get('id') or '?')[:8]}…")
+            self._refresh_jobs()
+        except Exception as exc:
+            self._set_status(f"重试失败: {exc}")
+
     def _refresh_jobs(self) -> None:
+        """Refresh the jobs list and start/stop the 1.5 s auto-poll timer.
+
+        Oracle: fetchWormsJobs() app.js ~11602 — when a job is running,
+        poll every 1 500 ms; stop when no running job exists.
+        """
         if not self._service:
             return
         jobs = self._service.list_jobs()
         self._jobs_list.clear()
+
+        # Stop any existing poll timer; we'll restart it if needed
+        if self._poll_timer is not None:
+            self._poll_timer.stop()
+            self._poll_timer = None
+
+        # Detect active (running) job and error-containing job for retry button
+        has_running = any(j.get("status") == "running" for j in jobs)
+        has_failed  = any(
+            j.get("counts", {}).get("error", 0) > 0
+            for j in jobs
+        )
+        if hasattr(self, "_retry_btn"):
+            self._retry_btn.setEnabled(has_failed)
+
         if not jobs:
             item = QListWidgetItem("（暂无任务）")
             item.setForeground(QColor(_MUTED_2))
             self._jobs_list.addItem(item)
-            return
-        for j in jobs[:20]:
-            jid     = (j.get("id") or "?")[:8]
-            status  = j.get("status", "?")
-            cursor  = j.get("cursor", 0)
-            total   = len(j.get("record_ids", []))
-            ts      = (j.get("created_at") or "")[:10]
-            counts  = j.get("counts", {})
-            summary = "  ".join(f"{k}:{v}" for k, v in counts.items() if v)
-            label   = f"[{ts}]  {jid}…  {status}  {cursor}/{total}"
-            if summary:
-                label += f"  ({summary})"
-            item = QListWidgetItem(label)
-            if status == "completed":
-                item.setForeground(QColor(_SUCCESS))
-            elif status == "running":
-                item.setForeground(QColor("#6699ff"))
-            elif status in ("paused", "cancelled"):
-                item.setForeground(QColor(_WARN))
-            self._jobs_list.addItem(item)
+        else:
+            for j in jobs[:20]:
+                jid     = (j.get("id") or "?")[:8]
+                status  = j.get("status", "?")
+                cursor  = j.get("cursor", 0)
+                total   = len(j.get("record_ids", []))
+                ts      = (j.get("created_at") or "")[:10]
+                counts  = j.get("counts", {})
+                summary = "  ".join(f"{k}:{v}" for k, v in counts.items() if v)
+                label   = f"[{ts}]  {jid}…  {status}  {cursor}/{total}"
+                if summary:
+                    label += f"  ({summary})"
+                item = QListWidgetItem(label)
+                if status == "completed":
+                    item.setForeground(QColor(_SUCCESS))
+                elif status == "running":
+                    item.setForeground(QColor("#6699ff"))
+                elif status in ("paused", "cancelled"):
+                    item.setForeground(QColor(_WARN))
+                self._jobs_list.addItem(item)
+
+        # Auto-poll: restart 1.5 s single-shot timer when a job is running
+        # Oracle: taxonJobPollTimer = setTimeout(..., 1500) in app.js ~11609
+        if has_running:
+            self._poll_timer = QTimer(self)
+            self._poll_timer.setSingleShot(True)
+            self._poll_timer.timeout.connect(self._refresh_jobs)
+            self._poll_timer.start(1500)
 
     # ── UI helpers ─────────────────────────────────────────────────────
 
@@ -1759,3 +1826,284 @@ class WormsMatchDialog(QDialog):
                 _label("选择候选后预览标准分类阶元", color=_MUTED_2, size=12)
             )
         self._chain_layout.addStretch()
+
+
+# ── WormsQuickFillDialog ───────────────────────────────────────────────────────
+
+class _QuickSearchWorker(QObject):
+    """Background search worker for WormsQuickFillDialog."""
+
+    finished = pyqtSignal(list)
+    error    = pyqtSignal(str)
+
+    def __init__(self, service: WormsService, name: str) -> None:
+        super().__init__()
+        self._svc  = service
+        self._name = name
+
+    def run(self) -> None:
+        try:
+            # Always use like=True for quick popup (oracle: doWormsPopupSearch ~12753)
+            self.finished.emit(self._svc.search(self._name, like=True))
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+
+class WormsQuickFillDialog(QDialog):
+    """工作台快捷 WoRMS 填充弹窗.
+
+    Mirrors ``renderWormsPopupOverlay()`` / ``doWormsPopupSearch()`` in
+    app.js lines ~12685–12760.
+
+    Behaviour:
+    - Search bar pre-filled with *initial_query* (typically current
+      taxon group or scientific name in the specimen card).
+    - Results list: each row shows sciname / rank / status badges /
+      breadcrumb + 「填充」button.
+    - Clicking 「填充」fills Latin-only fields (class→taxonGroup,
+      order, family, genus, scientificname if Species rank) via
+      ``fill_callback`` then closes the dialog.
+    - Chinese fields (*Cn) are NEVER written.
+
+    Parameters
+    ----------
+    service:
+        WormsService for searches.
+    fill_callback:
+        Callable(rec: dict) invoked with the chosen WoRMS AphiaRecord.
+        The callback is responsible for merging fields into the specimen.
+    initial_query:
+        Pre-filled search text (may be empty).
+    parent:
+        Parent widget.
+    """
+
+    def __init__(
+        self,
+        service: WormsService,
+        fill_callback,
+        *,
+        initial_query: str = "",
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self._svc           = service
+        self._fill_callback = fill_callback
+        self._results:      list[dict] = []
+        self._loading:      bool = False
+        self._error:        str  = ""
+        self._search_thread: Optional[QThread] = None
+
+        self.setWindowTitle("从 WoRMS 查找分类")
+        self.setMinimumSize(540, 440)
+        self.setModal(True)
+        self.setStyleSheet(
+            f"QDialog {{ background:{_BG}; color:{_TEXT}; }}"
+            f"QLabel {{ color:{_TEXT}; background:transparent; }}"
+        )
+        self._build_ui()
+
+        # Pre-fill and auto-search if query provided
+        if initial_query:
+            self._search_input.setText(initial_query.strip())
+            self._on_search()
+
+    # ── UI ──────────────────────────────────────────────────────────────────
+
+    def _build_ui(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(20, 16, 20, 16)
+        root.setSpacing(10)
+
+        root.addWidget(_label("从 WoRMS 查找分类", size=15, bold=True))
+
+        # Search bar (oracle: worms-popup-search div ~12695)
+        bar = QHBoxLayout()
+        bar.setSpacing(8)
+
+        self._search_input = QLineEdit()
+        self._search_input.setObjectName("WQSearchInput")
+        self._search_input.setPlaceholderText("输入拉丁学名…")
+        self._search_input.setStyleSheet(
+            f"QLineEdit#WQSearchInput {{ background:{_PANEL}; border:1px solid {_BORDER};"
+            f"  border-radius:6px; padding:7px 10px; color:{_TEXT}; font-size:13px;"
+            f"  font-family:{_MONO}; }}"
+            f"QLineEdit#WQSearchInput:focus {{ border-color:{_ACCENT}; }}"
+        )
+        self._search_input.returnPressed.connect(self._on_search)
+        bar.addWidget(self._search_input, stretch=1)
+
+        search_btn = QPushButton("搜索")
+        search_btn.setObjectName("WQSearchBtn")
+        search_btn.setStyleSheet(
+            f"QPushButton#WQSearchBtn {{ background:{_ACCENT}; color:{_BG};"
+            f"  border:none; border-radius:6px; padding:7px 16px; font-size:12px; font-weight:600; }}"
+            f"QPushButton#WQSearchBtn:hover {{ background:{_ACCENT_H}; }}"
+        )
+        search_btn.clicked.connect(self._on_search)
+        bar.addWidget(search_btn)
+        root.addLayout(bar)
+
+        # Status label (loading / error)
+        self._status_lbl = _label("", color=_MUTED, size=11)
+        root.addWidget(self._status_lbl)
+
+        # Results scroll area (oracle: worms-popup-results div ~12713)
+        self._results_scroll = QScrollArea()
+        self._results_scroll.setWidgetResizable(True)
+        self._results_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._results_scroll.setStyleSheet("QScrollArea { background: transparent; }")
+
+        self._results_container = QWidget()
+        self._results_container.setStyleSheet("background:transparent;")
+        self._results_layout = QVBoxLayout(self._results_container)
+        self._results_layout.setContentsMargins(0, 0, 0, 0)
+        self._results_layout.setSpacing(4)
+        self._results_layout.addStretch()
+
+        self._results_scroll.setWidget(self._results_container)
+        root.addWidget(self._results_scroll, stretch=1)
+
+        # Close button (oracle: worms-popup-cancel ~12736)
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+        btn_row.addStretch()
+        close_btn = QPushButton("关闭")
+        close_btn.setObjectName("WQCloseBtn")
+        close_btn.setStyleSheet(
+            f"QPushButton#WQCloseBtn {{ background:{_PANEL}; color:{_MUTED};"
+            f"  border:1px solid {_BORDER}; border-radius:6px; padding:7px 16px; font-size:12px; }}"
+            f"QPushButton#WQCloseBtn:hover {{ color:{_TEXT}; }}"
+        )
+        close_btn.clicked.connect(self.reject)
+        btn_row.addWidget(close_btn)
+        root.addLayout(btn_row)
+
+    # ── Search (oracle: doWormsPopupSearch ~12743) ──────────────────────────
+
+    def _on_search(self) -> None:
+        q = self._search_input.text().strip()
+        if not q:
+            return
+        if self._search_thread and self._search_thread.isRunning():
+            return
+
+        self._loading = True
+        self._error = ""
+        self._results = []
+        self._status_lbl.setText("查询中…")
+        self._render_results()
+
+        worker = _QuickSearchWorker(self._svc, q)
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_search_done)
+        worker.error.connect(self._on_search_error)
+        worker.finished.connect(thread.quit)
+        worker.error.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        self._search_thread = thread
+        thread.start()
+
+    def _on_search_done(self, results: list[dict]) -> None:
+        self._loading = False
+        self._results = results
+        self._status_lbl.setText(
+            f"找到 {len(results)} 条结果" if results else "无结果"
+        )
+        self._render_results()
+
+    def _on_search_error(self, msg: str) -> None:
+        self._loading = False
+        self._error = msg
+        self._status_lbl.setText(f"错误: {msg}")
+        self._render_results()
+
+    # ── Result rendering (oracle: worms-popup-result rows ~12714) ──────────
+
+    def _render_results(self) -> None:
+        # Clear old result widgets
+        to_remove = []
+        for i in range(self._results_layout.count()):
+            item = self._results_layout.itemAt(i)
+            if item and item.widget():
+                to_remove.append(item.widget())
+        for w in to_remove:
+            self._results_layout.removeWidget(w)
+            w.deleteLater()
+
+        if self._loading:
+            self._results_layout.addWidget(
+                _label("查询中…", color=_MUTED, size=12)
+            )
+        elif not self._results:
+            pass  # status label already shows the message
+        else:
+            for rec in self._results:
+                row_w = QWidget()
+                row_w.setObjectName("WQResultRow")
+                row_w.setStyleSheet(
+                    f"QWidget#WQResultRow {{ background:{_PANEL}; border:1px solid {_BORDER};"
+                    f"  border-radius:6px; }}"
+                    f"QWidget#WQResultRow:hover {{ border-color:{_ACCENT}; }}"
+                )
+                row_lay = QVBoxLayout(row_w)
+                row_lay.setContentsMargins(10, 8, 10, 8)
+                row_lay.setSpacing(3)
+
+                # Top: sciname + rank/status badges (oracle: ~12716–12718)
+                top = QHBoxLayout()
+                top.setSpacing(6)
+                sciname = rec.get("scientificname") or "?"
+                top.addWidget(_label(sciname, bold=True, font=_MONO, size=12))
+                rank = rec.get("rank") or ""
+                status = (rec.get("status") or "").lower()
+                if rank:
+                    top.addWidget(_badge(rank, "rank"))
+                if status:
+                    top.addWidget(_badge(status, "accepted" if status == "accepted" else "unaccepted"))
+                top.addStretch()
+
+                # 填充 button (oracle: worms-popup-fill-btn ~12721)
+                fill_btn = QPushButton("填充")
+                fill_btn.setObjectName("WQFillBtn")
+                fill_btn.setFixedWidth(52)
+                fill_btn.setStyleSheet(
+                    f"QPushButton#WQFillBtn {{ background:rgba(41,185,171,0.12); color:{_ACCENT};"
+                    f"  border:1px solid rgba(41,185,171,0.30); border-radius:5px;"
+                    f"  padding:3px 8px; font-size:11px; font-weight:600; }}"
+                    f"QPushButton#WQFillBtn:hover {{ background:rgba(41,185,171,0.22);"
+                    f"  border-color:{_ACCENT}; }}"
+                )
+                _rec = rec  # capture loop var
+                fill_btn.clicked.connect(lambda _checked=False, r=_rec: self._do_fill(r))
+                top.addWidget(fill_btn)
+                row_lay.addLayout(top)
+
+                # Breadcrumb: class > order > family (oracle: ~12719)
+                bc = " > ".join(
+                    p for p in [rec.get("class"), rec.get("order"), rec.get("family")]
+                    if p
+                )
+                if bc:
+                    row_lay.addWidget(_label(bc, color=_MUTED_2, size=11))
+
+                self._results_layout.addWidget(row_w)
+
+        self._results_layout.addStretch()
+
+    # ── Fill action (oracle: fillBtn click ~12722–12727) ──────────────────
+
+    def _do_fill(self, rec: dict) -> None:
+        """Invoke fill_callback with *rec*, then close the dialog.
+
+        Chinese fields (*Cn) are never touched — that constraint is
+        enforced by the callback implementation, not here.
+        """
+        try:
+            self._fill_callback(rec)
+        except Exception:
+            pass
+        self.accept()

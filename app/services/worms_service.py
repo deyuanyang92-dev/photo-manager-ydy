@@ -580,6 +580,42 @@ class WormsService:
                 return j
         return None
 
+    def retry_failed_job(self, job_id: str) -> Optional[dict]:
+        """Reset a job's cursor to 0, filter record_ids to error-status only,
+        and set status back to "running" — mirrors server.js "retry-failed"
+        action (server.js ~2157).
+
+        Parameters
+        ----------
+        job_id:
+            ID of the job to retry.
+
+        Returns
+        -------
+        Updated job dict, or None if not found.
+        """
+        store = self._read_jobs()
+        taxonomy = _read_json_safe(self._taxonomy_path, {"mappings": {}})
+        mappings = taxonomy.get("mappings", {})
+
+        for j in store.get("jobs", []):
+            if j.get("id") != job_id:
+                continue
+            # Retain only record IDs that previously errored
+            error_ids = [
+                rid for rid in j.get("record_ids", [])
+                if mappings.get(rid, {}).get("status") == "error"
+            ]
+            # If no error IDs known, retry full set (safe fallback)
+            j["record_ids"] = error_ids or j.get("record_ids", [])
+            j["cursor"]     = 0
+            j["counts"]     = {}
+            j["status"]     = "running"
+            j["updated_at"] = _now_iso()
+            self._write_jobs(store)
+            return j
+        return None
+
     # ── Cache introspection ───────────────────────────────────────────────
 
     def cache_stats(self) -> dict:

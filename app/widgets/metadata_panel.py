@@ -263,6 +263,23 @@ class MetadataPanel(QWidget):
             self._genus = _invisible_line_edit()
             self._scientific_name = _invisible_line_edit()
 
+        # ── WoRMS quick-fill button (oracle: renderWormsPopupOverlay ~12685) ───
+        # Opens a lightweight search dialog; fills Latin fields only.
+        # Chinese *Cn fields are never touched (invariant enforced in callback).
+        worms_btn_row = QHBoxLayout()
+        worms_btn_row.setContentsMargins(0, 2, 0, 2)
+        self._worms_quick_btn = QPushButton("WoRMS 查")
+        self._worms_quick_btn.setObjectName("WormsFill")
+        self._worms_quick_btn.setToolTip("从 WoRMS 快捷查找物种，填充拉丁分类信息（不覆盖中文）")
+        self._worms_quick_btn.setFixedHeight(28)
+        self._worms_quick_btn.setStyleSheet(
+            "QPushButton#WormsFill { font-size:11px; padding:2px 10px; }"
+        )
+        self._worms_quick_btn.clicked.connect(self._on_worms_quick_fill)
+        worms_btn_row.addStretch()
+        worms_btn_row.addWidget(self._worms_quick_btn)
+        form.addRow(worms_btn_row)
+
         # ── Notes ────────────────────────────────────────────────────────────
         form.addRow(_section_label("备注"))
         notes_lbl = QLabel("标本备注")
@@ -424,6 +441,68 @@ class MetadataPanel(QWidget):
                 proxy_edit.setText(value)
                 proxy_edit.blockSignals(False)
                 self._on_field_edited(db_field, value)
+
+    def _on_worms_quick_fill(self) -> None:
+        """Open WormsQuickFillDialog pre-filled with current taxon/scientific name.
+
+        On selection, fills Latin taxonomy fields into the specimen via ctx.
+        Chinese fields (*Cn) are never overwritten — enforced by ctx.worms_fill_specimen.
+
+        Oracle: renderWormsPopupOverlay / doWormsPopupSearch in app.js ~12685.
+        """
+        from pathlib import Path as _Path
+        from app.services.worms_service import WormsService
+        from app.views.worms_view import WormsQuickFillDialog
+
+        # Build a WormsService for this widget (uses project data dir if available)
+        try:
+            project_dir = getattr(self.ctx, "current_project_dir", None)
+            _data = (_Path(project_dir) / "_data") if project_dir else \
+                    (_Path.home() / ".photo_workbench" / "data")
+            _data.mkdir(parents=True, exist_ok=True)
+            svc = WormsService(
+                cache_path=str(_data / "worms_cache.json"),
+                jobs_path=str(_data / "worms_jobs.json"),
+            )
+        except Exception:
+            return
+
+        # Pre-fill from current scientific name or taxon group
+        initial = (
+            self._scientific_name.text().strip()
+            or self._taxon_group.text().strip()
+        )
+
+        # Callback: delegate to ctx.worms_fill_specimen then refresh proxy edits
+        def _fill(rec: dict) -> None:
+            fill_fn = getattr(self.ctx, "worms_fill_specimen", None)
+            if callable(fill_fn):
+                fill_fn(rec)
+            # Also update proxy edits directly so the panel reflects the change
+            # without a full reload.  Mirrors wormsFillToSpecimen field mapping:
+            #   class  → taxon_group, order → order_name, family → family,
+            #   Species → scientific_name.  Chinese fields: never touched.
+            mapping = {
+                "class":  ("taxon_group",     self._taxon_group),
+                "order":  ("order_name",      self._order_name),
+                "family": ("family",          self._family),
+                "genus":  ("genus",           self._genus),
+            }
+            for worms_key, (db_field, proxy) in mapping.items():
+                val = rec.get(worms_key, "")
+                if val:
+                    proxy.blockSignals(True)
+                    proxy.setText(val)
+                    proxy.blockSignals(False)
+                    self._on_field_edited(db_field, val)
+            if rec.get("rank") == "Species" and rec.get("scientificname"):
+                self._scientific_name.blockSignals(True)
+                self._scientific_name.setText(rec["scientificname"])
+                self._scientific_name.blockSignals(False)
+                self._on_field_edited("scientific_name", rec["scientificname"])
+
+        dlg = WormsQuickFillDialog(svc, _fill, initial_query=initial, parent=self)
+        dlg.exec()
 
     def _on_save(self) -> None:
         if self._uid:

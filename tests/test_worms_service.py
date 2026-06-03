@@ -723,3 +723,141 @@ class TestResolveMapping:
             store = json.load(fh)
         assert store["mappings"]["r1"]["worms"]["AphiaID"] == 100
         assert store["mappings"]["r1"]["chain"] == chain
+
+
+# ── retry_failed_job (new) ────────────────────────────────────────────────────
+
+class TestRetryFailedJob:
+    """WormsService.retry_failed_job() — mirrors server.js "retry-failed" action."""
+
+    def _write_taxonomy(self, path: str, mappings: dict) -> None:
+        import json
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"mappings": mappings}, fh, ensure_ascii=False)
+
+    def test_retry_failed_resets_error_ids_and_cursor(self, tmp_path):
+        svc = _make_service(str(tmp_path))
+
+        # Pre-populate taxonomy with one error, one matched
+        self._write_taxonomy(svc._taxonomy_path, {
+            "r1": {"status": "error"},
+            "r2": {"status": "matched"},
+        })
+
+        # Create a job with both record_ids; set cursor > 0
+        job = svc.create_job(["r1", "r2"])
+        store = svc._read_jobs()
+        for j in store["jobs"]:
+            if j["id"] == job.id:
+                j["cursor"] = 5
+                j["counts"] = {"error": 1, "matched": 1}
+        svc._write_jobs(store)
+
+        updated = svc.retry_failed_job(job.id)
+
+        assert updated is not None
+        assert updated["status"] == "running"
+        assert updated["cursor"] == 0
+        assert updated["counts"] == {}
+        # Only the error record_id should remain
+        assert updated["record_ids"] == ["r1"]
+
+    def test_retry_failed_unknown_id_returns_none(self, tmp_path):
+        svc = _make_service(str(tmp_path))
+        result = svc.retry_failed_job("nonexistent-uuid")
+        assert result is None
+
+    def test_retry_failed_no_taxonomy_file_falls_back_to_full_set(self, tmp_path):
+        """When worms_taxonomy.json is absent, retry falls back to all record_ids."""
+        svc = _make_service(str(tmp_path))
+        # Do NOT write taxonomy file
+        job = svc.create_job(["r1", "r2", "r3"])
+
+        updated = svc.retry_failed_job(job.id)
+
+        assert updated is not None
+        assert updated["status"] == "running"
+        assert updated["cursor"] == 0
+        # No error IDs known → falls back to original record_ids
+        assert set(updated["record_ids"]) == {"r1", "r2", "r3"}
+
+
+# ── WormsQuickFillDialog smoke test ──────────────────────────────────────────
+
+class TestWormsQuickFillDialogOffscreen:
+    """WormsQuickFillDialog constructs without raising (no network calls)."""
+
+    def test_constructs_with_empty_query(self, qt_app, tmp_path):
+        from app.views.worms_view import WormsQuickFillDialog
+
+        svc = _make_service(str(tmp_path))
+        filled = []
+        dlg = WormsQuickFillDialog(svc, lambda r: filled.append(r), initial_query="")
+        assert dlg is not None
+        assert dlg._results == []
+        assert dlg._loading is False
+
+    def test_do_fill_calls_callback_and_accepts(self, qt_app, tmp_path):
+        """_do_fill invokes fill_callback and closes dialog (accepted)."""
+        from app.views.worms_view import WormsQuickFillDialog
+
+        svc = _make_service(str(tmp_path))
+        filled = []
+        dlg = WormsQuickFillDialog(svc, lambda r: filled.append(r), initial_query="")
+        fake_rec = {"AphiaID": 1, "scientificname": "Foo bar", "rank": "Species",
+                    "status": "accepted", "class": "Actinopterygii"}
+        dlg._do_fill(fake_rec)
+        assert filled == [fake_rec]
+
+    def test_initial_query_sets_search_text(self, qt_app, tmp_path):
+        """Initial query is reflected in the search input (no auto-search when mocked)."""
+        from app.views.worms_view import WormsQuickFillDialog
+        from unittest.mock import patch
+
+        svc = _make_service(str(tmp_path))
+
+        # Patch QThread.start so no background thread actually fires
+        with patch.object(__import__("PyQt6.QtCore", fromlist=["QThread"]).QThread, "start"):
+            dlg = WormsQuickFillDialog(
+                svc, lambda r: None, initial_query="Conus", parent=None
+            )
+        assert dlg._search_input.text() == "Conus"
+
+
+# ── Auto-poll QTimer smoke test ───────────────────────────────────────────────
+
+class TestAutoPollingTimer:
+    """WormsView._refresh_jobs starts/stops a QTimer for running jobs."""
+
+    def test_poll_timer_starts_for_running_job(self, qt_app, tmp_path):
+        """When a running job exists, _refresh_jobs should start _poll_timer."""
+        from app.views.worms_view import WormsView
+
+        ctx = MagicMock()
+        ctx.current_project_dir = str(tmp_path)
+        view = WormsView(ctx)
+
+        # Inject a running job directly into the service
+        view._service.create_job(["r1"])  # status = "running" by default
+
+        view._refresh_jobs()
+
+        assert view._poll_timer is not None
+        assert view._poll_timer.isActive()
+        view._poll_timer.stop()  # clean up
+
+    def test_poll_timer_not_started_when_no_running_job(self, qt_app, tmp_path):
+        """When no running job, _poll_timer should remain None."""
+        from app.views.worms_view import WormsView
+
+        ctx = MagicMock()
+        ctx.current_project_dir = str(tmp_path)
+        view = WormsView(ctx)
+
+        # Create then complete a job
+        job = view._service.create_job(["r1"])
+        view._service.update_job_status(job.id, "completed")
+
+        view._refresh_jobs()
+
+        assert view._poll_timer is None

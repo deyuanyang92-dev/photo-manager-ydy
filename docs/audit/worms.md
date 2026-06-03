@@ -18,9 +18,9 @@
 | `wormsFillToSpecimen(record, sp)` | 11447 | ✓ | `WormsView._on_fill_to_specimen()` | 字段映射已修正（本次） |
 | `flattenClassification(tree)` | 11459 | ✓ | `WormsService.flatten_classification()` | 完整 |
 | `loadWormsTaxonomyCandidates()` | 804 | ✓ | `WormsService.load_taxonomy_candidates()` | 本次新增 |
-| `fetchWormsJobs()` | 11602 | ◐ | `WormsView._refresh_jobs()` | 有刷新；**缺自动轮询（1.5 s）** |
+| `fetchWormsJobs()` | 11602 | ✓ | `WormsView._refresh_jobs()` | 自动轮询 QTimer(1.5 s)已加（本次） |
 | `startTaxonomyWormsJob(allFiltered)` | 11701 | ◐ | `WormsView._on_create_job()` | 仅支持输入 ID；缺"全部筛选"模式 |
-| `updateWormsJob(job, action)` | 11735 | ✓ | `WormsService.update_job_status()` | 完整 |
+| `updateWormsJob(job, action)` | 11735 | ✓ | `WormsService.update_job_status()` + `retry_failed_job()` | 全四动作（本次加 retry-failed） |
 | `resolveTaxonMapping(row, aphiaId, noMatch)` | 11742 | ✓ | `WormsService.resolve_mapping()` | 本次新增 |
 | `openWormsMatchModal(row)` | 11767 | ✓ | `WormsMatchDialog` | 本次新增 |
 | `searchWormsForTaxonRow()` | 11777 | ✓ | `WormsMatchDialog._on_search()` | 本次新增（内嵌对话框） |
@@ -34,8 +34,8 @@
 | `renderWormsSynonymsTab(rec)` | 12614 | ✓ | `_build_synonyms_tab()` | 完整 |
 | `doWormsSearch()` | 12631 | ✓ | `WormsView._on_search()` | 完整 |
 | `selectWormsTaxon(rec)` | 12654 | ✓ | `WormsView._on_result_clicked()` | 完整 |
-| `renderWormsPopupOverlay()` | 12685 | — | 未实现 | 工作台快捷填充弹窗；需要 workbench_view.py 集成，超出本次范围 |
-| `doWormsPopupSearch()` | 12743 | — | 未实现 | 同上 |
+| `renderWormsPopupOverlay()` | 12685 | ✓ | `WormsQuickFillDialog` (worms_view.py) + MetadataPanel「WoRMS 查」按钮 | 本次实现 |
+| `doWormsPopupSearch()` | 12743 | ✓ | `WormsQuickFillDialog._on_search()` + `_QuickSearchWorker` | 本次实现 |
 
 ---
 
@@ -51,11 +51,17 @@
 
 ---
 
+## 本次新补缺项（第二次）
+
+8. **`WormsQuickFillDialog`** — `worms_view.py` 新增，对应 `renderWormsPopupOverlay` + `doWormsPopupSearch`：搜索框预填、结果列表（每行有「填充」按钮）、关闭按钮；Latin-only 填充，Chinese 不覆盖
+9. **MetadataPanel「WoRMS 查」按钮** — `metadata_panel.py` 分类区底部新增按钮，点击弹出 `WormsQuickFillDialog`，回调通过 `ctx.worms_fill_specimen` 写入
+10. **批量任务 1.5 s 自动轮询** — `WormsView._refresh_jobs()` 启动 `QTimer` single-shot 1500ms，仅在有 running 任务时激活；`_poll_timer` 属性跟踪，`on_activate` 时初始化
+11. **retry-failed job action** — `WormsService.retry_failed_job()` 新增：按 worms_taxonomy.json 过滤 error 状态 record_ids、归零 cursor/counts、重置 status="running"；`WormsView` 加「重试失败」按钮
+
+---
+
 ## 仍然缺失（诚实说明）
 
 | 缺口 | 影响 | 原因 |
 |---|---|---|
-| `renderWormsPopupOverlay` / `doWormsPopupSearch` | 工作台右侧快捷填充弹窗 | 需改动 workbench_view.py，超出本次约束"只改 worms 相关" |
-| 批量任务"全部筛选"模式 | `startTaxonomyWormsJob(allFiltered=true)` 的 query payload | worms_view.py 没有 taxonomy 表的 query state |
-| 批量任务自动轮询（1.5 s） | `fetchWormsJobs` 里的 `setTimeout(1500)` | Qt 里需 QTimer；已留 TODO 注释在代码里 |
-| `retry-failed` job action | server.js 中 job/:id/:action 有四个动作（pause/cancel/resume/retry-failed）；Qt 只做了 update_job_status | 非核心，可按需补 |
+| 批量任务"全部筛选"模式 | `startTaxonomyWormsJob(allFiltered=true)` 的 query payload | worms_view.py 没有 taxonomy 表的 query state；需 taxonomy_view 联动 |
