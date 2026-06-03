@@ -236,6 +236,7 @@ class MonitorPanel(QWidget):
     assign_requested = pyqtSignal(str)
     unassign_requested = pyqtSignal(str)
     refresh_requested = pyqtSignal()
+    add_jpg_requested = pyqtSignal()   # emitted when user clicks "添加照片"
 
     def __init__(self, ctx: "AppContext", parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -357,6 +358,7 @@ class MonitorPanel(QWidget):
         add_btn.setObjectName("Outline")
         icons.set_button_icon(add_btn, "mdi6.image-plus-outline", color=icons.TONE_MUTED, size=15)
         add_btn.setToolTip("把已有照片添加进来（导入 incoming-jpg/）")
+        add_btn.clicked.connect(self.add_jpg_requested.emit)
         controls.addWidget(add_btn)
         dir_btn = QPushButton("📁 选目录")
         dir_btn.setObjectName("Ghost")
@@ -572,6 +574,14 @@ class MonitorPanel(QWidget):
             card.set_selected(False)
         self._sel_count.setText("未选中")
         self._del_btn.setEnabled(False)
+
+    def selected_jpg_paths(self) -> list[str]:
+        """Return absolute paths of all currently selected JPG cards."""
+        return [
+            c._entry.path
+            for c in self._selected_cards()
+            if getattr(c._entry, "kind", "") == "jpg" and getattr(c._entry, "path", "")
+        ]
 
     def _on_delete_clicked(self) -> None:
         """Delete selected JPG files.

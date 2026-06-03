@@ -696,6 +696,174 @@ class TestDeleteWithTiffWarning:
 
 # ── GroupingPanel capture-main-actions ────────────────────────────────────────
 
+class TestAddToGroup:
+    def test_monitor_panel_has_selected_jpg_paths(self):
+        """MonitorPanel must have selected_jpg_paths() method."""
+        from app.widgets.monitor_panel import MonitorPanel
+        ctx = _make_ctx()
+        w = MonitorPanel(ctx)
+        assert hasattr(w, "selected_jpg_paths")
+        assert callable(w.selected_jpg_paths)
+
+    def test_monitor_panel_has_add_jpg_requested_signal(self):
+        """MonitorPanel must have add_jpg_requested signal."""
+        from app.widgets.monitor_panel import MonitorPanel
+        ctx = _make_ctx()
+        w = MonitorPanel(ctx)
+        assert hasattr(w, "add_jpg_requested")
+
+    def test_grouping_panel_add_jpgs_to_group(self):
+        """GroupingPanel.add_jpgs_to_group must add paths to the group."""
+        from app.widgets.grouping_panel import GroupingPanel
+        from app.services.grouping_service import Group, SpecimenGrouping
+        ctx = _make_ctx()
+        w = GroupingPanel(ctx)
+        sg = SpecimenGrouping(
+            uid="FJ-XM-B2-DLC001-T95E-20260601",
+            groups=[Group(group_index=0, angle_label="正面", jpg_paths=[])],
+        )
+        w.load_grouping("FJ-XM-B2-DLC001-T95E-20260601", sg)
+        w.add_jpgs_to_group(0, ["/fake/a.jpg", "/fake/b.jpg"])
+        assert "/fake/a.jpg" in w._grouping.groups[0].jpg_paths
+        assert "/fake/b.jpg" in w._grouping.groups[0].jpg_paths
+
+    def test_grouping_panel_mutual_exclusion(self):
+        """add_jpgs_to_group must remove path from other groups (mutual exclusion)."""
+        from app.widgets.grouping_panel import GroupingPanel
+        from app.services.grouping_service import Group, SpecimenGrouping
+        ctx = _make_ctx()
+        w = GroupingPanel(ctx)
+        sg = SpecimenGrouping(
+            uid="UID1",
+            groups=[
+                Group(group_index=0, jpg_paths=["/fake/a.jpg"]),
+                Group(group_index=1, jpg_paths=[]),
+            ],
+        )
+        w.load_grouping("UID1", sg)
+        # Move /fake/a.jpg from group 0 to group 1
+        w.add_jpgs_to_group(1, ["/fake/a.jpg"])
+        assert "/fake/a.jpg" not in w._grouping.groups[0].jpg_paths
+        assert "/fake/a.jpg" in w._grouping.groups[1].jpg_paths
+
+    def test_grouping_panel_has_add_selection_signal(self):
+        """GroupingPanel must have add_selection_to_group_requested signal."""
+        from app.widgets.grouping_panel import GroupingPanel
+        ctx = _make_ctx()
+        w = GroupingPanel(ctx)
+        assert hasattr(w, "add_selection_to_group_requested")
+
+
+class TestRemoveJpgFromGroup:
+    def test_remove_jpg_from_group(self):
+        """GroupingPanel.remove_jpg_from_group must remove path from the group."""
+        from app.widgets.grouping_panel import GroupingPanel
+        from app.services.grouping_service import Group, SpecimenGrouping
+        ctx = _make_ctx()
+        w = GroupingPanel(ctx)
+        sg = SpecimenGrouping(
+            uid="UID1",
+            groups=[Group(group_index=0, jpg_paths=["/a.jpg", "/b.jpg"])],
+        )
+        w.load_grouping("UID1", sg)
+        w.remove_jpg_from_group(0, "/a.jpg")
+        assert "/a.jpg" not in w._grouping.groups[0].jpg_paths
+        assert "/b.jpg" in w._grouping.groups[0].jpg_paths
+
+    def test_grouping_panel_has_free_compose_signal(self):
+        """GroupingPanel must have free_compose_requested signal."""
+        from app.widgets.grouping_panel import GroupingPanel
+        ctx = _make_ctx()
+        w = GroupingPanel(ctx)
+        assert hasattr(w, "free_compose_requested")
+
+    def test_grouping_panel_has_retroactive_signal(self):
+        """GroupingPanel must have retroactive_requested signal."""
+        from app.widgets.grouping_panel import GroupingPanel
+        ctx = _make_ctx()
+        w = GroupingPanel(ctx)
+        assert hasattr(w, "retroactive_requested")
+
+
+class TestMonitorPanelAddJpg:
+    def test_has_add_jpg_signal(self):
+        """MonitorPanel must emit add_jpg_requested signal."""
+        from app.widgets.monitor_panel import MonitorPanel
+        ctx = _make_ctx()
+        w = MonitorPanel(ctx)
+        assert hasattr(w, "add_jpg_requested")
+
+
+class TestResultsColumnOpenExplorer:
+    def test_load_uid_with_open_btn(self):
+        """ResultsColumn items must have an 'open in folder' mechanism."""
+        from app.widgets.results_column import ResultsColumn
+        w = ResultsColumn()
+        tiffs = [{"path": "/fake/result.tif", "name": "result.tif"}]
+        w.load_uid("UID1", tiffs, [])
+        assert hasattr(w, "_open_in_explorer")
+
+
+class TestHeliconParamsPanel:
+    def test_constructs(self):
+        from app.widgets.helicon_params_panel import HeliconParamsPanel
+        w = HeliconParamsPanel()
+        assert w is not None
+
+    def test_default_params(self):
+        from app.widgets.helicon_params_panel import HeliconParamsPanel
+        w = HeliconParamsPanel()
+        p = w.get_params()
+        assert p["method"] in (0, 1, 2)
+        assert 1 <= p["radius"] <= 30
+        assert 1 <= p["smoothing"] <= 10
+
+    def test_set_params(self):
+        from app.widgets.helicon_params_panel import HeliconParamsPanel
+        w = HeliconParamsPanel()
+        w.set_params({"method": 1, "radius": 8.0, "smoothing": 4})
+        p = w.get_params()
+        assert p["method"] == 1
+        assert p["radius"] == 8.0
+        assert p["smoothing"] == 4
+
+    def test_workbench_view_has_helicon_params(self):
+        """WorkbenchView must expose _helicon_params (HeliconParamsPanel)."""
+        from app.views.workbench_view import WorkbenchView
+        from app.widgets.helicon_params_panel import HeliconParamsPanel
+        ctx = _make_ctx()
+        w = WorkbenchView(ctx)
+        assert hasattr(w, "_helicon_params")
+        assert isinstance(w._helicon_params, HeliconParamsPanel)
+
+
+class TestProjectSettingsDrawer:
+    def test_constructs(self):
+        from app.widgets.project_settings_drawer import ProjectSettingsDrawer
+        ctx = _make_ctx()
+        w = ProjectSettingsDrawer(ctx)
+        assert w is not None
+
+    def test_has_helicon_status_label(self):
+        from app.widgets.project_settings_drawer import ProjectSettingsDrawer
+        ctx = _make_ctx()
+        w = ProjectSettingsDrawer(ctx)
+        assert hasattr(w, "_helicon_status_lbl")
+
+    def test_has_auto_activate_checkbox(self):
+        from app.widgets.project_settings_drawer import ProjectSettingsDrawer
+        ctx = _make_ctx()
+        w = ProjectSettingsDrawer(ctx)
+        assert hasattr(w, "_auto_activate_cb")
+
+    def test_workbench_view_has_settings_drawer(self):
+        """WorkbenchView must expose _settings_drawer."""
+        from app.views.workbench_view import WorkbenchView
+        ctx = _make_ctx()
+        w = WorkbenchView(ctx)
+        assert hasattr(w, "_settings_drawer")
+
+
 class TestGroupingPanelCaptureActions:
     def test_has_target_label(self):
         from app.widgets.grouping_panel import GroupingPanel

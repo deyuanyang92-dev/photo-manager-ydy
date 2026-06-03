@@ -24,6 +24,7 @@ clear()
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -32,6 +33,7 @@ from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QPushButton,
     QScrollArea,
     QSizePolicy,
     QVBoxLayout,
@@ -46,10 +48,12 @@ from app.config import icons
 class _TiffCard(QFrame):
     """A single composed-TIFF result card."""
 
-    def __init__(self, info: dict, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, info: dict, open_fn=None,
+                 parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setObjectName("Card")
         self._info = info
+        self._open_fn = open_fn
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -101,6 +105,16 @@ class _TiffCard(QFrame):
         state_chip.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         body_lay.addWidget(state_chip)
         lay.addWidget(body, stretch=1)
+
+        # Open-in-explorer button
+        if self._open_fn:
+            open_btn = QPushButton("📂")
+            open_btn.setObjectName("Ghost")
+            open_btn.setFixedSize(26, 26)
+            open_btn.setToolTip("在文件夹中显示")
+            p = self._info.get("path", "")
+            open_btn.clicked.connect(lambda _, _p=p: self._open_fn(_p))
+            lay.addWidget(open_btn)
 
         from app.config.effects import apply_card_shadow
         apply_card_shadow(self, blur=14, y=2, alpha=45)
@@ -343,7 +357,8 @@ class ResultsColumn(QWidget):
         archive_zips:
             List of dicts with at least ``path`` and optionally ``name``, ``size``.
         """
-        tiff_cards = [_TiffCard(info) for info in composed_tiffs]
+        tiff_cards = [_TiffCard(info, open_fn=self._open_in_explorer)
+                      for info in composed_tiffs]
         self._tiff_gallery.set_cards(tiff_cards)
 
         zip_cards = [_ArchiveCard(info) for info in archive_zips]
@@ -353,6 +368,28 @@ class ResultsColumn(QWidget):
         """Reset to empty (暂无结果) state."""
         self._tiff_gallery.clear()
         self._zip_gallery.clear()
+
+    def _open_in_explorer(self, path: str) -> None:
+        """Open the folder containing *path* in the system file explorer.
+
+        Oracle: app.js openInExplorer() / electron shell.showItemInFolder().
+        """
+        import subprocess
+        import sys
+        try:
+            if sys.platform == "win32":
+                subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
+            else:
+                # WSL: open Windows Explorer via explorer.exe with wslpath
+                win_path = path
+                try:
+                    from app.utils.path_utils import wsl_to_windows
+                    win_path = wsl_to_windows(path) or path
+                except Exception:
+                    pass
+                subprocess.Popen(["explorer.exe", "/select,", win_path])
+        except Exception:
+            pass
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

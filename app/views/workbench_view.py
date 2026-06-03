@@ -43,11 +43,34 @@ from PyQt6.QtWidgets import (
 
 from app.views.base_view import BaseView
 from app.widgets.grouping_panel import GroupingPanel
+from app.widgets.helicon_params_panel import HeliconParamsPanel
 from app.widgets.metadata_panel import MetadataPanel
 from app.widgets.monitor_panel import MonitorPanel
 from app.widgets.naming_panel import NamingPanel
 from app.widgets.results_column import ResultsColumn
 from app.widgets.specimen_sidebar import SpecimenSidebar
+
+
+def _free_compose_output_name(incoming_dir: str, user_name: Optional[str]) -> str:
+    """Return a unique output TIFF name for free-compose.
+
+    If user_name is given, sanitize and use it.
+    Otherwise auto-generate "自由合成-N.tif" incrementing N until no conflict.
+    Oracle: app.js freeComposeSelected(), auto-naming "自由合成-N".
+    """
+    import re
+    if user_name:
+        safe = re.sub(r'[\\/:*?"<>|]', "_", user_name.strip())
+        if safe and not safe.lower().endswith(".tif"):
+            safe += ".tif"
+        if safe and not os.path.exists(os.path.join(incoming_dir, safe)):
+            return safe
+    n = 1
+    while True:
+        candidate = f"自由合成-{n}.tif"
+        if not os.path.exists(os.path.join(incoming_dir, candidate)):
+            return candidate
+        n += 1
 
 
 class WorkbenchView(BaseView):
@@ -111,6 +134,7 @@ class WorkbenchView(BaseView):
         self._monitor.refresh_requested.connect(self._refresh_monitor)
         self._monitor.assign_requested.connect(self._on_assign_jpg)
         self._monitor.unassign_requested.connect(self._on_unassign_jpg)
+        self._monitor.add_jpg_requested.connect(self._on_add_jpg_files)
         centre.addWidget(self._monitor)
 
         self._grouping = GroupingPanel(self.ctx)
@@ -118,6 +142,9 @@ class WorkbenchView(BaseView):
         self._grouping.organise_requested.connect(self._on_organise_requested)
         self._grouping.undo_compose_requested.connect(self._on_undo_compose)
         self._grouping.grouping_changed.connect(self._on_grouping_changed)
+        self._grouping.add_selection_to_group_requested.connect(self._on_add_selection_to_group)
+        self._grouping.free_compose_requested.connect(self._on_free_compose)
+        self._grouping.retroactive_requested.connect(self._on_retroactive_scan)
         centre.addWidget(self._grouping)
 
         centre.setSizes([300, 250])
@@ -138,6 +165,9 @@ class WorkbenchView(BaseView):
         self._naming.save_requested.connect(self._on_naming_save)
         right_lay.addWidget(self._naming)           # natural height, no compress
 
+        self._helicon_params = HeliconParamsPanel()
+        right_lay.addWidget(self._helicon_params)
+
         self._metadata = MetadataPanel(self.ctx)
         self._metadata.save_requested.connect(self._on_save_metadata)
         right_lay.addWidget(self._metadata)
@@ -157,6 +187,11 @@ class WorkbenchView(BaseView):
         # Initial splitter proportions: sidebar : capture : results : right-panel
         outer.setSizes([220, 480, 240, 320])
         body_lay.addWidget(outer, stretch=1)
+
+        # ── Project settings drawer (overlay, hidden by default) ────────────
+        from app.widgets.project_settings_drawer import ProjectSettingsDrawer
+        self._settings_drawer = ProjectSettingsDrawer(self.ctx, parent=self)
+        self._settings_drawer.setFixedWidth(380)
 
         # ── No-project banner ───────────────────────────────────────────────
         self._no_project_banner = QLabel(
@@ -203,6 +238,11 @@ class WorkbenchView(BaseView):
         self._helicon_tag.setObjectName("TagWarn")
         row.addWidget(self._helicon_tag)
         row.addStretch()
+        settings_btn = QPushButton("⚙ 设置")
+        settings_btn.setObjectName("Ghost")
+        settings_btn.setFixedHeight(28)
+        settings_btn.clicked.connect(self._on_open_settings)
+        row.addWidget(settings_btn)
         return row
 
     def _build_dir_strip(self) -> QFrame:
@@ -565,6 +605,158 @@ class WorkbenchView(BaseView):
         except Exception:
             pass
 
+    def _on_add_selection_to_group(self, group_index: int) -> None:
+        """Resolve monitor selection and add JPGs to the specified group.
+
+        Oracle: app.js groupingAddSelectedToGroup() app.js:5258–5271.
+        """
+        jpg_paths = self._monitor.selected_jpg_paths()
+        if not jpg_paths:
+            QMessageBox.information(self, "加入分组", "请先在上方监控区选中要入组的 JPG。")
+            return
+        self._on_add_to_group(group_index, jpg_paths)
+        self._monitor._on_select_none()
+
+    def _on_add_to_group(self, group_index: int, jpg_paths: list[str]) -> None:
+        """Add selected monitor JPGs to the specified grouping group."""
+        self._grouping.add_jpgs_to_group(group_index, jpg_paths)
+        # Also mark those paths as manually assigned to the current uid
+        uid = self._current_uid
+        project_dir = self.ctx.current_project_dir
+        if uid and project_dir and jpg_paths:
+            try:
+                from app.services.activation_service import manual_assign
+                manual_assign(project_dir, uid, jpg_paths)
+            except Exception:
+                pass
+
+    def _on_add_jpg_files(self) -> None:
+        """Open file picker for JPGs → copy to incoming-jpg/.
+
+        Oracle: app.js importJpgFiles() app.js:7944–7975.
+        """
+        project_dir = self.ctx.current_project_dir
+        if not project_dir:
+            QMessageBox.information(self, "添加照片", "请先打开一个项目。")
+            return
+
+        from PyQt6.QtWidgets import QFileDialog
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "选择 JPG 照片",
+            filter="JPG 照片 (*.jpg *.jpeg *.JPG *.JPEG)",
+        )
+        if not paths:
+            return
+
+        incoming_dir = os.path.join(project_dir, "incoming-jpg")
+        os.makedirs(incoming_dir, exist_ok=True)
+        import shutil
+        errors = []
+        for src in paths:
+            dest = os.path.join(incoming_dir, os.path.basename(src))
+            try:
+                if os.path.abspath(src) != os.path.abspath(dest):
+                    shutil.copy2(src, dest)
+            except OSError as e:
+                errors.append(str(e))
+
+        if errors:
+            QMessageBox.warning(self, "导入部分失败", "\n".join(errors[:5]))
+        self._refresh_monitor()
+
+    def _on_free_compose(self) -> None:
+        """Free compose: selected monitor JPGs → Helicon → incoming-jpg/.
+
+        Stub — full implementation in Task 7.
+        Oracle: app.js freeComposeSelected() app.js:7982–8010.
+        """
+        project_dir = self.ctx.current_project_dir
+        if not project_dir:
+            QMessageBox.information(self, "无号合成", "请先打开一个项目。")
+            return
+
+        jpg_paths = self._monitor.selected_jpg_paths()
+        if not jpg_paths:
+            QMessageBox.information(self, "无号合成", "请先在监控区选中要合成的 JPG。")
+            return
+
+        from app.services.helicon_service import detect_helicon
+        exe = detect_helicon()
+        if not exe:
+            QMessageBox.warning(self, "未检测到 Helicon Focus",
+                                "请确认 Helicon Focus 已安装并配置路径。")
+            return
+
+        from PyQt6.QtWidgets import QInputDialog
+        user_name, ok = QInputDialog.getText(
+            self, "无号合成", "输出文件名（留空自动命名）：", text=""
+        )
+        if not ok:
+            return
+
+        incoming_dir = os.path.join(project_dir, "incoming-jpg")
+        os.makedirs(incoming_dir, exist_ok=True)
+        output_name = _free_compose_output_name(incoming_dir, user_name.strip() or None)
+        output_path = os.path.join(incoming_dir, output_name)
+
+        params = self._helicon_params.get_params()
+        progress = QProgressDialog(
+            f"无号合成 {len(jpg_paths)} 张 JPG…", None, 0, 0, self
+        )
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setWindowTitle("Helicon 无号合成")
+        progress.show()
+        QApplication.processEvents()
+        try:
+            from app.services.helicon_service import stack_single_subprocess
+            result = stack_single_subprocess(
+                jpg_paths=jpg_paths,
+                output_file=output_path,
+                method=str(params["method"]),
+                radius=str(params["radius"]),
+                smoothing=str(params["smoothing"]),
+            )
+        finally:
+            progress.close()
+
+        if result.get("ok") and os.path.isfile(output_path):
+            QMessageBox.information(self, "无号合成完成",
+                                    f"TIFF 已保存到 incoming-jpg/：\n{output_name}")
+            self._refresh_monitor()
+        else:
+            QMessageBox.warning(self, "无号合成失败", "Helicon 执行后未生成输出文件。")
+
+    def _on_retroactive_scan(self) -> None:
+        """Launch retroactive organize modal.
+
+        Oracle: app.js retroactiveScan() + renderRetroactiveModal().
+        """
+        project_dir = self.ctx.current_project_dir
+        db = self.ctx.get_db()
+        if not project_dir or not db:
+            QMessageBox.information(self, "存量整理", "请先打开一个项目。")
+            return
+
+        try:
+            from app.services.retroactive_service import scan_project_retroactive
+            result = scan_project_retroactive(project_dir, db)
+        except Exception as exc:
+            QMessageBox.warning(self, "扫描失败", str(exc))
+            return
+
+        total_groups = sum(len(sp["groups"]) for sp in result.get("specimens", []))
+        if not total_groups and not result.get("unnamedTiffs"):
+            QMessageBox.information(
+                self, "存量整理",
+                "没找到可整理的 TIF 成片（需 results/ 里有按编号命名的 TIF）。"
+            )
+            return
+
+        from app.widgets.retroactive_modal import RetroactiveModal
+        dlg = RetroactiveModal(self.ctx, result, parent=self)
+        if dlg.exec() == RetroactiveModal.DialogCode.Accepted:
+            self._refresh_monitor()
+
     # ── Grouping ──────────────────────────────────────────────────────────────
 
     def _on_compose_requested(self, uid: str, group_index: int) -> None:
@@ -640,9 +832,13 @@ class WorkbenchView(BaseView):
             QApplication.processEvents()
 
             try:
+                p = self._helicon_params.get_params()
                 result = stack_single_subprocess(
                     jpg_paths=group.jpg_paths,
                     output_file=output_path,
+                    method=str(p["method"]),
+                    radius=str(p["radius"]),
+                    smoothing=str(p["smoothing"]),
                 )
             finally:
                 progress.close()
@@ -654,10 +850,19 @@ class WorkbenchView(BaseView):
                 group.composed_tiff_path = output_path
                 group.status = "composed"
                 group.updated_at = now
+                group.result_sequence = preview.next_seq
                 save_grouping(db, uid, grouping.groups)
+
+                # Bump next_result_sequence_hint so next compose gets seq+1
+                try:
+                    from app.services.organize_service import _bump_seq_hint
+                    _bump_seq_hint(db, uid, preview.next_seq)
+                except Exception:
+                    pass
 
                 # Reload grouping panel
                 self._grouping.load_grouping(uid, grouping)
+                self._refresh_results_column(uid, grouping)
                 QMessageBox.information(
                     self,
                     "合成完成",
@@ -942,6 +1147,21 @@ class WorkbenchView(BaseView):
             return get_active_uid(db)
         except Exception:
             return None
+
+    def _on_open_settings(self) -> None:
+        """Show project settings drawer positioned at the right edge."""
+        self._settings_drawer.refresh()
+        self._settings_drawer.show()
+        # Position at right edge of this widget
+        try:
+            win_rect = self.rect()
+            dw = self._settings_drawer
+            dw.setGeometry(
+                win_rect.right() - dw.width(), 0,
+                dw.width(), win_rect.height()
+            )
+        except Exception:
+            pass
 
     def _show_no_project(self) -> None:
         self._sidebar.refresh()  # clears list

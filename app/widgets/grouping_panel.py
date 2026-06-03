@@ -111,9 +111,11 @@ class _ComposedRow(QFrame):
 class _DraftGroupRow(QFrame):
     """Editable draft group card (angle label + drag-reorderable JPG list)."""
 
-    compose_clicked = pyqtSignal(int)    # group_index
-    label_changed = pyqtSignal(int, str) # group_index, new_label
-    jpg_removed = pyqtSignal(int, str)   # group_index, jpg_path
+    compose_clicked = pyqtSignal(int)         # group_index
+    label_changed = pyqtSignal(int, str)      # group_index, new_label
+    jpg_removed = pyqtSignal(int, str)        # group_index, jpg_path (kept for compat)
+    add_selected_to_group = pyqtSignal(int)   # group_index
+    jpg_remove_requested = pyqtSignal(int, str)  # group_index, jpg_path
 
     def __init__(self, group: "Group", parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -150,13 +152,22 @@ class _DraftGroupRow(QFrame):
         compose_btn.setToolTip("调用 Helicon Focus CLI 合成该组 JPG")
         compose_btn.clicked.connect(lambda: self.compose_clicked.emit(self._group.group_index))
         header.addWidget(compose_btn)
+
+        add_sel_btn = QPushButton("← 加入所选")
+        add_sel_btn.setObjectName("Ghost")
+        add_sel_btn.setFixedHeight(26)
+        add_sel_btn.setToolTip("将监控区选中的 JPG 加入此分组（其他组自动移除）")
+        add_sel_btn.clicked.connect(
+            lambda: self.add_selected_to_group.emit(self._group.group_index)
+        )
+        header.addWidget(add_sel_btn)
         root.addLayout(header)
 
         # JPG list (drag-reorderable)
         self._jpg_list = QListWidget()
         self._jpg_list.setDragDropMode(QListWidget.DragDropMode.InternalMove)
         self._jpg_list.setMaximumHeight(104)
-        self._jpg_list.setToolTip("拖拽可重新排序；双击删除（暂不支持，用右键）")
+        self._jpg_list.setToolTip("拖拽可重新排序；右键 → 移除此 JPG")
         for p in self._group.jpg_paths:
             item = QListWidgetItem(Path(p).name)
             item.setData(Qt.ItemDataRole.UserRole, p)
@@ -164,16 +175,35 @@ class _DraftGroupRow(QFrame):
             self._jpg_list.addItem(item)
 
         if not self._group.jpg_paths:
-            empty = QListWidgetItem("空组 — 从监控区拖入 JPG")
+            empty = QListWidgetItem("空组 — 从监控区拖入 JPG 或点「← 加入所选」")
             empty.setFlags(Qt.ItemFlag.NoItemFlags)
             self._jpg_list.addItem(empty)
 
+        # Context menu for right-click remove
+        self._jpg_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._jpg_list.customContextMenuRequested.connect(self._on_jpg_context_menu)
         root.addWidget(self._jpg_list)
 
         # JPG count line
         count_lbl = QLabel(f"{len(self._group.jpg_paths)} 张 JPG")
         count_lbl.setObjectName("MutedSmall")
         root.addWidget(count_lbl)
+
+
+    def _on_jpg_context_menu(self, pos) -> None:
+        """Right-click context menu on the JPG list — offers 「移除此 JPG」."""
+        from PyQt6.QtWidgets import QMenu
+        item = self._jpg_list.itemAt(pos)
+        if not item:
+            return
+        path = item.data(Qt.ItemDataRole.UserRole)
+        if not path:
+            return
+        menu = QMenu(self)
+        action = menu.addAction("移除此 JPG")
+        chosen = menu.exec(self._jpg_list.mapToGlobal(pos))
+        if chosen == action:
+            self.jpg_remove_requested.emit(self._group.group_index, path)
 
 
 # ── Grouping panel ────────────────────────────────────────────────────────────
@@ -196,6 +226,10 @@ class GroupingPanel(QWidget):
     # Bulk-action signals (capture-main-actions row)
     compose_all_requested = pyqtSignal(str)    # uid — compose all pending groups
     organise_all_requested = pyqtSignal(str)   # uid — organise all composed groups
+    # Add-to-group / free-compose / retroactive signals
+    add_selection_to_group_requested = pyqtSignal(int)  # group_index
+    free_compose_requested = pyqtSignal()
+    retroactive_requested = pyqtSignal()
 
     def __init__(self, ctx: "AppContext", parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -252,6 +286,7 @@ class GroupingPanel(QWidget):
         more_btn.setObjectName("Ghost")
         more_btn.setFixedHeight(30)
         more_btn.setToolTip("更多操作")
+        more_btn.setMenu(self._build_more_menu())
         main_actions.addWidget(more_btn)
 
         main_actions.addStretch()
@@ -339,7 +374,53 @@ class GroupingPanel(QWidget):
         self._clear_content()
         self._empty_lbl.show()
 
+    def add_jpgs_to_group(self, group_index: int, jpg_paths: list[str]) -> None:
+        """Add *jpg_paths* to the group at *group_index* (mutual exclusion).
+
+        Removes paths from all other groups first, then appends (no duplicates).
+        Mirrors web groupingAddSelectedToGroup() app.js:5258–5271.
+        """
+        if not self._grouping:
+            return
+        # P1: remove paths from all other groups (mutual exclusion)
+        for g in self._grouping.groups:
+            if g.group_index != group_index:
+                g.jpg_paths = [p for p in g.jpg_paths if p not in jpg_paths]
+        # P2: add to target group (no duplicates)
+        target = next((g for g in self._grouping.groups if g.group_index == group_index), None)
+        if target is None:
+            return
+        for p in jpg_paths:
+            if p not in target.jpg_paths:
+                target.jpg_paths.append(p)
+        self._rebuild()
+        self.grouping_changed.emit()
+
+    def remove_jpg_from_group(self, group_index: int, jpg_path: str) -> None:
+        """Remove *jpg_path* from the specified group.
+
+        Mirrors web groupingRemoveFile() app.js:5274–5280.
+        """
+        if not self._grouping:
+            return
+        for g in self._grouping.groups:
+            if g.group_index == group_index:
+                g.jpg_paths = [p for p in g.jpg_paths if p != jpg_path]
+                break
+        self._rebuild()
+        self.grouping_changed.emit()
+
     # ── Internal ──────────────────────────────────────────────────────────────
+
+    def _build_more_menu(self):
+        """Build the ⋯ 更多 dropdown menu."""
+        from PyQt6.QtWidgets import QMenu
+        menu = QMenu(self)
+        free_act = menu.addAction("无号合成（选中 JPG → incoming-jpg/）")
+        free_act.triggered.connect(self.free_compose_requested.emit)
+        retro_act = menu.addAction("存量整理…")
+        retro_act.triggered.connect(self.retroactive_requested.emit)
+        return menu
 
     def _rebuild(self) -> None:
         self._clear_content()
@@ -361,6 +442,8 @@ class GroupingPanel(QWidget):
                 row = _DraftGroupRow(g, self)
                 row.compose_clicked.connect(self._on_compose)
                 row.label_changed.connect(self._on_label_changed)
+                row.add_selected_to_group.connect(self._on_add_selected_to_group)
+                row.jpg_remove_requested.connect(self._on_jpg_remove)
                 self._content_lay.addWidget(row)
 
         if composed:
@@ -455,3 +538,11 @@ class GroupingPanel(QWidget):
                 g.angle_label = new_label
                 break
         self.grouping_changed.emit()
+
+    def _on_add_selected_to_group(self, group_index: int) -> None:
+        """Request workbench view to resolve monitor selection and add to group."""
+        self.add_selection_to_group_requested.emit(group_index)
+
+    def _on_jpg_remove(self, group_index: int, jpg_path: str) -> None:
+        """Handle right-click remove from _DraftGroupRow."""
+        self.remove_jpg_from_group(group_index, jpg_path)
