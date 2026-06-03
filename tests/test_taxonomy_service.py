@@ -450,6 +450,72 @@ class TestAllRecords:
         assert records[0].get("recordId", "").startswith("user:")
 
 
+# ── History tracking ──────────────────────────────────────────────────────────
+
+class TestHistory:
+    def test_update_stores_history_entry(self, svc):
+        svc.learn({
+            "class": "Polychaeta", "order": "Phyllodocida",
+            "family": "Polynoidae", "species": "Halosydna brevisetosa",
+            "familyCn": "多鳞虫科",  # pre-fill so history captures it
+        })
+        records, _ = svc.all_records(source_filter="user")
+        rec_id = records[0]["recordId"]
+        svc.update(rec_id, {"familyCn": "多鳞虫科_v2"})
+        records2, _ = svc.all_records(source_filter="user")
+        hist = records2[0].get("history", [])
+        assert len(hist) == 1
+        assert "at" in hist[0]
+        assert "before" in hist[0]
+        assert hist[0]["before"]["familyCn"] == "多鳞虫科"
+
+    def test_update_history_max_10(self, svc):
+        """History list never exceeds 10 entries."""
+        svc.learn({
+            "class": "Polychaeta", "order": "Phyllodocida",
+            "family": "Polynoidae", "species": "Halosydna brevisetosa",
+        })
+        records, _ = svc.all_records(source_filter="user")
+        rec_id = records[0]["recordId"]
+        for i in range(15):
+            svc.update(rec_id, {"orderCn": f"叶须虫目_v{i}"})
+        records2, _ = svc.all_records(source_filter="user")
+        hist = records2[0].get("history", [])
+        assert len(hist) <= 10
+
+    def test_update_history_persists_to_disk(self, svc, tmp_dirs):
+        _, user_p = tmp_dirs
+        svc.learn({
+            "class": "Polychaeta", "order": "Phyllodocida",
+            "family": "Polynoidae", "species": "Halosydna brevisetosa",
+        })
+        records, _ = svc.all_records(source_filter="user")
+        rec_id = records[0]["recordId"]
+        svc.update(rec_id, {"orderCn": "叶须虫目_new"})
+        data = json.loads(user_p.read_text())
+        hist = data[0].get("history", [])
+        assert len(hist) == 1
+        assert hist[0]["before"]["orderCn"] == ""
+
+    def test_update_history_before_has_all_fields(self, svc):
+        """history[].before must contain all 10 editable fields."""
+        svc.learn({
+            "class": "Polychaeta", "order": "Phyllodocida",
+            "family": "Polynoidae", "species": "Halosydna brevisetosa",
+        })
+        records, _ = svc.all_records(source_filter="user")
+        rec_id = records[0]["recordId"]
+        svc.update(rec_id, {"classCn": "多毛纲"})
+        records2, _ = svc.all_records(source_filter="user")
+        before = records2[0]["history"][0]["before"]
+        expected_keys = {
+            "class", "classCn", "order", "orderCn",
+            "family", "familyCn", "genus", "genusCn",
+            "species", "speciesCn",
+        }
+        assert set(before.keys()) == expected_keys
+
+
 # ── Widget smoke tests (offscreen) ────────────────────────────────────────────
 
 class TestTaxonomyInputPanelSmoke:

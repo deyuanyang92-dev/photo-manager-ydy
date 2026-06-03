@@ -386,8 +386,8 @@ class TaxonomyService:
     def update(self, record_id: str, updates: dict[str, Any]) -> Optional[dict[str, Any]]:
         """Update an existing user record by recordId.
 
-        Only user records (recordId starting with "user:") can be updated.
-        Seed records are immutable.
+        Saves a history snapshot before writing (mirrors server.js:934-943).
+        History is capped at 10 entries (oldest dropped when over limit).
 
         Parameters
         ----------
@@ -410,6 +410,25 @@ class TaxonomyService:
         if entry is None:
             return None  # not found or is a seed record
 
+        # ── Record history (mirrors server.js:934-943) ─────────────────
+        before = {
+            "class":     entry.get("class", ""),
+            "classCn":   entry.get("classCn", ""),
+            "order":     entry.get("order", ""),
+            "orderCn":   entry.get("orderCn", ""),
+            "family":    entry.get("family", ""),
+            "familyCn":  entry.get("familyCn", ""),
+            "genus":     entry.get("genus", ""),
+            "genusCn":   entry.get("genusCn", ""),
+            "species":   entry.get("species", ""),
+            "speciesCn": entry.get("speciesCn", ""),
+        }
+        history = entry.setdefault("history", [])
+        history.append({"at": _now_iso(), "before": before})
+        if len(history) > 10:
+            history.pop(0)
+
+        # ── Apply updates ──────────────────────────────────────────────
         allowed = {
             "class", "order", "family", "species",
             "classCn", "orderCn", "familyCn", "speciesCn",
