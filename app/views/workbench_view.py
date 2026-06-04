@@ -30,6 +30,7 @@ from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFrame,
@@ -263,6 +264,53 @@ class _ComposeWorkbenchDialog(QDialog):
     def _recompose(self) -> None:
         self._action = self.ACTION_RECOMPOSE
         self.accept()
+
+
+class _RetroactiveScanDialog(QDialog):
+    """Pre-scan dialog: choose results/ subdirectory before retroactive scan.
+
+    Presents a combo populated with subdirectories of project results/.
+    '全部' (data=None) scans the whole results/ tree; a named entry restricts
+    the scan to results/<subdir>/.
+    """
+
+    def __init__(self, project_dir: str, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("存量整理 — 选择扫描范围")
+        self._project_dir = project_dir
+        self._build_ui()
+
+    def _build_ui(self) -> None:
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 16, 16, 16)
+        lay.setSpacing(12)
+
+        lay.addWidget(QLabel("子目录："))
+        self._subdir_combo = QComboBox()
+        self._subdir_combo.addItem("全部", None)
+        results_dir = Path(self._project_dir) / "results"
+        if results_dir.exists():
+            for d in sorted(results_dir.iterdir()):
+                if d.is_dir():
+                    self._subdir_combo.addItem(d.name, d.name)
+        lay.addWidget(self._subdir_combo)
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        ok_btn = btns.button(QDialogButtonBox.StandardButton.Ok)
+        if ok_btn:
+            ok_btn.setText("开始扫描")
+        cancel_btn = btns.button(QDialogButtonBox.StandardButton.Cancel)
+        if cancel_btn:
+            cancel_btn.setText("取消")
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        lay.addWidget(btns)
+
+    def selected_subdir(self) -> Optional[str]:
+        """Return the selected subdirectory name, or None for 全部."""
+        return self._subdir_combo.currentData()
 
 
 class WorkbenchView(BaseView):
@@ -950,9 +998,14 @@ class WorkbenchView(BaseView):
             QMessageBox.information(self, "存量整理", "请先打开一个项目。")
             return
 
+        pre = _RetroactiveScanDialog(project_dir, parent=self)
+        if pre.exec() != QDialog.DialogCode.Accepted:
+            return
+        selected_subdir = pre.selected_subdir()
+
         try:
             from app.services.retroactive_service import scan_project_retroactive
-            result = scan_project_retroactive(project_dir, db)
+            result = scan_project_retroactive(project_dir, db, subdir=selected_subdir)
         except Exception as exc:
             QMessageBox.warning(self, "扫描失败", str(exc))
             return

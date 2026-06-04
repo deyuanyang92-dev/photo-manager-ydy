@@ -121,3 +121,60 @@ class TestRetroactiveScan:
         result = scan_project_retroactive(project_dir, db)
         assert len(result.get("unassignedJpgs", [])) >= 1
         db.close()
+
+
+class TestRetroactiveScanSubdir:
+    """subdir parameter: scan only results/<subdir>/ when given."""
+
+    def _setup_project(self, tmp_path):
+        """Create project with two result subdirs: sub_a and sub_b."""
+        project_dir = str(tmp_path)
+        results_dir = tmp_path / "results"
+        results_dir.mkdir()
+        (tmp_path / "incoming-jpg").mkdir()
+
+        sub_a = results_dir / "sub_a"
+        sub_b = results_dir / "sub_b"
+        sub_a.mkdir()
+        sub_b.mkdir()
+
+        uid_a = "FJ-XM-B2-DLC001-T95E-20260601"
+        uid_b = "FJ-XM-B2-DLC002-T95E-20260601"
+        (sub_a / "FJ-XM-B2-DLC001-1-T95E-20260601.tif").write_bytes(b"TIFF-A")
+        (sub_b / "FJ-XM-B2-DLC002-1-T95E-20260601.tif").write_bytes(b"TIFF-B")
+        return project_dir, uid_a, uid_b
+
+    def test_retroactive_with_subdir_only_scans_subdir(self, tmp_path):
+        """subdir='sub_a' must return only specimens from results/sub_a/."""
+        from app.services.retroactive_service import scan_project_retroactive
+        project_dir, uid_a, uid_b = self._setup_project(tmp_path)
+        db = _make_db(tmp_path)
+        result = scan_project_retroactive(project_dir, db, subdir="sub_a")
+        assert result["ok"] is True
+        uids = [sp["uid"] for sp in result["specimens"]]
+        assert uid_a in uids, "sub_a TIFF must appear"
+        assert uid_b not in uids, "sub_b TIFF must NOT appear when subdir=sub_a"
+        db.close()
+
+    def test_retroactive_subdir_none_scans_all(self, tmp_path):
+        """subdir=None must scan entire results/ including both subdirectories."""
+        from app.services.retroactive_service import scan_project_retroactive
+        project_dir, uid_a, uid_b = self._setup_project(tmp_path)
+        db = _make_db(tmp_path)
+        result = scan_project_retroactive(project_dir, db, subdir=None)
+        assert result["ok"] is True
+        uids = [sp["uid"] for sp in result["specimens"]]
+        assert uid_a in uids, "sub_a TIFF must appear when subdir=None"
+        assert uid_b in uids, "sub_b TIFF must appear when subdir=None"
+        db.close()
+
+    def test_retroactive_nonexistent_subdir_returns_empty(self, tmp_path):
+        """subdir pointing to nonexistent dir must return empty specimens list."""
+        from app.services.retroactive_service import scan_project_retroactive
+        (tmp_path / "results").mkdir()
+        (tmp_path / "incoming-jpg").mkdir()
+        db = _make_db(tmp_path)
+        result = scan_project_retroactive(str(tmp_path), db, subdir="ghost_dir")
+        assert result["ok"] is True
+        assert result["specimens"] == []
+        db.close()

@@ -1359,3 +1359,64 @@ class TestBatchResultDialog:
         assert r.ok is True
         assert r.size_bytes == 512
         assert r.error == ""
+
+
+# ── Retroactive subdir selector ──────────────────────────────────────────────
+
+class TestRetroactiveSubdirSelector:
+    """_RetroactiveScanDialog must expose a subdir combo populated from results/."""
+
+    def test_subdir_dialog_constructs(self, tmp_path):
+        """_RetroactiveScanDialog must construct without error."""
+        from app.views.workbench_view import _RetroactiveScanDialog
+        project_dir = str(tmp_path)
+        (tmp_path / "results").mkdir()
+        dlg = _RetroactiveScanDialog(project_dir)
+        assert dlg is not None
+
+    def test_subdir_combo_has_all_option(self, tmp_path):
+        """Combo must include '全部' as the first option (data=None)."""
+        from app.views.workbench_view import _RetroactiveScanDialog
+        project_dir = str(tmp_path)
+        (tmp_path / "results").mkdir()
+        dlg = _RetroactiveScanDialog(project_dir)
+        assert dlg._subdir_combo.itemText(0) == "全部"
+        assert dlg._subdir_combo.itemData(0) is None
+
+    def test_subdir_combo_populated_with_subdirs(self, tmp_path):
+        """Combo must list subdirectories of results/ alphabetically."""
+        from app.views.workbench_view import _RetroactiveScanDialog
+        project_dir = str(tmp_path)
+        results = tmp_path / "results"
+        results.mkdir()
+        (results / "alpha").mkdir()
+        (results / "beta").mkdir()
+        (results / "not_a_dir.txt").write_bytes(b"")
+        dlg = _RetroactiveScanDialog(project_dir)
+        items = [dlg._subdir_combo.itemText(i) for i in range(dlg._subdir_combo.count())]
+        assert "全部" in items
+        assert "alpha" in items
+        assert "beta" in items
+        assert "not_a_dir.txt" not in items
+
+    def test_selected_subdir_none_for_all(self, tmp_path):
+        """selected_subdir() must return None when '全部' is chosen."""
+        from app.views.workbench_view import _RetroactiveScanDialog
+        project_dir = str(tmp_path)
+        (tmp_path / "results").mkdir()
+        dlg = _RetroactiveScanDialog(project_dir)
+        dlg._subdir_combo.setCurrentIndex(0)
+        assert dlg.selected_subdir() is None
+
+    def test_selected_subdir_returns_name(self, tmp_path):
+        """selected_subdir() must return the directory name when one is chosen."""
+        from app.views.workbench_view import _RetroactiveScanDialog
+        project_dir = str(tmp_path)
+        results = tmp_path / "results"
+        results.mkdir()
+        (results / "week01").mkdir()
+        dlg = _RetroactiveScanDialog(project_dir)
+        idx = dlg._subdir_combo.findText("week01")
+        assert idx >= 0
+        dlg._subdir_combo.setCurrentIndex(idx)
+        assert dlg.selected_subdir() == "week01"

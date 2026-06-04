@@ -46,8 +46,12 @@ def scan_project_retroactive(
     incoming_subdir: str = "incoming-jpg",
     results_subdir: str = "results",
     selection_paths: Optional[list[str]] = None,
+    subdir: Optional[str] = None,
 ) -> dict:
     """Scan project for named TIFFs and pair with preceding JPGs.
+
+    If *subdir* is given, only TIFFs inside results/<subdir>/ are scanned;
+    otherwise the entire results/ tree (including subdirectories) is covered.
 
     Returns dict with keys:
       ok: bool
@@ -58,7 +62,10 @@ def scan_project_retroactive(
     Oracle: server.js /api/organize/retroactive/scan handler.
     """
     resolved = str(Path(project_dir).resolve())
-    results_dir = os.path.join(resolved, results_subdir)
+    if subdir is not None:
+        results_dir = os.path.join(resolved, results_subdir, subdir)
+    else:
+        results_dir = os.path.join(resolved, results_subdir)
     incoming_dir = os.path.join(resolved, incoming_subdir)
 
     # Build selection set if provided
@@ -66,16 +73,26 @@ def scan_project_retroactive(
     if selection_paths:
         sel_set = {os.path.abspath(p) for p in selection_paths}
 
-    # List TIFFs in results/
+    # List TIFFs in results/ (recursive when subdir=None, flat otherwise)
     tiff_files: list[dict] = []
     unnamed_tiffs: list[dict] = []
     if os.path.isdir(results_dir):
-        for name in sorted(os.listdir(results_dir)):
-            if not re.search(r"\.tiff?$", name, re.IGNORECASE):
-                continue
-            full = os.path.join(results_dir, name)
-            if not os.path.isfile(full):
-                continue
+        # Collect all TIFF paths: flat list when a specific subdir was given,
+        # recursive walk when scanning the whole results/ tree.
+        all_tiff_paths: list[str] = []
+        if subdir is not None:
+            for name in sorted(os.listdir(results_dir)):
+                full = os.path.join(results_dir, name)
+                if os.path.isfile(full) and re.search(r"\.tiff?$", name, re.IGNORECASE):
+                    all_tiff_paths.append(full)
+        else:
+            for dirpath, _dirs, filenames in os.walk(results_dir):
+                for name in sorted(filenames):
+                    if re.search(r"\.tiff?$", name, re.IGNORECASE):
+                        all_tiff_paths.append(os.path.join(dirpath, name))
+
+        for full in all_tiff_paths:
+            name = os.path.basename(full)
             if sel_set and os.path.abspath(full) not in sel_set:
                 continue
             uid = _parse_uid_from_tiff_name(name)
