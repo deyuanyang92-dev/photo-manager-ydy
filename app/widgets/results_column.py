@@ -29,7 +29,9 @@ from pathlib import Path
 from typing import Optional
 
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import (
+    QDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -43,17 +45,124 @@ from PyQt6.QtWidgets import (
 from app.config import icons
 
 
+# ── TIFF Lightbox Dialog ───────────────────────────────────────────────────────
+
+class _TiffLightboxDialog(QDialog):
+    """Fullscreen-ish lightbox for browsing composed TIFF files."""
+
+    def __init__(self, paths: list, initial_index: int = 0,
+                 parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("图片预览")
+        self.resize(900, 700)
+        self._paths = paths
+        self._index = initial_index
+
+        layout = QVBoxLayout(self)
+
+        self._info_label = QLabel()
+        layout.addWidget(self._info_label)
+
+        self._image_label = QLabel(alignment=Qt.AlignmentFlag.AlignCenter)
+        self._image_label.setMinimumSize(800, 550)
+        self._image_label.setScaledContents(False)
+        layout.addWidget(self._image_label)
+
+        nav_row = QHBoxLayout()
+
+        self._prev_btn = QPushButton("◀ 上一张")
+        self._prev_btn.clicked.connect(self._go_prev)
+        nav_row.addWidget(self._prev_btn)
+
+        self._next_btn = QPushButton("下一张 ▶")
+        self._next_btn.clicked.connect(self._go_next)
+        nav_row.addWidget(self._next_btn)
+
+        open_btn = QPushButton("在文件管理器中显示")
+        open_btn.clicked.connect(self._open_explorer)
+        nav_row.addWidget(open_btn)
+
+        close_btn = QPushButton("关闭")
+        close_btn.clicked.connect(self.close)
+        nav_row.addWidget(close_btn)
+
+        layout.addLayout(nav_row)
+
+        self._load_current()
+
+    def _load_current(self) -> None:
+        path = self._paths[self._index]
+        self._info_label.setText(
+            f"{path.name}  ({self._index + 1} / {len(self._paths)})"
+        )
+
+        pixmap = QPixmap(str(path))
+        if pixmap.isNull():
+            try:
+                from PIL import Image
+                import tempfile
+                img = Image.open(str(path))
+                img.thumbnail((1600, 1200))
+                tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+                img.save(tmp.name)
+                pixmap = QPixmap(tmp.name)
+                os.unlink(tmp.name)
+            except Exception:
+                pass
+
+        if not pixmap.isNull():
+            scaled = pixmap.scaled(
+                self._image_label.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            self._image_label.setPixmap(scaled)
+        else:
+            self._image_label.setText(f"无法预览: {path.name}")
+
+        self._prev_btn.setEnabled(self._index > 0)
+        self._next_btn.setEnabled(self._index < len(self._paths) - 1)
+
+    def _go_prev(self) -> None:
+        self._index -= 1
+        self._load_current()
+
+    def _go_next(self) -> None:
+        self._index += 1
+        self._load_current()
+
+    def _open_explorer(self) -> None:
+        import subprocess
+        import sys
+        path = self._paths[self._index]
+        if sys.platform == "win32":
+            subprocess.run(["explorer", "/select,", str(path)])
+        else:
+            subprocess.run(["xdg-open", str(path.parent)])
+
+    def keyPressEvent(self, e) -> None:
+        if e.key() == Qt.Key.Key_Left and self._index > 0:
+            self._go_prev()
+        elif e.key() == Qt.Key.Key_Right and self._index < len(self._paths) - 1:
+            self._go_next()
+        elif e.key() == Qt.Key.Key_Escape:
+            self.close()
+        else:
+            super().keyPressEvent(e)
+
+
 # ── Individual result cards ────────────────────────────────────────────────────
 
 class _TiffCard(QFrame):
     """A single composed-TIFF result card."""
 
-    def __init__(self, info: dict, open_fn=None,
+    def __init__(self, info: dict, open_fn=None, lightbox_fn=None,
                  parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setObjectName("Card")
         self._info = info
         self._open_fn = open_fn
+        self._lightbox_fn = lightbox_fn
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -118,6 +227,13 @@ class _TiffCard(QFrame):
 
         from app.config.effects import apply_card_shadow
         apply_card_shadow(self, blur=14, y=2, alpha=45)
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        if self._lightbox_fn:
+            path = self._info.get("path", "")
+            if path:
+                self._lightbox_fn(Path(path))
+        super().mouseDoubleClickEvent(event)
 
 
 class _ArchiveCard(QFrame):
@@ -357,8 +473,12 @@ class ResultsColumn(QWidget):
         archive_zips:
             List of dicts with at least ``path`` and optionally ``name``, ``size``.
         """
-        tiff_cards = [_TiffCard(info, open_fn=self._open_in_explorer)
-                      for info in composed_tiffs]
+        all_tiff_paths = [Path(info["path"]) for info in composed_tiffs if info.get("path")]
+        tiff_cards = [
+            _TiffCard(info, open_fn=self._open_in_explorer,
+                      lightbox_fn=lambda p, _paths=all_tiff_paths: self._open_tiff_lightbox(p, _paths))
+            for info in composed_tiffs
+        ]
         self._tiff_gallery.set_cards(tiff_cards)
 
         zip_cards = [_ArchiveCard(info) for info in archive_zips]
@@ -368,6 +488,15 @@ class ResultsColumn(QWidget):
         """Reset to empty (暂无结果) state."""
         self._tiff_gallery.clear()
         self._zip_gallery.clear()
+
+    def _open_tiff_lightbox(self, clicked_path: Path, all_paths: list) -> None:
+        """Open the TIFF lightbox dialog starting at *clicked_path*."""
+        try:
+            idx = all_paths.index(clicked_path)
+        except ValueError:
+            idx = 0
+        dlg = _TiffLightboxDialog(all_paths, initial_index=idx, parent=self)
+        dlg.exec()
 
     def _open_in_explorer(self, path: str) -> None:
         """Open the folder containing *path* in the system file explorer.
