@@ -45,7 +45,9 @@ from PyQt6.QtGui import (
 from PyQt6.QtWidgets import (
     QApplication,
     QComboBox,
+    QDoubleSpinBox,
     QFrame,
+    QGraphicsItem,
     QGraphicsScene,
     QGraphicsView,
     QGraphicsTextItem,
@@ -457,6 +459,35 @@ class _RowEditorPanel(QWidget):
             self._rebuild_cards()
 
 
+# ── Constrained field text item ───────────────────────────────────────────────
+
+class ConstrainedFieldItem(QGraphicsTextItem):
+    """QGraphicsTextItem that clamps vertical movement within its row bounds.
+
+    Horizontal movement is unconstrained. Vertical movement is clamped so the
+    item stays within [row_top, row_bottom - item_height].
+    """
+
+    def __init__(
+        self,
+        text: str,
+        row_top: float,
+        row_bottom: float,
+        parent=None,
+    ) -> None:
+        super().__init__(text, parent)
+        self._row_top = row_top
+        self._row_bottom = row_bottom
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges)
+
+    def itemChange(self, change, value):
+        if change == QGraphicsItem.GraphicsItemChange.ItemPositionChange:
+            h = self.boundingRect().height()
+            clamped_y = max(self._row_top, min(value.y(), self._row_bottom - h))
+            return QPointF(value.x(), clamped_y)
+        return super().itemChange(change, value)
+
+
 # ── QR generation helper ──────────────────────────────────────────────────────
 
 def _generate_qr_pixmap(text: str, size_px: int, ecc: str = "Q") -> Optional[QPixmap]:
@@ -508,6 +539,8 @@ class LabelScene(QGraphicsScene):
     Origin (0, 0) = top-left corner of the label area.
     Scene unit = mm * _SCENE_SCALE px.
     """
+
+    qr_moved = pyqtSignal(float, float)
 
     def __init__(
         self,
@@ -600,7 +633,8 @@ class LabelScene(QGraphicsScene):
             if row.get("prefix"):
                 text = row["prefix"] + text
 
-            item = QGraphicsTextItem(text)
+            lh = resolve_line_height(tmpl, row)
+            item = ConstrainedFieldItem(text, row_top=y_px, row_bottom=y_px + 1)
             size_pt = row.get("size") or 9
             font = QFont()
             font.setPointSizeF(float(size_pt))
@@ -611,9 +645,12 @@ class LabelScene(QGraphicsScene):
                 font.setItalic(True)
             item.setFont(font)
             item.setTextWidth(text_w_px)
+            row_height = item.boundingRect().height() * lh
+            item._row_bottom = y_px + row_height
             item.setFlags(
-                QGraphicsTextItem.GraphicsItemFlag.ItemIsSelectable
-                | QGraphicsTextItem.GraphicsItemFlag.ItemIsMovable
+                ConstrainedFieldItem.GraphicsItemFlag.ItemIsSelectable
+                | ConstrainedFieldItem.GraphicsItemFlag.ItemIsMovable
+                | ConstrainedFieldItem.GraphicsItemFlag.ItemSendsGeometryChanges
             )
             item.setTextInteractionFlags(
                 Qt.TextInteractionFlag.TextEditorInteraction
@@ -623,8 +660,7 @@ class LabelScene(QGraphicsScene):
             self.addItem(item)
             self._text_items.append(item)
 
-            lh = resolve_line_height(tmpl, row)
-            y_px += item.boundingRect().height() * lh
+            y_px += row_height
 
         self.setSceneRect(0, 0, w_px, h_px)
 
@@ -658,6 +694,7 @@ class LabelScene(QGraphicsScene):
         if self._qr_item is None:
             return
         self._qr_item.setPos(_mm_to_px(x_mm), _mm_to_px(y_mm))
+        self.qr_moved.emit(_mm_to_px(x_mm), _mm_to_px(y_mm))
         if push_undo:
             self.set_qr_pos_mm(x_mm, y_mm)
 
@@ -759,12 +796,77 @@ class LabelEditorWidget(QWidget):
         redo_sc = QShortcut(QKeySequence.StandardKey.Redo, self)
         redo_sc.activated.connect(self._undo_stack.redo)
 
+        # QR position spinboxes (mm)
+        self._updating_spins = False
+        qr_pos_bar = QHBoxLayout()
+        qr_pos_bar.setSpacing(4)
+        qr_lbl = QLabel("QR 位置")
+        qr_lbl.setStyleSheet("color: #87a2a1; font-size: 10px;")
+        qr_pos_bar.addWidget(qr_lbl)
+
+        x_lbl = QLabel("X:")
+        x_lbl.setStyleSheet("color: #87a2a1; font-size: 10px;")
+        qr_pos_bar.addWidget(x_lbl)
+        self._qr_x_spin = QDoubleSpinBox()
+        self._qr_x_spin.setRange(0, 200)
+        self._qr_x_spin.setSuffix(" mm")
+        self._qr_x_spin.setDecimals(1)
+        self._qr_x_spin.setFixedWidth(80)
+        self._qr_x_spin.setFixedHeight(22)
+        self._qr_x_spin.setStyleSheet(
+            "QDoubleSpinBox { background:#0f2127; border:1px solid rgba(145,182,181,0.18);"
+            " border-radius:3px; color:#eef3ef; font-size:10px; padding:1px; }"
+        )
+        self._qr_x_spin.valueChanged.connect(self._on_qr_spin_changed)
+        qr_pos_bar.addWidget(self._qr_x_spin)
+
+        y_lbl = QLabel("Y:")
+        y_lbl.setStyleSheet("color: #87a2a1; font-size: 10px;")
+        qr_pos_bar.addWidget(y_lbl)
+        self._qr_y_spin = QDoubleSpinBox()
+        self._qr_y_spin.setRange(0, 200)
+        self._qr_y_spin.setSuffix(" mm")
+        self._qr_y_spin.setDecimals(1)
+        self._qr_y_spin.setFixedWidth(80)
+        self._qr_y_spin.setFixedHeight(22)
+        self._qr_y_spin.setStyleSheet(
+            "QDoubleSpinBox { background:#0f2127; border:1px solid rgba(145,182,181,0.18);"
+            " border-radius:3px; color:#eef3ef; font-size:10px; padding:1px; }"
+        )
+        self._qr_y_spin.valueChanged.connect(self._on_qr_spin_changed)
+        qr_pos_bar.addWidget(self._qr_y_spin)
+        qr_pos_bar.addStretch()
+        layout.addLayout(qr_pos_bar)
+
+        # Connect scene → spin
+        self._scene.qr_moved.connect(self._on_qr_moved)
+
+        # Initialise spins from current QR position
+        if self._scene.qr_item is not None:
+            pos = self._scene.qr_item.pos()
+            self._on_qr_moved(pos.x(), pos.y())
+
         # Row structural editor panel (mirrors renderEditorModeBar +
         # renderRowFloatingToolbar from app.js)
         self._row_editor = _RowEditorPanel(self)
         self._row_editor.set_rows(list(self._template.get("rows") or []))
         self._row_editor.rows_changed.connect(self._on_rows_changed)
         layout.addWidget(self._row_editor)
+
+    # ── QR spin callbacks ──────────────────────────────────────────────────
+
+    def _on_qr_spin_changed(self) -> None:
+        if self._updating_spins:
+            return
+        x_mm = self._qr_x_spin.value()
+        y_mm = self._qr_y_spin.value()
+        self._scene._set_qr_pos_mm(x_mm, y_mm, push_undo=False)
+
+    def _on_qr_moved(self, x_px: float, y_px: float) -> None:
+        self._updating_spins = True
+        self._qr_x_spin.setValue(_px_to_mm(x_px))
+        self._qr_y_spin.setValue(_px_to_mm(y_px))
+        self._updating_spins = False
 
     # ── Row editor callbacks ───────────────────────────────────────────────
 
