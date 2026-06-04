@@ -324,6 +324,8 @@ class LabelTemplateLibrary:
     bucket : "sample" | "tissue"
     """
 
+    MAX_BACKUP_SLOTS = 20
+
     def __init__(self, bucket: str) -> None:
         if bucket not in ("sample", "tissue"):
             raise ValueError(f"bucket must be 'sample' or 'tissue', got {bucket!r}")
@@ -440,7 +442,8 @@ class LabelTemplateLibrary:
         """Insert or update a record.  Mirror JS upsertLabelTemplateRecord.
 
         If rec has no 'id', a new id is generated (insert).
-        If rec has an 'id' that already exists, it is updated.
+        If rec has an 'id' that already exists, it is updated (and the old
+        version is snapshotted to the per-template rolling backup first).
         Returns the normalized record.
         """
         normalized = self._normalize_record(rec)
@@ -450,6 +453,7 @@ class LabelTemplateLibrary:
             -1,
         )
         if idx >= 0:
+            self.backup_template(normalized["id"], "overwrite")
             normalized["updatedAt"] = _now_iso()
             lib["templates"][idx] = normalized
         else:
@@ -483,6 +487,7 @@ class LabelTemplateLibrary:
 
     def delete(self, template_id: str) -> bool:
         """Delete a template record by id.  Returns True if deleted."""
+        self.backup_template(template_id, "delete")
         lib = self._read_raw()
         before = len(lib["templates"])
         lib["templates"] = [r for r in lib["templates"] if r.get("id") != template_id]
@@ -556,6 +561,47 @@ class LabelTemplateLibrary:
         qkey = _BACKUP_QSETTINGS_KEY[self._bucket]
         self._qs.setValue(qkey, _json.dumps(backups))
 
+    # ── Per-template rolling backup ───────────────────────────────────────────
+
+    def _backup_key(self, template_id: str) -> str:
+        return f"label_backup/{template_id}/slots"
+
+    def backup_template(self, template_id: str, reason: str = "") -> bool:
+        """Save current template record to rolling backup (max 20 slots).
+
+        Returns True if a snapshot was stored, False when template not found.
+        """
+        import json as _json, time as _time
+        current = self.get(template_id)
+        if not current:
+            return False
+        raw = self._qs.value(self._backup_key(template_id), "[]")
+        try:
+            slots = _json.loads(raw) if isinstance(raw, str) else (raw or [])
+        except Exception:
+            slots = []
+        slots.append({"ts": int(_time.time()), "reason": reason, "data": current})
+        slots = slots[-self.MAX_BACKUP_SLOTS:]
+        self._qs.setValue(self._backup_key(template_id), _json.dumps(slots))
+        return True
+
+    def restore_backup(self, template_id: str, slot_index: int = -1) -> bool:
+        """Restore template from per-template backup slot (default: latest).
+
+        Returns True if restored, False when no backup exists.
+        """
+        import json as _json
+        raw = self._qs.value(self._backup_key(template_id), "[]")
+        try:
+            slots = _json.loads(raw) if isinstance(raw, str) else (raw or [])
+        except Exception:
+            return False
+        if not slots:
+            return False
+        entry = slots[slot_index]
+        self.upsert(entry["data"])
+        return True
+
     def backup_library(self, reason: str = "修改前备份") -> bool:
         """Snapshot current library into a rolling 20-slot backup.
 
@@ -577,12 +623,24 @@ class LabelTemplateLibrary:
         self._write_backups(backups)
         return True
 
-    def latest_backup(self) -> Optional[dict]:
+    def latest_backup(self, template_id: Optional[str] = None) -> Optional[dict]:
         """Return the most-recent backup snapshot dict, or None.
 
+        Without arguments: returns library-level snapshot
+        ``{"at": iso, "reason": str, "raw": json_str}`` or None.
         Mirror: ``latestLabelCustomBackup(bucket)`` in app.js.
-        Returns ``{"at": iso, "reason": str, "raw": json_str}`` or None.
+
+        With template_id: returns per-template snapshot
+        ``{"ts": int, "reason": str, "data": dict}`` or None.
         """
+        if template_id is not None:
+            import json as _json
+            raw = self._qs.value(self._backup_key(template_id), "[]")
+            try:
+                slots = _json.loads(raw) if isinstance(raw, str) else (raw or [])
+            except Exception:
+                return None
+            return slots[-1] if slots else None
         backups = self._read_backups()
         return backups[0] if backups else None
 
