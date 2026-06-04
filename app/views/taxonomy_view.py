@@ -2087,6 +2087,25 @@ class TaxonomyView(BaseView):
 
     # ── Import ────────────────────────────────────────────────────────────────
 
+    def get_filtered_uids(self) -> list:
+        """Return record identifiers of all records currently shown in the table (after filter applied).
+
+        User records return their ``recordId``.  Seed records without one return
+        ``seed:{page_offset+row}`` — the same convention used by _taxonomy_record_id.
+        """
+        uids = []
+        for row in range(self._model.rowCount()):
+            rec = self._model.record_at(row)
+            if rec is None:
+                continue
+            rid = str(rec.get("recordId", "")).strip()
+            if rid:
+                uids.append(rid)
+            else:
+                page_offset = self._model._page_offset
+                uids.append(f"seed:{page_offset + row}")
+        return uids
+
     def _on_import(self) -> None:
         """Import taxonomy records from Excel or CSV.
 
