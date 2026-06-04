@@ -688,3 +688,72 @@ class TestLabelEditorKeyboardShortcuts:
         texts = [b.text() for b in btns]
         assert any("撤销" in t for t in texts)
         assert any("重做" in t for t in texts)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Per-template rolling backup — backup_template / latest_backup(template_id) /
+# restore_backup — MAX_BACKUP_SLOTS = 20
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestPerTemplateBackup:
+    def test_backup_creates_slot(self, sample_lib):
+        """backup_template(template_id) creates one backup slot."""
+        rec = sample_lib.upsert({"name": "备份测试", "template": {"rows": []}})
+        result = sample_lib.backup_template(rec["id"])
+        assert result is True
+        snap = sample_lib.latest_backup(rec["id"])
+        assert snap is not None
+        assert "data" in snap
+        assert snap["data"]["id"] == rec["id"]
+
+    def test_backup_rolls_at_20_slots(self, sample_lib):
+        """Adding 21 backups keeps only the newest 20."""
+        rec = sample_lib.upsert({"name": "滚动备份", "template": {"rows": []}})
+        for i in range(21):
+            rec = sample_lib.upsert({
+                "id": rec["id"],
+                "name": f"滚动备份-{i}",
+                "template": {"rows": [{"size": i}]},
+            })
+            sample_lib.backup_template(rec["id"], f"step {i}")
+        import json
+        raw = sample_lib._qs.value(sample_lib._backup_key(rec["id"]), "[]")
+        slots = json.loads(raw) if isinstance(raw, str) else (raw or [])
+        assert len(slots) <= sample_lib.MAX_BACKUP_SLOTS
+
+    def test_latest_backup_returns_last(self, sample_lib):
+        """latest_backup(template_id) returns the most recently appended entry."""
+        rec = sample_lib.upsert({"name": "最新备份", "template": {"rows": []}})
+        sample_lib.backup_template(rec["id"], "第一次")
+        rec = sample_lib.upsert({
+            "id": rec["id"],
+            "name": "最新备份-v2",
+            "template": {"rows": [{"size": 9}]},
+        })
+        sample_lib.backup_template(rec["id"], "第二次")
+        snap = sample_lib.latest_backup(rec["id"])
+        assert snap is not None
+        assert snap.get("reason") == "第二次"
+
+    def test_restore_backup_restores_data(self, sample_lib):
+        """restore_backup(template_id) puts the backed-up template back into library."""
+        rec = sample_lib.upsert({"name": "恢复测试", "template": {"rows": []}})
+        sample_lib.backup_template(rec["id"])
+        sample_lib.upsert({
+            "id": rec["id"],
+            "name": "修改后",
+            "template": {"rows": [{"fields": ["storage"], "size": 9}]},
+        })
+        assert sample_lib.get(rec["id"])["name"] == "修改后"
+        ok = sample_lib.restore_backup(rec["id"])
+        assert ok is True
+        restored = sample_lib.get(rec["id"])
+        assert restored["name"] == "恢复测试"
+
+    def test_backup_called_before_delete(self, sample_lib):
+        """delete(template_id) must call backup_template before removing."""
+        from unittest.mock import patch
+        rec = sample_lib.upsert({"name": "删前备份", "template": {"rows": []}})
+        with patch.object(sample_lib, "backup_template", wraps=sample_lib.backup_template) as mock_bt:
+            sample_lib.delete(rec["id"])
+        mock_bt.assert_called_once_with(rec["id"], "delete")
