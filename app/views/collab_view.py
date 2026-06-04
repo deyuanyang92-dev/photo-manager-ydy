@@ -40,6 +40,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from app.services.collab_offline_queue import OfflineDraftQueue
 from app.views.base_view import BaseView
 
 if False:  # TYPE_CHECKING
@@ -90,6 +91,10 @@ class CollabView(BaseView):
         # Service is optional — the view degrades gracefully when absent
         self._service: Optional["CollabService"] = getattr(ctx, "collab_service", None)
         super().__init__(ctx)
+        self._offline_queue = OfflineDraftQueue(ctx.settings._qs)
+        self._retry_timer = QTimer(self)
+        self._retry_timer.setInterval(30_000)
+        self._retry_timer.timeout.connect(self._retry_offline_drafts)
         self._connect_service_signals()
 
     # ── BaseView contract ─────────────────────────────────────────────────
@@ -270,6 +275,8 @@ class CollabView(BaseView):
             self._debug_local_addr.setText(
                 f"本机地址：{self._service.local_address()}"
             )
+        if not self._retry_timer.isActive():
+            self._retry_timer.start()
 
     # ── Signal wiring ─────────────────────────────────────────────────────
 
@@ -422,6 +429,20 @@ class CollabView(BaseView):
                      f"  {p.hostname or p.ip}:{p.port}" for p in peers]
             body = "\n".join(lines) if lines else "  （无在线节点）"
             self._debug_log.setText(f"在线节点：\n{body}")
+
+    def _retry_offline_drafts(self) -> None:
+        if self._service is None:
+            return
+        self._offline_queue.retry_all(self._service)
+
+    def _update_task_status(self, uid: str, status: str) -> None:
+        """Update task status, queuing as offline draft on network failure."""
+        if self._service is None:
+            return
+        try:
+            self._service.update_task_status(uid, status)
+        except Exception:
+            self._offline_queue.mark_draft(uid, status)
 
     def _show_no_service_placeholder(self) -> None:
         self._task_table.setRowCount(1)
