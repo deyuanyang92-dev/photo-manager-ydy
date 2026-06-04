@@ -43,10 +43,76 @@ from PyQt6.QtWidgets import (
 )
 
 from app.config import icons
+from app.services import grouping_service
 
 if TYPE_CHECKING:
     from app.app_context import AppContext
     from app.services.grouping_service import Group, SpecimenGrouping
+
+
+# ── Cross-group drag list ─────────────────────────────────────────────────────
+
+class _CrossGroupList(QListWidget):
+    """QListWidget that supports cross-group JPG drag-drop.
+
+    When a drop arrives from a *different* list, the dragged item is removed
+    from the source list and the parent GroupingPanel._on_groups_changed() is
+    called to persist the change.
+
+    Within the same list, items reorder normally (InternalMove behaviour is
+    preserved by letting Qt handle it via the base dropEvent).
+    """
+
+    def __init__(self, panel: "GroupingPanel", group_index: int,
+                 parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._panel = panel
+        self._group_index = group_index
+        self.setDragDropMode(QListWidget.DragDropMode.DragDrop)
+        self.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.setAcceptDrops(True)
+
+    def dropEvent(self, event) -> None:
+        src = event.source()
+        if src is self:
+            # Same-list reorder — delegate to Qt's default implementation.
+            super().dropEvent(event)
+            self._panel._on_groups_changed()
+            return
+
+        if not isinstance(src, _CrossGroupList):
+            event.ignore()
+            return
+
+        # Cross-group move: identify the item being dragged.
+        item = src.currentItem()
+        if item is None:
+            event.ignore()
+            return
+
+        jpg_path = item.data(Qt.ItemDataRole.UserRole)
+        if not jpg_path:
+            event.ignore()
+            return
+
+        # Remove from source list widget and source group model.
+        src.takeItem(src.row(item))
+
+        # Add to this list widget.
+        new_item = QListWidgetItem(item.text())
+        new_item.setData(Qt.ItemDataRole.UserRole, jpg_path)
+        new_item.setToolTip(jpg_path)
+        self.addItem(new_item)
+
+        event.setDropAction(Qt.DropAction.MoveAction)
+        event.accept()
+
+        # Persist via panel (updates the in-memory model and saves to DB).
+        self._panel._move_jpg_between_groups(
+            src_group_index=src._group_index,
+            dst_group_index=self._group_index,
+            jpg_path=jpg_path,
+        )
 
 
 # ── Composed row ──────────────────────────────────────────────────────────────
@@ -122,10 +188,12 @@ class _DraftGroupRow(QFrame):
     delete_group_requested = pyqtSignal(int)  # group_index  #cursor
     import_tiff_requested = pyqtSignal(int)   # group_index  #cursor groupingImportTiff
 
-    def __init__(self, group: "Group", parent: Optional[QWidget] = None) -> None:
+    def __init__(self, group: "Group", parent: Optional[QWidget] = None,
+                 panel: Optional["GroupingPanel"] = None) -> None:
         super().__init__(parent)
         self.setObjectName("Panel")
         self._group = group
+        self._panel = panel
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -197,9 +265,12 @@ class _DraftGroupRow(QFrame):
 
         root.addLayout(header)
 
-        # JPG list (drag-reorderable)
-        self._jpg_list = QListWidget()
-        self._jpg_list.setDragDropMode(QListWidget.DragDropMode.InternalMove)
+        # JPG list (drag-reorderable, supports cross-group drops)
+        self._jpg_list = _CrossGroupList(
+            panel=self._panel,
+            group_index=self._group.group_index,
+            parent=self,
+        )
         self._jpg_list.setMaximumHeight(104)
         self._jpg_list.setToolTip("拖拽可重新排序；右键 → 移除此 JPG")
         for p in self._group.jpg_paths:
@@ -479,6 +550,35 @@ class GroupingPanel(QWidget):
 
     # ── Internal ──────────────────────────────────────────────────────────────
 
+    def _move_jpg_between_groups(
+        self, src_group_index: int, dst_group_index: int, jpg_path: str
+    ) -> None:
+        """Move *jpg_path* from *src_group_index* to *dst_group_index* in the
+        in-memory model, then persist and emit grouping_changed.
+
+        Called by _CrossGroupList.dropEvent on a cross-group drop.
+        """
+        if not self._grouping:
+            return
+        for g in self._grouping.groups:
+            if g.group_index == src_group_index:
+                g.jpg_paths = [p for p in g.jpg_paths if p != jpg_path]
+            elif g.group_index == dst_group_index:
+                if jpg_path not in g.jpg_paths:
+                    g.jpg_paths.append(jpg_path)
+        self._on_groups_changed()
+
+    def _on_groups_changed(self) -> None:
+        """Persist the current in-memory grouping to DB and emit grouping_changed."""
+        if not self._grouping or not self._uid:
+            return
+        db = self.ctx.get_db()
+        if db is not None:
+            grouping_service.save_grouping(
+                db, self._uid, self._grouping.groups, clean_phantoms=False
+            )
+        self.grouping_changed.emit()
+
     def _build_more_menu(self):
         """Build the ⋯ 更多 dropdown menu."""
         from PyQt6.QtWidgets import QMenu
@@ -506,7 +606,7 @@ class GroupingPanel(QWidget):
             sec_lbl.setObjectName("Section")
             self._content_lay.addWidget(sec_lbl)
             for g in draft:
-                row = _DraftGroupRow(g, self)
+                row = _DraftGroupRow(g, self, panel=self)
                 row.compose_clicked.connect(self._on_compose)
                 row.label_changed.connect(self._on_label_changed)
                 row.add_selected_to_group.connect(self._on_add_selected_to_group)
