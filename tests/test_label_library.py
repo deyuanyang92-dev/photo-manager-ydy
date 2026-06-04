@@ -662,3 +662,71 @@ class TestLabelEditorKeyboardShortcuts:
         texts = [b.text() for b in btns]
         assert any("撤销" in t for t in texts)
         assert any("重做" in t for t in texts)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Mode-switching framework — 批量打印 / 设计模式 switcher
+# Task 3-B: mode switcher at top of LabelsView + _LabelDesignWidget
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestModeSwitcher:
+    def _make_view(self, qt_app):
+        from app.views.labels_view import LabelsView
+        from app.app_context import AppContext
+        ctx = AppContext()
+        return LabelsView(ctx)
+
+    def test_mode_switcher_has_two_buttons(self, qt_app):
+        view = self._make_view(qt_app)
+        assert hasattr(view, "_batch_btn")
+        assert hasattr(view, "_design_btn")
+
+    def test_mode_switcher_default_is_batch(self, qt_app):
+        view = self._make_view(qt_app)
+        assert view._batch_btn.isChecked()
+        assert not view._design_btn.isChecked()
+
+    def test_switch_to_design_mode_changes_stack_index(self, qt_app):
+        view = self._make_view(qt_app)
+        view._design_btn.click()
+        assert view._mode_stack.currentIndex() == 1
+        assert view._design_btn.isChecked()
+        assert not view._batch_btn.isChecked()
+
+    def test_switch_back_to_batch_mode(self, qt_app):
+        view = self._make_view(qt_app)
+        view._design_btn.click()
+        view._batch_btn.click()
+        assert view._mode_stack.currentIndex() == 0
+        assert view._batch_btn.isChecked()
+        assert not view._design_btn.isChecked()
+
+    def test_design_widget_has_editor(self, qt_app):
+        from app.views.labels_view import _LabelDesignWidget
+        from app.app_context import AppContext
+        ctx = AppContext()
+        w = _LabelDesignWidget(ctx)
+        assert hasattr(w, "_editor")
+        from app.widgets.label_editor import LabelEditorWidget
+        assert isinstance(w._editor, LabelEditorWidget)
+
+    def test_design_widget_has_template_list(self, qt_app):
+        from app.views.labels_view import _LabelDesignWidget
+        from app.app_context import AppContext
+        ctx = AppContext()
+        w = _LabelDesignWidget(ctx)
+        assert hasattr(w, "_tmpl_list")
+        from PyQt6.QtWidgets import QListWidget
+        assert isinstance(w._tmpl_list, QListWidget)
+
+    def test_batch_mode_content_is_page0(self, qt_app):
+        view = self._make_view(qt_app)
+        assert view._mode_stack.currentIndex() == 0
+
+    def test_batch_btn_text(self, qt_app):
+        view = self._make_view(qt_app)
+        assert "批量" in view._batch_btn.text()
+
+    def test_design_btn_text(self, qt_app):
+        view = self._make_view(qt_app)
+        assert "设计" in view._design_btn.text()

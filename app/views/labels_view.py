@@ -55,6 +55,7 @@ from PyQt6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFileDialog,
+    QFontComboBox,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -1819,6 +1820,264 @@ class _Step4Widget(QWidget):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Design mode widget
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _LabelDesignWidget(QWidget):
+    """设计模式面板 — 三栏布局：模板库 | 编辑器 | 属性。
+
+    Oracle: renderLabelsWorkbench() / setLabelMode("design") in app.js.
+    """
+
+    def __init__(self, ctx: "AppContext", parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._ctx = ctx
+        self._setup_ui()
+
+    def _setup_ui(self) -> None:
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setHandleWidth(4)
+        splitter.setStyleSheet(
+            "QSplitter::handle { background: rgba(145,182,181,0.10); }"
+        )
+
+        # ── LEFT: template library ────────────────────────────────────
+        left = QWidget()
+        left.setStyleSheet("background: #0c2027;")
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(8, 8, 8, 8)
+        left_layout.setSpacing(6)
+
+        lib_title = QLabel("模板库")
+        lib_title.setStyleSheet("color:#eef3ef; font-size:13px; font-weight:bold;")
+        left_layout.addWidget(lib_title)
+
+        self._tmpl_list = QListWidget()
+        self._tmpl_list.setStyleSheet(
+            "QListWidget { background:#0a1e25; border:1px solid rgba(145,182,181,0.15);"
+            " color:#eef3ef; border-radius:4px; }"
+            "QListWidget::item:selected { background: rgba(41,185,171,0.25); }"
+            "QListWidget::item:hover { background: rgba(41,185,171,0.12); }"
+        )
+        self._tmpl_list.currentRowChanged.connect(self._on_template_selected)
+        left_layout.addWidget(self._tmpl_list, stretch=1)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(4)
+        new_btn = QPushButton("新建")
+        del_btn = QPushButton("删除")
+        for b in (new_btn, del_btn):
+            b.setStyleSheet(
+                "QPushButton { background:#10242a; border:1px solid rgba(145,182,181,0.20);"
+                " border-radius:4px; color:#cfe0db; padding:3px 8px; font-size:11px; }"
+                "QPushButton:hover { border-color:#29b9ab; color:#29b9ab; }"
+            )
+        new_btn.clicked.connect(self._on_new_template)
+        del_btn.clicked.connect(self._on_delete_template)
+        btn_row.addWidget(new_btn)
+        btn_row.addWidget(del_btn)
+        left_layout.addLayout(btn_row)
+
+        splitter.addWidget(left)
+        splitter.setStretchFactor(0, 1)
+
+        # ── CENTER: LabelEditorWidget ─────────────────────────────────
+        center = QWidget()
+        center.setStyleSheet("background: #08161b;")
+        center_layout = QVBoxLayout(center)
+        center_layout.setContentsMargins(4, 4, 4, 4)
+        center_layout.setSpacing(0)
+
+        self._editor = LabelEditorWidget(
+            template=None,
+            dims={"w": 50, "h": 30},
+            label_data={},
+            parent=center,
+        )
+        center_layout.addWidget(self._editor)
+        splitter.addWidget(center)
+        splitter.setStretchFactor(1, 3)
+
+        # ── RIGHT: properties panel ───────────────────────────────────
+        right = QWidget()
+        right.setStyleSheet("background: #0c2027;")
+        right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(8, 8, 8, 8)
+        right_layout.setSpacing(6)
+
+        prop_title = QLabel("属性")
+        prop_title.setStyleSheet("color:#eef3ef; font-size:13px; font-weight:bold;")
+        right_layout.addWidget(prop_title)
+
+        font_label = QLabel("字体：")
+        font_label.setStyleSheet("color:#cfe0db; font-size:11px;")
+        right_layout.addWidget(font_label)
+        self._font_combo = QFontComboBox()
+        self._font_combo.setStyleSheet(
+            "QFontComboBox { background:#0f2127; border:1px solid rgba(145,182,181,0.18);"
+            " border-radius:4px; color:#eef3ef; padding:2px 4px; }"
+        )
+        right_layout.addWidget(self._font_combo)
+
+        size_label = QLabel("字号：")
+        size_label.setStyleSheet("color:#cfe0db; font-size:11px;")
+        right_layout.addWidget(size_label)
+        self._size_spin = QSpinBox()
+        self._size_spin.setRange(6, 72)
+        self._size_spin.setValue(10)
+        self._size_spin.setStyleSheet(
+            "QSpinBox { background:#0f2127; border:1px solid rgba(145,182,181,0.18);"
+            " border-radius:4px; color:#eef3ef; padding:2px 4px; }"
+        )
+        right_layout.addWidget(self._size_spin)
+        right_layout.addStretch()
+
+        splitter.addWidget(right)
+        splitter.setStretchFactor(2, 1)
+
+        # ── BOTTOM toolbar ────────────────────────────────────────────
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+        main_layout.addWidget(splitter, stretch=1)
+
+        toolbar_frame = QFrame()
+        toolbar_frame.setStyleSheet(
+            "QFrame { background: #091e24; border-top: 1px solid rgba(145,182,181,0.10); }"
+        )
+        toolbar_frame_layout = QHBoxLayout(toolbar_frame)
+        toolbar_frame_layout.setContentsMargins(12, 6, 12, 6)
+        toolbar_frame_layout.setSpacing(8)
+
+        _btn_css = (
+            "QPushButton { background:#10242a; border:1px solid rgba(145,182,181,0.20);"
+            " border-radius:4px; color:#cfe0db; padding:5px 14px; font-size:12px; }"
+            "QPushButton:hover { border-color:#29b9ab; color:#29b9ab; }"
+        )
+        save_btn = QPushButton("保存模板")
+        save_btn.setStyleSheet(_btn_css)
+        save_btn.clicked.connect(self._on_save_template)
+        print_btn = QPushButton("打印当前标本")
+        print_btn.setStyleSheet(_btn_css)
+        print_btn.clicked.connect(self._on_print)
+
+        toolbar_frame_layout.addWidget(save_btn)
+        toolbar_frame_layout.addWidget(print_btn)
+        toolbar_frame_layout.addStretch()
+        main_layout.addWidget(toolbar_frame)
+
+    def refresh(self) -> None:
+        """Load template list and inject active specimen data into editor."""
+        self._reload_template_list()
+        self._load_active_specimen()
+
+    def _reload_template_list(self) -> None:
+        self._tmpl_list.clear()
+        for bucket_key in ("sample", "tissue"):
+            lib = LabelTemplateLibrary(bucket_key)
+            for rec in lib.records():
+                item = QListWidgetItem(
+                    f"{'🧪' if bucket_key == 'sample' else '🧬'} {rec.get('name', bucket_key)}"
+                )
+                item.setData(Qt.ItemDataRole.UserRole, (bucket_key, rec))
+                self._tmpl_list.addItem(item)
+        for key, tmpl in BUILTIN_TEMPLATES.items():
+            item = QListWidgetItem(f"[内置] {tmpl.get('name', key)}")
+            item.setData(Qt.ItemDataRole.UserRole, ("builtin", tmpl))
+            self._tmpl_list.addItem(item)
+
+    def _load_active_specimen(self) -> None:
+        db = self._ctx.get_db()
+        if db is None:
+            return
+        from app.services.activation_service import get_active_uid
+        uid = get_active_uid(db)
+        if uid is None:
+            return
+        try:
+            row = db.execute(
+                "SELECT * FROM specimens WHERE id = ? LIMIT 1", (uid,)
+            ).fetchone()
+            if row is None:
+                row = db.execute(
+                    """SELECT s.* FROM specimens s
+                       JOIN tasks t ON t.uid LIKE '%' || s.id || '%'
+                       WHERE t.uid = ? LIMIT 1""",
+                    (uid,)
+                ).fetchone()
+            if row:
+                d = dict(row)
+                label_data = specimen_to_label_data({
+                    "province":       d.get("province"),
+                    "site":           d.get("site"),
+                    "station":        d.get("station"),
+                    "id":             d.get("id"),
+                    "storage":        d.get("storage"),
+                    "collectionDate": d.get("collection_date"),
+                    "photoDate":      d.get("photo_date"),
+                    "species":        d.get("scientific_name_cn") or d.get("scientific_name"),
+                    "latin":          d.get("scientific_name") or "",
+                    "collector":      d.get("collector"),
+                    "photographer":   d.get("photographer"),
+                    "family":         d.get("family"),
+                    "region":         d.get("geo_area") or "",
+                    "lon":            str(d.get("lon") or ""),
+                    "lat":            str(d.get("lat") or ""),
+                    "geoArea":        d.get("geo_area") or "",
+                    "photoNotes":     d.get("photo_notes") or "",
+                })
+                self._editor.update_label(label_data=label_data)
+        except Exception:
+            pass
+
+    def _on_template_selected(self, row: int) -> None:
+        item = self._tmpl_list.item(row)
+        if item is None:
+            return
+        bucket_or_kind, tmpl_or_rec = item.data(Qt.ItemDataRole.UserRole)
+        if bucket_or_kind == "builtin":
+            tmpl = tmpl_or_rec
+        else:
+            tmpl = tmpl_or_rec.get("template") or {}
+        self._editor.update_label(template=tmpl)
+
+    def _on_save_template(self) -> None:
+        pass
+
+    def _on_print(self) -> None:
+        printer = QPrinter()
+        dlg = QPrintDialog(printer, self)
+        if dlg.exec():
+            pass
+
+    def _on_new_template(self) -> None:
+        lib = LabelTemplateLibrary("sample")
+        rec = lib.clone_from_builtin(
+            BUILTIN_TEMPLATES["standard"],
+            BUILTIN_TEMPLATES["standard"].get("name", "标准"),
+        )
+        self._reload_template_list()
+
+    def _on_delete_template(self) -> None:
+        item = self._tmpl_list.currentItem()
+        if item is None:
+            return
+        bucket_or_kind, tmpl_or_rec = item.data(Qt.ItemDataRole.UserRole)
+        if bucket_or_kind == "builtin":
+            return
+        rec = tmpl_or_rec
+        resp = QMessageBox.question(
+            self, "删除确认",
+            f"确定删除模板「{rec.get('name', '')}」？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if resp == QMessageBox.StandardButton.Yes:
+            lib = LabelTemplateLibrary(bucket_or_kind)
+            lib.delete(rec["id"])
+            self._reload_template_list()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Main view
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1844,6 +2103,50 @@ class LabelsView(BaseView):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
+
+        # ── Mode switcher bar (批量打印 / 设计模式) ─────────────────────
+        mode_bar_frame = QFrame()
+        mode_bar_frame.setStyleSheet(
+            "QFrame { background: #091e24; border-bottom: 1px solid rgba(145,182,181,0.14); }"
+        )
+        mode_bar_layout = QHBoxLayout(mode_bar_frame)
+        mode_bar_layout.setContentsMargins(12, 5, 12, 5)
+        mode_bar_layout.setSpacing(4)
+
+        _mode_btn_css = (
+            "QPushButton { background:#0c2027; border:1px solid rgba(145,182,181,0.18);"
+            " border-radius:14px; color:#87a2a1; padding:4px 16px; font-size:12px; }"
+            "QPushButton:checked { background:rgba(41,185,171,0.18);"
+            " border:1.5px solid #29b9ab; color:#29b9ab; font-weight:bold; }"
+            "QPushButton:hover { border-color:#29b9ab; color:#29b9ab; }"
+        )
+        self._batch_btn = QPushButton("批量打印")
+        self._batch_btn.setCheckable(True)
+        self._batch_btn.setChecked(True)
+        self._batch_btn.setStyleSheet(_mode_btn_css)
+        self._batch_btn.setFixedHeight(28)
+
+        self._design_btn = QPushButton("设计模式")
+        self._design_btn.setCheckable(True)
+        self._design_btn.setChecked(False)
+        self._design_btn.setStyleSheet(_mode_btn_css)
+        self._design_btn.setFixedHeight(28)
+
+        mode_bar_layout.addWidget(self._batch_btn)
+        mode_bar_layout.addWidget(self._design_btn)
+        mode_bar_layout.addStretch()
+        root.addWidget(mode_bar_frame)
+
+        # ── Mode stack ────────────────────────────────────────────────
+        self._mode_stack = QStackedWidget()
+        self._mode_stack.setStyleSheet("background: #08161b;")
+
+        # ── Page 0: batch wizard content ───────────────────────────────
+        batch_page = QWidget()
+        batch_page.setStyleSheet("background: #08161b;")
+        batch_layout = QVBoxLayout(batch_page)
+        batch_layout.setContentsMargins(0, 0, 0, 0)
+        batch_layout.setSpacing(0)
 
         # ── Top step navigation bar ────────────────────────────────────
         nav_frame = QFrame()
@@ -1872,7 +2175,7 @@ class LabelsView(BaseView):
             self._step_btns.append(btn)
 
         nav_bar.addStretch()
-        root.addWidget(nav_frame)
+        batch_layout.addWidget(nav_frame)
 
         # ── Stacked pages ──────────────────────────────────────────────
         # Each step is wrapped in a QScrollArea so a short window never
@@ -1900,7 +2203,7 @@ class LabelsView(BaseView):
             sa.setWidget(step_widget)
             self._stack.addWidget(sa)
 
-        root.addWidget(self._stack, stretch=1)
+        batch_layout.addWidget(self._stack, stretch=1)
 
         # ── Bottom prev/next bar ───────────────────────────────────────
         bottom_frame = QFrame()
@@ -1921,7 +2224,15 @@ class LabelsView(BaseView):
         bottom_bar.addWidget(self._btn_prev)
         bottom_bar.addStretch()
         bottom_bar.addWidget(self._btn_next)
-        root.addWidget(bottom_frame)
+        batch_layout.addWidget(bottom_frame)
+
+        self._mode_stack.addWidget(batch_page)
+
+        # ── Page 1: design mode ────────────────────────────────────────
+        self._design_widget = _LabelDesignWidget(self.ctx, self)
+        self._mode_stack.addWidget(self._design_widget)
+
+        root.addWidget(self._mode_stack, stretch=1)
 
         # ── Status bar ────────────────────────────────────────────────
         status_frame = QFrame()
@@ -1952,12 +2263,24 @@ class LabelsView(BaseView):
         status_layout.addStretch()
         root.addWidget(status_frame)
 
+        # ── Wire mode buttons ─────────────────────────────────────────
+        self._batch_btn.clicked.connect(lambda: self._switch_mode(0))
+        self._design_btn.clicked.connect(lambda: self._switch_mode(1))
+
         # Wire print buttons
         self._step4.sample_button.clicked.connect(lambda: self._print("sample"))
         self._step4.tissue_button.clicked.connect(lambda: self._print("tissue"))
 
         self._current_step: int = 0
         self._go_to_step(0)
+
+    def _switch_mode(self, index: int) -> None:
+        self._mode_stack.setCurrentIndex(index)
+        self._batch_btn.setChecked(index == 0)
+        self._design_btn.setChecked(index == 1)
+        self._status_mode.setText("批量打印" if index == 0 else "设计模式")
+        if index == 1:
+            self._design_widget.refresh()
 
     # ── on_activate ───────────────────────────────────────────────────
 
