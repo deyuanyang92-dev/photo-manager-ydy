@@ -1047,6 +1047,17 @@ class WormsView(BaseView):
         create_btn.clicked.connect(self._on_create_job)
         ctrl.addWidget(create_btn)
 
+        import_filter_btn = QPushButton("从分类库筛选导入")
+        import_filter_btn.setObjectName("BtnImportFromTaxonFilter")
+        import_filter_btn.setFixedWidth(114)
+        import_filter_btn.setStyleSheet(
+            f"QPushButton {{ background:{_PANEL}; color:{_ACCENT}; border:1px solid rgba(41,185,171,0.30);"
+            f"  border-radius:6px; padding:6px 10px; font-size:12px; }}"
+            f"QPushButton:hover {{ border-color:{_ACCENT}; background:rgba(41,185,171,0.08); }}"
+        )
+        import_filter_btn.clicked.connect(self._on_import_from_taxon_filter)
+        ctrl.addWidget(import_filter_btn)
+
         refresh_btn = QPushButton("刷新")
         refresh_btn.setFixedWidth(52)
         refresh_btn.setStyleSheet(
@@ -1283,6 +1294,25 @@ class WormsView(BaseView):
             self._refresh_jobs()
         except Exception as exc:
             self._set_status(f"创建失败: {exc}")
+
+    def _on_import_from_taxon_filter(self) -> None:
+        """Fill job IDs input with UIDs from TaxonomyView's current filter result."""
+        win = self.window()
+        taxon_view = None
+        if hasattr(win, "_views"):
+            taxon_view = win._views.get("taxonomy")
+
+        if taxon_view is None:
+            QMessageBox.warning(self, "提示", "请先打开分类库页面")
+            return
+
+        uids = taxon_view.get_filtered_uids()
+        if not uids:
+            QMessageBox.information(self, "提示", "分类库无筛选结果")
+            return
+
+        self._job_ids_input.setText(",".join(uids))
+        QMessageBox.information(self, "已导入", f"已导入 {len(uids)} 条筛选结果")
 
     def _on_retry_failed(self) -> None:
         """Retry all error-status items in the most recent job.
