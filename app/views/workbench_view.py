@@ -420,6 +420,7 @@ class WorkbenchView(BaseView):
 
         self._naming = NamingPanel(self.ctx)
         self._naming.save_requested.connect(self._on_naming_save)
+        self._naming.uid_corrected.connect(self._on_uid_corrected)
         right_lay.addWidget(self._naming)           # natural height, no compress
 
         self._helicon_params = HeliconParamsPanel()
@@ -640,6 +641,17 @@ class WorkbenchView(BaseView):
             if callable(selector):
                 selector(uid)
 
+    def _on_uid_corrected(self, old_uid: str, new_uid: str) -> None:
+        """Handle UID change after storage correction in NamingPanel.
+
+        Updates _current_uid and refreshes the sidebar.
+        """
+        if self._current_uid == old_uid:
+            self._current_uid = new_uid
+        self._sidebar.refresh()
+        if new_uid:
+            self._sidebar.select_uid(new_uid)
+
     def _on_naming_save(self) -> None:
         """Persist the naming panel's current UID into the specimens table.
 
@@ -715,7 +727,7 @@ class WorkbenchView(BaseView):
             if row:
                 from app.models.specimen import Specimen
                 sp = Specimen.from_row(row)
-                self._naming.load_specimen(sp.raw or {
+                sp_dict = sp.raw or {
                     "province": sp.province,
                     "site": sp.site,
                     "station": sp.station,
@@ -723,7 +735,9 @@ class WorkbenchView(BaseView):
                     "storage": sp.storage,
                     "collection_date": sp.collection_date,
                     "photo_date": sp.photo_date,
-                })
+                }
+                sp_dict["uid"] = sp.uid
+                self._naming.load_specimen(sp_dict)
                 self._metadata.load_specimen(sp)
         except Exception:
             pass

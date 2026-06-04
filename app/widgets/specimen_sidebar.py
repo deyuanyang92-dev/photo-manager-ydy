@@ -15,11 +15,13 @@ from PyQt6.QtWidgets import (
     QApplication,
     QFrame,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMenu,
+    QMessageBox,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -337,6 +339,8 @@ class SpecimenSidebar(QWidget):
         copy_act = menu.addAction("复制编号")
         print_act = menu.addAction("打印标签...")
         menu.addSeparator()
+        rename_act = menu.addAction("修改编号…")
+        menu.addSeparator()
         activate_act = menu.addAction("激活")
         deactivate_act = menu.addAction("去激活")
 
@@ -345,10 +349,50 @@ class SpecimenSidebar(QWidget):
             QApplication.clipboard().setText(uid)
         elif chosen == print_act:
             self.print_labels_requested.emit(uid)
+        elif chosen == rename_act:
+            self._on_rename_specimen_code(uid)
         elif chosen == activate_act:
             self.activate_requested.emit(uid)
         elif chosen == deactivate_act:
             self.deactivate_requested.emit(uid)
+
+    def _on_rename_specimen_code(self, uid: str) -> None:
+        """Prompt for a new specimen id segment and apply rename via the service."""
+        from app.utils.naming import parse_uid
+        parsed = parse_uid(uid)
+        current_code = (parsed or {}).get("speciesId") or ""
+        new_code, ok = QInputDialog.getText(
+            self, "修改标本编号", "新编号：", text=current_code
+        )
+        if not ok or not new_code.strip():
+            return
+
+        from app.services.specimen_rename_service import (
+            rename_specimen_code,
+            specimen_has_risky_references,
+        )
+        db = self.ctx.get_db()
+        if not db:
+            QMessageBox.critical(self, "错误", "未打开项目，无法修改编号")
+            return
+
+        if specimen_has_risky_references(db, uid):
+            reply = QMessageBox.warning(
+                self,
+                "警告",
+                f"该标本已有分组/任务记录。\n"
+                f"编号将从 {uid} 改变。\n"
+                "已生成的 TIFF/ZIP 文件名不会自动重命名。\n\n确认修改？",
+                QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            )
+            if reply != QMessageBox.StandardButton.Ok:
+                return
+
+        try:
+            rename_specimen_code(db, uid, new_code.strip())
+            self.refresh()
+        except ValueError as exc:
+            QMessageBox.critical(self, "错误", str(exc))
 
     def copy_current_uid(self) -> bool:
         """Copy selected UID to clipboard. Returns False when nothing selected."""

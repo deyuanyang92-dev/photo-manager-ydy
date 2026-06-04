@@ -57,10 +57,12 @@ class NamingPanel(QWidget):
     uid_generated = pyqtSignal(str)
     result_id_generated = pyqtSignal(str)
     save_requested = pyqtSignal()
+    uid_corrected = pyqtSignal(str, str)  # (old_uid, new_uid) after storage correction
 
     def __init__(self, ctx: "AppContext", parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.ctx = ctx
+        self._persisted_uid: Optional[str] = None  # UID of the currently loaded saved specimen
         self._setup_ui()
 
     # ── UI ────────────────────────────────────────────────────────────────────
@@ -288,6 +290,7 @@ class NamingPanel(QWidget):
         Chinese fields (taxonGroupCn, orderCn …) are NOT auto-filled — user
         fills those manually per the project constraint.
         """
+        self._persisted_uid = sp.get("uid") or sp.get("uniqueId") or None
         self._province.setText(sp.get("province") or "")
         self._site.setText(sp.get("site") or "")
         self._station.setText(sp.get("station") or "")
@@ -539,8 +542,53 @@ class NamingPanel(QWidget):
         Sets the free-text storage QLineEdit to the selected code and
         un-checks all other buttons.  The QLineEdit.textChanged signal
         will trigger _update_preview automatically.
+
+        When an existing (saved) specimen is loaded, changing storage type
+        triggers applyStorageCorrection() to migrate the UID and all references.
+        Oracle: app.js:9303, applyStorageCorrection (line ~3001).
         """
+        old_code = self._storage.text().strip()
         self._storage.setText(code)
-        # Sync button checked state: check the matching button, uncheck others
         for btn in self._storage_btn_group.buttons():
             btn.setChecked(btn.text() == code)
+
+        if not self._persisted_uid or old_code == code:
+            return
+
+        from app.services.specimen_rename_service import (
+            apply_storage_correction,
+            specimen_has_risky_references,
+        )
+        from PyQt6.QtWidgets import QMessageBox
+        db = None
+        try:
+            db = self.ctx.get_db()
+        except Exception:
+            db = None
+        if not db:
+            return
+
+        uid = self._persisted_uid
+        if specimen_has_risky_references(db, uid):
+            reply = QMessageBox.warning(
+                self,
+                "保存方式修正",
+                "保存方式改变会更新唯一编号，已有记录将迁移。确认？",
+                QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            )
+            if reply != QMessageBox.StandardButton.Ok:
+                self._storage.setText(old_code)
+                for btn in self._storage_btn_group.buttons():
+                    btn.setChecked(btn.text() == old_code)
+                return
+
+        try:
+            new_uid = apply_storage_correction(db, uid, code)
+            if new_uid != uid:
+                self._persisted_uid = new_uid
+                self.uid_corrected.emit(uid, new_uid)
+        except ValueError as exc:
+            QMessageBox.critical(self, "错误", str(exc))
+            self._storage.setText(old_code)
+            for btn in self._storage_btn_group.buttons():
+                btn.setChecked(btn.text() == old_code)
