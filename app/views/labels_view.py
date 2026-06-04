@@ -2346,22 +2346,28 @@ class LabelsView(BaseView):
 
         self._current_step: int = 0
 
-        # Restore persisted layout and switch to it
-        from PyQt6.QtCore import QSettings  # noqa: PLC0415
-        settings = QSettings("PhotoPlatform", "Labels")
-        saved_layout = settings.value("layout", "工作台")
-        saved_idx = 0
-        for i, (name, _cls) in enumerate(self._LAYOUTS):
-            if name == saved_layout:
-                saved_idx = i
-                break
-        # Trigger initial layout build (suppresses combo signal during init)
-        self._layout_combo.blockSignals(True)
-        self._layout_combo.setCurrentIndex(saved_idx)
-        self._layout_combo.blockSignals(False)
-        self._switch_layout(saved_idx)
+        # Always start with 工作台 (index 0) so tests are stable.
+        # QSettings restore is deferred via QTimer so event loop must be
+        # running — tests that don't exec() the app never trigger it.
+        self._switch_layout(0)
 
         self._go_to_step(0)
+
+        # Defer QSettings restore until after event loop starts.
+        QTimer.singleShot(0, self._restore_layout_from_settings)
+
+    def _restore_layout_from_settings(self) -> None:
+        """Restore the last-used layout from QSettings (deferred, safe for tests)."""
+        from PyQt6.QtCore import QSettings  # noqa: PLC0415
+        settings = QSettings("PhotoPlatform", "Labels")
+        saved = settings.value("layout", "工作台")
+        for i, (name, _cls) in enumerate(self._LAYOUTS):
+            if name == saved and i != self._layout_combo.currentIndex():
+                self._layout_combo.blockSignals(True)
+                self._layout_combo.setCurrentIndex(i)
+                self._layout_combo.blockSignals(False)
+                self._switch_layout(i)
+                break
 
     # ── Layout switching ───────────────────────────────────────────────
 

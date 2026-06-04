@@ -900,56 +900,32 @@ class TestLabelsView:
 
 class TestLabelDataText:
     def test_label_data_text_all_fields(self):
+        """label_data_text mirrors JS labelDataText(): uniqueId + speciesName + region +
+        collectorLabel joined by newline, values only (no field-name prefixes)."""
         data = {
-            "uid": "FJ-YGLZ-B2-001",
-            "scientific_name": "Polynoidae sp.",
-            "scientific_name_cn": "背鳞虫",
-            "province": "福建",
-            "site": "厦门",
-            "station": "B2",
-            "date": "20260506",
-            "collector": "杨德援",
-            "storage": "D95E",
-            "notes": "备注内容",
+            "uniqueId": "FJ-YGLZ-B2-001",
+            "speciesName": "背鳞虫 sp.01",
+            "region": "福建·厦门",
+            "collectorLabel": "杨德援采集",
         }
         result = label_data_text(data)
-        assert "编号: FJ-YGLZ-B2-001" in result
-        assert "拉丁名: Polynoidae sp." in result
-        assert "中文名: 背鳞虫" in result
-        assert "省份: 福建" in result
-        assert "采集地: 厦门" in result
-        assert "站号: B2" in result
-        assert "采集日期: 20260506" in result
-        assert "采集人: 杨德援" in result
-        assert "保存方式: D95E" in result
-        assert "备注: 备注内容" in result
+        assert "FJ-YGLZ-B2-001" in result
+        assert "背鳞虫 sp.01" in result
+        assert "福建·厦门" in result
+        assert "杨德援采集" in result
         lines = result.split("\n")
-        assert len(lines) == 10
+        assert len(lines) == 4
 
     def test_label_data_text_skips_empty(self):
         data = {
-            "uid": "FJ-001",
-            "scientific_name": "",
-            "scientific_name_cn": None,
-            "province": "福建",
-            "site": None,
-            "station": "",
-            "date": "20260506",
-            "collector": None,
-            "storage": "D95E",
-            "notes": "",
+            "uniqueId": "FJ-001",
+            "speciesName": "",
+            "region": None,
+            "collectorLabel": "",
         }
         result = label_data_text(data)
-        assert "编号: FJ-001" in result
-        assert "拉丁名" not in result
-        assert "中文名" not in result
-        assert "省份: 福建" in result
-        assert "采集地" not in result
-        assert "站号" not in result
-        assert "采集日期: 20260506" in result
-        assert "采集人" not in result
-        assert "保存方式: D95E" in result
-        assert "备注" not in result
+        assert "FJ-001" in result
+        assert result == "FJ-001"
 
     def test_label_data_text_empty_dict(self):
         assert label_data_text({}) == ""

@@ -516,26 +516,20 @@ def validate_print_job(job: dict) -> list[dict]:
 def label_data_text(data: dict) -> str:
     """Return plain-text summary of label data (for clipboard/export).
 
-    Mirrors web labelDataText(). One field per line: "字段名: 值".
-    Skips empty/None fields.
+    Mirrors web labelDataText(). One value per line, in display order.
+    Uses the camelCase keys returned by specimen_to_label_data().
+    Skips empty/None/falsy fields.
+    Falls back to 'latin' when 'speciesName' is absent.
     """
-    FIELD_ORDER = [
-        ("uid", "编号"),
-        ("scientific_name", "拉丁名"),
-        ("scientific_name_cn", "中文名"),
-        ("province", "省份"),
-        ("site", "采集地"),
-        ("station", "站号"),
-        ("date", "采集日期"),
-        ("collector", "采集人"),
-        ("storage", "保存方式"),
-        ("notes", "备注"),
+    d = data or {}
+    species = d.get("speciesName") or d.get("latin") or ""
+    FIELD_VALUES = [
+        d.get("uniqueId"),
+        species,
+        d.get("region"),
+        d.get("collectorLabel"),
     ]
-    lines = []
-    for key, label in FIELD_ORDER:
-        val = (data or {}).get(key)
-        if val:
-            lines.append(f"{label}: {val}")
+    lines = [str(v) for v in FIELD_VALUES if v]
     return "\n".join(lines)
 
 
