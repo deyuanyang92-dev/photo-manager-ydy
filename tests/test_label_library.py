@@ -460,6 +460,32 @@ class TestLabelsViewFull:
         assert hasattr(view._step2._sample_col, "_lib")
         assert hasattr(view._step2._tissue_col, "_lib")
 
+    def test_classic_layout_shows_template_section_without_navigation(self, qt_app):
+        view = self._make_view(qt_app)
+        mock = [_sp(), _rna_sp()]
+        view._specimens = mock
+        view._step1.set_specimens(mock)
+        qt_app.processEvents()
+
+        assert not view._step2.isHidden()
+        assert view._content_layout.indexOf(view._step2) >= 0
+        assert not view._step2._sample_col._manage_btn.isHidden()
+        assert not view._step2._sample_col._import_btn.isHidden()
+        assert view._step2._sample_col.selected_template()["name"]
+
+    def test_template_library_visible_without_specimen_selection(self, qt_app):
+        view = self._make_view(qt_app)
+        mock = [_sp(), _rna_sp()]
+        view._specimens = mock
+        view._step1.set_specimens(mock)
+        view._step1._select_none()
+        qt_app.processEvents()
+
+        assert not view._step2._splitter.isHidden()
+        assert not view._step2._sample_col._manage_btn.isHidden()
+        assert not view._step2._sample_col._import_btn.isHidden()
+        assert view._step2._empty_hint.text().startswith("未选择标本")
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # _BucketColWidget — selected_template with library key

@@ -1290,8 +1290,31 @@ class TestComposePreviewDialog:
         assert callable(w._show_compose_preview)
         db.close()
 
+    def test_compose_workbench_dialog_defaults(self, tmp_path, qapp):
+        from app.views.workbench_view import _ComposeWorkbenchDialog
 
-# ── _BatchResultDialog ────────────────────────────────────────────────────────
+        jpg1 = tmp_path / "a.jpg"
+        jpg2 = tmp_path / "b.jpg"
+        tiff = tmp_path / "out.tif"
+        jpg1.write_bytes(b"jpg1")
+        jpg2.write_bytes(b"jpg2")
+        tiff.write_bytes(b"tiff")
+
+        dlg = _ComposeWorkbenchDialog(
+            [str(jpg1), str(jpg2)],
+            str(tiff),
+            {"method": 1, "radius": 8.5, "smoothing": 3},
+            angle_label="背面",
+        )
+
+        assert dlg.windowTitle() == "合成工作台"
+        assert dlg.selected_jpgs() == [str(jpg1), str(jpg2)]
+        assert dlg.params()["method"] == 1
+        assert dlg.params()["radius"] == 8.5
+        assert dlg.params()["smoothing"] == 3
+
+
+# ── _BatchResultDialog ────────────────────────────────────────────
 
 class TestBatchResultDialog:
     """Tests for _BatchResultDialog and FileResult in workbench_view / retroactive_service."""

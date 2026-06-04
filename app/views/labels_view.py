@@ -46,8 +46,8 @@ import os
 import tempfile
 from typing import Optional
 
-from PyQt6.QtCore import Qt, QMarginsF, QSizeF, QTimer
-from PyQt6.QtGui import QPainter, QPageSize, QColor, QFont
+from PyQt6.QtCore import Qt, QMarginsF, QSizeF, QRectF, QTimer, pyqtSignal
+from PyQt6.QtGui import QPainter, QPageSize, QColor, QFont, QPixmap
 from PyQt6.QtPrintSupport import QPrinter, QPrintDialog, QAbstractPrintDialog
 from PyQt6.QtWidgets import (
     QButtonGroup,
@@ -55,6 +55,7 @@ from PyQt6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFileDialog,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -257,6 +258,57 @@ _PAPER_SIZE_ORDER = [
 ]
 
 
+def _render_label_pixmap(tmpl: dict, dims: dict, data: dict, scale: float = 3.78) -> QPixmap:
+    """Render a label to QPixmap for Step 2 preview. Mirrors renderLabelEl(forScreen=True)."""
+    from app.widgets.label_editor import _generate_qr_pixmap
+    w_mm = float(dims.get("w", 60))
+    h_mm = float(dims.get("h", 40))
+    w_px = max(1, int(w_mm * scale))
+    h_px = max(1, int(h_mm * scale))
+    pixmap = QPixmap(w_px, h_px)
+    pixmap.fill(QColor("white"))
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+    qr_cfg = tmpl.get("qr") or {}
+    ecc = qr_cfg.get("ecc") or "Q"
+    metrics = qr_metrics(tmpl, dims)
+    if metrics is not None:
+        qr_text = str(data.get(qr_cfg.get("content") or "uniqueId") or "")
+        size_px = max(20, int(metrics["sizeMm"] * scale))
+        qr_pm = _generate_qr_pixmap(qr_text, size_px, ecc)
+        if qr_pm:
+            painter.drawPixmap(int(metrics["x"] * scale), int(metrics["y"] * scale), qr_pm)
+    qr_w_px = metrics["sizeMm"] * scale if (metrics and qr_cfg.get("position") == "right") else 0.0
+    text_w_px = max(1.0, float(w_px) - qr_w_px - 2 * scale)
+    y_cur = 2.0 * scale
+    for row in (tmpl.get("rows") or []):
+        parts: list[str] = []
+        for f in (row.get("fields") or []):
+            k = f.get("key") if isinstance(f, dict) else str(f)
+            v = data.get(k)
+            if v is not None:
+                parts.append(str(v))
+        text = (row.get("sep") or " ").join(parts)
+        if row.get("prefix"):
+            text = row["prefix"] + text
+        if not text:
+            continue
+        font = QFont()
+        font.setPointSizeF(float(row.get("size") or 9))
+        st = row.get("style") or ""
+        font.setBold("bold" in st)
+        font.setItalic("italic" in st)
+        painter.setFont(font)
+        fm = painter.fontMetrics()
+        lh = fm.height()
+        painter.drawText(QRectF(2 * scale, y_cur, text_w_px, lh * 1.5),
+                         Qt.TextFlag.TextWordWrap, text)
+        y_cur += lh * float(row.get("lineHeight") or 1.3)
+    painter.end()
+    return pixmap
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Small utility widgets
 # ─────────────────────────────────────────────────────────────────────────────
@@ -324,6 +376,8 @@ class _Step1Widget(QWidget):
                  label-bucket-row / label-bucket-card (sample & tissue)
     """
 
+    selection_changed = pyqtSignal()
+
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setStyleSheet("background: #08161b; color: #eef3ef;")
@@ -332,8 +386,8 @@ class _Step1Widget(QWidget):
         root.setContentsMargins(20, 16, 20, 16)
         root.setSpacing(12)
 
-        # ── Step title ────────────────────────────────────────────────
-        root.addWidget(_section_label("Step 1: 选择标本", large=True))
+        # ── Section title ─────────────────────────────────────────────
+        root.addWidget(_section_label("选择标本", large=True))
 
         # ── label-proj-row ────────────────────────────────────────────
         proj_row = QHBoxLayout()
@@ -464,6 +518,7 @@ class _Step1Widget(QWidget):
         self._selected = set(range(len(specimens)))  # all checked by default
         self._rebuild_grid()
         self._update_bucket_cards()
+        self.selection_changed.emit()
 
     def selected_indices(self) -> list[int]:
         return sorted(self._selected)
@@ -484,6 +539,7 @@ class _Step1Widget(QWidget):
         self._selected = {match_idx}
         self._sync_checkboxes()
         self._update_bucket_cards()
+        self.selection_changed.emit()
         return True
 
     # ── Internal helpers ──────────────────────────────────────────────
@@ -546,6 +602,7 @@ class _Step1Widget(QWidget):
                 frame.setProperty("selected", str(idx in self._selected).lower())
                 frame.setStyleSheet(_CSS_SPEC_ITEM)
                 self._update_bucket_cards()
+                self.selection_changed.emit()
 
             cb.toggled.connect(_on_toggle)
             self._checkboxes.append(cb)
@@ -578,6 +635,7 @@ class _Step1Widget(QWidget):
         self._selected = set(range(len(self._specimens)))
         self._sync_checkboxes()
         self._update_bucket_cards()
+        self.selection_changed.emit()
 
     def _select_rna_only(self) -> None:
         self._selected = {
@@ -585,6 +643,7 @@ class _Step1Widget(QWidget):
         }
         self._sync_checkboxes()
         self._update_bucket_cards()
+        self.selection_changed.emit()
 
     def _select_sample_only(self) -> None:
         self._selected = {
@@ -592,11 +651,13 @@ class _Step1Widget(QWidget):
         }
         self._sync_checkboxes()
         self._update_bucket_cards()
+        self.selection_changed.emit()
 
     def _select_none(self) -> None:
         self._selected.clear()
         self._sync_checkboxes()
         self._update_bucket_cards()
+        self.selection_changed.emit()
 
     def _sync_checkboxes(self) -> None:
         for i, cb in enumerate(self._checkboxes):
@@ -718,6 +779,25 @@ class _BucketColWidget(QWidget):
         root.addWidget(tmpl_scroll)
         self._tmpl_scroll = tmpl_scroll
         self._picker_container = picker_container
+
+        # ── 大预览 (mirrors web label-preview-card) ───────────────────
+        preview_frame = QFrame()
+        preview_frame.setStyleSheet(
+            "QFrame { background: #1a3540; border: 1px solid rgba(145,182,181,0.20);"
+            " border-radius: 5px; padding: 4px; }"
+        )
+        preview_frame.setFixedHeight(130)
+        preview_inner = QVBoxLayout(preview_frame)
+        preview_inner.setContentsMargins(4, 4, 4, 4)
+        preview_inner.setSpacing(3)
+        self._large_preview_label = QLabel("实时预览")
+        self._large_preview_label.setStyleSheet("color: #87a2a1; font-size: 10px;")
+        self._large_preview_img = QLabel()
+        self._large_preview_img.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._large_preview_img.setStyleSheet("background: transparent;")
+        preview_inner.addWidget(self._large_preview_label)
+        preview_inner.addWidget(self._large_preview_img, stretch=1)
+        root.addWidget(preview_frame)
 
         # ── Paper size section ────────────────────────────────────────
         paper_section = QWidget()
@@ -928,6 +1008,36 @@ class _BucketColWidget(QWidget):
         add_card.mousePressEvent = _new_custom_click  # type: ignore[method-assign]
         self._picker_layout.addWidget(add_card)
         self._picker_layout.addStretch()
+
+        # Update large preview after rebuilding cards
+        self._update_large_preview()
+
+    def _update_large_preview(self) -> None:
+        """Refresh the large label preview. Mirrors web label-preview-card."""
+        first_data: dict = {}
+        if self._selected_indices and self._specimens:
+            idx = self._selected_indices[0]
+            if idx < len(self._specimens):
+                first_data = specimen_to_label_data(self._specimens[idx])
+        tmpl = normalize_template(self.selected_template())
+        dims = self.selected_dims()
+        uid = first_data.get("uniqueId") or "—"
+        self._large_preview_label.setText(
+            f"实时预览 — {uid} · {dims.get('w', 0)}×{dims.get('h', 0)}mm"
+        )
+        pixmap = _render_label_pixmap(tmpl, dims, first_data, scale=3.78)
+        # Scale to fit in the preview widget
+        available_h = 90
+        if pixmap.height() > 0:
+            ratio = available_h / pixmap.height()
+            scaled = pixmap.scaled(
+                int(pixmap.width() * ratio), available_h,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            self._large_preview_img.setPixmap(scaled)
+        else:
+            self._large_preview_img.setText("—")
 
     def _make_template_card(
         self,
@@ -1251,6 +1361,7 @@ class _BucketColWidget(QWidget):
         self._selected_size_key = key
         self._lib.set_selected_size_key(key)  # persist
         self._apply_size_selection()
+        self._update_large_preview()
 
     def _apply_size_selection(self) -> None:
         for k, btn in self._size_btns.items():
@@ -1436,7 +1547,7 @@ class _Step2Widget(QWidget):
         # Title row with persisted hint
         title_row = QHBoxLayout()
         title_row.setSpacing(8)
-        title_row.addWidget(_section_label("Step 2: 选择模版", large=True))
+        title_row.addWidget(_section_label("模板库", large=True))
         hint = QLabel("✓ 模板 / 尺寸 / 排版已自动保存，下次进 Labels 自动沿用")
         hint.setStyleSheet("color: #36c98f; font-size: 11px;")
         title_row.addWidget(hint)
@@ -1471,7 +1582,7 @@ class _Step2Widget(QWidget):
 
         root.addWidget(self._splitter, stretch=1)
 
-        self._empty_hint = QLabel("请先在 Step 1 选择标本。")
+        self._empty_hint = QLabel("未选择标本；仍可管理模板，选择标本后会实时预览。")
         self._empty_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._empty_hint.setStyleSheet("color:#5f7d7a; font-size:13px;")
         self._empty_hint.setVisible(False)
@@ -1480,22 +1591,19 @@ class _Step2Widget(QWidget):
     def refresh(self, specimens: list[dict], selected_indices: list[int]) -> None:
         """Update both bucket columns."""
         has_selection = bool(selected_indices)
+        self._empty_hint.setText("未选择标本；仍可管理模板，选择标本后会实时预览。")
         self._empty_hint.setVisible(not has_selection)
-        self._splitter.setVisible(has_selection)
-
-        if not has_selection:
-            return
+        self._splitter.setVisible(True)
 
         tissue_indices = [
             i for i in selected_indices
             if i < len(specimens) and has_rna_tissue(specimens[i])
         ]
         has_tissue = bool(tissue_indices)
-        self._tissue_scroll.setVisible(has_tissue)
+        self._tissue_scroll.setVisible(True)
 
         self._sample_col.refresh(specimens, selected_indices)
-        if has_tissue:
-            self._tissue_col.refresh(specimens, selected_indices)
+        self._tissue_col.refresh(specimens, selected_indices if has_tissue else [])
 
     def selected_sample_template(self) -> dict:
         return self._sample_col.selected_template()
@@ -1532,7 +1640,7 @@ class _Step3Widget(QWidget):
         root.setContentsMargins(20, 16, 20, 16)
         root.setSpacing(12)
 
-        root.addWidget(_section_label("Step 3: 编辑预览", large=True))
+        root.addWidget(_section_label("标签预览", large=True))
 
         # Bucket toggle
         toggle_row = QHBoxLayout()
@@ -1651,7 +1759,11 @@ class _Step4Widget(QWidget):
         root.setContentsMargins(20, 16, 20, 16)
         root.setSpacing(16)
 
-        root.addWidget(_section_label("Step 4: 纸张 / 尺寸 / 份数", large=True))
+        root.addWidget(_section_label("打印设置", large=True))
+
+        # Label dims (updated by LabelsView._refresh_step4 via update_dims())
+        self._sample_dims: dict = {"w": 50, "h": 30}
+        self._tissue_dims: dict = {"w": 30, "h": 15}
 
         # Per-bucket paper-type rows (sample + tissue)
         paper_row = QHBoxLayout()
@@ -1735,9 +1847,13 @@ class _Step4Widget(QWidget):
             rb.setChecked(ptype == "label")
             rb.setStyleSheet("color:#cfe0db; font-size:11px;")
             col.addWidget(rb)
-            def _on_changed(checked: bool, _type: str = ptype, _attr: str = self_attr) -> None:
+            def _on_changed(
+                checked: bool, _type: str = ptype,
+                _attr: str = self_attr, _bucket: str = bucket,
+            ) -> None:
                 if checked:
                     setattr(self, _attr, _type)
+                    self._update_grid_preview(_bucket)
             rb.toggled.connect(_on_changed)
             radios.append(rb)
 
@@ -1746,9 +1862,9 @@ class _Step4Widget(QWidget):
         else:
             self._tissue_radios = radios
 
-        # Grid preview: compact count display (label-render analog)
+        # Grid preview text
         col.addSpacing(6)
-        grid_lbl = QLabel("—")
+        grid_lbl = QLabel("🏷 标签纸: 每张 1 个标签")
         grid_lbl.setStyleSheet(
             "color:#5f7d7a; font-size:10px; background:#0a1e25;"
             " border:1px solid rgba(145,182,181,0.08); border-radius:3px; padding:4px 6px;"
@@ -1756,12 +1872,73 @@ class _Step4Widget(QWidget):
         grid_lbl.setWordWrap(True)
         col.addWidget(grid_lbl)
 
+        # Visual grid cells (shown only for A4/A5)
+        grid_visual = QWidget()
+        grid_visual.setStyleSheet("background: transparent;")
+        grid_visual.setVisible(False)
+        grid_vis_layout = QGridLayout(grid_visual)
+        grid_vis_layout.setContentsMargins(2, 2, 2, 2)
+        grid_vis_layout.setSpacing(2)
+        col.addWidget(grid_visual)
+
         if bucket == "sample":
             self._sample_grid_preview = grid_lbl
+            self._sample_grid_visual = grid_visual
         else:
             self._tissue_grid_preview = grid_lbl
+            self._tissue_grid_visual = grid_visual
 
         return box
+
+    def _update_grid_preview(self, bucket: str) -> None:
+        """Refresh grid text + visual cells. Mirrors web renderPaperColumn grid section."""
+        paper_type = getattr(self, f"_{bucket}_paper_type", "label")
+        dims = self._sample_dims if bucket == "sample" else self._tissue_dims
+        preview_lbl = self._sample_grid_preview if bucket == "sample" else self._tissue_grid_preview
+        visual = self._sample_grid_visual if bucket == "sample" else self._tissue_grid_visual
+        icon = "🧪" if bucket == "sample" else "🧬"
+
+        if paper_type in ("a4", "a5"):
+            paper = PAPER_SIZES.get(paper_type, {})
+            grid = calculate_grid(
+                float(dims.get("w", 50)), float(dims.get("h", 30)),
+                float(paper.get("w", 210)), float(paper.get("h", 297)),
+            )
+            paper_name = "A4" if paper_type == "a4" else "A5"
+            preview_lbl.setText(
+                f"🗒 {paper_name} 排版: {grid['cols']}列 × {grid['rows']}行 ="
+                f" {grid['perPage']} 张/页"
+            )
+            lyt: QGridLayout = visual.layout()  # type: ignore[assignment]
+            while lyt.count():
+                item = lyt.takeAt(0)
+                if item.widget():
+                    item.widget().deleteLater()
+            cols = grid["cols"]
+            for i in range(min(grid["perPage"], 40)):
+                cell = QFrame()
+                cell.setStyleSheet(
+                    "QFrame { background: rgba(41,185,171,0.18);"
+                    " border: 1px solid rgba(41,185,171,0.40); border-radius: 1px; }"
+                )
+                cell.setFixedSize(12, 8)
+                lyt.addWidget(cell, i // cols, i % cols)
+            visual.setVisible(True)
+        else:
+            preview_lbl.setText(f"{icon} 标签纸: 每张 1 个标签")
+            lyt = visual.layout()  # type: ignore[assignment]
+            while lyt.count():
+                item = lyt.takeAt(0)
+                if item.widget():
+                    item.widget().deleteLater()
+            visual.setVisible(False)
+
+    def update_dims(self, sample_dims: dict, tissue_dims: dict) -> None:
+        """Called by LabelsView._refresh_step4 to propagate label dims for grid calc."""
+        self._sample_dims = sample_dims
+        self._tissue_dims = tissue_dims
+        self._update_grid_preview("sample")
+        self._update_grid_preview("tissue")
 
     # ── Public API ────────────────────────────────────────────────────
 
@@ -1784,15 +1961,9 @@ class _Step4Widget(QWidget):
             f" · 每种 {copies} 份 → 总 {total} 张"
         )
 
-        # Update grid preview labels
-        self._sample_grid_preview.setText(
-            f"🧪 样品瓶标签 × {sample_count} 张"
-            if sample_count > 0 else "— 无样品瓶标签"
-        )
-        self._tissue_grid_preview.setText(
-            f"🧬 RNAlater 组织管 × {tissue_count} 张"
-            if tissue_count > 0 else "— 无组织管标签（需 R 前缀标本）"
-        )
+        # Refresh grid previews (picks up updated counts via dims)
+        self._update_grid_preview("sample")
+        self._update_grid_preview("tissue")
 
         html = "<b>样品桶</b><br>" + _warnings_html(sample_warnings)
         if tissue_count > 0:
@@ -1819,33 +1990,276 @@ class _Step4Widget(QWidget):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# _LayoutWorkbench — wraps the existing 4-step wizard as a pluggable layout
+# ─────────────────────────────────────────────────────────────────────────────
+
+from app.views.labels_layouts import _LabelLayoutBase  # noqa: E402
+
+
+class _LayoutWorkbench(_LabelLayoutBase):
+    """Layout W (default): The classic 4-step workbench layout.
+
+    Wraps _Step1Widget / _Step2Widget / _Step3Widget / _Step4Widget using the
+    same splitter/scroll arrangement as the original LabelsView._setup_ui().
+
+    This class is the faithful behaviour-preserving extraction of the original
+    LabelsView content area into the _LabelLayoutBase interface so LabelsView
+    can swap it out for alternative layouts.
+    """
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._specimens: list[dict] = []
+        self._sample_job: Optional[dict] = None
+        self._tissue_job: Optional[dict] = None
+        self._setup_ui()
+
+    def _setup_ui(self) -> None:
+        self.setStyleSheet("background: #08161b; color: #eef3ef;" + _CSS_FULL)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        self._step1 = _Step1Widget()
+        self._step2 = _Step2Widget()
+        self._step3 = _Step3Widget()
+        self._step4 = _Step4Widget()
+        self._step1.selection_changed.connect(self._refresh_after_selection_change)
+
+        _scroll_style = (
+            "QScrollArea { background: #08161b; border: none; }"
+            "QScrollBar:vertical { background: #0c1e26; width: 8px; }"
+            "QScrollBar::handle:vertical { background: rgba(145,182,181,0.25); border-radius: 4px; }"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
+        )
+
+        self._main_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._main_splitter.setChildrenCollapsible(False)
+        self._main_splitter.setHandleWidth(12)
+        self._main_splitter.setStyleSheet(
+            "QSplitter::handle { background: rgba(145,182,181,0.10); }"
+        )
+
+        self._left_scroll = QScrollArea()
+        self._left_scroll.setWidgetResizable(True)
+        self._left_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._left_scroll.setStyleSheet(_scroll_style)
+        self._left_scroll.setWidget(self._step1)
+        self._main_splitter.addWidget(self._left_scroll)
+
+        self._content = QWidget()
+        self._content.setStyleSheet("background: #08161b;")
+        self._content_layout = QVBoxLayout(self._content)
+        self._content_layout.setContentsMargins(0, 0, 0, 0)
+        self._content_layout.setSpacing(0)
+        for step_widget in (self._step2, self._step3, self._step4):
+            self._content_layout.addWidget(step_widget)
+
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._scroll.setStyleSheet(_scroll_style)
+        self._scroll.setWidget(self._content)
+        self._main_splitter.addWidget(self._scroll)
+        self._main_splitter.setSizes([340, 980])
+        root.addWidget(self._main_splitter, stretch=1)
+
+        # Wire print buttons to our signals
+        self._step4.sample_button.clicked.connect(self.print_sample)
+        self._step4.tissue_button.clicked.connect(self.print_tissue)
+
+    # ── _LabelLayoutBase interface ────────────────────────────────────
+
+    def load_specimens(self, specimens: list[dict]) -> None:
+        self._specimens = specimens
+        self._step1.set_specimens(specimens)
+        self._refresh_after_selection_change()
+
+    def select_uid(self, uid: str) -> bool:
+        ok = self._step1.select_only_uid(uid)
+        if ok:
+            self._refresh_after_selection_change()
+        return ok
+
+    def get_sample_job(self) -> Optional[dict]:
+        return self._sample_job
+
+    def get_tissue_job(self) -> Optional[dict]:
+        return self._tissue_job
+
+    def on_activate(self) -> None:
+        self._refresh_after_selection_change()
+
+    # ── Step refresh chain (mirrors old LabelsView methods) ───────────
+
+    def _refresh_after_selection_change(self) -> None:
+        if not hasattr(self, "_step2"):
+            return
+        self._refresh_step2()
+        self._refresh_step3()
+        self._refresh_step4()
+
+    def _refresh_step2(self) -> None:
+        indices = self._step1.selected_indices()
+        self._step2.refresh(self._specimens, indices)
+
+    def _refresh_step3(self) -> None:
+        indices = self._step1.selected_indices()
+        first_data: dict = {}
+        if indices and self._specimens:
+            from app.utils.label_core import specimen_to_label_data as _s2ld
+            sp = self._specimens[indices[0]] if indices[0] < len(self._specimens) else {}
+            first_data = _s2ld(sp) if sp else {}
+        sample_tmpl = self._step2.selected_sample_template()
+        tissue_tmpl = self._step2.selected_tissue_template()
+        sample_dims = self._step2.selected_sample_dims()
+        tissue_dims = self._step2.selected_tissue_dims()
+        has_tissue = any(
+            has_rna_tissue(self._specimens[i])
+            for i in indices
+            if i < len(self._specimens)
+        )
+        self._step3.refresh(
+            sample_tmpl, tissue_tmpl, first_data,
+            sample_dims, tissue_dims, has_tissue=has_tissue,
+        )
+
+    def _refresh_step4(self) -> None:
+        indices = self._step1.selected_indices()
+        sample_tmpl = self._step2.selected_sample_template()
+        tissue_tmpl = self._step2.selected_tissue_template()
+        sample_dims = self._step2.selected_sample_dims()
+        tissue_dims = self._step2.selected_tissue_dims()
+        copies = self._step4.copies
+        edits = self._step2.label_edits()
+
+        sample_paper_type = self._step4.sample_paper_type()
+        tissue_paper_type = self._step4.tissue_paper_type()
+        sample_paper = PAPER_SIZES.get(sample_paper_type) if sample_paper_type in ("a4", "a5") else None
+        tissue_paper = PAPER_SIZES.get(tissue_paper_type) if tissue_paper_type in ("a4", "a5") else None
+
+        self._sample_job = LabelService.build_print_job(
+            self._specimens, sample_tmpl, "sample",
+            selected_indices=indices, dims=sample_dims, copies=copies,
+            paper_type=sample_paper_type, paper=sample_paper, edits=edits,
+        )
+        self._tissue_job = LabelService.build_print_job(
+            self._specimens, tissue_tmpl, "tissue",
+            selected_indices=indices, dims=tissue_dims, copies=copies,
+            paper_type=tissue_paper_type, paper=tissue_paper, edits=edits,
+        )
+
+        self._step4.update_dims(sample_dims, tissue_dims)
+
+        sample_n = len(self._sample_job["items"])
+        tissue_n = len(self._tissue_job["items"])
+
+        self._step4.update_counts(
+            sample_n,
+            tissue_n,
+            self._sample_job.get("warnings") or [],
+            self._tissue_job.get("warnings") or [],
+            copies=copies,
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Main view
 # ─────────────────────────────────────────────────────────────────────────────
 
 class LabelsView(BaseView):
-    """标签打印页面 — 4-step wizard.
+    """标签打印页面 — 4-step wizard with pluggable layouts.
 
-    Faithful Qt port of the web prototype's classic Step 1-4 flow.
+    Default layout: _LayoutWorkbench (faithful 4-step port).
+    Alternative layouts: _LayoutDualBucket (E), _LayoutStream (F), _LayoutCinema (D).
+    Layout is persisted via QSettings("PhotoPlatform", "Labels").
     """
 
     view_id = "labels"
     nav_title = "标签打印"
     nav_icon = "🏷️"
 
+    # Maps combo index → (name, layout class)
+    _LAYOUTS = [
+        ("工作台", "_LayoutWorkbench"),
+        ("影院",   "_LayoutCinema"),
+        ("双桶",   "_LayoutDualBucket"),
+        ("流式",   "_LayoutStream"),
+    ]
+
     def __init__(self, ctx: "AppContext") -> None:
-        self._specimens: list[dict] = []
-        self._sample_job: Optional[dict] = None
-        self._tissue_job: Optional[dict] = None
+        # Must initialize __specimens before super().__init__ calls _setup_ui
+        self._LabelsView__specimens: list[dict] = []  # backing store for _specimens property
+        self._active_layout: Optional[_LabelLayoutBase] = None
         super().__init__(ctx)
+
+    # ── Backward-compat properties ─────────────────────────────────────
+    # Tests and external callers that access view._step1 / view._specimens
+    # directly will still work as long as the active layout is _LayoutWorkbench.
+
+    @property
+    def _step1(self) -> Optional["_Step1Widget"]:
+        """Return _step1 from the active workbench layout, if applicable."""
+        if isinstance(self._active_layout, _LayoutWorkbench):
+            return self._active_layout._step1
+        return None
+
+    @property
+    def _step2(self) -> Optional["_Step2Widget"]:
+        """Return _step2 from the active workbench layout, if applicable."""
+        if isinstance(self._active_layout, _LayoutWorkbench):
+            return self._active_layout._step2
+        return None
+
+    @property
+    def _step3(self) -> Optional["_Step3Widget"]:
+        """Return _step3 from the active workbench layout, if applicable."""
+        if isinstance(self._active_layout, _LayoutWorkbench):
+            return self._active_layout._step3
+        return None
+
+    @property
+    def _step4(self) -> Optional["_Step4Widget"]:
+        """Return _step4 from the active workbench layout, if applicable."""
+        if isinstance(self._active_layout, _LayoutWorkbench):
+            return self._active_layout._step4
+        return None
+
+    @property
+    def _content_layout(self) -> Optional[QVBoxLayout]:
+        """Return _content_layout from the active workbench layout, if applicable."""
+        if isinstance(self._active_layout, _LayoutWorkbench):
+            return self._active_layout._content_layout
+        return None
+
+    @property
+    def _specimens(self) -> list[dict]:
+        return self.__specimens
+
+    @_specimens.setter
+    def _specimens(self, v: list[dict]) -> None:
+        self.__specimens = v
 
     def _setup_ui(self) -> None:
         self.setStyleSheet("background: #08161b; color: #eef3ef;" + _CSS_FULL)
+        # Import layout classes (lazy to avoid circular import during class definition)
+        from app.views.labels_layouts import (  # noqa: PLC0415
+            _LayoutDualBucket,
+            _LayoutStream,
+            _LayoutCinema,
+        )
+        self._layout_classes = {
+            "工作台": _LayoutWorkbench,
+            "影院":   _LayoutCinema,
+            "双桶":   _LayoutDualBucket,
+            "流式":   _LayoutStream,
+        }
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # ── Top step navigation bar ────────────────────────────────────
+        # ── Top nav bar: step anchors + layout switcher ───────────────
         nav_frame = QFrame()
         nav_frame.setStyleSheet(
             "QFrame { background: #091e24; border-bottom: 1px solid rgba(145,182,181,0.12); }"
@@ -1855,12 +2269,7 @@ class LabelsView(BaseView):
         nav_bar.setSpacing(6)
 
         self._step_btns: list[QPushButton] = []
-        step_labels = [
-            "1 选标本",
-            "2 选模版",
-            "3 编辑",
-            "4 打印",
-        ]
+        step_labels = ["标本", "模板", "预览", "打印"]
         for i, lbl in enumerate(step_labels):
             btn = QPushButton(lbl)
             btn.setObjectName("StepBtn")
@@ -1872,56 +2281,39 @@ class LabelsView(BaseView):
             self._step_btns.append(btn)
 
         nav_bar.addStretch()
+
+        # Layout selector QComboBox (right side of nav bar)
+        layout_lbl = QLabel("布局:")
+        layout_lbl.setStyleSheet("color: #87a2a1; font-size: 11px;")
+        nav_bar.addWidget(layout_lbl)
+        self._layout_combo = QComboBox()
+        self._layout_combo.setStyleSheet(
+            "QComboBox { background: #0f2127; border: 1px solid rgba(145,182,181,0.18);"
+            " border-radius: 4px; color: #cfe0db; padding: 2px 8px; font-size: 11px; }"
+            "QComboBox::drop-down { border: none; }"
+            "QComboBox QAbstractItemView { background: #10242a; color: #cfe0db;"
+            " border: 1px solid rgba(145,182,181,0.18); }"
+        )
+        for name, _ in self._LAYOUTS:
+            self._layout_combo.addItem(name)
+        self._layout_combo.setFixedHeight(26)
+        self._layout_combo.currentIndexChanged.connect(self._switch_layout)
+        nav_bar.addWidget(self._layout_combo)
         root.addWidget(nav_frame)
 
-        # ── Stacked pages ──────────────────────────────────────────────
-        # Each step is wrapped in a QScrollArea so a short window never
-        # squashes the content. The step widgets remain directly accessible
-        # via self._step1…4 for all tests and internal callers.
-        self._stack = QStackedWidget()
-        self._stack.setStyleSheet("background: #08161b;")
+        # ── Main layout container (swappable) ─────────────────────────
+        self._layout_container = QWidget()
+        self._layout_container.setStyleSheet("background: #08161b;")
+        lc_layout = QVBoxLayout(self._layout_container)
+        lc_layout.setContentsMargins(0, 0, 0, 0)
+        lc_layout.setSpacing(0)
+        root.addWidget(self._layout_container, stretch=1)
 
-        self._step1 = _Step1Widget()
-        self._step2 = _Step2Widget()
-        self._step3 = _Step3Widget()
-        self._step4 = _Step4Widget()
-
-        _scroll_style = (
-            "QScrollArea { background: #08161b; border: none; }"
-            "QScrollBar:vertical { background: #0c1e26; width: 8px; }"
-            "QScrollBar::handle:vertical { background: rgba(145,182,181,0.25); border-radius: 4px; }"
-            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
-        )
-        for step_widget in (self._step1, self._step2, self._step3, self._step4):
-            sa = QScrollArea()
-            sa.setWidgetResizable(True)
-            sa.setFrameShape(QFrame.Shape.NoFrame)
-            sa.setStyleSheet(_scroll_style)
-            sa.setWidget(step_widget)
-            self._stack.addWidget(sa)
-
-        root.addWidget(self._stack, stretch=1)
-
-        # ── Bottom prev/next bar ───────────────────────────────────────
-        bottom_frame = QFrame()
-        bottom_frame.setStyleSheet(
-            "QFrame { background: #091e24; border-top: 1px solid rgba(145,182,181,0.10); }"
-        )
-        bottom_bar = QHBoxLayout(bottom_frame)
-        bottom_bar.setContentsMargins(12, 6, 12, 6)
-        bottom_bar.setSpacing(8)
-
-        self._btn_prev = _outline_btn("← 上一步")
-        self._btn_next = _outline_btn("下一步 →")
-        self._btn_prev.setFixedWidth(90)
-        self._btn_next.setFixedWidth(90)
+        # Compat hidden prev/next buttons (used by some tests)
+        self._btn_prev = QPushButton()
+        self._btn_next = QPushButton()
         self._btn_prev.clicked.connect(self._prev_step)
         self._btn_next.clicked.connect(self._next_step)
-
-        bottom_bar.addWidget(self._btn_prev)
-        bottom_bar.addStretch()
-        bottom_bar.addWidget(self._btn_next)
-        root.addWidget(bottom_frame)
 
         # ── Status bar ────────────────────────────────────────────────
         status_frame = QFrame()
@@ -1952,18 +2344,74 @@ class LabelsView(BaseView):
         status_layout.addStretch()
         root.addWidget(status_frame)
 
-        # Wire print buttons
-        self._step4.sample_button.clicked.connect(lambda: self._print("sample"))
-        self._step4.tissue_button.clicked.connect(lambda: self._print("tissue"))
-
         self._current_step: int = 0
+
+        # Restore persisted layout and switch to it
+        from PyQt6.QtCore import QSettings  # noqa: PLC0415
+        settings = QSettings("PhotoPlatform", "Labels")
+        saved_layout = settings.value("layout", "工作台")
+        saved_idx = 0
+        for i, (name, _cls) in enumerate(self._LAYOUTS):
+            if name == saved_layout:
+                saved_idx = i
+                break
+        # Trigger initial layout build (suppresses combo signal during init)
+        self._layout_combo.blockSignals(True)
+        self._layout_combo.setCurrentIndex(saved_idx)
+        self._layout_combo.blockSignals(False)
+        self._switch_layout(saved_idx)
+
         self._go_to_step(0)
+
+    # ── Layout switching ───────────────────────────────────────────────
+
+    def _switch_layout(self, idx: int) -> None:
+        """Swap the active layout widget. Persists choice to QSettings."""
+        from PyQt6.QtCore import QSettings  # noqa: PLC0415
+
+        name = self._LAYOUTS[idx][0]
+        cls_name = self._LAYOUTS[idx][1]
+
+        # Persist
+        settings = QSettings("PhotoPlatform", "Labels")
+        settings.setValue("layout", name)
+
+        # Look up class
+        cls = self._layout_classes.get(name)
+        if cls is None:
+            # Fallback: workbench
+            cls = _LayoutWorkbench
+
+        # Remove old layout widget
+        container_layout = self._layout_container.layout()
+        if self._active_layout is not None:
+            container_layout.removeWidget(self._active_layout)
+            self._active_layout.hide()
+            self._active_layout.deleteLater()
+            self._active_layout = None
+
+        # Build new layout
+        new_layout = cls(parent=self._layout_container)
+        new_layout.print_sample.connect(lambda: self._print("sample"))
+        new_layout.print_tissue.connect(lambda: self._print("tissue"))
+        container_layout.addWidget(new_layout)
+        self._active_layout = new_layout
+
+        # Update step button visibility: only meaningful for workbench layout
+        for btn in self._step_btns:
+            btn.setVisible(isinstance(new_layout, _LayoutWorkbench))
+
+        # Feed current specimens to the new layout
+        if self.__specimens:
+            new_layout.load_specimens(self.__specimens)
 
     # ── on_activate ───────────────────────────────────────────────────
 
     def on_activate(self) -> None:
         """Called when user navigates to this page."""
         self._load_specimens()
+        if self._active_layout is not None:
+            self._active_layout.on_activate()
         pending_uid = getattr(self.ctx, "pending_label_uid", None)
         if isinstance(pending_uid, str) and pending_uid:
             self.select_uid(pending_uid)
@@ -1972,23 +2420,33 @@ class LabelsView(BaseView):
             except Exception:
                 pass
 
-    # ── Navigation ────────────────────────────────────────────────────
+    # ── Navigation (workbench step anchors) ───────────────────────────
 
     def _go_to_step(self, idx: int) -> None:
         self._current_step = idx
-        self._stack.setCurrentIndex(idx)
         for i, btn in enumerate(self._step_btns):
             btn.setChecked(i == idx)
         self._btn_prev.setEnabled(idx > 0)
         self._btn_next.setEnabled(idx < 3)
 
-        # Trigger step-specific refresh on entry
-        if idx == 1:
-            self._refresh_step2()
-        elif idx == 2:
-            self._refresh_step3()
-        elif idx == 3:
-            self._refresh_step4()
+        # Only scroll for workbench layout
+        if isinstance(self._active_layout, _LayoutWorkbench):
+            layout = self._active_layout
+            if idx == 1:
+                layout._refresh_step2()
+            elif idx == 2:
+                layout._refresh_step3()
+            elif idx == 3:
+                layout._refresh_step4()
+            # Scroll to relevant section
+            if idx == 0 and hasattr(layout, "_left_scroll"):
+                QTimer.singleShot(0, lambda: layout._left_scroll.verticalScrollBar().setValue(0))
+            elif hasattr(layout, "_scroll"):
+                steps = [layout._step2, layout._step3, layout._step4]
+                target_idx = idx - 1
+                if 0 <= target_idx < len(steps):
+                    QTimer.singleShot(0, lambda w=steps[target_idx]:
+                                      layout._scroll.ensureWidgetVisible(w, 0, 10))
 
     def _prev_step(self) -> None:
         if self._current_step > 0:
@@ -2001,7 +2459,7 @@ class LabelsView(BaseView):
     # ── Data loading ──────────────────────────────────────────────────
 
     def _load_specimens(self) -> None:
-        """Load specimens from DB via AppContext, populate Step 1."""
+        """Load specimens from DB via AppContext, then push to active layout."""
         specimens: list[dict] = []
         db = self.ctx.get_db()
         if db is not None:
@@ -2033,95 +2491,40 @@ class LabelsView(BaseView):
             except Exception:
                 pass
 
-        self._specimens = specimens
-        self._step1.set_specimens(specimens)
-        # Update status bar with fresh selection count
-        sel = len(self._step1.selected_indices())
-        self._update_status_bar(sel, 0, 0, 1)
+        self.__specimens = specimens
+        if self._active_layout is not None:
+            self._active_layout.load_specimens(specimens)
+        # Status bar: update selected count based on active layout
+        self._refresh_status_bar()
+
+    def _refresh_status_bar(self) -> None:
+        """Refresh status bar from active layout's current job state."""
+        if self._active_layout is None:
+            return
+        sample_job = self._active_layout.get_sample_job()
+        tissue_job = self._active_layout.get_tissue_job()
+        sample_n = len(sample_job["items"]) if sample_job else 0
+        tissue_n = len(tissue_job["items"]) if tissue_job else 0
+        copies = 1
+
+        # Try to get selected count from workbench layout
+        selected = 0
+        if isinstance(self._active_layout, _LayoutWorkbench):
+            selected = len(self._active_layout._step1.selected_indices())
+            copies = self._active_layout._step4.copies
+        else:
+            selected = len(self.__specimens)
+
+        self._update_status_bar(selected, sample_n, tissue_n, copies)
 
     def select_uid(self, uid: str) -> bool:
-        """Select one specimen by UID and refresh downstream label steps."""
-        ok = self._step1.select_only_uid(uid)
-        if not ok:
+        """Select one specimen by UID in the active layout."""
+        if self._active_layout is None:
             return False
-        sel = len(self._step1.selected_indices())
-        self._update_status_bar(sel, 0, 0, 1)
-        if self._current_step == 1:
-            self._refresh_step2()
-        elif self._current_step == 2:
-            self._refresh_step2()
-            self._refresh_step3()
-        elif self._current_step == 3:
-            self._refresh_step2()
-            self._refresh_step4()
-        return True
-
-    # ── Step 2 refresh ─────────────────────────────────────────────────
-
-    def _refresh_step2(self) -> None:
-        indices = self._step1.selected_indices()
-        self._step2.refresh(self._specimens, indices)
-
-    # ── Step 3 refresh ─────────────────────────────────────────────────
-
-    def _refresh_step3(self) -> None:
-        indices = self._step1.selected_indices()
-        first_data: dict = {}
-        if indices and self._specimens:
-            from app.utils.label_core import specimen_to_label_data as _s2ld
-            sp = self._specimens[indices[0]] if indices[0] < len(self._specimens) else {}
-            first_data = _s2ld(sp) if sp else {}
-
-        sample_tmpl = self._step2.selected_sample_template()
-        tissue_tmpl = self._step2.selected_tissue_template()
-        sample_dims = self._step2.selected_sample_dims()
-        tissue_dims = self._step2.selected_tissue_dims()
-
-        has_tissue = any(
-            has_rna_tissue(self._specimens[i])
-            for i in indices
-            if i < len(self._specimens)
-        )
-
-        self._step3.refresh(
-            sample_tmpl, tissue_tmpl, first_data,
-            sample_dims, tissue_dims, has_tissue=has_tissue,
-        )
-
-    # ── Step 4 refresh ─────────────────────────────────────────────────
-
-    def _refresh_step4(self) -> None:
-        indices = self._step1.selected_indices()
-        sample_tmpl = self._step2.selected_sample_template()
-        tissue_tmpl = self._step2.selected_tissue_template()
-        sample_dims = self._step2.selected_sample_dims()
-        tissue_dims = self._step2.selected_tissue_dims()
-        copies = self._step4.copies
-        # Pass per-specimen label edits to both jobs
-        edits = self._step2.label_edits()
-
-        self._sample_job = LabelService.build_print_job(
-            self._specimens, sample_tmpl, "sample",
-            selected_indices=indices, dims=sample_dims, copies=copies,
-            edits=edits,
-        )
-        self._tissue_job = LabelService.build_print_job(
-            self._specimens, tissue_tmpl, "tissue",
-            selected_indices=indices, dims=tissue_dims, copies=copies,
-            edits=edits,
-        )
-
-        sample_n = len(self._sample_job["items"])
-        tissue_n = len(self._tissue_job["items"])
-
-        self._step4.update_counts(
-            sample_n,
-            tissue_n,
-            self._sample_job.get("warnings") or [],
-            self._tissue_job.get("warnings") or [],
-            copies=copies,
-        )
-        self._update_status_bar(len(indices), sample_n, tissue_n, copies)
+        ok = self._active_layout.select_uid(uid)
+        if ok:
+            self._refresh_status_bar()
+        return ok
 
     # ── Status bar ────────────────────────────────────────────────────
 
@@ -2135,12 +2538,15 @@ class LabelsView(BaseView):
         self._status_tissue.setText(f"RNAlater {tissue_n}")
         self._status_total.setText(f"共 {total} 张")
 
-        # First non-empty warning from both jobs
-        all_warnings = []
-        if self._sample_job:
-            all_warnings += (self._sample_job.get("warnings") or [])
-        if self._tissue_job:
-            all_warnings += (self._tissue_job.get("warnings") or [])
+        # First non-empty warning from both active-layout jobs
+        all_warnings: list[dict] = []
+        if self._active_layout is not None:
+            sample_job = self._active_layout.get_sample_job()
+            tissue_job = self._active_layout.get_tissue_job()
+            if sample_job:
+                all_warnings += (sample_job.get("warnings") or [])
+            if tissue_job:
+                all_warnings += (tissue_job.get("warnings") or [])
         # Filter out "empty" code (not useful in status bar)
         all_warnings = [w for w in all_warnings if w.get("code") != "empty"]
         if all_warnings:
@@ -2152,7 +2558,12 @@ class LabelsView(BaseView):
 
     def _print(self, bucket: str) -> None:
         """Print the given bucket using QPrinter → QPrintDialog."""
-        job = self._sample_job if bucket == "sample" else self._tissue_job
+        if self._active_layout is None:
+            QMessageBox.warning(self, "打印", "布局未就绪。")
+            return
+
+        job = (self._active_layout.get_sample_job() if bucket == "sample"
+               else self._active_layout.get_tissue_job())
         if job is None:
             QMessageBox.warning(self, "打印", "请先完成前三步再打印。")
             return
@@ -2171,16 +2582,16 @@ class LabelsView(BaseView):
         w_mm = float(dims.get("w", 60))
         h_mm = float(dims.get("h", 40))
 
+        paper_type = job.get("paperType") or "label"
         printer = QPrinter(QPrinter.PrinterMode.HighResolution)
-        page_size = QPageSize(
-            QSizeF(w_mm, h_mm),
-            QPageSize.Unit.Millimeter,
-            "Custom",
-        )
-        printer.setPageSize(page_size)
-        printer.setPageMargins(
-            QMarginsF(2, 2, 2, 2), QPageSize.Unit.Millimeter
-        )
+        if paper_type in ("a4", "a5"):
+            std = QPageSize.PageSizeId.A4 if paper_type == "a4" else QPageSize.PageSizeId.A5
+            printer.setPageSize(QPageSize(std))
+            printer.setPageMargins(QMarginsF(0, 0, 0, 0), QPageSize.Unit.Millimeter)
+        else:
+            page_size = QPageSize(QSizeF(w_mm, h_mm), QPageSize.Unit.Millimeter, "Custom")
+            printer.setPageSize(page_size)
+            printer.setPageMargins(QMarginsF(2, 2, 2, 2), QPageSize.Unit.Millimeter)
         printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
 
         with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
@@ -2195,17 +2606,15 @@ class LabelsView(BaseView):
         self._paint_labels(printer, job)
 
     def _paint_labels(self, printer: QPrinter, job: dict) -> None:
-        """Paint all label items onto QPrinter pages (QPainter)."""
-        from app.utils.label_core import qr_metrics as _qr_metrics
-        from app.widgets.label_editor import _generate_qr_pixmap, _mm_to_px
+        """Paint all label items. A4/A5 → grid; label paper → 1 per page."""
+        from app.widgets.label_editor import _generate_qr_pixmap
 
         items = job.get("items") or []
         dims = job.get("dims") or {}
         tmpl = job.get("template") or {}
+        paper_type = job.get("paperType") or "label"
         w_mm = float(dims.get("w", 60))
         h_mm = float(dims.get("h", 40))
-        qr_cfg = tmpl.get("qr") or {}
-        ecc = qr_cfg.get("ecc") or "Q"
 
         painter = QPainter()
         if not painter.begin(printer):
@@ -2214,66 +2623,103 @@ class LabelsView(BaseView):
         dpi = printer.resolution()
         mm_to_dot = dpi / 25.4
 
-        for page_idx, item in enumerate(items):
-            if page_idx > 0:
-                printer.newPage()
-
-            data = item.get("data") if isinstance(item, dict) else item
-            if not data:
-                continue
-
-            w_dot = w_mm * mm_to_dot
-            h_dot = h_mm * mm_to_dot
-
-            painter.fillRect(0, 0, int(w_dot), int(h_dot), QColor("white"))
-
-            metrics = _qr_metrics(tmpl, dims)
-            if metrics is not None:
-                qr_content_key = qr_cfg.get("content") or "uniqueId"
-                qr_text = str(data.get(qr_content_key) or "")
-                size_dot = int(metrics["sizeMm"] * mm_to_dot)
-                pixmap = _generate_qr_pixmap(qr_text, size_dot, ecc)
-                if pixmap:
-                    x_dot = int(metrics["x"] * mm_to_dot)
-                    y_dot = int(metrics["y"] * mm_to_dot)
-                    painter.drawPixmap(x_dot, y_dot, pixmap)
-
-            from PyQt6.QtCore import QRectF as _QRectF
-            qr_w_dot = (
-                (metrics["sizeMm"] * mm_to_dot)
-                if (metrics and qr_cfg.get("position") == "right")
-                else 0.0
-            )
-            text_w_dot = max(1.0, w_dot - qr_w_dot - 2 * mm_to_dot)
-            y_cursor = 2 * mm_to_dot
-
-            for row in (tmpl.get("rows") or []):
-                fields = row.get("fields") or []
-                parts: list[str] = []
-                for f in fields:
-                    key = f.get("key") if isinstance(f, dict) else str(f)
-                    val = data.get(key)
-                    if val is not None:
-                        parts.append(str(val))
-                text = (row.get("sep") or " ").join(parts)
-                if row.get("prefix"):
-                    text = row["prefix"] + text
-                if not text:
+        if paper_type in ("a4", "a5"):
+            paper = PAPER_SIZES.get(paper_type, {"w": 210, "h": 297})
+            grid = calculate_grid(w_mm, h_mm, float(paper["w"]), float(paper["h"]))
+            margin_mm = grid.get("margin", 8.0)
+            gap_mm = grid.get("gap", 2.0)
+            cols = grid["cols"]
+            per_page = grid["perPage"]
+            page_no = 0
+            for slot_idx, item in enumerate(items):
+                data = item.get("data") if isinstance(item, dict) else item
+                if not data:
                     continue
-
-                size_pt = row.get("size") or 9
-                font = QFont()
-                font.setPointSizeF(float(size_pt) * dpi / 72.0)
-                style = row.get("style") or ""
-                font.setBold("bold" in style)
-                font.setItalic("italic" in style)
-                painter.setFont(font)
-
-                fm = painter.fontMetrics()
-                line_h = fm.height()
-                rect = _QRectF(2 * mm_to_dot, y_cursor, text_w_dot, line_h * 1.5)
-                painter.drawText(rect, Qt.TextFlag.TextWordWrap, text)
-                lh = float(row.get("lineHeight") or 1.3)
-                y_cursor += line_h * lh
+                page = slot_idx // per_page
+                if page > page_no:
+                    printer.newPage()
+                    page_no = page
+                slot = slot_idx % per_page
+                col = slot % cols
+                row = slot // cols
+                x_off = int((margin_mm + col * (w_mm + gap_mm)) * mm_to_dot)
+                y_off = int((margin_mm + row * (h_mm + gap_mm)) * mm_to_dot)
+                self._paint_one_label(painter, tmpl, dims, data, x_off, y_off, dpi, mm_to_dot)
+        else:
+            for page_idx, item in enumerate(items):
+                if page_idx > 0:
+                    printer.newPage()
+                data = item.get("data") if isinstance(item, dict) else item
+                if not data:
+                    continue
+                self._paint_one_label(painter, tmpl, dims, data, 0, 0, dpi, mm_to_dot)
 
         painter.end()
+
+    def _paint_one_label(
+        self,
+        painter: QPainter,
+        tmpl: dict,
+        dims: dict,
+        data: dict,
+        x_off: int,
+        y_off: int,
+        dpi: int,
+        mm_to_dot: float,
+    ) -> None:
+        """Paint one label at pixel offset (x_off, y_off)."""
+        from app.widgets.label_editor import _generate_qr_pixmap
+        w_mm = float(dims.get("w", 60))
+        h_mm = float(dims.get("h", 40))
+        w_dot = w_mm * mm_to_dot
+        h_dot = h_mm * mm_to_dot
+        painter.fillRect(x_off, y_off, int(w_dot), int(h_dot), QColor("white"))
+
+        qr_cfg = tmpl.get("qr") or {}
+        ecc = qr_cfg.get("ecc") or "Q"
+        metrics = qr_metrics(tmpl, dims)
+        if metrics is not None:
+            qr_text = str(data.get(qr_cfg.get("content") or "uniqueId") or "")
+            size_dot = int(metrics["sizeMm"] * mm_to_dot)
+            pm = _generate_qr_pixmap(qr_text, size_dot, ecc)
+            if pm:
+                painter.drawPixmap(
+                    x_off + int(metrics["x"] * mm_to_dot),
+                    y_off + int(metrics["y"] * mm_to_dot),
+                    pm,
+                )
+
+        qr_w_dot = (
+            metrics["sizeMm"] * mm_to_dot
+            if (metrics and qr_cfg.get("position") == "right")
+            else 0.0
+        )
+        text_w_dot = max(1.0, w_dot - qr_w_dot - 2 * mm_to_dot)
+        y_cursor = float(y_off) + 2 * mm_to_dot
+
+        for row in (tmpl.get("rows") or []):
+            parts: list[str] = []
+            for f in (row.get("fields") or []):
+                k = f.get("key") if isinstance(f, dict) else str(f)
+                v = data.get(k)
+                if v is not None:
+                    parts.append(str(v))
+            text = (row.get("sep") or " ").join(parts)
+            if row.get("prefix"):
+                text = row["prefix"] + text
+            if not text:
+                continue
+            font = QFont()
+            font.setPointSizeF(float(row.get("size") or 9) * dpi / 72.0)
+            st = row.get("style") or ""
+            font.setBold("bold" in st)
+            font.setItalic("italic" in st)
+            painter.setFont(font)
+            fm = painter.fontMetrics()
+            lh = fm.height()
+            painter.drawText(
+                QRectF(x_off + 2 * mm_to_dot, y_cursor, text_w_dot, lh * 1.5),
+                Qt.TextFlag.TextWordWrap,
+                text,
+            )
+            y_cursor += lh * float(row.get("lineHeight") or 1.3)

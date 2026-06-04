@@ -30,11 +30,15 @@ from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QDialog,
+    QDialogButtonBox,
     QFrame,
     QHBoxLayout,
     QInputDialog,
     QLabel,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QProgressDialog,
     QPushButton,
@@ -112,6 +116,152 @@ def _free_compose_output_name(incoming_dir: str, user_name: Optional[str]) -> st
         if not os.path.exists(os.path.join(incoming_dir, candidate)):
             return candidate
         n += 1
+
+
+class _ComposeWorkbenchDialog(QDialog):
+    """Post-compose preview workspace.
+
+    Mirrors the web compose page at a desktop scale: left source JPG checklist,
+    center TIFF preview/status, right Helicon params, footer save/cancel/recompose.
+    """
+
+    ACTION_SAVE = "save"
+    ACTION_CANCEL = "cancel"
+    ACTION_RECOMPOSE = "recompose"
+
+    def __init__(
+        self,
+        jpg_paths: list[str],
+        tiff_path: str,
+        params: dict,
+        *,
+        angle_label: str = "",
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self._jpg_paths = list(jpg_paths)
+        self._tiff_path = tiff_path
+        self._action = self.ACTION_CANCEL
+        self._checks: list[tuple[QCheckBox, str]] = []
+        self._params_panel = HeliconParamsPanel()
+        self._params_panel.set_params(params)
+        self.setWindowTitle("合成工作台")
+        self.setMinimumSize(920, 560)
+        self._build_ui(angle_label)
+
+    def _build_ui(self, angle_label: str) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 16, 16, 14)
+        root.setSpacing(12)
+
+        head = QHBoxLayout()
+        title = QLabel("合成工作台")
+        title.setStyleSheet("font-size: 17px; font-weight: 700; color: #eef3ef;")
+        head.addWidget(title)
+        if angle_label:
+            badge = QLabel(angle_label)
+            badge.setStyleSheet(
+                "color:#29b9ab; border:1px solid rgba(41,185,171,0.35);"
+                " border-radius:5px; padding:2px 8px; font-size:12px;"
+            )
+            head.addWidget(badge)
+        fname = QLabel(Path(self._tiff_path).name)
+        fname.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        fname.setStyleSheet("color:#87a2a1; font-size:12px;")
+        head.addWidget(fname, 1)
+        root.addLayout(head)
+
+        body = QSplitter(Qt.Orientation.Horizontal)
+        body.setChildrenCollapsible(False)
+        body.setHandleWidth(12)
+
+        sources = QFrame()
+        sources.setObjectName("Panel")
+        src_lay = QVBoxLayout(sources)
+        src_lay.setContentsMargins(12, 12, 12, 12)
+        src_lay.setSpacing(8)
+        src_lay.addWidget(QLabel("源图"))
+        src_list = QListWidget()
+        src_list.setAlternatingRowColors(True)
+        for path in self._jpg_paths:
+            item = QListWidgetItem(src_list)
+            cb = QCheckBox(Path(path).name)
+            cb.setChecked(True)
+            cb.setToolTip(path)
+            self._checks.append((cb, path))
+            src_list.setItemWidget(item, cb)
+            item.setSizeHint(cb.sizeHint())
+        src_lay.addWidget(src_list, 1)
+        body.addWidget(sources)
+
+        preview = QFrame()
+        preview.setObjectName("Panel")
+        pv_lay = QVBoxLayout(preview)
+        pv_lay.setContentsMargins(16, 16, 16, 16)
+        pv_lay.setSpacing(10)
+        pv_title = QLabel("TIFF 预览")
+        pv_title.setStyleSheet("font-size: 13px; font-weight: 700; color:#eef3ef;")
+        pv_lay.addWidget(pv_title)
+        status = QLabel()
+        if os.path.isfile(self._tiff_path):
+            size_mb = os.path.getsize(self._tiff_path) / (1024 * 1024)
+            status.setText(f"已生成 TIFF\n{self._tiff_path}\n\n大小：{size_mb:.1f} MB")
+        else:
+            status.setText(f"未找到 TIFF\n{self._tiff_path}")
+        status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        status.setWordWrap(True)
+        status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        status.setStyleSheet(
+            "color:#87a2a1; background:#061c1e; border:1px dashed rgba(145,182,181,0.22);"
+            " border-radius:8px; padding:28px; font-size:12px;"
+        )
+        pv_lay.addWidget(status, 1)
+        hint = QLabel("调整右侧参数后可重合成预览；保存后写入当前分组结果。")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#5f7d7a; font-size:11px;")
+        pv_lay.addWidget(hint)
+        body.addWidget(preview)
+
+        body.addWidget(self._params_panel)
+        body.setSizes([240, 460, 220])
+        root.addWidget(body, 1)
+
+        foot = QHBoxLayout()
+        foot.addStretch()
+        cancel = QPushButton("取消（退回 TIFF）")
+        cancel.setObjectName("Outline")
+        cancel.clicked.connect(self._cancel)
+        foot.addWidget(cancel)
+        recompose = QPushButton("重合成预览")
+        recompose.setObjectName("Outline")
+        recompose.clicked.connect(self._recompose)
+        foot.addWidget(recompose)
+        save = QPushButton("保存到结果")
+        save.setObjectName("Primary")
+        save.clicked.connect(self._save)
+        foot.addWidget(save)
+        root.addLayout(foot)
+
+    def selected_jpgs(self) -> list[str]:
+        return [path for cb, path in self._checks if cb.isChecked()]
+
+    def params(self) -> dict:
+        return self._params_panel.get_params()
+
+    def action(self) -> str:
+        return self._action
+
+    def _save(self) -> None:
+        self._action = self.ACTION_SAVE
+        self.accept()
+
+    def _cancel(self) -> None:
+        self._action = self.ACTION_CANCEL
+        self.reject()
+
+    def _recompose(self) -> None:
+        self._action = self.ACTION_RECOMPOSE
+        self.accept()
 
 
 class WorkbenchView(BaseView):
@@ -919,35 +1069,44 @@ class WorkbenchView(BaseView):
             output_name = preview.suggested_tiff_name
             output_path = os.path.join(results_dir, output_name)
 
-            # Progress dialog (NOTE: real subprocess is blocking; QProcess would
-            # allow non-blocking — use subprocess for now as stack_single_subprocess
-            # is the existing service API)
-            progress = QProgressDialog(
-                f"正在合成 {len(group.jpg_paths)} 张 JPG…",
-                None,  # no cancel button (blocking call)
-                0, 0,  # indeterminate
-                self,
-            )
-            progress.setWindowModality(Qt.WindowModality.WindowModal)
-            progress.setWindowTitle("Helicon 合成")
-            progress.show()
-            from PyQt6.QtWidgets import QApplication
-            QApplication.processEvents()
-
-            try:
-                p = self._helicon_params.get_params()
-                result = stack_single_subprocess(
-                    jpg_paths=group.jpg_paths,
-                    output_file=output_path,
-                    method=str(p["method"]),
-                    radius=str(p["radius"]),
-                    smoothing=str(p["smoothing"]),
+            params = self._helicon_params.get_params()
+            while True:
+                result = self._run_helicon_stack(
+                    stack_single_subprocess,
+                    group.jpg_paths,
+                    output_path,
+                    params,
                 )
-            finally:
-                progress.close()
+                if not result.get("ok") or not os.path.isfile(output_path):
+                    QMessageBox.warning(self, "合成失败", "Helicon 执行后未生成输出文件。")
+                    return
 
-            if result.get("ok") and os.path.isfile(output_path):
-                # Update grouping in DB
+                dlg = _ComposeWorkbenchDialog(
+                    group.jpg_paths,
+                    output_path,
+                    params,
+                    angle_label=group.angle_label,
+                    parent=self,
+                )
+                dlg.exec()
+                action = dlg.action()
+                params = dlg.params()
+                self._helicon_params.set_params(params)
+
+                if action == _ComposeWorkbenchDialog.ACTION_RECOMPOSE:
+                    selected = dlg.selected_jpgs()
+                    if len(selected) < 2:
+                        QMessageBox.warning(self, "合成", "选中的 JPG 不足 2 张，无法重合成。")
+                        continue
+                    self._retire_tiff(output_path)
+                    group.jpg_paths = selected
+                    continue
+
+                if action == _ComposeWorkbenchDialog.ACTION_CANCEL:
+                    self._retire_tiff(output_path)
+                    return
+
+                # Save to result: persist grouping only after preview approval.
                 from datetime import datetime, timezone
                 now = datetime.now(tz=timezone.utc).isoformat()
                 group.composed_tiff_path = output_path
@@ -956,28 +1115,51 @@ class WorkbenchView(BaseView):
                 group.result_sequence = preview.next_seq
                 save_grouping(db, uid, grouping.groups)
 
-                # Bump next_result_sequence_hint so next compose gets seq+1
                 try:
                     from app.services.organize_service import _bump_seq_hint
                     _bump_seq_hint(db, uid, preview.next_seq)
                 except Exception:
                     pass
 
-                # Reload grouping panel
                 self._grouping.load_grouping(uid, grouping)
                 self._refresh_results_column(uid, grouping)
-                QMessageBox.information(
-                    self,
-                    "合成完成",
-                    f"TIFF 已生成：{output_name}",
-                )
-            else:
-                QMessageBox.warning(self, "合成失败", "Helicon 执行后未生成输出文件。")
+                QMessageBox.information(self, "合成完成", f"TIFF 已生成：{output_name}")
+                return
 
         except RuntimeError as exc:
             QMessageBox.warning(self, "合成失败", str(exc))
         except Exception as exc:
             QMessageBox.warning(self, "合成失败", f"意外错误：{exc}")
+
+    def _run_helicon_stack(
+        self,
+        stack_fn,
+        jpg_paths: list[str],
+        output_path: str,
+        params: dict,
+    ) -> dict:
+        """Run Helicon with a blocking progress dialog."""
+        progress = QProgressDialog(
+            f"正在合成 {len(jpg_paths)} 张 JPG…",
+            None,
+            0,
+            0,
+            self,
+        )
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setWindowTitle("Helicon 合成")
+        progress.show()
+        QApplication.processEvents()
+        try:
+            return stack_fn(
+                jpg_paths=jpg_paths,
+                output_file=output_path,
+                method=str(params["method"]),
+                radius=str(params["radius"]),
+                smoothing=str(params["smoothing"]),
+            )
+        finally:
+            progress.close()
 
     def _on_organise_requested(self, uid: str, group_index: int) -> None:
         """Organise (archive) the composed group.

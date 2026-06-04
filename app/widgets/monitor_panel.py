@@ -30,7 +30,7 @@ Badge palette (mirrors web styles.css):
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
@@ -39,6 +39,7 @@ from PyQt6.QtWidgets import (
     QFrame,
     QGridLayout,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QMenu,
     QMessageBox,
@@ -50,6 +51,7 @@ from PyQt6.QtWidgets import (
 )
 
 from app.config import icons
+from app.services import grouping_service, activation_service
 
 if TYPE_CHECKING:
     from app.app_context import AppContext
@@ -98,12 +100,18 @@ class _FileCard(QFrame):
     selection_toggled = pyqtSignal(str, bool) # path, selected
 
     def __init__(self, entry, active_uid: Optional[str] = None,
-                 parent: Optional[QWidget] = None) -> None:
+                 parent: Optional[QWidget] = None,
+                 on_add_to_group: Optional[Callable[[str], None]] = None,
+                 on_assign_uid: Optional[Callable[[str], None]] = None,
+                 on_unassign: Optional[Callable[[str], None]] = None) -> None:
         super().__init__(parent)
         self.setObjectName("Card")
         self._entry = entry
         self._active_uid = active_uid
         self._selected = False
+        self._on_add_to_group = on_add_to_group
+        self._on_assign_uid = on_assign_uid
+        self._on_unassign = on_unassign
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -232,8 +240,34 @@ class _FileCard(QFrame):
     def _on_jpg_context_menu(self, pos) -> None:
         jpg_path = getattr(self._entry, "path", "")
         menu = QMenu(self)
+
         action = menu.addAction("复制路径")
         action.triggered.connect(lambda: QApplication.clipboard().setText(jpg_path))
+
+        menu.addSeparator()
+
+        add_action = menu.addAction("加入当前分组")
+        if self._on_add_to_group is not None:
+            add_action.triggered.connect(lambda: self._on_add_to_group(jpg_path))
+        else:
+            add_action.setEnabled(False)
+
+        assign_action = menu.addAction("指定归属标本")
+        if self._on_assign_uid is not None:
+            def _do_assign_uid():
+                uid, ok = QInputDialog.getText(self, "指定标本", "输入标本编号：")
+                if ok and uid.strip():
+                    self._on_assign_uid(jpg_path, uid.strip())
+            assign_action.triggered.connect(_do_assign_uid)
+        else:
+            assign_action.setEnabled(False)
+
+        unassign_action = menu.addAction("取消归属")
+        if self._on_unassign is not None:
+            unassign_action.triggered.connect(lambda: self._on_unassign(jpg_path))
+        else:
+            unassign_action.setEnabled(False)
+
         menu.exec(self.mapToGlobal(pos))
 
 
@@ -532,7 +566,12 @@ class MonitorPanel(QWidget):
             jpg_c, tiff_c = len(jpgs), len(tiffs)
             cols = 2
             for idx, entry in enumerate(all_files):
-                card = _FileCard(entry, self._active_uid, self)
+                card = _FileCard(
+                    entry, self._active_uid, self,
+                    on_add_to_group=self._on_ctx_add_to_group,
+                    on_assign_uid=self._on_ctx_assign_uid,
+                    on_unassign=self._on_ctx_unassign,
+                )
                 card.assign_requested.connect(self.assign_requested)
                 card.deactivate_requested.connect(self.unassign_requested)
                 card.selection_toggled.connect(self._on_card_selection_toggled)
@@ -674,6 +713,55 @@ class MonitorPanel(QWidget):
         if deleted:
             self._on_select_none()
             self.refresh_requested.emit()
+
+    # ── Context menu handlers ─────────────────────────────────────────────────
+
+    def _on_ctx_add_to_group(self, jpg_path: str) -> None:
+        db = self.ctx.get_db()
+        if db is None:
+            return
+        active_uid = activation_service.get_active_uid(db)
+        if not active_uid:
+            QMessageBox.warning(self, "无激活标本", "请先激活一个标本")
+            return
+        self._add_jpg_to_grouping(db, active_uid, jpg_path)
+
+    def _on_ctx_assign_uid(self, jpg_path: str, uid: str) -> None:
+        db = self.ctx.get_db()
+        if db is None:
+            return
+        self._add_jpg_to_grouping(db, uid, jpg_path)
+
+    def _add_jpg_to_grouping(self, db, uid: str, jpg_path: str) -> None:
+        """Add jpg_path to first group of uid's grouping, creating one if needed."""
+        sg = grouping_service.load_grouping(db, uid)
+        if sg.groups:
+            if jpg_path not in sg.groups[0].jpg_paths:
+                sg.groups[0].jpg_paths.append(jpg_path)
+        else:
+            new_group = grouping_service.Group(group_index=0, jpg_paths=[jpg_path])
+            sg.groups = [new_group]
+        grouping_service.save_grouping(db, uid, sg.groups, clean_phantoms=False)
+
+    def _on_ctx_unassign(self, jpg_path: str) -> None:
+        db = self.ctx.get_db()
+        if db is None:
+            return
+        grouping_service._ensure_grouping_table(db)
+        rows = db.execute(
+            "SELECT uid FROM grouping WHERE jpg_paths LIKE ?",
+            (f'%{jpg_path}%',),
+        ).fetchall()
+        uids = {row[0] for row in rows}
+        for uid in uids:
+            sg = grouping_service.load_grouping(db, uid)
+            changed = False
+            for g in sg.groups:
+                if jpg_path in g.jpg_paths:
+                    g.jpg_paths = [p for p in g.jpg_paths if p != jpg_path]
+                    changed = True
+            if changed:
+                grouping_service.save_grouping(db, uid, sg.groups, clean_phantoms=False)
 
     # ── Slots ─────────────────────────────────────────────────────────────────
 

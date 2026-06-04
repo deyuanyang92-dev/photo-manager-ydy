@@ -53,6 +53,7 @@ from PyQt6.QtWidgets import (
     QGraphicsPixmapItem,
     QMenu,
     QScrollArea,
+    QSlider,
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
@@ -766,6 +767,107 @@ class LabelEditorWidget(QWidget):
         self._row_editor.rows_changed.connect(self._on_rows_changed)
         layout.addWidget(self._row_editor)
 
+        # ── QR controls panel (mirrors web QR box in renderTemplateEditor) ──
+        qr_frame = QFrame()
+        qr_frame.setStyleSheet(
+            "QFrame { background: #0c2027; border: 1px solid rgba(145,182,181,0.12);"
+            " border-radius: 4px; padding: 4px; }"
+        )
+        qr_layout = QVBoxLayout(qr_frame)
+        qr_layout.setContentsMargins(6, 4, 6, 4)
+        qr_layout.setSpacing(4)
+
+        qr_title = QLabel("QR 二维码位置")
+        qr_title.setStyleSheet("color: #cfe0db; font-size: 10px; font-weight: bold;")
+        qr_layout.addWidget(qr_title)
+
+        qr_pos_row = QHBoxLayout()
+        qr_pos_row.setSpacing(3)
+        self._qr_pos_btns: dict[str, QPushButton] = {}
+        for pos, name in [("left","左"), ("right","右"), ("top","上"), ("bottom","下"), ("none","无")]:
+            btn = QPushButton(name)
+            btn.setFixedSize(28, 20)
+            btn.setCheckable(True)
+            btn.setStyleSheet(
+                "QPushButton { background:#0f2127; border:1px solid rgba(145,182,181,0.18);"
+                " border-radius:3px; color:#87a2a1; font-size:10px; }"
+                "QPushButton:checked { background:rgba(41,185,171,0.20);"
+                " border-color:#29b9ab; color:#29b9ab; }"
+            )
+            btn.clicked.connect(lambda checked, _p=pos: self._set_qr_position(_p))
+            qr_pos_row.addWidget(btn)
+            self._qr_pos_btns[pos] = btn
+        qr_pos_row.addStretch()
+        qr_layout.addLayout(qr_pos_row)
+
+        qr_size_row = QHBoxLayout()
+        qr_size_row.setSpacing(6)
+        qr_size_row.addWidget(QLabel("大小"))
+        self._qr_size_slider = QSlider(Qt.Orientation.Horizontal)
+        self._qr_size_slider.setRange(20, 70)
+        self._qr_size_slider.setSingleStep(1)
+        self._qr_size_slider.setFixedHeight(16)
+        self._qr_size_slider.setStyleSheet(
+            "QSlider::groove:horizontal { height:4px; background:#1a3540; border-radius:2px; }"
+            "QSlider::handle:horizontal { background:#29b9ab; width:10px; height:10px;"
+            " border-radius:5px; margin:-3px 0; }"
+        )
+        self._qr_size_lbl = QLabel("40%")
+        self._qr_size_lbl.setFixedWidth(32)
+        self._qr_size_lbl.setStyleSheet("color:#87a2a1; font-size:10px;")
+        self._qr_size_slider.valueChanged.connect(self._on_qr_size_changed)
+        qr_size_row.addWidget(self._qr_size_slider)
+        qr_size_row.addWidget(self._qr_size_lbl)
+        qr_layout.addLayout(qr_size_row)
+        layout.addWidget(qr_frame)
+
+        # ── Global line-height panel (mirrors web 全局排版 section) ──────
+        lh_frame = QFrame()
+        lh_frame.setStyleSheet(qr_frame.styleSheet())
+        lh_layout = QVBoxLayout(lh_frame)
+        lh_layout.setContentsMargins(6, 4, 6, 4)
+        lh_layout.setSpacing(4)
+
+        lh_title = QLabel("全局行高")
+        lh_title.setStyleSheet("color: #cfe0db; font-size: 10px; font-weight: bold;")
+        lh_layout.addWidget(lh_title)
+
+        lh_preset_row = QHBoxLayout()
+        lh_preset_row.setSpacing(4)
+        for preset_name, preset_val in [("紧凑 1.1", 1.1), ("正常 1.3", 1.3), ("宽松 1.6", 1.6)]:
+            pbtn = QPushButton(preset_name)
+            pbtn.setFixedHeight(20)
+            pbtn.setStyleSheet(
+                "QPushButton { background:#0f2127; border:1px solid rgba(145,182,181,0.18);"
+                " border-radius:3px; color:#87a2a1; font-size:9px; padding:0 4px; }"
+                "QPushButton:hover { color:#29b9ab; border-color:#29b9ab; }"
+            )
+            pbtn.clicked.connect(lambda checked, v=preset_val: self._set_line_height(v))
+            lh_preset_row.addWidget(pbtn)
+        lh_preset_row.addStretch()
+        lh_layout.addLayout(lh_preset_row)
+
+        lh_slider_row = QHBoxLayout()
+        lh_slider_row.setSpacing(6)
+        lh_slider_row.addWidget(QLabel("行高"))
+        self._lh_slider = QSlider(Qt.Orientation.Horizontal)
+        self._lh_slider.setRange(80, 200)
+        self._lh_slider.setSingleStep(5)
+        self._lh_slider.setFixedHeight(16)
+        self._lh_slider.setStyleSheet(self._qr_size_slider.styleSheet())
+        self._lh_lbl = QLabel("1.30")
+        self._lh_lbl.setFixedWidth(32)
+        self._lh_lbl.setStyleSheet("color:#87a2a1; font-size:10px;")
+        self._lh_slider.valueChanged.connect(self._on_lh_changed)
+        lh_slider_row.addWidget(self._lh_slider)
+        lh_slider_row.addWidget(self._lh_lbl)
+        lh_layout.addLayout(lh_slider_row)
+        layout.addWidget(lh_frame)
+
+        # Sync controls to initial template state
+        self._sync_qr_controls()
+        self._sync_lh_controls()
+
     # ── Row editor callbacks ───────────────────────────────────────────────
 
     def _on_rows_changed(self) -> None:
@@ -837,6 +939,73 @@ class LabelEditorWidget(QWidget):
         self._view.fitInView(self._scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
         self.template_changed.emit(copy.deepcopy(self._template))
 
+    # ── QR position / size controls ────────────────────────────────────────
+
+    def _set_qr_position(self, pos: str) -> None:
+        tmpl = copy.deepcopy(self._template)
+        qr = tmpl.setdefault("qr", {})
+        qr["position"] = pos
+        self._template = tmpl
+        self._sync_qr_controls()
+        self._scene.rebuild(self._template, self._dims, self._label_data)
+        self._view.fitInView(self._scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+        self.template_changed.emit(copy.deepcopy(self._template))
+
+    def _on_qr_size_changed(self, value: int) -> None:
+        pct = value / 100.0
+        self._qr_size_lbl.setText(f"{value}%")
+        tmpl = copy.deepcopy(self._template)
+        qr = tmpl.setdefault("qr", {})
+        qr["sizePct"] = pct
+        self._template = tmpl
+        self._scene.rebuild(self._template, self._dims, self._label_data)
+        self._view.fitInView(self._scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+        self.template_changed.emit(copy.deepcopy(self._template))
+
+    def _sync_qr_controls(self) -> None:
+        qr = self._template.get("qr") or {}
+        cur_pos = qr.get("position") or "right"
+        for p, btn in self._qr_pos_btns.items():
+            btn.setChecked(p == cur_pos)
+        pct = int((qr.get("sizePct") or 0.4) * 100)
+        self._qr_size_slider.blockSignals(True)
+        self._qr_size_slider.setValue(max(20, min(70, pct)))
+        self._qr_size_slider.blockSignals(False)
+        self._qr_size_lbl.setText(f"{pct}%")
+
+    # ── Line-height controls ────────────────────────────────────────────────
+
+    def _set_line_height(self, value: float) -> None:
+        tmpl = copy.deepcopy(self._template)
+        tmpl["lineHeight"] = value
+        for row in (tmpl.get("rows") or []):
+            row.pop("lineHeight", None)
+        self._template = tmpl
+        self._sync_lh_controls()
+        self._scene.rebuild(self._template, self._dims, self._label_data)
+        self._view.fitInView(self._scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+        self.template_changed.emit(copy.deepcopy(self._template))
+
+    def _on_lh_changed(self, value: int) -> None:
+        lh = value / 100.0
+        self._lh_lbl.setText(f"{lh:.2f}")
+        tmpl = copy.deepcopy(self._template)
+        tmpl["lineHeight"] = lh
+        for row in (tmpl.get("rows") or []):
+            row.pop("lineHeight", None)
+        self._template = tmpl
+        self._scene.rebuild(self._template, self._dims, self._label_data)
+        self._view.fitInView(self._scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+        self.template_changed.emit(copy.deepcopy(self._template))
+
+    def _sync_lh_controls(self) -> None:
+        lh = float(self._template.get("lineHeight") or 1.3)
+        v = int(lh * 100)
+        self._lh_slider.blockSignals(True)
+        self._lh_slider.setValue(max(80, min(200, v)))
+        self._lh_slider.blockSignals(False)
+        self._lh_lbl.setText(f"{lh:.2f}")
+
     # ── Public API ─────────────────────────────────────────────────────────
 
     def update_label(
@@ -855,6 +1024,8 @@ class LabelEditorWidget(QWidget):
             self._label_data = label_data
         self._scene.rebuild(self._template, self._dims, self._label_data)
         self._row_editor.set_rows(list(self._template.get("rows") or []))
+        self._sync_qr_controls()
+        self._sync_lh_controls()
         self._view.fitInView(self._scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
 
     @property
