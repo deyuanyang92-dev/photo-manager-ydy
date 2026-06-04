@@ -242,6 +242,36 @@ def reset_helicon_cache() -> None:
 # cannot be exercised in headless CI.  It is marked accordingly.
 # build_helicon_args and detect_helicon are fully unit-testable.
 
+def build_helicon_cmd(
+    jpg_paths: list[str],
+    output_file: str,
+    method: Optional[str] = None,
+    radius: Optional[str] = None,
+    smoothing: Optional[str] = None,
+    quality: Optional[int] = None,
+    input_list_path: Optional[str] = None,
+    tiff_compression: Optional[str] = None,
+) -> list[str]:
+    """Return the full command list [exe, arg, ...] for HeliconWorker.
+
+    Raises RuntimeError if Helicon is not detected.
+    """
+    exe = detect_helicon()
+    if not exe:
+        raise RuntimeError("Helicon Focus 未安装或未检测到")
+    args = build_helicon_args(
+        jpg_paths=jpg_paths,
+        output=output_file,
+        method=method,
+        radius=radius,
+        smoothing=smoothing,
+        quality=quality,
+        input_list_path=input_list_path,
+        tiff_compression=tiff_compression,
+    )
+    return [exe] + args
+
+
 def stack_single_subprocess(
     jpg_paths: list[str],
     output_file: str,

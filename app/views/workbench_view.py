@@ -29,7 +29,6 @@ from typing import Optional
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
-    QApplication,
     QCheckBox,
     QDialog,
     QDialogButtonBox,
@@ -49,6 +48,8 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from app.workers.helicon_worker import HeliconWorker
 
 from app.views.base_view import BaseView
 from app.widgets.grouping_panel import GroupingPanel
@@ -923,31 +924,20 @@ class WorkbenchView(BaseView):
         output_path = os.path.join(incoming_dir, output_name)
 
         params = self._helicon_params.get_params()
-        progress = QProgressDialog(
-            f"无号合成 {len(jpg_paths)} 张 JPG…", None, 0, 0, self
-        )
-        progress.setWindowModality(Qt.WindowModality.WindowModal)
-        progress.setWindowTitle("Helicon 无号合成")
-        progress.show()
-        QApplication.processEvents()
-        try:
-            from app.services.helicon_service import stack_single_subprocess
-            result = stack_single_subprocess(
-                jpg_paths=jpg_paths,
-                output_file=output_path,
-                method=str(params["method"]),
-                radius=str(params["radius"]),
-                smoothing=str(params["smoothing"]),
-            )
-        finally:
-            progress.close()
 
-        if result.get("ok") and os.path.isfile(output_path):
-            QMessageBox.information(self, "无号合成完成",
-                                    f"TIFF 已保存到 incoming-jpg/：\n{output_name}")
-            self._refresh_monitor()
-        else:
-            QMessageBox.warning(self, "无号合成失败", "Helicon 执行后未生成输出文件。")
+        def _on_finished(tiff_path):
+            if os.path.isfile(output_path):
+                QMessageBox.information(self, "无号合成完成",
+                                        f"TIFF 已保存到 incoming-jpg/：\n{output_name}")
+                self._refresh_monitor()
+            else:
+                QMessageBox.warning(self, "无号合成失败", "Helicon 执行后未生成输出文件。")
+
+        def _on_failed(msg: str):
+            if msg != "用户取消":
+                QMessageBox.warning(self, "无号合成失败", msg)
+
+        self._run_helicon_stack(jpg_paths, output_path, params, _on_finished, _on_failed)
 
     def _on_retroactive_scan(self) -> None:
         """Launch retroactive organize modal.
@@ -1002,7 +992,7 @@ class WorkbenchView(BaseView):
 
         try:
             from app.services.grouping_service import load_grouping, save_grouping
-            from app.services.helicon_service import detect_helicon, stack_single_subprocess
+            from app.services.helicon_service import detect_helicon
             from app.services.organize_service import organize_preview, build_result_basename
 
             grouping = load_grouping(db, uid)
@@ -1070,61 +1060,64 @@ class WorkbenchView(BaseView):
             output_path = os.path.join(results_dir, output_name)
 
             params = self._helicon_params.get_params()
-            while True:
-                result = self._run_helicon_stack(
-                    stack_single_subprocess,
-                    group.jpg_paths,
-                    output_path,
-                    params,
-                )
-                if not result.get("ok") or not os.path.isfile(output_path):
-                    QMessageBox.warning(self, "合成失败", "Helicon 执行后未生成输出文件。")
-                    return
 
-                dlg = _ComposeWorkbenchDialog(
-                    group.jpg_paths,
-                    output_path,
-                    params,
-                    angle_label=group.angle_label,
-                    parent=self,
-                )
-                dlg.exec()
-                action = dlg.action()
-                params = dlg.params()
-                self._helicon_params.set_params(params)
+            def _do_compose(jpg_paths, out_path, cur_params):
+                def _on_finished(tiff_path):
+                    if not os.path.isfile(out_path):
+                        QMessageBox.warning(self, "合成失败", "Helicon 执行后未生成输出文件。")
+                        return
+                    dlg = _ComposeWorkbenchDialog(
+                        jpg_paths,
+                        out_path,
+                        cur_params,
+                        angle_label=group.angle_label,
+                        parent=self,
+                    )
+                    dlg.exec()
+                    action = dlg.action()
+                    new_params = dlg.params()
+                    self._helicon_params.set_params(new_params)
 
-                if action == _ComposeWorkbenchDialog.ACTION_RECOMPOSE:
-                    selected = dlg.selected_jpgs()
-                    if len(selected) < 2:
-                        QMessageBox.warning(self, "合成", "选中的 JPG 不足 2 张，无法重合成。")
-                        continue
-                    self._retire_tiff(output_path)
-                    group.jpg_paths = selected
-                    continue
+                    if action == _ComposeWorkbenchDialog.ACTION_RECOMPOSE:
+                        selected = dlg.selected_jpgs()
+                        if len(selected) < 2:
+                            QMessageBox.warning(self, "合成", "选中的 JPG 不足 2 张，无法重合成。")
+                            return
+                        self._retire_tiff(out_path)
+                        group.jpg_paths = selected
+                        _do_compose(selected, out_path, new_params)
+                        return
 
-                if action == _ComposeWorkbenchDialog.ACTION_CANCEL:
-                    self._retire_tiff(output_path)
-                    return
+                    if action == _ComposeWorkbenchDialog.ACTION_CANCEL:
+                        self._retire_tiff(out_path)
+                        return
 
-                # Save to result: persist grouping only after preview approval.
-                from datetime import datetime, timezone
-                now = datetime.now(tz=timezone.utc).isoformat()
-                group.composed_tiff_path = output_path
-                group.status = "composed"
-                group.updated_at = now
-                group.result_sequence = preview.next_seq
-                save_grouping(db, uid, grouping.groups)
+                    # Save to result: persist grouping only after preview approval.
+                    from datetime import datetime, timezone
+                    now = datetime.now(tz=timezone.utc).isoformat()
+                    group.composed_tiff_path = out_path
+                    group.status = "composed"
+                    group.updated_at = now
+                    group.result_sequence = preview.next_seq
+                    save_grouping(db, uid, grouping.groups)
 
-                try:
-                    from app.services.organize_service import _bump_seq_hint
-                    _bump_seq_hint(db, uid, preview.next_seq)
-                except Exception:
-                    pass
+                    try:
+                        from app.services.organize_service import _bump_seq_hint
+                        _bump_seq_hint(db, uid, preview.next_seq)
+                    except Exception:
+                        pass
 
-                self._grouping.load_grouping(uid, grouping)
-                self._refresh_results_column(uid, grouping)
-                QMessageBox.information(self, "合成完成", f"TIFF 已生成：{output_name}")
-                return
+                    self._grouping.load_grouping(uid, grouping)
+                    self._refresh_results_column(uid, grouping)
+                    QMessageBox.information(self, "合成完成", f"TIFF 已生成：{output_name}")
+
+                def _on_failed(msg: str):
+                    if msg != "用户取消":
+                        QMessageBox.warning(self, "合成失败", msg)
+
+                self._run_helicon_stack(jpg_paths, out_path, cur_params, _on_finished, _on_failed)
+
+            _do_compose(group.jpg_paths, output_path, params)
 
         except RuntimeError as exc:
             QMessageBox.warning(self, "合成失败", str(exc))
@@ -1133,33 +1126,63 @@ class WorkbenchView(BaseView):
 
     def _run_helicon_stack(
         self,
-        stack_fn,
         jpg_paths: list[str],
         output_path: str,
         params: dict,
-    ) -> dict:
-        """Run Helicon with a blocking progress dialog."""
-        progress = QProgressDialog(
-            f"正在合成 {len(jpg_paths)} 张 JPG…",
-            None,
-            0,
-            0,
-            self,
-        )
-        progress.setWindowModality(Qt.WindowModality.WindowModal)
-        progress.setWindowTitle("Helicon 合成")
-        progress.show()
-        QApplication.processEvents()
+        on_finished,
+        on_failed,
+    ) -> None:
+        """Launch HeliconWorker (non-blocking) with a cancellable progress dialog.
+
+        *on_finished(tiff_path: Path)* is called on success.
+        *on_failed(msg: str)* is called on error or cancel.
+        """
+        from app.services.helicon_service import build_helicon_cmd
+
         try:
-            return stack_fn(
+            cmd = build_helicon_cmd(
                 jpg_paths=jpg_paths,
                 output_file=output_path,
                 method=str(params["method"]),
                 radius=str(params["radius"]),
                 smoothing=str(params["smoothing"]),
             )
-        finally:
+        except RuntimeError as exc:
+            on_failed(str(exc))
+            return
+
+        progress = QProgressDialog(
+            f"正在合成 {len(jpg_paths)} 张 JPG…",
+            "取消",
+            0,
+            0,
+            self,
+        )
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setWindowTitle("Helicon 合成")
+
+        worker = HeliconWorker(cmd=cmd, output_path=output_path, parent=self)
+        self._helicon_worker = worker  # keep reference alive
+
+        def _on_done(tiff_path):
             progress.close()
+            on_finished(tiff_path)
+
+        def _on_fail(msg: str):
+            progress.close()
+            on_failed(msg)
+
+        def _on_cancel():
+            worker.cancel()
+            on_failed("用户取消")
+
+        worker.finished.connect(_on_done)
+        worker.failed.connect(_on_fail)
+        progress.canceled.connect(_on_cancel)
+
+        progress.show()
+        worker.start()
+        self._helicon_progress = progress  # keep reference alive
 
     def _on_organise_requested(self, uid: str, group_index: int) -> None:
         """Organise (archive) the composed group.
