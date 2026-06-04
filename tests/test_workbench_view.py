@@ -1420,3 +1420,65 @@ class TestRetroactiveSubdirSelector:
         assert idx >= 0
         dlg._subdir_combo.setCurrentIndex(idx)
         assert dlg.selected_subdir() == "week01"
+
+
+# ── Collab post_photo_index wiring ────────────────────────────────────────────
+
+class TestCollabPostPhotoIndex:
+    """WorkbenchView must call collab_service.post_photo_index after compose/organize."""
+
+    def _make_workbench_with_collab(self, tmp_path):
+        from app.views.workbench_view import WorkbenchView
+        project_dir = str(tmp_path / "proj")
+        Path(project_dir).mkdir(parents=True)
+        (Path(project_dir) / "incoming-jpg").mkdir()
+        (Path(project_dir) / "results").mkdir()
+        (Path(project_dir) / "_data").mkdir()
+        db = _make_db(str(tmp_path / "proj/_data/project.db"))
+        ctx = _make_ctx(project_dir=project_dir, db=db)
+        collab = MagicMock()
+        ctx.collab_service = collab
+        w = WorkbenchView(ctx)
+        return w, collab, db
+
+    def test_post_photo_index_called_after_helicon_finish(self, tmp_path):
+        """_on_helicon_finished must call collab_service.post_photo_index(uid, 'tiff')."""
+        w, collab, db = self._make_workbench_with_collab(tmp_path)
+        uid = "FJ-XM-B2-DLC001-T95E-20260601"
+        w._current_uid = uid
+        w._on_helicon_finished(uid)
+        collab.post_photo_index.assert_called_once_with(uid, "tiff")
+        db.close()
+
+    def test_post_photo_index_called_after_organize(self, tmp_path):
+        """_on_organize_finished must call collab_service.post_photo_index(uid, 'zip')."""
+        w, collab, db = self._make_workbench_with_collab(tmp_path)
+        uid = "FJ-XM-B2-DLC001-T95E-20260601"
+        w._current_uid = uid
+        w._on_organize_finished(uid)
+        collab.post_photo_index.assert_called_once_with(uid, "zip")
+        db.close()
+
+    def test_post_photo_index_no_crash_when_no_collab(self, tmp_path):
+        """Must not crash when collab_service is None."""
+        from app.views.workbench_view import WorkbenchView
+        project_dir = str(tmp_path / "proj2")
+        Path(project_dir).mkdir(parents=True)
+        db = _make_db(str(tmp_path / "proj2" / "project.db"))
+        ctx = _make_ctx(project_dir=project_dir, db=db)
+        ctx.collab_service = None
+        w = WorkbenchView(ctx)
+        w._current_uid = "FJ-XM-B2-DLC001-T95E-20260601"
+        w._on_helicon_finished("FJ-XM-B2-DLC001-T95E-20260601")
+        w._on_organize_finished("FJ-XM-B2-DLC001-T95E-20260601")
+        db.close()
+
+    def test_post_photo_index_no_crash_on_collab_exception(self, tmp_path):
+        """Must silently swallow exceptions from post_photo_index."""
+        w, collab, db = self._make_workbench_with_collab(tmp_path)
+        collab.post_photo_index.side_effect = RuntimeError("network gone")
+        uid = "FJ-XM-B2-DLC001-T95E-20260601"
+        w._current_uid = uid
+        w._on_helicon_finished(uid)
+        w._on_organize_finished(uid)
+        db.close()

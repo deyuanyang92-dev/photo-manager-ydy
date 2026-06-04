@@ -1162,6 +1162,7 @@ class WorkbenchView(BaseView):
 
                     self._grouping.load_grouping(uid, grouping)
                     self._refresh_results_column(uid, grouping)
+                    self._on_helicon_finished(uid)
                     QMessageBox.information(self, "合成完成", f"TIFF 已生成：{output_name}")
 
                 def _on_failed(msg: str):
@@ -1340,6 +1341,7 @@ class WorkbenchView(BaseView):
                 self._grouping.load_grouping(uid, grouping)
                 self._refresh_monitor()
                 self._refresh_results_column(uid, grouping)
+                self._on_organize_finished(uid)
 
                 msg = (
                     f"归档完成：{Path(result.zip_path).name}\n"
@@ -1562,6 +1564,26 @@ class WorkbenchView(BaseView):
         db.commit()
         self._load_specimen(uid)
         return uid
+
+    # ── Collab photo-index hooks ──────────────────────────────────────────────
+
+    def _on_helicon_finished(self, uid: str) -> None:
+        """Broadcast tiff photo-index to collab peers (oracle: collabPostPhotoIndex)."""
+        svc = getattr(self.ctx, "collab_service", None)
+        if svc is not None:
+            try:
+                svc.post_photo_index(uid, "tiff")
+            except Exception:
+                pass
+
+    def _on_organize_finished(self, uid: str) -> None:
+        """Broadcast zip photo-index to collab peers (oracle: collabPostPhotoIndex)."""
+        svc = getattr(self.ctx, "collab_service", None)
+        if svc is not None:
+            try:
+                svc.post_photo_index(uid, "zip")
+            except Exception:
+                pass
 
     # ── Results column ────────────────────────────────────────────────────────
 
