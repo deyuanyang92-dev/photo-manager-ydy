@@ -48,6 +48,18 @@ class AppSettings:
         else:
             self._qs.remove("project/last_dir")
 
+    # 新增（folder-tree 步骤 3）：记住「项目树」选定的根目录，下次打开复原。
+    @property
+    def project_tree_root(self) -> Optional[str]:
+        return self._qs.value("project/tree_root", None)
+
+    @project_tree_root.setter
+    def project_tree_root(self, path: Optional[str]) -> None:
+        if path:
+            self._qs.setValue("project/tree_root", path)
+        else:
+            self._qs.remove("project/tree_root")
+
     # ── Nav selection ─────────────────────────────────────────────────
 
     @property
@@ -69,6 +81,47 @@ class AppSettings:
     @auto_activate_on_new_specimen.setter
     def auto_activate_on_new_specimen(self, val: bool) -> None:
         self._qs.setValue("workbench/auto_activate_on_new_specimen", val)
+
+    # ── Appearance ────────────────────────────────────────────────────
+
+    @property
+    def current_theme(self) -> str:
+        return self._qs.value("appearance/theme", "classic_light", type=str)
+
+    @current_theme.setter
+    def current_theme(self, name: str) -> None:
+        self._qs.setValue("appearance/theme", name)
+
+    # ── LAN collaboration ─────────────────────────────────────────────
+
+    @property
+    def collab_enabled(self) -> bool:
+        """Whether the LAN collaboration service should run.  Default OFF."""
+        return self._qs.value("collab/enabled", False, type=bool)
+
+    @collab_enabled.setter
+    def collab_enabled(self, val: bool) -> None:
+        self._qs.setValue("collab/enabled", bool(val))
+
+    @property
+    def team_code(self) -> str:
+        """Explicit collaboration-group code.  Empty = no group = no sync."""
+        return str(self._qs.value("collab/team_code", "", type=str)).strip()
+
+    @team_code.setter
+    def team_code(self, code: Optional[str]) -> None:
+        self._qs.setValue("collab/team_code", (code or "").strip())
+
+    # ── Geocoding ─────────────────────────────────────────────────────
+
+    @property
+    def amap_web_key(self) -> str:
+        """高德「Web 服务」API key.  Empty = use OpenStreetMap/Nominatim."""
+        return str(self._qs.value("geocode/amap_web_key", "", type=str)).strip()
+
+    @amap_web_key.setter
+    def amap_web_key(self, key: Optional[str]) -> None:
+        self._qs.setValue("geocode/amap_web_key", (key or "").strip())
 
     # ── Sync ──────────────────────────────────────────────────────────
 

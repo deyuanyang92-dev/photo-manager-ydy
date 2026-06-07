@@ -11,11 +11,14 @@ from __future__ import annotations
 
 from app.views.workbench_view import WorkbenchView
 from app.views.overview_view import OverviewView
+from app.views.project_tree_view import ProjectTreeView  # 新增：项目文件夹树
 from app.views.taxonomy_view import TaxonomyView
 from app.views.worms_view import WormsView
 from app.views.coords_view import CoordsView
+from app.views.collection_map_view import CollectionMapView
 from app.views.labels_view import LabelsView
 from app.views.summary_view import SummaryView
+from app.views.collection_records_view import CollectionRecordsView
 from app.views.settings_view import SettingsView
 
 # Order = nav order (mirrors web prototype topbar exactly)
@@ -23,10 +26,13 @@ from app.views.settings_view import SettingsView
 ALL_VIEWS: list[type] = [
     WorkbenchView,   # 照片工作区（含 监控/分组/命名/合成/整理/成果 面板）
     OverviewView,    # 项目总览（+ 导出 Excel/CSV/DwC）
+    ProjectTreeView,  # 项目树（文件夹树：调查→断面→站位 任意层级，任一节点可拍照）
     LabelsView,      # 标签打印（双桶 + 二维码 WYSIWYG）
     WormsView,       # WoRMS 分类库（海洋物种验证）
     TaxonomyView,    # 内置分类库（+ 4 级补全浮层）
     CoordsView,      # 坐标工具（交互地图）
     SummaryView,     # 项目汇总（跨项目标本数据汇总表 + 导出 Excel/CSV）
+    CollectionRecordsView,  # 采集记录簿（站位登记 + 拍照自动填充源）
+    CollectionMapView,  # 采集地图（站位经纬度分级可视化）
     SettingsView,    # 配置
 ]
