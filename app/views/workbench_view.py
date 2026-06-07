@@ -52,6 +52,8 @@ from PyQt6.QtWidgets import (
 
 from app.workers.helicon_worker import HeliconWorker
 
+from app.config import icons
+from app.config.theme import TOKENS
 from app.views.base_view import BaseView
 from app.widgets.grouping_panel import GroupingPanel
 from app.widgets.helicon_params_panel import HeliconParamsPanel
@@ -59,6 +61,7 @@ from app.widgets.metadata_panel import MetadataPanel
 from app.widgets.monitor_panel import MonitorPanel
 from app.widgets.naming_panel import NamingPanel
 from app.widgets.results_column import ResultsColumn
+from app.widgets.taxon_card_panel import TaxonCardPanel
 from app.widgets.specimen_sidebar import SpecimenSidebar
 
 
@@ -152,24 +155,25 @@ class _ComposeWorkbenchDialog(QDialog):
         self._build_ui(angle_label)
 
     def _build_ui(self, angle_label: str) -> None:
+        t = TOKENS
         root = QVBoxLayout(self)
         root.setContentsMargins(16, 16, 16, 14)
         root.setSpacing(12)
 
         head = QHBoxLayout()
         title = QLabel("合成工作台")
-        title.setStyleSheet("font-size: 17px; font-weight: 700; color: #eef3ef;")
+        title.setStyleSheet(f"font-size: 17px; font-weight: 700; color: {t['text']};")
         head.addWidget(title)
         if angle_label:
             badge = QLabel(angle_label)
             badge.setStyleSheet(
-                "color:#29b9ab; border:1px solid rgba(41,185,171,0.35);"
+                f"color:{t['accent']}; border:1px solid {t['accent_glow']};"
                 " border-radius:5px; padding:2px 8px; font-size:12px;"
             )
             head.addWidget(badge)
         fname = QLabel(Path(self._tiff_path).name)
         fname.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        fname.setStyleSheet("color:#87a2a1; font-size:12px;")
+        fname.setStyleSheet(f"color:{t['muted']}; font-size:12px;")
         head.addWidget(fname, 1)
         root.addLayout(head)
 
@@ -202,7 +206,7 @@ class _ComposeWorkbenchDialog(QDialog):
         pv_lay.setContentsMargins(16, 16, 16, 16)
         pv_lay.setSpacing(10)
         pv_title = QLabel("TIFF 预览")
-        pv_title.setStyleSheet("font-size: 13px; font-weight: 700; color:#eef3ef;")
+        pv_title.setStyleSheet(f"font-size: 13px; font-weight: 700; color:{t['text']};")
         pv_lay.addWidget(pv_title)
         status = QLabel()
         if os.path.isfile(self._tiff_path):
@@ -214,13 +218,13 @@ class _ComposeWorkbenchDialog(QDialog):
         status.setWordWrap(True)
         status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         status.setStyleSheet(
-            "color:#87a2a1; background:#061c1e; border:1px dashed rgba(145,182,181,0.22);"
+            f"color:{t['muted']}; background:{t['panel_inset']}; border:1px dashed {t['border_medium']};"
             " border-radius:8px; padding:28px; font-size:12px;"
         )
         pv_lay.addWidget(status, 1)
         hint = QLabel("调整右侧参数后可重合成预览；保存后写入当前分组结果。")
         hint.setWordWrap(True)
-        hint.setStyleSheet("color:#5f7d7a; font-size:11px;")
+        hint.setStyleSheet(f"color:{t['muted_dim']}; font-size:11px;")
         pv_lay.addWidget(hint)
         body.addWidget(preview)
 
@@ -313,6 +317,20 @@ class _RetroactiveScanDialog(QDialog):
         return self._subdir_combo.currentData()
 
 
+class _DrawerScrim(QWidget):
+    """Dimmed backdrop behind the settings drawer; click anywhere to dismiss."""
+
+    def __init__(self, on_click, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("DrawerScrim")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self._on_click = on_click
+        self.hide()
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt override)
+        self._on_click()
+
+
 class WorkbenchView(BaseView):
     """Daily-use workbench — specimen list | monitor + grouping | naming + metadata.
 
@@ -339,8 +357,8 @@ class WorkbenchView(BaseView):
         # ── Body container (header + dir-strip + splitter) ─────────────────
         body = QWidget()
         body_lay = QVBoxLayout(body)
-        body_lay.setContentsMargins(28, 22, 28, 18)
-        body_lay.setSpacing(18)
+        body_lay.setContentsMargins(24, 18, 24, 18)
+        body_lay.setSpacing(14)
         root.addWidget(body, stretch=1)
 
         # ── Workspace header: title + project tag + helicon status ─────────
@@ -354,11 +372,12 @@ class WorkbenchView(BaseView):
         outer = QSplitter(Qt.Orientation.Horizontal)
         outer.setObjectName("WorkbenchSplitter")
         outer.setChildrenCollapsible(False)
-        outer.setHandleWidth(18)
+        outer.setHandleWidth(14)
 
         # ── Left: specimen sidebar ─────────────────────────────────────────
         self._sidebar = SpecimenSidebar(self.ctx)
-        self._sidebar.setMinimumWidth(210)
+        self._sidebar.setMinimumWidth(250)
+        self._sidebar.setMaximumWidth(330)
         self._sidebar.specimen_selected.connect(self._on_specimen_selected)
         self._sidebar.activate_requested.connect(self._on_sidebar_activate)
         self._sidebar.deactivate_requested.connect(self._on_sidebar_deactivate)
@@ -384,15 +403,22 @@ class WorkbenchView(BaseView):
         # ── Centre ①: vertical splitter (monitor top, grouping bottom) ───────
         centre = QSplitter(Qt.Orientation.Vertical)
         centre.setChildrenCollapsible(False)
-        centre.setHandleWidth(18)
+        centre.setHandleWidth(14)
 
         self._monitor = MonitorPanel(self.ctx)
         self._monitor.refresh_requested.connect(self._refresh_monitor)
         self._monitor.assign_requested.connect(self._on_assign_jpg)
         self._monitor.unassign_requested.connect(self._on_unassign_jpg)
         self._monitor.add_jpg_requested.connect(self._on_add_jpg_files)
+        self._monitor.grouping_requested.connect(self._on_open_grouping)
         centre.addWidget(self._monitor)
 
+        # 分组工具 lives in an on-demand popup, NOT permanently in the main
+        # column.  The web oracle keeps this panel collapsed by default and opens
+        # it from a 监控区 "分组工具" toggle (app.js:568 / 8595-8627); a non-modal
+        # dialog is the desktop equivalent and keeps the work column clean
+        # (监控区↑ / 结果区↓).  The panel instance + every signal wire are
+        # unchanged — it is just re-homed into the dialog.
         self._grouping = GroupingPanel(self.ctx)
         self._grouping.compose_requested.connect(self._on_compose_requested)
         self._grouping.organise_requested.connect(self._on_organise_requested)
@@ -402,32 +428,87 @@ class WorkbenchView(BaseView):
         self._grouping.free_compose_requested.connect(self._on_free_compose)
         self._grouping.retroactive_requested.connect(self._on_retroactive_scan)
         self._grouping.import_tiff_requested.connect(self._on_import_tiff)  # #cursor
-        centre.addWidget(self._grouping)
+        self._grouping.supp_process_requested.connect(self._on_supplementary_process)
+        self._grouping.supp_files_dropped.connect(self._on_supplementary_dropped)
+        # Helicon 合成参数 — web 把参数放合成流程（app.js:6698/6881），不在右栏。
+        # 移入分组工具弹窗（compose 触发处）。compose 仍读 get_params()，逻辑不变。
+        self._helicon_params = HeliconParamsPanel()
+        self._seed_helicon_defaults()
+        self._grouping_dialog = self._build_grouping_dialog(self._grouping)
 
-        centre.setSizes([300, 250])
+        # 成果内容 (composed TIFFs + archive ZIPs) — stacked BELOW the monitor in
+        # the main column, mirroring the web oracle's 监控区(top) / 结果区(bottom)
+        # workspace (app.js:4995, renderFinalResults app.js:9017).  Keeping the
+        # results visible in the work column (not hidden behind a tab) preserves
+        # at-a-glance compose/compress state.
+        self._results = ResultsColumn()
+        centre.addWidget(self._results)
+
+        centre.setSizes([440, 360])
+        centre.setMinimumWidth(520)
         outer.addWidget(centre)
 
-        # ── Centre ②: 成果内容 column (composed TIFFs + archive ZIPs) ──────
-        self._results = ResultsColumn()
-        self._results.setMinimumWidth(200)
-        outer.addWidget(self._results)
-
-        # ── Right: naming + metadata (scrollable — never compress/overlap) ──
+        # ── Right rail: 编号与元数据 column.  Vertical stacking of the results in
+        #    the centre column frees the horizontal budget the old tab hack was
+        #    invented to reclaim, so the naming panel keeps a width floor (never
+        #    clips the UID / copy buttons) as a plain column — no tabs.
         right = QWidget()
         right_lay = QVBoxLayout(right)
-        right_lay.setContentsMargins(0, 0, 6, 0)
-        right_lay.setSpacing(18)
+        right_lay.setContentsMargins(0, 0, 0, 0)
+        right_lay.setSpacing(12)
 
+        # Right-rail command strip.  Keep the global save action visible without
+        # turning it into a banner that competes with the form itself.
+        rail_toolbar = QHBoxLayout()
+        rail_toolbar.setContentsMargins(0, 0, 0, 0)
+        rail_toolbar.setSpacing(8)
+
+        rail_toolbar.addStretch(1)
+
+        # 栏顶「收起命名 / 展开命名」整体折叠按钮（web rightPanelCollapsed）
+        self._rail_collapse_btn = QPushButton("收起")
+        self._rail_collapse_btn.setObjectName("Ghost")
+        self._rail_collapse_btn.setFixedHeight(30)
+        self._rail_collapse_btn.setToolTip("收起 / 展开整条命名栏")
+        self._rail_collapse_btn.clicked.connect(self._toggle_right_rail)
+        rail_toolbar.addWidget(self._rail_collapse_btn)
+        right_lay.addLayout(rail_toolbar)
+
+        # 卡1 照片编号
         self._naming = NamingPanel(self.ctx)
         self._naming.save_requested.connect(self._on_naming_save)
         self._naming.uid_corrected.connect(self._on_uid_corrected)
+        self._naming.open_project_settings.connect(self._on_open_settings)
+        self._naming.keys_committed.connect(self._apply_collection_autofill)
         right_lay.addWidget(self._naming)           # natural height, no compress
 
-        self._helicon_params = HeliconParamsPanel()
-        right_lay.addWidget(self._helicon_params)
+        # Right-rail autosave debounce (web scheduleRightPanelPersist, 500ms).
+        # 卡2/卡3 have no save button — edits persist live; reload=False keeps
+        # the focused input's cursor.
+        self._rail_save_timer = QTimer(self)
+        self._rail_save_timer.setSingleShot(True)
+        self._rail_save_timer.setInterval(500)
+        self._rail_save_timer.timeout.connect(self._flush_rail_save)
+        # 卡1 non-key fields (日期/拍照备注) autosave like web input-persist.
+        # KEY segments (地区/样地/站位/物种/保存方式) still go through the 保存
+        # button / storage-correction path — autosaving them would change the UID.
+        self._naming._collection_date.textEdited.connect(lambda *_: self._schedule_rail_save())
+        self._naming._photo_date.textEdited.connect(lambda *_: self._schedule_rail_save())
+        self._naming._photo_notes.textChanged.connect(lambda: self._schedule_rail_save())
 
+        # 卡2 分类标签（独立卡，对齐 web renderTaxonNotesCard）
+        self._taxon_card = TaxonCardPanel(self.ctx)
+        self._taxon_card.save_requested.connect(
+            lambda: self._on_save_metadata(self._current_uid) if self._current_uid else None
+        )
+        self._taxon_card.taxon_changed.connect(lambda *_: self._schedule_rail_save())
+        self._taxon_card.open_edit_requested.connect(self._on_open_taxon_edit)
+        right_lay.addWidget(self._taxon_card)
+
+        # 卡3 元数据（已瘦身，无分类；编辑即存）
         self._metadata = MetadataPanel(self.ctx)
         self._metadata.save_requested.connect(self._on_save_metadata)
+        self._metadata.metadata_changed.connect(lambda *_: self._schedule_rail_save())
         right_lay.addWidget(self._metadata)
         right_lay.addStretch(1)
 
@@ -439,17 +520,24 @@ class WorkbenchView(BaseView):
         right_scroll.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
-        right_scroll.setMinimumWidth(320)
+        right_scroll.setMinimumWidth(320)   # web bindPanelResize 下限
+        right_scroll.setMaximumWidth(500)   # web bindPanelResize 上限
+        self._right_scroll = right_scroll
+        self._right_rail_widget = right
+        self._right_rail_collapsed = False
         outer.addWidget(right_scroll)
 
-        # Initial splitter proportions: sidebar : capture : results : right-panel
-        outer.setSizes([220, 480, 240, 320])
+        # 3-zone proportions: sidebar : centre stage (monitor/grouping/results)
+        # : naming rail.
+        outer.setSizes([280, 760, 380])
         body_lay.addWidget(outer, stretch=1)
 
         # ── Project settings drawer (overlay, hidden by default) ────────────
         from app.widgets.project_settings_drawer import ProjectSettingsDrawer
+        self._settings_scrim = _DrawerScrim(self._close_settings, parent=self)
         self._settings_drawer = ProjectSettingsDrawer(self.ctx, parent=self)
         self._settings_drawer.setFixedWidth(380)
+        self._settings_drawer.closed.connect(self._settings_scrim.hide)
 
         # ── No-project banner ───────────────────────────────────────────────
         self._no_project_banner = QLabel(
@@ -486,7 +574,7 @@ class WorkbenchView(BaseView):
         """
         row = QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(12)
+        row.setSpacing(10)
         title = QLabel("拍照工作台")
         title.setObjectName("WorkspaceTitle")
         row.addWidget(title)
@@ -497,9 +585,9 @@ class WorkbenchView(BaseView):
         self._helicon_tag.setObjectName("TagWarn")
         row.addWidget(self._helicon_tag)
         row.addStretch()
-        settings_btn = QPushButton("⚙ 设置")
+        settings_btn = QPushButton("设置")
         settings_btn.setObjectName("Ghost")
-        settings_btn.setFixedHeight(28)
+        settings_btn.setFixedHeight(26)
         settings_btn.clicked.connect(self._on_open_settings)
         row.addWidget(settings_btn)
         return row
@@ -509,8 +597,8 @@ class WorkbenchView(BaseView):
         strip = QFrame()
         strip.setObjectName("DirStrip")
         lay = QHBoxLayout(strip)
-        lay.setContentsMargins(12, 8, 12, 8)
-        lay.setSpacing(18)
+        lay.setContentsMargins(10, 6, 10, 6)
+        lay.setSpacing(12)
 
         def _item(label: str) -> QLabel:
             l = QLabel(label)
@@ -619,13 +707,44 @@ class WorkbenchView(BaseView):
         self._monitor.set_batch(batch_uid, active_uid, activated_at)
 
     def _on_new_specimen(self) -> None:
-        """Start a fresh blank UID draft in the naming/metadata panels."""
+        """Start a fresh blank UID draft in the naming/metadata panels.
+
+        The draft is pre-filled with the project's inherited 地区/样地 + 人员
+        defaults (resolved up the folder tree) so the user never re-types them
+        per specimen — see project_settings_service.effective_new_specimen_prefill.
+        """
         self._current_uid = None
-        self._naming.load_specimen({})
+        prefill = self._effective_prefill()
+        self._naming.load_specimen({
+            "province": prefill.get("province", ""),
+            "site": prefill.get("site", ""),
+        })
         try:
             self._metadata.clear()
+            self._taxon_card.clear()
+            # apply_autofill is non-destructive; clear() ran first so all empty.
+            self._metadata.apply_autofill({
+                k: prefill[k]
+                for k in ("collector", "photographer", "identifier")
+                if prefill.get(k)
+            })
         except Exception:
             pass
+
+    def _effective_prefill(self) -> dict:
+        """Inherited new-specimen defaults for the current project, or empties."""
+        empty = {"province": "", "site": "", "stations": {},
+                 "collector": "", "photographer": "", "identifier": ""}
+        project_dir = getattr(self.ctx, "current_project_dir", None)
+        if not project_dir:
+            return empty
+        try:
+            from app.services import project_settings_service as pss
+            return pss.effective_new_specimen_prefill(
+                project_dir, root=getattr(self.ctx, "current_project_root", None)
+            )
+        except Exception:
+            return empty
 
     def _on_print_labels(self, uid: str) -> None:
         """Open the labels page with exactly *uid* selected."""
@@ -668,20 +787,41 @@ class WorkbenchView(BaseView):
         if not uid:
             QMessageBox.information(self, "保存", "编号尚未填写完整。")
             return
+
+        # ── Collaboration UID claim ───────────────────────────────────────
+        # When collaboration is active (running + a group code), claim a NEW
+        # UID across the LAN so no teammate can reuse it.  Re-saving a UID that
+        # is already a local specimen is an update, not a new claim.
+        svc = getattr(self.ctx, "collab_service", None)
+        if svc is not None and svc.is_running() and svc.group_code:
+            is_local = db.execute(
+                "SELECT 1 FROM specimens WHERE uid=?", (uid,)
+            ).fetchone() is not None
+            if not is_local:
+                ok, msg = svc.create_task(uid, assignee=self._collab_operator())
+                if not ok:
+                    QMessageBox.warning(
+                        self, "编号已被占用",
+                        f"编号 {uid} 已被占用：{msg}\n请改用其他编号后再保存。",
+                    )
+                    self._naming._apply_sequence_suggestion()
+                    return
+
         n = self._naming
         try:
             db.execute(
                 """
                 INSERT INTO specimens (uid, id, province, site, station,
                                        storage, collection_date, photo_date,
-                                       owner_project_dir)
-                VALUES (?,?,?,?,?,?,?,?,?)
+                                       photo_notes, owner_project_dir)
+                VALUES (?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(uid) DO UPDATE SET
                     id=excluded.id, province=excluded.province,
                     site=excluded.site, station=excluded.station,
                     storage=excluded.storage,
                     collection_date=excluded.collection_date,
                     photo_date=excluded.photo_date,
+                    photo_notes=excluded.photo_notes,
                     owner_project_dir=excluded.owner_project_dir
                 """,
                 (
@@ -693,6 +833,7 @@ class WorkbenchView(BaseView):
                     n._storage.text().strip(),
                     n._collection_date.text().strip(),
                     n._photo_date.text().strip(),
+                    n._photo_notes.toPlainText().strip(),
                     project_dir,
                 ),
             )
@@ -702,6 +843,80 @@ class WorkbenchView(BaseView):
             self._sidebar.select_uid(uid)
         except Exception as exc:
             QMessageBox.warning(self, "保存失败", str(exc))
+
+    def _seed_helicon_defaults(self) -> None:
+        """Seed the compose params panel from saved Helicon defaults (QSettings).
+
+        Keeps the per-compose panel in sync with the 「保存为默认」 stored by the
+        top-bar Helicon 配置 dialog. Failures are non-fatal (panel keeps its own
+        hardcoded defaults).
+        """
+        try:
+            from app.views.settings_view import (
+                _K_HELICON_METHOD, _K_HELICON_RADIUS, _K_HELICON_SMOOTHING,
+            )
+            qs = self.ctx.settings._qs
+            self._helicon_params.set_params({
+                "method": int(qs.value(_K_HELICON_METHOD, 1)),
+                "radius": float(qs.value(_K_HELICON_RADIUS, 4)),
+                "smoothing": int(qs.value(_K_HELICON_SMOOTHING, 4)),
+            })
+        except Exception:
+            pass
+
+    def _build_grouping_dialog(self, panel: QWidget) -> QDialog:
+        """Host the GroupingPanel in a non-modal popup.
+
+        Non-modal so the user can still drag/select files in the monitor while
+        the grouping tool is open (the monitor → group flow relies on it).
+        """
+        dlg = QDialog(self)
+        dlg.setObjectName("GroupingDialog")
+        dlg.setWindowTitle("分组工具")
+        dlg.setModal(False)
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(0, 0, 0, 0)
+        # The panel's own collapse toggle is redundant inside a dedicated popup.
+        toggle = getattr(panel, "_group_toggle_btn", None)
+        if toggle is not None:
+            toggle.setVisible(False)
+        lay.addWidget(panel)
+        # Helicon 合成参数 — 跟随合成流程放在分组工具弹窗里（web 同款位置）。
+        helicon = getattr(self, "_helicon_params", None)
+        if helicon is not None:
+            lay.addWidget(helicon)
+        dlg.resize(660, 640)
+        return dlg
+
+    def _on_open_grouping(self) -> None:
+        """Open (or re-focus) the grouping/compose popup — web 分组工具 toggle."""
+        dlg = self._grouping_dialog
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+
+    def _toggle_right_rail(self) -> None:
+        """Collapse/expand the whole naming rail (web rightPanelCollapsed)."""
+        self._right_rail_collapsed = not self._right_rail_collapsed
+        c = self._right_rail_collapsed
+        for w in (self._naming, self._taxon_card, self._metadata):
+            w.setVisible(not c)
+        if c:
+            self._right_scroll.setMinimumWidth(48)
+            self._right_scroll.setMaximumWidth(48)
+        else:
+            self._right_scroll.setMinimumWidth(280)
+            self._right_scroll.setMaximumWidth(480)
+        self._rail_collapse_btn.setText("展开" if c else "收起")
+
+    def _on_open_taxon_edit(self) -> None:
+        """Open the 「一次编辑五级」 taxon modal and write the result back."""
+        from app.widgets.taxon_edit_dialog import TaxonEditDialog
+        dlg = TaxonEditDialog(self._taxon_card.field_values(), parent=self)
+        if dlg.exec():
+            self._taxon_card.apply_values(dlg.result_values())
+            if self._current_uid:
+                self._on_save_metadata(self._current_uid)
 
     def _load_specimen(self, uid: str) -> None:
         """Load grouping + naming + metadata + results for *uid*."""
@@ -735,15 +950,51 @@ class WorkbenchView(BaseView):
                     "storage": sp.storage,
                     "collection_date": sp.collection_date,
                     "photo_date": sp.photo_date,
+                    "photo_notes": sp.photo_notes,
                 }
                 sp_dict["uid"] = sp.uid
+                sp_dict.setdefault("photo_notes", sp.photo_notes)
                 self._naming.load_specimen(sp_dict)
                 self._metadata.load_specimen(sp)
+                self._taxon_card.load_specimen(sp)
         except Exception:
             pass
 
         # Populate ② 成果内容 column from grouping data
         self._refresh_results_column(uid, grouping)
+
+    # ── Collection-record auto-fill ─────────────────────────────────────────────
+
+    def _apply_collection_autofill(self) -> None:
+        """Fill empty capture fields from a matching 采集记录 (野外采集记录簿).
+
+        Triggered when the four location keys (地区/样地/站位/采集日期) are
+        finished editing or picked from the record menu. Non-destructive: only
+        empty fields are filled (collection_record_service.autofill_values).
+        Fields the capture cards lack (生境/潮水/…) stay in the record only.
+        """
+        db = self.ctx.get_db()
+        if not db:
+            return
+        province, site, station, col_date = self._naming.current_keys()
+        if not (province and site and station and col_date):
+            return
+        from app.services import collection_record_service as crs
+        rec = crs.lookup_record(db, province, site, station, col_date)
+        if not rec:
+            return
+        current = self._metadata.current_values()
+        current["photo_date"] = self._naming._photo_date.text()
+        vals = crs.autofill_values(rec, current)
+        if not vals:
+            return
+        if "photo_date" in vals and not self._naming._photo_date.text().strip():
+            self._naming._photo_date.setText(str(vals["photo_date"]))
+        self._metadata.apply_autofill(vals)
+        # Persist for an already-saved specimen; a brand-new draft persists when
+        # the user hits 保存 (fields are read straight off the panels then).
+        if self._current_uid:
+            self._schedule_rail_save()
 
     # ── Monitor ───────────────────────────────────────────────────────────────
 
@@ -1374,6 +1625,158 @@ class WorkbenchView(BaseView):
         except Exception as exc:
             QMessageBox.warning(self, "整理失败", f"意外错误：{exc}")
 
+    # ── 补处理 (supplementary archival) ────────────────────────────────────────
+    #   Archive a selected JPG + TIFF bundle WITHOUT requiring an active specimen.
+    #   The specimen identity is read from the TIFF filename (oracle
+    #   processSelectedMonitorFiles / startSmartCompression, app.js:4407/4282).
+
+    def _on_supplementary_process(self) -> None:
+        """补处理 button clicked → consume the monitor selection."""
+        from app.utils import ui
+        paths = self._monitor.selected_all_paths()
+        if not paths:
+            ui.info(self, "补处理", "请先在监控区选择 JPG 原片与 TIFF 成片")
+            return
+        self._run_supplementary(paths)
+
+    def _on_supplementary_dropped(self, paths: list) -> None:
+        """Files dropped onto the 补处理 button → archive them directly."""
+        if paths:
+            self._run_supplementary(list(paths))
+
+    def _run_supplementary(self, paths: list) -> None:
+        from app.services.supplementary_service import (
+            validate_supp_group,
+            SuppGroupError,
+        )
+        from app.workers.supp_compression_worker import SuppCompressionWorker
+        from app.utils import ui
+
+        db = self.ctx.get_db()
+        project_dir = self.ctx.current_project_dir
+        if not db or not project_dir:
+            ui.info(self, "补处理", "请先打开一个项目。")
+            return
+
+        # Validate selection → resolve specimen from TIFF name (no activation needed).
+        try:
+            grp = validate_supp_group(db, paths)
+        except SuppGroupError as exc:
+            ui.warn(self, "补处理", str(exc))
+            return
+
+        # Collision guard: same-named result already in results/ (decision①: → results/).
+        results_dir = Path(project_dir) / "results"
+        tiff_stem = Path(grp.tiff_path).stem
+        existing_zip = results_dir / f"{tiff_stem}.zip"
+        existing_tiff = results_dir / Path(grp.tiff_path).name
+        if existing_zip.is_file() or (
+            existing_tiff.is_file()
+            and str(existing_tiff) != str(Path(grp.tiff_path))
+        ):
+            reply = ui.question(
+                self,
+                "归档文件已存在",
+                f"results/ 下已存在同名成果：\n{tiff_stem}.*\n\n是否覆盖并重新归档？",
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+        delete_jpg: bool = False
+        try:
+            delete_jpg = bool(
+                getattr(self.ctx.settings, "delete_jpg_after_archive", False)
+            )
+        except Exception:
+            pass
+
+        # Stash for the finished handler (move-to-results + UI refresh).
+        self._supp_pending = grp
+        self._supp_worker = SuppCompressionWorker(
+            grp.jpg_paths,
+            grp.tiff_path,
+            project_dir,
+            delete_jpg=delete_jpg,
+            parent=self,
+        )
+        self._supp_worker.started_archiving.connect(self._on_supp_started)
+        self._supp_worker.finished.connect(self._on_supp_finished)
+        self._supp_worker.failed.connect(self._on_supp_failed)
+        self._supp_worker.start()
+
+    def _on_supp_started(self, jpg_count: int, tiff_stem: str) -> None:
+        try:
+            win = self.window()
+            bar = win.statusBar() if hasattr(win, "statusBar") else None
+            if bar is not None:
+                bar.showMessage(f"正在归档 {jpg_count} 张原片 → {tiff_stem}.zip", 4000)
+        except Exception:
+            pass
+
+    def _on_supp_finished(self, result) -> None:
+        """Move TIFF + ZIP into results/ (decision①), then refresh + toast."""
+        from app.utils import ui
+        grp = getattr(self, "_supp_pending", None)
+        self._supp_pending = None
+        project_dir = self.ctx.current_project_dir
+        if not result or not getattr(result, "ok", False) or grp is None or not project_dir:
+            ui.warn(self, "补处理", "归档过程出现错误。")
+            return
+
+        import shutil
+
+        results_dir = Path(project_dir) / "results"
+        results_dir.mkdir(exist_ok=True)
+
+        # Move the ZIP into results/ (zip is not a red-line artifact; replace OK).
+        final_zip = Path(result.zip_path)
+        try:
+            if final_zip.is_file() and final_zip.parent != results_dir:
+                dest_zip = results_dir / final_zip.name
+                if dest_zip.is_file():
+                    dest_zip.unlink()
+                shutil.move(str(final_zip), str(dest_zip))
+                final_zip = dest_zip
+        except Exception:
+            pass
+
+        # Move the TIFF into results/ (data preserved — moved, never deleted).
+        try:
+            src_tiff = Path(grp.tiff_path)
+            if src_tiff.is_file() and src_tiff.parent != results_dir:
+                dest_tiff = results_dir / src_tiff.name
+                shutil.move(str(src_tiff), str(dest_tiff))  # replaces same-named result
+        except Exception:
+            pass
+
+        # Refresh monitor; refresh results column if the archived specimen is loaded.
+        self._refresh_monitor()
+        try:
+            from app.services.grouping_service import load_grouping
+            db = self.ctx.get_db()
+            if db is not None and getattr(self, "_current_uid", None) == grp.uid:
+                self._refresh_results_column(grp.uid, load_grouping(db, grp.uid))
+        except Exception:
+            pass
+        self._on_organize_finished(grp.uid)
+
+        msg = (
+            f"归档完成：{final_zip.name}\n"
+            f"压缩率：{result.saved_percent}%\n"
+        )
+        if result.delete_jpg:
+            msg += "JPG 原片已删除。"
+        elif result.requested_delete_jpg and not result.delete_jpg:
+            msg += f"JPG 保留（{result.deletion_skipped_reason}）。"
+        else:
+            msg += "JPG 原片已保留。"
+        ui.info(self, "补处理完成", msg)
+
+    def _on_supp_failed(self, message: str) -> None:
+        from app.utils import ui
+        self._supp_pending = None
+        ui.warn(self, "补处理", f"归档失败: {message}")
+
     def _on_import_tiff(self, uid: str, group_index: int) -> None:
         """Persist the imported TIFF association from grouping panel to DB.
 
@@ -1467,29 +1870,43 @@ class WorkbenchView(BaseView):
 
     # ── Metadata save ─────────────────────────────────────────────────────────
 
-    def _on_save_metadata(self, uid: str) -> None:
-        """Persist metadata edits to the DB specimens table."""
+    def _schedule_rail_save(self) -> None:
+        """Debounce a right-rail autosave (卡2/卡3 live edits)."""
+        if self._current_uid:
+            self._rail_save_timer.start()
+
+    def _flush_rail_save(self) -> None:
+        if self._current_uid:
+            self._on_save_metadata(self._current_uid, reload=False)
+
+    def _on_save_metadata(self, uid: str, reload: bool = True) -> None:
+        """Persist right-rail edits to the DB specimens table.
+
+        Mirrors the web whole-`sp` persist (scheduleRightPanelPersist): one save
+        gathers every right-rail field across the three cards —
+        卡1 命名(日期/保存方式/拍照备注), 卡2 分类(拉丁/中名/备注), 卡3 元数据
+        (采集人/拍摄人/鉴定人/经纬度/地理区).  ``reload=False`` for autosave so the
+        focused input does not lose its cursor mid-edit.
+        """
         db = self.ctx.get_db()
         if not db:
             return
-        # Collect values from the metadata panel's form fields
         panel = self._metadata
+        naming = self._naming
         fields: dict[str, str] = {
+            # 卡3 元数据
             "collector":       panel._collector.text(),
-            "collection_date": panel._collection_date.text(),
-            "photo_date":      panel._photo_date.text(),
             "photographer":    panel._photographer.text(),
             "identifier":      panel._identifier.text(),
             "geo_area":        panel._geo_area.text(),
-            "storage":         panel._storage.text(),
-            "taxon_group":     panel._taxon_group.text(),
-            "order_name":      panel._order_name.text(),
-            "family":          panel._family.text(),
-            "genus":           panel._genus.text(),
-            "scientific_name": panel._scientific_name.text(),
-            "notes":           panel._notes.toPlainText(),
-            "photo_notes":     panel._photo_notes.toPlainText(),
+            # 卡1 命名（日期 / 保存方式 / 拍照备注）
+            "collection_date": naming._collection_date.text(),
+            "photo_date":      naming._photo_date.text(),
+            "storage":         naming._storage.text(),
+            "photo_notes":     naming._photo_notes.toPlainText(),
         }
+        # 卡2 分类字段（拉丁 + 中名 + 备注）来自独立的「分类标签」卡片
+        fields.update(self._taxon_card.field_values())
         lon_str = panel._lon.text().strip()
         lat_str = panel._lat.text().strip()
 
@@ -1514,8 +1931,10 @@ class WorkbenchView(BaseView):
         except Exception:
             pass
 
-        # Refresh naming panel with latest values if storage changed
-        self._load_specimen(uid)
+        # Refresh naming panel with latest values if storage changed.  Skipped
+        # for autosave (reload=False) so the focused input keeps its cursor.
+        if reload:
+            self._load_specimen(uid)
 
     # ── WoRMS fill hook ───────────────────────────────────────────────────────
 
@@ -1612,11 +2031,13 @@ class WorkbenchView(BaseView):
 
         if grouping is not None:
             for g in grouping.groups:
+                seq = getattr(g, "result_sequence", None)
                 tiff_path = getattr(g, "composed_tiff_path", None)
                 if tiff_path:
                     composed_tiffs.append({
                         "path": tiff_path,
                         "name": os.path.basename(tiff_path),
+                        "seq": seq,
                     })
                 zip_path = getattr(g, "archive_zip", None)
                 if zip_path:
@@ -1629,6 +2050,7 @@ class WorkbenchView(BaseView):
                         "path": zip_path,
                         "name": os.path.basename(zip_path),
                         "size": zip_size,
+                        "seq": seq,
                     })
 
         self._results.load_uid(uid, composed_tiffs, archive_zips)
@@ -1762,6 +2184,15 @@ class WorkbenchView(BaseView):
 
         return [path for cb, path in checkboxes if cb.isChecked()]
 
+    def _collab_operator(self) -> str | None:
+        """Current operator name (for task assignee), read safely from settings."""
+        try:
+            raw = self.ctx.settings._qs.value("user/current_user", "")
+            name = str(raw).strip()
+            return name or None
+        except Exception:
+            return None
+
     def _on_open_collab_manager(self) -> None:
         """Open the CollabManagerDialog from the sidebar 'collab_manager_requested' signal."""
         from app.widgets.collab_manager_dialog import CollabManagerDialog
@@ -1772,17 +2203,26 @@ class WorkbenchView(BaseView):
     def _on_open_settings(self) -> None:
         """Show project settings drawer positioned at the right edge."""
         self._settings_drawer.refresh()
-        self._settings_drawer.show()
-        # Position at right edge of this widget
         try:
             win_rect = self.rect()
+            # Backdrop scrim covers the whole view, drawer sits on top of it.
+            self._settings_scrim.setGeometry(win_rect)
+            self._settings_scrim.show()
+            self._settings_scrim.raise_()
             dw = self._settings_drawer
             dw.setGeometry(
                 win_rect.right() - dw.width(), 0,
                 dw.width(), win_rect.height()
             )
+            dw.show()
+            dw.raise_()
         except Exception:
-            pass
+            self._settings_drawer.show()
+
+    def _close_settings(self) -> None:
+        """Dismiss the settings drawer and its backdrop scrim."""
+        self._settings_scrim.hide()
+        self._settings_drawer._on_close()
 
     def _show_no_project(self) -> None:
         self._sidebar.refresh()  # clears list
@@ -1790,5 +2230,6 @@ class WorkbenchView(BaseView):
         self._grouping.clear()
         self._results.clear()
         self._metadata.clear()
+        self._taxon_card.clear()
         self._refresh_header()
         self._no_project_banner.show()
