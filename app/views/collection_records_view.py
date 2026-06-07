@@ -207,6 +207,15 @@ class CollectionRecordsView(BaseView):
         btn_save.setObjectName("Primary")
         btn_save.clicked.connect(self._grid_save)
         bar.addWidget(btn_save)
+        # Excel 模板导出 / 导入（步骤 5）
+        btn_export = QPushButton("⬇ 导出模板")
+        btn_export.setToolTip("导出 Excel 模板（含已有记录），离线填好后再导入")
+        btn_export.clicked.connect(self._grid_export_template)
+        bar.addWidget(btn_export)
+        btn_import = QPushButton("⬆ 导入Excel")
+        btn_import.setToolTip("从 Excel/CSV 批量导入采集记录")
+        btn_import.clicked.connect(self._grid_import)
+        bar.addWidget(btn_import)
         v.addLayout(bar)
 
         # 非模态状态行（不用会阻塞的 QMessageBox，offscreen 测试也安全）。
@@ -532,4 +541,51 @@ class CollectionRecordsView(BaseView):
         msg = f"已保存 {saved} 条。"
         if skipped_no_ps:
             msg += f"  {skipped_no_ps} 行缺地区/样地未保存（请先在项目设置或上层目录填写）。"
+        self._grid_status_lbl.setText(msg)
+
+    # ── Excel 模板导出 / 导入（步骤 5） ──────────────────────────────────────────
+    def _grid_export_template(self) -> None:
+        from app.utils import ui
+        db = self.ctx.get_db()
+        if db is None:
+            self._grid_status_lbl.setText("当前没有打开的项目，无法导出。")
+            return
+        path = ui.get_save_file_name(
+            self, "导出采集记录模板", "采集记录模板.xlsx", "Excel 文件 (*.xlsx)"
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".xlsx"):
+            path += ".xlsx"
+        prov, site = self._effective_ps()
+        try:
+            from app.services import collection_record_io as crio
+            n = crio.export_template(db, path, province=prov, site=site)
+            self._grid_status_lbl.setText(f"已导出模板：{n} 条已有记录 + 空行 → {path}")
+        except Exception as exc:  # noqa: BLE001
+            self._grid_status_lbl.setText(f"导出失败：{exc}")
+
+    def _grid_import(self) -> None:
+        from app.utils import ui
+        db = self.ctx.get_db()
+        if db is None:
+            self._grid_status_lbl.setText("当前没有打开的项目，无法导入。")
+            return
+        path = ui.get_open_file_name(
+            self, "导入采集记录", "", "表格 (*.xlsx *.xlsm *.csv)"
+        )
+        if not path:
+            return
+        from app.services import collection_record_io as crio
+        rep = crio.import_file(db, path)
+        self._reload()
+        self._grid_load()
+        if not rep.ok:
+            self._grid_status_lbl.setText("导入失败：" + "；".join(rep.errors[:3]))
+            return
+        msg = f"已导入 {rep.imported} 条。"
+        if rep.skipped:
+            msg += f"  跳过 {rep.skipped} 行（缺地区/样地/站位/采集日期）。"
+        if rep.errors:
+            msg += f"  {len(rep.errors)} 行出错。"
         self._grid_status_lbl.setText(msg)

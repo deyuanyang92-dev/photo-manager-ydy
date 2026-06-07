@@ -106,6 +106,31 @@ def test_grid_add_row_inherits_date_and_collector(qapp, ctx):
     assert view._grid.item(last, _col("station")).text() == ""  # station NOT carried
 
 
+def test_grid_export_then_import_via_buttons(qapp, ctx, tmp_path, monkeypatch):
+    db = ctx.get_db()
+    pss.save_setting(db, "code_labels",
+                     {"province": "GD", "site": "雷州", "stations": {}, "species": {}})
+    crs.upsert_record(db, {"province": "GD", "site": "雷州", "station": "S01",
+                           "collection_date": "20260518", "habitat": "泥滩"})
+    view = CollectionRecordsView(ctx)
+    view.on_activate()
+
+    import app.utils.ui as uimod
+    out = tmp_path / "tpl.xlsx"
+    monkeypatch.setattr(uimod, "get_save_file_name", lambda *a, **k: str(out))
+    view._grid_export_template()
+    assert out.exists()
+    assert "已导出模板" in view._grid_status_lbl.text()
+
+    # wipe and re-import through the button handler
+    db.execute("DELETE FROM collection_records")
+    db.commit()
+    monkeypatch.setattr(uimod, "get_open_file_name", lambda *a, **k: str(out))
+    view._grid_import()
+    assert crs.lookup_record(db, "GD", "雷州", "S01", "20260518") is not None
+    assert "已导入" in view._grid_status_lbl.text()
+
+
 def test_grid_edit_existing_record_updates_in_place(qapp, ctx):
     db = ctx.get_db()
     crs.upsert_record(db, {"province": "FJ", "site": "XM", "station": "B2",
