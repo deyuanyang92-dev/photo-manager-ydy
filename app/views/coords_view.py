@@ -33,7 +33,7 @@ import io
 import json
 from typing import Optional, TYPE_CHECKING
 
-from PyQt6.QtCore import Qt, QUrl, pyqtSlot
+from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QClipboard
 from PyQt6.QtWidgets import (
     QApplication,
@@ -76,7 +76,14 @@ if TYPE_CHECKING:
 _AMAP_KEY = "f9b9d89f08a91d7320a879970a784043"
 _AMAP_SECURITY_CODE = "8d7ff2ed7f5e5dfd9fe0ba97e3616aa6"
 
-# ── Theme shorthands (mirrors CSS :root custom properties) ────────────────────
+# ── Theme shorthands — resolved from the LIVE active theme ────────────────────
+# Previously these were hardcoded deep-teal constants, which force-painted the
+# whole 坐标工具 page dark regardless of the chosen theme → under a light theme
+# the panels / labels rendered dark/broken.  The dict now holds the deep-teal
+# values only as a fallback; _refresh_palette() rebinds each entry from the
+# active theme tokens (app.config.theme.TOKENS) and is called at the top of
+# _setup_ui() (the theme is applied before any view is built), so every
+# `{_C['...']}` f-string picks up the live palette.
 _C = {
     "bg": "#08161b",
     "panel": "#10242a",
@@ -94,7 +101,39 @@ _C = {
     "input_border": "rgba(145,182,181,0.16)",
     "success_soft": "rgba(54,201,143,0.14)",
     "success": "#36c98f",
+    # accent / danger soft tints used inline by the format badge (live-rebound)
+    "accent_soft": "rgba(41,185,171,0.12)",
+    "accent_soft_border": "rgba(41,185,171,0.25)",
+    "danger_soft": "rgba(230,110,99,0.12)",
+    "danger_soft_border": "rgba(230,110,99,0.25)",
+    "overlay_scrim": "rgba(0,0,0,0.62)",
 }
+
+
+def _refresh_palette() -> None:
+    """Rebind the module ``_C`` colour dict to the current theme tokens."""
+    from app.config.theme import TOKENS
+    g = TOKENS.get
+    _C["bg"] = g("bg", _C["bg"])
+    _C["panel"] = g("panel", _C["panel"])
+    _C["panel2"] = g("panel_2", _C["panel2"])
+    _C["text"] = g("text", _C["text"])
+    _C["text_soft"] = g("text_soft", _C["text_soft"])
+    _C["muted"] = g("muted", _C["muted"])
+    _C["muted_dim"] = g("muted_dim", _C["muted_dim"])
+    _C["accent"] = g("accent", _C["accent"])
+    _C["accent_hover"] = g("accent_hover", _C["accent_hover"])
+    _C["danger"] = g("danger", _C["danger"])
+    _C["border"] = g("border", _C["border"])
+    _C["border_med"] = g("border_medium", _C["border_med"])
+    _C["input_bg"] = g("input_bg", _C["input_bg"])
+    _C["input_border"] = g("input_border", _C["input_border"])
+    _C["success_soft"] = g("success_soft", _C["success_soft"])
+    _C["success"] = g("success", _C["success"])
+    _C["accent_soft"] = g("accent_soft", _C["accent_soft"])
+    _C["accent_soft_border"] = g("accent_glow", _C["accent_soft_border"])
+    _C["danger_soft"] = g("danger_soft", _C["danger_soft"])
+    _C["danger_soft_border"] = g("danger_soft", _C["danger_soft_border"])
 
 # ── 批量示例数据（镜像 app.js batchExamples） ──────────────────────────────────
 _BATCH_EXAMPLES: dict[str, str] = {
@@ -146,142 +185,7 @@ _BATCH_EXAMPLES: dict[str, str] = {
     ]),
 }
 
-# ── Inline GCJ-02 math (used inside JS map HTML) ──────────────────────────────
-_MAP_HTML = """<!DOCTYPE html>
-<html lang="zh">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<style>
-  * { margin:0; padding:0; box-sizing:border-box; }
-  body { background:#0c1c22; color:#ccc; font-family:system-ui,sans-serif; font-size:13px; }
-  #map { width:100%; height:100vh; }
-  #info { position:absolute; bottom:0; left:0; right:0;
-          background:rgba(0,0,0,0.75); padding:6px 10px; z-index:200; }
-  #coordDisplay { color:#e0e0e0; margin-bottom:2px; }
-  #coordFormats { color:#aaa; font-size:12px; }
-</style>
-</head>
-<body>
-<div id="map"></div>
-<div id="info">
-  <div id="coordDisplay">点击地图或拖拽标记选点</div>
-  <div id="coordFormats"></div>
-</div>
-<script>
-window._AMapSecurityConfig = { securityJsCode: "{SECURITY_CODE}" };
-</script>
-<script src="https://webapi.amap.com/maps?v=2.0&key={AMAP_KEY}&plugin=AMap.Geocoder,AMap.PlaceSearch"
-        onerror="document.getElementById('coordDisplay').textContent='高德地图加载失败（需网络连接）'">
-</script>
-<script>
-var _map=null, _marker=null, _selectedWgs=null;
-
-function initMap(lat,lon){
-  if(!window.AMap){ document.getElementById('coordDisplay').textContent='高德地图加载失败'; return; }
-  var center=(lat!==null&&lon!==null)?[lon,lat]:[121.76,29.11];
-  _map=new AMap.Map('map',{zoom:12,center:center,resizeEnable:true});
-  AMap.plugin(['AMap.ToolBar'],function(){ _map.addControl(new AMap.ToolBar({position:'RT'})); });
-  _map.on('click',function(e){ setMarker(e.lnglat.getLng(),e.lnglat.getLat()); });
-  if(lat!==null&&lon!==null) setMarker(lon,lat);
-  setTimeout(function(){ if(_map) _map.resize(); },300);
-}
-
-function setMarker(gcjLon,gcjLat){
-  if(_marker) _map.remove(_marker);
-  _marker=new AMap.Marker({position:[gcjLon,gcjLat],draggable:true,cursor:'move'});
-  _marker.on('dragend',function(e){ var p=e.target.getPosition(); updateDisplay(p.getLng(),p.getLat()); });
-  _map.add(_marker);
-  updateDisplay(gcjLon,gcjLat);
-}
-
-function updateDisplay(gcjLon,gcjLat){
-  var wLon=gcjLon, wLat=gcjLat;
-  for(var i=0;i<5;i++){ var g=wgs84ToGcj02(wLon,wLat); wLon+=gcjLon-g.lon; wLat+=gcjLat-g.lat; }
-  _selectedWgs={lat:+wLat.toFixed(7),lon:+wLon.toFixed(7)};
-  document.getElementById('coordDisplay').textContent=
-    'WGS-84: '+_selectedWgs.lat.toFixed(6)+', '+_selectedWgs.lon.toFixed(6)+
-    '  (GCJ-02: '+gcjLat.toFixed(6)+', '+gcjLon.toFixed(6)+')';
-  document.getElementById('coordFormats').textContent=
-    'DMS: '+toDMS(_selectedWgs.lat,_selectedWgs.lon)+
-    '  |  DDM: '+toDDM(_selectedWgs.lat,_selectedWgs.lon);
-  if(window.qt_bridge) window.qt_bridge.onMarkerMoved(JSON.stringify(_selectedWgs));
-}
-
-function doPlaceSearch(q){
-  if(!q||!window.AMap) return;
-  AMap.plugin('AMap.PlaceSearch',function(){
-    var ps=new AMap.PlaceSearch({pageSize:5,pageIndex:1});
-    ps.search(q,function(status,result){
-      if(status==='complete'&&result.poiList&&result.poiList.pois.length>0){
-        var poi=result.poiList.pois[0]; var loc=poi.location;
-        _map.setCenter([loc.getLng(),loc.getLat()]); _map.setZoom(15);
-        setMarker(loc.getLng(),loc.getLat());
-      }
-    });
-  });
-}
-
-function moveTo(gcjLon,gcjLat){
-  if(!_map) return;
-  _map.setCenter([gcjLon,gcjLat]); _map.setZoom(14); setMarker(gcjLon,gcjLat);
-}
-
-var PI=Math.PI, A=6378245.0, EE=0.00669342162296594323;
-function inChina(lon,lat){ return lon>=73.66&&lon<=135.05&&lat>=3.86&&lat<=53.55; }
-function transLat(x,y){
-  var r=-100+2*x+3*y+0.2*y*y+0.1*x*y+0.2*Math.sqrt(Math.abs(x));
-  r+=(20*Math.sin(6*x*PI)+20*Math.sin(2*x*PI))*2/3;
-  r+=(20*Math.sin(y*PI)+40*Math.sin(y/3*PI))*2/3;
-  r+=(160*Math.sin(y/12*PI)+320*Math.sin(y*PI/30))*2/3;
-  return r;
-}
-function transLon(x,y){
-  var r=300+x+2*y+0.1*x*y+0.1*Math.sqrt(Math.abs(x));
-  r+=(20*Math.sin(6*x*PI)+20*Math.sin(2*x*PI))*2/3;
-  r+=(20*Math.sin(x*PI)+40*Math.sin(x/3*PI))*2/3;
-  r+=(150*Math.sin(x/12*PI)+300*Math.sin(x/30*PI))*2/3;
-  return r;
-}
-function wgs84ToGcj02(lon,lat){
-  if(!inChina(lon,lat)) return {lon:lon,lat:lat};
-  var dLat=transLat(lon-105,lat-35), dLon=transLon(lon-105,lat-35);
-  var rad=lat/180*PI, magic=Math.sin(rad); magic=1-EE*magic*magic;
-  var sq=Math.sqrt(magic);
-  dLat=dLat*180/((A*(1-EE))/(magic*sq)*PI);
-  dLon=dLon*180/((A/sq)/Math.cos(rad)*PI);
-  return {lon:+(lon+dLon).toFixed(6),lat:+(lat+dLat).toFixed(6)};
-}
-function toDMS(lat,lon){
-  function fmt(dd){ var a=Math.abs(dd),d=Math.floor(a),mf=(a-d)*60,m=Math.floor(mf),s=((mf-m)*60).toFixed(1); return d+'°'+m+"'"+s+'"'; }
-  return fmt(lat)+(lat>=0?'N':'S')+' '+fmt(lon)+(lon>=0?'E':'W');
-}
-function toDDM(lat,lon){
-  function fmt(dd){ var a=Math.abs(dd),d=Math.floor(a),m=((a-d)*60).toFixed(3); return d+'°'+m+"'"; }
-  return fmt(lat)+(lat>=0?'N':'S')+' '+fmt(lon)+(lon>=0?'E':'W');
-}
-</script>
-</body>
-</html>
-""".replace("{AMAP_KEY}", _AMAP_KEY).replace("{SECURITY_CODE}", _AMAP_SECURITY_CODE)
-
-
 # ── Helpers ────────────────────────────────────────────────────────────────────
-
-def _inject_webchannel_shim(html: str) -> str:
-    shim = """
-<script src="qrc:///qtwebchannel/qwebchannel.js"></script>
-<script>
-document.addEventListener('DOMContentLoaded', function() {
-  if (typeof QWebChannel !== 'undefined') {
-    new QWebChannel(qt.webChannelTransport, function(channel) {
-      window.qt_bridge = channel.objects.qt_bridge;
-    });
-  }
-});
-</script>
-"""
-    return html.replace("</body>", shim + "</body>")
 
 
 def _btn(text: str, object_name: str = "") -> QPushButton:
@@ -339,13 +243,14 @@ class CoordsView(BaseView):
         # map state
         self._map_open: bool = False
         self._map_selected_wgs: Optional[dict] = None
-        self._web_view = None   # lazy QWebEngineView
+        self._tile_map = None   # lazy TileMapWidget
 
         super().__init__(ctx)
 
     # ── BaseView ─────────────────────────────────────────────────────────────
 
     def _setup_ui(self) -> None:
+        _refresh_palette()
         # Outer scroll area so long pages scroll without widget overlap
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -361,9 +266,16 @@ class CoordsView(BaseView):
         )
         outer.addWidget(self._scroll)
 
-        # Content container — generous horizontal padding for readability
+        # Content container — generous horizontal padding for readability.
+        # Scope the background to this widget only; an unscoped
+        # `background: …` rule cascades to every descendant and would wipe
+        # out child widgets' own backgrounds (e.g. the Primary 搜索地名 button
+        # rendered as an empty box because its teal gradient got overridden).
         self._content = QWidget()
-        self._content.setStyleSheet(f"background: {_C['bg']};")
+        self._content.setObjectName("CoordContent")
+        self._content.setStyleSheet(
+            f"QWidget#CoordContent {{ background: {_C['bg']}; }}"
+        )
         self._content_layout = QVBoxLayout(self._content)
         self._content_layout.setContentsMargins(28, 24, 28, 32)
         self._content_layout.setSpacing(0)
@@ -505,7 +417,7 @@ class CoordsView(BaseView):
         place_row.addWidget(self._place_input, 1)
         self._place_btn = QPushButton("搜索地名")
         self._place_btn.setObjectName("Primary")
-        self._place_btn.setFixedWidth(80)
+        self._place_btn.setMinimumWidth(96)
         self._place_btn.clicked.connect(self._on_place_search)
         self._place_input.returnPressed.connect(self._on_place_search)
         place_row.addWidget(self._place_btn)
@@ -740,7 +652,8 @@ class CoordsView(BaseView):
         self._batch_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._batch_table.setAlternatingRowColors(True)
         self._batch_table.verticalHeader().setVisible(False)
-        self._batch_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._batch_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectItems)
+        self._batch_table.keyPressEvent = self._batch_table_key_press
         self._batch_table.horizontalHeader().setStretchLastSection(True)
         self._batch_table.setMinimumHeight(160)
         self._batch_table.setMaximumHeight(320)
@@ -776,9 +689,8 @@ class CoordsView(BaseView):
         self._update_badge()
         self._update_cs_section()
         # Propagate to map if open
-        if self._map_open and self._parsed and self._web_view:
-            gcj = wgs84_to_gcj02(self._parsed["lon"], self._parsed["lat"])
-            self._call_map_js(f"moveTo({gcj['lon']}, {gcj['lat']})")
+        if self._map_open and self._parsed and self._tile_map:
+            self._tile_map.set_marker(self._parsed["lon"], self._parsed["lat"])
 
     # ── Badge ─────────────────────────────────────────────────────────────────
 
@@ -794,15 +706,15 @@ class CoordsView(BaseView):
             )
             self._badge.setStyleSheet(
                 f"QLabel#CoordBadge {{ padding: 4px 8px; border-radius: 4px; font-size: 12px;"
-                f" background: rgba(41,185,171,0.12); color: {_C['accent']};"
-                f" border: 1px solid rgba(41,185,171,0.25); }}"
+                f" background: {_C['accent_soft']}; color: {_C['accent']};"
+                f" border: 1px solid {_C['accent_soft_border']}; }}"
             )
         else:
             self._badge.setText("无法识别坐标格式")
             self._badge.setStyleSheet(
                 f"QLabel#CoordBadge {{ padding: 4px 8px; border-radius: 4px; font-size: 12px;"
-                f" background: rgba(230,110,99,0.12); color: {_C['danger']};"
-                f" border: 1px solid rgba(230,110,99,0.25); }}"
+                f" background: {_C['danger_soft']}; color: {_C['danger']};"
+                f" border: 1px solid {_C['danger_soft_border']}; }}"
             )
 
     # ── CS tab bar & cards ────────────────────────────────────────────────────
@@ -949,11 +861,10 @@ class CoordsView(BaseView):
         self._refresh_place_ui()
         # Try via AMap if map is open / web view available; otherwise use
         # Nominatim HTTP (no API key required) as fallback.
-        if self._map_open and self._web_view:
-            self._call_map_js(f"doPlaceSearch({json.dumps(q)})")
-            # Results will come back via map; hide loading after delay
+        if self._map_open and self._tile_map:
+            self._tile_map.search_place(q)
             from PyQt6.QtCore import QTimer
-            QTimer.singleShot(3000, lambda: self._set_place_loading(False))
+            QTimer.singleShot(4000, lambda: self._set_place_loading(False))
         else:
             # Nominatim geocoder (lightweight, no key)
             from PyQt6.QtCore import QThread, pyqtSignal, QObject
@@ -1193,24 +1104,23 @@ class CoordsView(BaseView):
         return lat, lon
 
     def _format_val(self, val: float, is_lat: bool) -> str:
-        """Format a single lat or lon value per current batch_fmt."""
-        if self._batch_fmt == "dd":
-            return f"{abs(val):.6f}"
+        """Format a single lat or lon value per current batch_fmt.
+
+        Mirrors web ``batchFormatCoord`` (app.js:13596) exactly: prime/double-prime
+        glyphs (U+2032/U+2033, not ASCII ' "), and toFixed-style fixed decimals.
+        """
+        av = abs(val)
         if self._batch_fmt == "dms":
-            import math
-            av = abs(val)
             d = int(av)
             mf = (av - d) * 60
             m = int(mf)
-            s = round((mf - m) * 60, 1)
-            return f"{d}°{m}'{s}\""
+            s = (mf - m) * 60
+            return f"{d}°{m}′{s:.1f}″"
         if self._batch_fmt == "ddm":
-            import math
-            av = abs(val)
             d = int(av)
-            m = round((av - d) * 60, 3)
-            return f"{d}°{m}'"
-        return f"{val:.6f}"
+            m = (av - d) * 60
+            return f"{d}°{m:.3f}′"
+        return f"{av:.6f}"
 
     def _refresh_batch_table(self) -> None:
         has_rows = bool(self._batch_rows)
@@ -1294,6 +1204,24 @@ class CoordsView(BaseView):
                 ])
         return buf.getvalue()
 
+    def _batch_table_key_press(self, event) -> None:
+        from PyQt6.QtGui import QKeySequence
+        from PyQt6.QtWidgets import QApplication, QTableWidget
+        if event.matches(QKeySequence.StandardKey.Copy):
+            indexes = self._batch_table.selectionModel().selectedIndexes()
+            if indexes:
+                indexes = sorted(indexes, key=lambda i: (i.row(), i.column()))
+                rows: dict = {}
+                for idx in indexes:
+                    rows.setdefault(idx.row(), []).append(idx)
+                lines = []
+                for row_idxs in rows.values():
+                    parts = [str(self._batch_table.model().data(i) or "") for i in sorted(row_idxs, key=lambda x: x.column())]
+                    lines.append("\t".join(parts))
+                QApplication.clipboard().setText("\n".join(lines))
+            return
+        QTableWidget.keyPressEvent(self._batch_table, event)
+
     def _on_copy_csv(self) -> None:
         csv_text = self._batch_to_csv()
         QApplication.clipboard().setText(csv_text)
@@ -1326,7 +1254,9 @@ class CoordsView(BaseView):
         # Build overlay
         overlay = QWidget(self)
         overlay.setObjectName("MapOverlay")
-        overlay.setStyleSheet("QWidget#MapOverlay { background: rgba(0,0,0,0.62); }")
+        overlay.setStyleSheet(
+            f"QWidget#MapOverlay {{ background: {_C['overlay_scrim']}; }}"
+        )
         overlay.resize(self.size())
         overlay.show()
         overlay.raise_()
@@ -1417,7 +1347,7 @@ class CoordsView(BaseView):
             overlay.close()
             overlay.deleteLater()
             self._map_overlay = None
-            self._web_view = None
+            self._tile_map = None
 
         def _confirm() -> None:
             sel = self._map_selected_wgs
@@ -1431,8 +1361,8 @@ class CoordsView(BaseView):
 
         def _map_search() -> None:
             q = map_search.text().strip()
-            if q:
-                self._call_map_js(f"doPlaceSearch({json.dumps(q)})")
+            if q and self._tile_map:
+                self._tile_map.search_place(q)
 
         srch_btn.clicked.connect(_map_search)
         map_search.returnPressed.connect(_map_search)
@@ -1460,8 +1390,8 @@ class CoordsView(BaseView):
         # Keep a reference so it doesn't get GC'd before overlay is closed
         overlay._esc_filter = esc_filter  # type: ignore[attr-defined]
 
-        # Lazy WebEngineView
-        self._ensure_web_view(map_body, body_lay, coord_display, coord_formats, confirm_btn)
+        # Native tile map
+        self._insert_tile_map(map_body, body_lay, coord_display, coord_formats, confirm_btn)
 
         # Position modal centered in overlay
         overlay.resizeEvent = lambda e: self._reposition_modal(overlay, modal)
@@ -1471,11 +1401,10 @@ class CoordsView(BaseView):
 
         # Move marker if we already have parsed coords
         if self._parsed:
-            gcj = wgs84_to_gcj02(self._parsed["lon"], self._parsed["lat"])
+            _lon = self._parsed["lon"]
+            _lat = self._parsed["lat"]
             from PyQt6.QtCore import QTimer
-            QTimer.singleShot(500, lambda: self._call_map_js(
-                f"moveTo({gcj['lon']}, {gcj['lat']})"
-            ))
+            QTimer.singleShot(100, lambda: self._tile_map and self._tile_map.set_marker(_lon, _lat))
 
     def _reposition_modal(self, overlay: QWidget, modal: QFrame) -> None:
         ow, oh = overlay.width(), overlay.height()
@@ -1493,7 +1422,7 @@ class CoordsView(BaseView):
         if self._map_overlay and self._map_overlay.isVisible():
             self._map_overlay.resize(self.size())
 
-    def _ensure_web_view(
+    def _insert_tile_map(
         self,
         map_body: QWidget,
         body_lay: QVBoxLayout,
@@ -1501,75 +1430,24 @@ class CoordsView(BaseView):
         coord_formats: QLabel,
         confirm_btn: QPushButton,
     ) -> None:
-        """Create QWebEngineView or fallback label; inject JS bridge."""
-        try:
-            from PyQt6.QtWebEngineWidgets import QWebEngineView
-            from PyQt6.QtCore import QObject, pyqtSlot as Slot
-            from PyQt6.QtWebChannel import QWebChannel
+        """Insert TileMapWidget; wire marker_moved to update display labels."""
+        from app.widgets.tile_map_widget import TileMapWidget
 
-            wv = QWebEngineView()
-            wv.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        tm = TileMapWidget()
+        tm.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
-            class _Bridge(QObject):
-                def __init__(self_b, view_ref: "CoordsView"):
-                    super().__init__()
-                    self_b._view = view_ref
-                    self_b._display = coord_display
-                    self_b._formats = coord_formats
-                    self_b._confirm = confirm_btn
-
-                @pyqtSlot(str)
-                def onMarkerMoved(self_b, payload: str) -> None:  # noqa: N802
-                    """Mirrors coordUpdateMapDisplay (app.js:13469–13476).
-
-                    Display line: WGS-84: lat, lon  (GCJ-02: lat, lon)
-                    Formats line: DMS: ...  |  DDM: ...
-                    """
-                    try:
-                        data = json.loads(payload)
-                        self_b._view._map_selected_wgs = data
-                        self_b._confirm.setEnabled(True)
-                        lat = data.get("lat", 0)
-                        lon = data.get("lon", 0)
-                        # GCJ-02 coords for display (matches JS coordUpdateMapDisplay)
-                        gcj = wgs84_to_gcj02(lon, lat)
-                        self_b._display.setText(
-                            f"WGS-84: {lat:.6f}, {lon:.6f}"
-                            f"  (GCJ-02: {gcj['lat']:.6f}, {gcj['lon']:.6f})"
-                        )
-                        self_b._formats.setText(
-                            f"DMS: {to_dms(lat, lon)}  |  DDM: {to_ddm(lat, lon)}"
-                        )
-                    except Exception:
-                        pass
-
-            self._bridge = _Bridge(self)
-            channel = QWebChannel(wv.page())
-            channel.registerObject("qt_bridge", self._bridge)
-            wv.page().setWebChannel(channel)
-
-            wv.setHtml(
-                _inject_webchannel_shim(_MAP_HTML),
-                QUrl("https://map.local/")
+        def _on_moved(lon: float, lat: float) -> None:
+            self._map_selected_wgs = {"lat": lat, "lon": lon}
+            confirm_btn.setEnabled(True)
+            gcj = wgs84_to_gcj02(lon, lat)
+            coord_display.setText(
+                f"WGS-84: {lat:.6f}, {lon:.6f}"
+                f"  (GCJ-02: {gcj['lat']:.6f}, {gcj['lon']:.6f})"
             )
-            body_lay.addWidget(wv)
-            self._web_view = wv
-
-        except Exception as exc:  # noqa: BLE001
-            fallback = QLabel(
-                f"交互地图不可用（QWebEngineView 加载失败）\n{exc}"
+            coord_formats.setText(
+                f"DMS: {to_dms(lat, lon)}  |  DDM: {to_ddm(lat, lon)}"
             )
-            fallback.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            fallback.setStyleSheet(
-                f"color: {_C['muted']}; background: transparent; padding: 20px;"
-            )
-            body_lay.addWidget(fallback)
-            self._web_view = fallback
 
-    def _call_map_js(self, js: str) -> None:
-        try:
-            from PyQt6.QtWebEngineWidgets import QWebEngineView
-            if isinstance(self._web_view, QWebEngineView):
-                self._web_view.page().runJavaScript(js)
-        except Exception:
-            pass
+        tm.marker_moved.connect(_on_moved)
+        body_lay.addWidget(tm)
+        self._tile_map = tm
