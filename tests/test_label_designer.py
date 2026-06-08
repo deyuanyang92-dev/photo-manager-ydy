@@ -846,3 +846,123 @@ class TestLayersPanel:
         p.toggle_hidden_at_row(0)
         assert ops and ops[-1]["op"] == "element_hidden"
         assert ops[-1]["index"] == 0 and ops[-1]["value"] is True
+
+
+# ── Phase 6: zoom/pan, format painter, batch edit ───────────────────────────
+
+class TestFormatPainter:
+    def test_apply_style_copies_only_style_keys(self, qt_app):
+        d = _dlg(qt_app)
+        d._add_element("rect")
+        d._apply_edit({"op": "element_resize", "index": 0,
+                       "x": 5, "y": 5, "w": 20, "h": 12})
+        style = {"fill": "#ff0000", "strokeWidth": 1.5, "opacity": 0.4,
+                 "dash": "dash"}
+        d._apply_edit({"op": "element_apply_style", "index": 0,
+                       "style_dict": style})
+        el = d._tmpl["elements"][0]
+        assert el["fill"] == "#ff0000" and el["opacity"] == 0.4
+        assert el["dash"] == "dash" and el["strokeWidth"] == 1.5
+        # geometry untouched
+        assert el["x"] == 5 and el["w"] == 20
+
+    def test_format_painter_captures_whitelist(self, qt_app):
+        d = _dlg(qt_app)
+        d._add_element("rect")
+        d._tmpl["elements"][0]["fill"] = "#123456"
+        d._tmpl["elements"][0]["x"] = 99  # geometry must NOT be captured
+        d._select("element", -1, 0)
+        snap = d._capture_style(0)
+        assert snap.get("fill") == "#123456"
+        assert "x" not in snap and "w" not in snap and "points" not in snap
+
+    def test_apply_style_is_undoable(self, qt_app):
+        d = _dlg(qt_app)
+        d._add_element("rect")
+        d._apply_edit({"op": "element_apply_style", "index": 0,
+                       "style_dict": {"fill": "#00ff00"}})
+        d._do_undo()
+        assert d._tmpl["elements"][0].get("fill") in (None,)
+
+
+class TestBatchEdit:
+    def test_batch_applies_op_to_all_selected(self, qt_app):
+        d = _dlg(qt_app)
+        d._add_element("rect")
+        d._add_element("rect")
+        d._add_element("rect")
+        d._multi = {0, 2}
+        d._apply_element_edit_multi("element_opacity", {"value": 0.5})
+        els = d._tmpl["elements"]
+        assert els[0]["opacity"] == 0.5 and els[2]["opacity"] == 0.5
+        assert els[1]["opacity"] == 1.0   # unselected untouched
+
+    def test_batch_is_single_undo_frame(self, qt_app):
+        d = _dlg(qt_app)
+        d._add_element("rect")
+        d._add_element("rect")
+        d._multi = {0, 1}
+        d._apply_element_edit_multi("element_color", {"value": "#abcdef"})
+        d._do_undo()   # one undo reverts both
+        assert all(e.get("color", "#000000") != "#abcdef"
+                   for e in d._tmpl["elements"])
+
+
+class TestZoomPan:
+    def test_default_zoom_is_one(self, qt_app):
+        d = _dlg(qt_app)
+        assert d._canvas._zoom == 1.0
+
+    def test_set_zoom_scales_effective_ppm(self, qt_app):
+        d = _dlg(qt_app)
+        d._add_element("rect")
+        c = d._canvas
+        c.resize(600, 400)
+        c._render()
+        base_ppm = c._ppm
+        c.set_zoom(2.0)
+        c._render()
+        assert abs(c._ppm - base_ppm * 2.0) < 1e-6
+
+    def test_zoom_clamped(self, qt_app):
+        d = _dlg(qt_app)
+        c = d._canvas
+        c.set_zoom(99.0)
+        assert c._zoom <= 8.0
+        c.set_zoom(0.001)
+        assert c._zoom >= 0.2
+
+    def test_hit_box_aligns_after_zoom(self, qt_app):
+        d = _dlg(qt_app)
+        d._add_element("rect")
+        d._apply_edit({"op": "element_resize", "index": 0,
+                       "x": 5, "y": 5, "w": 20, "h": 12})
+        c = d._canvas
+        c.resize(700, 500)
+        c.set_zoom(1.5)
+        c._render()
+        box = c._selected_box() or [b for b in c._boxes
+                                    if b.get("kind") == "element"][0]
+        # center of the element in device px must hit it
+        pt = QPoint(int(c._origin.x() + box["x"] + box["w"] / 2),
+                    int(c._origin.y() + box["y"] + box["h"] / 2))
+        hit = c._hit(pt)
+        assert hit is not None and hit.get("etype") == "rect"
+
+
+class TestPropertyControlsSmoke:
+    def test_panel_builds_for_every_element_type(self, qt_app):
+        d = _dlg(qt_app)
+        for t in ("text", "field", "line", "rect", "ellipse", "shape",
+                  "image", "barcode"):
+            d._add_element(t)
+            idx = len(d._tmpl["elements"]) - 1
+            # selecting builds the contextual property panel — must not raise
+            d._select("element", -1, idx)
+        assert len(d._tmpl["elements"]) == 8
+
+    def test_label_panel_has_monochrome_toggle(self, qt_app):
+        d = _dlg(qt_app)
+        d._select("none", -1, -1)        # label-level panel
+        d._apply_edit({"op": "tmpl_monochrome", "value": True})
+        assert d._tmpl["monochrome"] is True

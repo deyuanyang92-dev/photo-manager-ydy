@@ -53,6 +53,24 @@ from app.utils.label_render import render_label_onto
 # Minimum free-form element size (mm) — resize handles clamp to this.
 MIN_EL_MM = 2.0
 
+# Style keys the format painter copies between elements. Deliberately excludes
+# geometry (x/y/w/h/points/rotation) and content (text/key/content/data).
+_STYLE_KEYS = (
+    "color", "stroke", "fill", "strokeWidth", "dash", "opacity", "font",
+    "style", "align", "gradient", "shadow", "cornerRadius",
+)
+
+# element_* ops that should fan out to the whole multi-selection (style/appearance
+# only — geometry/structural ops stay single-target).
+_BATCH_OPS = frozenset({
+    "element_color", "element_stroke", "element_fill", "element_strokeWidth",
+    "element_dash", "element_opacity", "element_font", "element_bold",
+    "element_italic", "element_align", "element_size", "element_cornerRadius",
+    "element_gradient", "element_shadow", "element_arrowStart",
+    "element_arrowEnd", "element_wrap", "element_hidden", "element_locked",
+    "element_rotation",
+})
+
 # Free-form element types offered by the "+元素" toolbar menu (type → label).
 ELEMENT_TYPE_LABELS: dict[str, str] = {
     "text": "文字", "field": "绑定字段", "line": "直线", "rect": "矩形",
@@ -179,6 +197,9 @@ class _DesignCanvas(QWidget):
         self._show_guides = False         # margin/bleed overlay toggle
         self._safe_mm = 2.0
         self._bleed_mm = 0.0
+        self._zoom = 1.0                  # 1.0 = fit-to-window (default)
+        self._pan = QPoint(0, 0)          # extra origin offset (px)
+        self._panning = False             # space-drag pan active
 
     def set_content(self, tmpl: dict, dims: dict, data: dict) -> None:
         self._tmpl = tmpl
@@ -200,7 +221,8 @@ class _DesignCanvas(QWidget):
         pad = 18
         avail_w = max(40, self.width() - 2 * pad)
         avail_h = max(40, self.height() - 2 * pad)
-        self._ppm = max(1.0, min(avail_w / w_mm, avail_h / h_mm))
+        fit = max(1.0, min(avail_w / w_mm, avail_h / h_mm))
+        self._ppm = fit * self._zoom    # zoom multiplies the fit-to-window scale
         w_px = max(1, int(w_mm * self._ppm))
         h_px = max(1, int(h_mm * self._ppm))
         pm = QPixmap(w_px, h_px)
@@ -214,8 +236,28 @@ class _DesignCanvas(QWidget):
                            hit_boxes=self._boxes)
         painter.end()
         self._pixmap = pm
-        self._origin = QPoint((self.width() - w_px) // 2, (self.height() - h_px) // 2)
+        self._origin = QPoint((self.width() - w_px) // 2 + self._pan.x(),
+                              (self.height() - h_px) // 2 + self._pan.y())
         self.update()
+
+    def set_zoom(self, z: float) -> None:
+        self._zoom = min(8.0, max(0.2, float(z)))
+        self._render()
+
+    def zoom_by(self, factor: float) -> None:
+        self.set_zoom(self._zoom * factor)
+
+    def reset_zoom(self) -> None:
+        self._zoom = 1.0
+        self._pan = QPoint(0, 0)
+        self._render()
+
+    def wheelEvent(self, e) -> None:  # noqa: N802
+        if e.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            self.zoom_by(1.15 if e.angleDelta().y() > 0 else 1 / 1.15)
+            e.accept()
+        else:
+            super().wheelEvent(e)
 
     def resizeEvent(self, e) -> None:  # noqa: N802
         super().resizeEvent(e)
@@ -411,6 +453,9 @@ class _DesignCanvas(QWidget):
 
     def mousePressEvent(self, e) -> None:  # noqa: N802
         self.setFocus()
+        if self._panning:                 # space held → pan, not select
+            self._press_pt = e.pos()
+            return
         # dragging out of a ruler margin starts a new reference guide
         axis = self._ruler_axis(e.pos())
         if axis is not None:
@@ -484,6 +529,11 @@ class _DesignCanvas(QWidget):
         return (pos.y() - oy) / self._ppm if self._ppm else 0.0
 
     def mouseMoveEvent(self, e) -> None:  # noqa: N802
+        if self._panning and self._press_pt is not None:
+            self._pan += e.pos() - self._press_pt
+            self._press_pt = e.pos()
+            self._render()
+            return
         if self._new_guide is not None:
             self._new_guide_mm = self._guide_mm_at(e.pos(), self._new_guide)
             self.update()
@@ -691,8 +741,18 @@ class _DesignCanvas(QWidget):
             self.nudged.emit(0, step)
         elif k in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
             self.delete_pressed.emit()
+        elif k == Qt.Key.Key_Space:
+            self._panning = True
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
         else:
             super().keyPressEvent(e)
+
+    def keyReleaseEvent(self, e) -> None:  # noqa: N802
+        if e.key() == Qt.Key.Key_Space:
+            self._panning = False
+            self.unsetCursor()
+        else:
+            super().keyReleaseEvent(e)
 
 
 # ── Property panel ──────────────────────────────────────────────────────────────
@@ -867,15 +927,99 @@ class _PropertyPanel(QWidget):
                 {"op": "element_showText", "index": index, "value": on}))
             self._row(st)
 
+        # universal appearance (opacity / dash / font / wrap / arrows)
+        self._appearance_rows(index, el)
+
         # z-order + delete/duplicate
         zup, zdn = _btn("上移一层"), _btn("下移一层")
         zup.clicked.connect(lambda: self.edit.emit({"op": "element_z", "index": index, "value": 1}))
         zdn.clicked.connect(lambda: self.edit.emit({"op": "element_z", "index": index, "value": -1}))
         self._row(zup, zdn)
+        hid = _btn("隐藏", True); hid.setChecked(bool(el.get("hidden")))
+        hid.toggled.connect(lambda on: self.edit.emit(
+            {"op": "element_hidden", "index": index, "value": on}))
+        lck = _btn("锁定", True); lck.setChecked(bool(el.get("locked")))
+        lck.toggled.connect(lambda on: self.edit.emit(
+            {"op": "element_locked", "index": index, "value": on}))
+        self._row(hid, lck)
         dup, dele = _btn("复制元素"), _btn("删除元素")
         dup.clicked.connect(lambda: self.edit.emit({"op": "element_dup", "index": index}))
         dele.clicked.connect(lambda: self.edit.emit({"op": "element_del", "index": index}))
         self._row(dup, dele)
+
+    _DASH_OPTIONS = (("实线", "solid"), ("虚线", "dash"), ("点线", "dot"),
+                     ("点划线", "dashdot"))
+
+    def _appearance_rows(self, index: int, el: dict) -> None:
+        et = el.get("type")
+        # opacity (all types)
+        op = QSlider(Qt.Orientation.Horizontal)
+        op.setRange(10, 100)
+        op.setValue(int(round(float(el.get("opacity", 1.0) or 1.0) * 100)))
+        op.valueChanged.connect(lambda v: self.edit.emit(
+            {"op": "element_opacity", "index": index, "value": v / 100.0}))
+        self._row("不透明", op)
+        # dash (stroked shapes)
+        if et in ("line", "rect", "ellipse", "shape"):
+            dash = QComboBox()
+            for label, val in self._DASH_OPTIONS:
+                dash.addItem(label, val)
+            di = dash.findData(el.get("dash") or "solid")
+            dash.setCurrentIndex(di if di >= 0 else 0)
+            dash.currentIndexChanged.connect(lambda _i: self.edit.emit(
+                {"op": "element_dash", "index": index, "value": dash.currentData()}))
+            self._row("线型", dash)
+        # arrowheads (line)
+        if et == "line":
+            a0 = _btn("起点箭头", True); a0.setChecked(bool(el.get("arrowStart")))
+            a1 = _btn("终点箭头", True); a1.setChecked(bool(el.get("arrowEnd")))
+            a0.toggled.connect(lambda on: self.edit.emit(
+                {"op": "element_arrowStart", "index": index, "value": on}))
+            a1.toggled.connect(lambda on: self.edit.emit(
+                {"op": "element_arrowEnd", "index": index, "value": on}))
+            self._row(a0, a1)
+        # font family + wrap (text/field)
+        if et in ("text", "field"):
+            font = QComboBox()
+            font.addItem("默认字体", "")
+            try:
+                from PyQt6.QtGui import QFontDatabase
+                for fam in QFontDatabase.families():
+                    font.addItem(fam, fam)
+            except Exception:
+                pass
+            fi = font.findData(el.get("font") or "")
+            font.setCurrentIndex(fi if fi >= 0 else 0)
+            font.currentIndexChanged.connect(lambda _i: self.edit.emit(
+                {"op": "element_font", "index": index, "value": font.currentData()}))
+            self._row("字体", font)
+            wrap = _btn("自动换行", True); wrap.setChecked(bool(el.get("wrap")))
+            wrap.toggled.connect(lambda on: self.edit.emit(
+                {"op": "element_wrap", "index": index, "value": on}))
+            self._row(wrap)
+        # gradient + shadow (filled shapes)
+        if et in ("rect", "ellipse", "shape"):
+            grad_on = _btn("渐变填充", True); grad_on.setChecked(bool(el.get("gradient")))
+            grad_on.toggled.connect(
+                lambda on, i=index: self._toggle_gradient(i, on))
+            sh_on = _btn("投影", True); sh_on.setChecked(bool(el.get("shadow")))
+            sh_on.toggled.connect(lambda on, i=index: self._toggle_shadow(i, on))
+            self._row(grad_on, sh_on)
+
+    def _toggle_gradient(self, index: int, on: bool) -> None:
+        if on:
+            self.edit.emit({"op": "element_gradient", "index": index, "value": {
+                "type": "linear", "angle": 0,
+                "stops": [["#ffffff", 0.0], ["#000000", 1.0]]}})
+        else:
+            self.edit.emit({"op": "element_gradient", "index": index, "value": None})
+
+    def _toggle_shadow(self, index: int, on: bool) -> None:
+        if on:
+            self.edit.emit({"op": "element_shadow", "index": index, "value": {
+                "dx": 0.6, "dy": 0.6, "blur": 0, "color": "#888888"}})
+        else:
+            self.edit.emit({"op": "element_shadow", "index": index, "value": None})
 
     def _text_style_rows(self, index: int, el: dict) -> None:
         size = QSpinBox(); size.setRange(4, 60)
@@ -1115,6 +1259,13 @@ class _PropertyPanel(QWidget):
         self._row("标签宽", w_spin)
         self._row("标签高", h_spin)
 
+        # monochrome collapse (B&W laser): gradients→first stop, no shadow/opacity
+        mono = _btn("单色折叠(黑白打印)", True)
+        mono.setChecked(bool(self._tmpl.get("monochrome")))
+        mono.toggled.connect(lambda on: self.edit.emit(
+            {"op": "tmpl_monochrome", "value": on}))
+        self._row(mono)
+
         dims_lbl = QLabel("点击画布上的文字/图形/QR 进行编辑；顶部「+元素」可加文字/图形/图片/条码。"
                           "选中元素后拖角缩放、拖动自动吸附对齐。")
         dims_lbl.setStyleSheet("color:#5f7d7a; font-size:12px;")
@@ -1329,8 +1480,18 @@ class LabelDesignerDialog(QDialog):
         self._inline_index = -1
         self._drag_baseline: Optional[tuple] = None
         self._selected_key: Optional[str] = None  # chosen library key on accept
+        self._fmt_pending: Optional[dict] = None   # captured style for format painter
         self._setup_ui()
         self._refresh()
+
+    # ── Format painter (Phase 6) ──────────────────────────────────────────────
+    def _on_format_painter_toggled(self, on: bool) -> None:
+        if on:
+            kind, _r, field = self._sel
+            self._fmt_pending = self._capture_style(field) \
+                if kind == "element" and field >= 0 else {}
+        else:
+            self._fmt_pending = None
 
     def _setup_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -1377,6 +1538,17 @@ class LabelDesignerDialog(QDialog):
         self._clear_guides_btn.setToolTip("从标尺拖出参考线；点此清除全部参考线")
         self._clear_guides_btn.clicked.connect(lambda: self._canvas.clear_user_guides())
 
+        # zoom controls (1.0 = fit-to-window; Ctrl+滚轮 / Space拖拽平移)
+        zoom_out = _btn("－"); zoom_out.setToolTip("缩小"); zoom_out.setFixedWidth(30)
+        zoom_out.clicked.connect(lambda: self._canvas.zoom_by(1 / 1.2))
+        zoom_in = _btn("＋"); zoom_in.setToolTip("放大"); zoom_in.setFixedWidth(30)
+        zoom_in.clicked.connect(lambda: self._canvas.zoom_by(1.2))
+        zoom_fit = _btn("适应"); zoom_fit.setToolTip("还原适应窗口 (1:1)")
+        zoom_fit.clicked.connect(lambda: self._canvas.reset_zoom())
+        self._fmt_btn = _btn("格式刷", True)
+        self._fmt_btn.setToolTip("先选好样板元素点此，再点目标元素套用其样式")
+        self._fmt_btn.toggled.connect(self._on_format_painter_toggled)
+
         self._undo_btn = _btn("↶ 撤销")
         self._redo_btn = _btn("↷ 重做")
         self._undo_btn.clicked.connect(self._do_undo)
@@ -1390,7 +1562,8 @@ class LabelDesignerDialog(QDialog):
             smenu.addAction("删除当前自定义", self._delete_current)
         saveas.setMenu(smenu)
         for w in (add_field, add_row, add_el, qr_btn, presets_btn,
-                  self._guide_btn, self._clear_guides_btn):
+                  self._guide_btn, self._clear_guides_btn,
+                  zoom_out, zoom_in, zoom_fit, self._fmt_btn):
             bar.addWidget(w)
         bar.addStretch()
         bar.addWidget(self._undo_btn)
@@ -1567,6 +1740,17 @@ class LabelDesignerDialog(QDialog):
         self._panel._dims = self._dims
         self._panel.show_for(kind, row, field, self._tmpl)
         self._sync_float_bar()
+        # format painter: first element click captures the source style; the
+        # next applies it to the target, then disarms the tool.
+        if self._fmt_pending is not None and kind == "element" and field >= 0:
+            if self._fmt_pending:
+                style = self._fmt_pending
+                self._fmt_pending = None
+                self._fmt_btn.setChecked(False)
+                self._apply_edit({"op": "element_apply_style", "index": field,
+                                  "style_dict": style})
+            else:
+                self._fmt_pending = self._capture_style(field)
 
     # ── Floating quick-format toolbar (Phase 2) ───────────────────────────────
     def _sync_float_bar(self) -> None:
@@ -1928,7 +2112,14 @@ class LabelDesignerDialog(QDialog):
             if isinstance(f, dict):
                 f["color"] = ch["value"]
         elif op and op.startswith("element_"):
-            self._apply_element_edit(op, ch)
+            multi = sorted(i for i in getattr(self, "_multi", set())
+                           if 0 <= i < len(self._elements()))
+            if op in _BATCH_OPS and len(multi) >= 2:
+                for j in multi:               # one undo frame (already pushed)
+                    c = dict(ch); c["index"] = j
+                    self._apply_element_edit(op, c)
+            else:
+                self._apply_element_edit(op, ch)
         elif op == "dims":
             self._dims = {"w": float(ch.get("w") or self._dims.get("w", 60)),
                           "h": float(ch.get("h") or self._dims.get("h", 40))}
@@ -2000,6 +2191,9 @@ class LabelDesignerDialog(QDialog):
             el["hidden"] = bool(ch.get("value"))
         elif op == "element_locked":
             el["locked"] = bool(ch.get("value"))
+        elif op == "element_apply_style":
+            for k, v in (ch.get("style_dict") or {}).items():
+                el[k] = copy.deepcopy(v)
         elif op == "element_key":
             el["key"] = ch.get("value")
         elif op == "element_content":
@@ -2099,6 +2293,27 @@ class LabelDesignerDialog(QDialog):
         if gid is None:
             return {index}
         return {i for i, e in enumerate(els) if e.get("group") == gid}
+
+    # ── Format painter + batch edit (Phase 6) ─────────────────────────────────
+    def _capture_style(self, index: int) -> dict:
+        """Snapshot the copyable style keys of element *index* (no geometry)."""
+        el = self._element_at(index)
+        if el is None:
+            return {}
+        return {k: copy.deepcopy(el[k]) for k in _STYLE_KEYS if k in el}
+
+    def _apply_element_edit_multi(self, op: str, ch: dict) -> None:
+        """Apply *op* to every selected element in one undo frame."""
+        idx = [i for i in self._selected_element_indices()
+               if 0 <= i < len(self._elements())]
+        if not idx:
+            return
+        self._push_undo()
+        for j in idx:
+            c = dict(ch)
+            c["index"] = j
+            self._apply_element_edit(op, c)
+        self._refresh()
 
     def _reorder_element(self, src: int, dst: int) -> None:
         """Move element *src* to list position *dst* (z-order drag-reorder)."""
