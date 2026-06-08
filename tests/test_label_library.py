@@ -185,6 +185,42 @@ class TestLabelTemplateLibraryCRUD:
         names = [r["name"] for r in sample_lib.records()]
         assert names == ["第一", "第二", "第三"]
 
+    def test_free_form_elements_round_trip(self, sample_lib):
+        """A template carrying every element type — including a base64 image —
+        survives QSettings JSON persistence intact (Phase G: zero migration)."""
+        import base64
+        img_b64 = base64.b64encode(b"\x89PNG\r\n\x1a\n-fake-bytes").decode("ascii")
+        elements = [
+            {"type": "text", "x": 1, "y": 1, "w": 20, "h": 6, "text": "Hi"},
+            {"type": "field", "x": 1, "y": 8, "w": 20, "h": 6, "key": "headerId"},
+            {"type": "line", "x1": 0, "y1": 0, "x2": 10, "y2": 0, "width": 0.5},
+            {"type": "rect", "x": 2, "y": 2, "w": 15, "h": 8, "fill": "#eeeeee"},
+            {"type": "ellipse", "x": 3, "y": 3, "w": 10, "h": 10},
+            {"type": "image", "x": 5, "y": 5, "w": 12, "h": 12, "data": img_b64},
+            {"type": "barcode", "x": 1, "y": 20, "w": 30, "h": 12, "content": "uniqueId"},
+        ]
+        rec = sample_lib.upsert({"name": "全元素", "template": {
+            "rows": [], "qr": {"ecc": "Q"}, "elements": elements}})
+        got = sample_lib.get(rec["id"])
+        saved = got["template"]["elements"]
+        assert [e["type"] for e in saved] == [e["type"] for e in elements]
+        img = next(e for e in saved if e["type"] == "image")
+        assert img["data"] == img_b64  # base64 survived the JSON round-trip
+
+    def test_phase1_style_keys_round_trip(self, sample_lib):
+        """Phase 1 keys (opacity/dash/font) survive QSettings persistence."""
+        elements = [
+            {"type": "text", "x": 1, "y": 1, "w": 20, "h": 6, "text": "Hi",
+             "opacity": 0.4, "font": "DejaVu Sans"},
+            {"type": "rect", "x": 2, "y": 2, "w": 15, "h": 8, "fill": "#eeeeee",
+             "opacity": 0.5, "dash": "dash"},
+        ]
+        rec = sample_lib.upsert({"name": "样式键", "template": {
+            "rows": [], "elements": elements}})
+        saved = sample_lib.get(rec["id"])["template"]["elements"]
+        assert saved[0]["opacity"] == 0.4 and saved[0]["font"] == "DejaVu Sans"
+        assert saved[1]["opacity"] == 0.5 and saved[1]["dash"] == "dash"
+
 
 # ── selected_key persistence ──────────────────────────────────────────────────
 
@@ -198,6 +234,14 @@ class TestSelectedKeyPersistence:
     def test_set_selected_key_persists(self, sample_lib):
         sample_lib.set_selected_key("compact")
         assert sample_lib.selected_key() == "compact"
+
+    def test_custom_dims_persist(self, sample_lib):
+        from app.services.label_service import resolve_dims
+        sample_lib.set_custom_dims(72.0, 41.0)
+        assert sample_lib.selected_custom_dims() == {"w": 72.0, "h": 41.0}
+        sample_lib.set_selected_size_key("custom")
+        # resolve_dims falls back to the persisted custom dims when none passed
+        assert resolve_dims(sample_lib) == {"w": 72.0, "h": 41.0}
 
     def test_select_record_sets_custom_key(self, sample_lib):
         rec = sample_lib.upsert({"name": "M", "template": {"rows": []}})
@@ -389,159 +433,151 @@ class TestDualBucketPrintJob:
 # ══════════════════════════════════════════════════════════════════════════════
 
 class TestLabelsViewFull:
+    """LabelsView — web-oracle classic Step 1-4 vertical flow."""
+
     def _make_view(self, qt_app):
         from app.views.labels_view import LabelsView
         from app.app_context import AppContext
         ctx = AppContext()
-        view = LabelsView(ctx)
+        return LabelsView(ctx)
+
+    def _loaded(self, qt_app, specs):
+        view = self._make_view(qt_app)
+        view._specimens = specs
+        view._step1.set_specimens(specs)  # emits → pushes to Step2/3, refreshes Step4
         return view
 
-    def test_status_bar_labels_exist(self, qt_app):
+    def test_step_sections_exist(self, qt_app):
         view = self._make_view(qt_app)
-        assert hasattr(view, "_status_selected")
-        assert hasattr(view, "_status_sample")
-        assert hasattr(view, "_status_tissue")
-        assert hasattr(view, "_status_total")
-        assert hasattr(view, "_status_warn")
+        for attr in ("_step1", "_step2", "_step3", "_step4"):
+            assert hasattr(view, attr)
 
-    def test_update_status_bar_sets_labels(self, qt_app):
-        view = self._make_view(qt_app)
-        view._sample_job = None
-        view._tissue_job = None
-        view._update_status_bar(5, 3, 2, 2)
-        assert "5" in view._status_selected.text()
-        assert "3" in view._status_sample.text()
-        assert "2" in view._status_tissue.text()
-        # total = (3+2)*2 = 10
-        assert "10" in view._status_total.text()
+    def test_output_reflects_injected_specimens(self, qt_app):
+        # 2 specimens, 1 R-prefix → samples 2, RNAlater 1, total (2+1)*1 = 3.
+        view = self._loaded(qt_app, [_sp(), _rna_sp()])
+        txt = view._step4._summary.text()
+        assert "样品瓶 2" in txt
+        assert "RNAlater 组织管 1" in txt
+        assert "总 3" in txt
 
-    def test_print_buttons_disabled_when_no_counts(self, qt_app):
-        view = self._make_view(qt_app)
-        view._go_to_step(3)
-        # No specimens loaded → counts are 0 → buttons disabled
-        # Step4 update_counts with (0,0,...) should disable both buttons
-        view._step4.update_counts(0, 0, [], [], copies=1)
-        assert not view._step4.sample_button.isEnabled()
-        assert not view._step4.tissue_button.isEnabled()
+    def test_no_selection_allows_blank_sample_print(self, qt_app):
+        """No specimen selected → the 样品瓶 button prints blank labels of the
+        bare template (编号 is supported, not required). Tissue stays strictly
+        R-prefix-derived, so its button remains disabled."""
+        view = self._loaded(qt_app, [_sp(), _rna_sp()])
+        view._step1.clear_selection()
+        assert view._step4._btn_sample.isEnabled()       # blank standalone print
+        assert not view._step4._btn_tissue.isEnabled()   # tissue needs R-prefix specimens
+
+    def test_no_selection_blank_job_has_one_item(self, qt_app):
+        view = self._loaded(qt_app, [_sp(), _rna_sp()])
+        view._step1.clear_selection()
+        sample_job = view._build_job("sample")
+        tissue_job = view._build_job("tissue")
+        assert len(sample_job["items"]) == 1            # one blank sample label
+        assert sample_job["items"][0]["data"] == {}     # bound fields blank
+        assert tissue_job["items"] == []                # tissue not fabricated
 
     def test_print_buttons_enabled_when_counts_positive(self, qt_app):
+        view = self._loaded(qt_app, [_sp(), _rna_sp()])
+        assert view._step4._btn_sample.isEnabled()
+        assert view._step4._btn_tissue.isEnabled()
+
+    def test_tissue_button_disabled_when_no_rna(self, qt_app):
+        view = self._loaded(qt_app, [_sp()])  # no R-prefix specimen
+        assert view._step4._btn_sample.isEnabled()
+        assert not view._step4._btn_tissue.isEnabled()
+
+    def test_inject_specimens_selects_all(self, qt_app):
+        view = self._loaded(qt_app, [_sp(), _rna_sp()])
+        assert len(view._step1.selected_indices()) == 2
+
+    def test_rna_marker_only_for_r_prefix(self, qt_app):
+        view = self._loaded(qt_app, [_sp(), _rna_sp()])
+        # index 0 = non-R (no RNA badge), index 1 = R-prefix (has badge)
+        assert view._step1._items[0]["rna"] is False
+        assert view._step1._items[1]["rna"] is True
+
+    def test_view_has_template_libraries(self, qt_app):
         view = self._make_view(qt_app)
-        view._step4.update_counts(3, 1, [], [], copies=1)
-        assert view._step4.sample_button.isEnabled()
-        assert view._step4.tissue_button.isEnabled()
+        assert "sample" in view._libs
+        assert "tissue" in view._libs
 
-    def test_print_tissue_button_disabled_when_tissue_zero(self, qt_app):
-        view = self._make_view(qt_app)
-        view._step4.update_counts(2, 0, [], [], copies=1)
-        assert view._step4.sample_button.isEnabled()
-        assert not view._step4.tissue_button.isEnabled()
+    def test_template_available_without_selection(self, qt_app):
+        view = self._loaded(qt_app, [_sp(), _rna_sp()])
+        view._step1.clear_selection()
+        # Resolved template stays available even with nothing checked.
+        from app.services.label_service import resolve_template
+        assert resolve_template(view._libs["sample"]).get("name")
 
-    def test_inject_specimens_with_rna(self, qt_app):
-        """Injecting R-prefix specimen activates tissue bucket in Step 2."""
-        view = self._make_view(qt_app)
-        mock = [_sp(), _rna_sp()]
-        view._specimens = mock
-        view._step1.set_specimens(mock)
-        view._go_to_step(1)
-        indices = view._step1.selected_indices()
-        assert len(indices) == 2
-
-    def test_label_edits_initially_empty(self, qt_app):
-        view = self._make_view(qt_app)
-        mock = [_sp()]
-        view._specimens = mock
-        view._step1.set_specimens(mock)
-        view._go_to_step(1)
-        edits = view._step2.label_edits()
-        assert isinstance(edits, dict)
-
-    def test_step2_bucket_col_has_template_library(self, qt_app):
-        view = self._make_view(qt_app)
-        assert hasattr(view._step2._sample_col, "_lib")
-        assert hasattr(view._step2._tissue_col, "_lib")
-
-    def test_classic_layout_shows_template_section_without_navigation(self, qt_app):
-        view = self._make_view(qt_app)
-        mock = [_sp(), _rna_sp()]
-        view._specimens = mock
-        view._step1.set_specimens(mock)
-        qt_app.processEvents()
-
-        assert not view._step2.isHidden()
-        assert view._content_layout.indexOf(view._step2) >= 0
-        assert not view._step2._sample_col._manage_btn.isHidden()
-        assert not view._step2._sample_col._import_btn.isHidden()
-        assert view._step2._sample_col.selected_template()["name"]
-
-    def test_template_library_visible_without_specimen_selection(self, qt_app):
-        view = self._make_view(qt_app)
-        mock = [_sp(), _rna_sp()]
-        view._specimens = mock
-        view._step1.set_specimens(mock)
-        view._step1._select_none()
-        qt_app.processEvents()
-
-        assert not view._step2._splitter.isHidden()
-        assert not view._step2._sample_col._manage_btn.isHidden()
-        assert not view._step2._sample_col._import_btn.isHidden()
-        assert view._step2._empty_hint.text().startswith("未选择标本")
+    def test_step2_cards_match_buckets(self, qt_app):
+        view = self._loaded(qt_app, [_sp(), _rna_sp()])
+        # sample column always; tissue column present when R-prefix selected.
+        assert view._step2._cards.get("sample")
+        assert view._step2._cards.get("tissue")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# _BucketColWidget — selected_template with library key
+# LabelDetailPanel — template + size resolution via the library
 # ══════════════════════════════════════════════════════════════════════════════
 
-class TestBucketColWidgetLibrary:
-    def _make_col(self, qt_app, bucket="sample"):
-        from app.views.labels_view import _BucketColWidget
-        col = _BucketColWidget(bucket)
-        return col
+class TestLabelDetailPanelTemplates:
+    def _make_detail(self, qt_app):
+        from app.widgets.label_detail_panel import LabelDetailPanel
+        return LabelDetailPanel()
 
-    def test_selected_template_builtin_returns_standard(self, qt_app):
-        col = self._make_col(qt_app, "sample")
-        col._selected_template_key = "standard"
-        tmpl = col.selected_template()
-        assert tmpl.get("name") == "标准"
+    def _fake_lib(self, tmp_path, bucket):
+        from PyQt6.QtCore import QSettings
+        from app.services.label_service import (
+            LabelTemplateLibrary, _MIGRATION_QSETTINGS_KEY,
+        )
+        ini = str(tmp_path / "detail_lib.ini")
+
+        class _FakeLib(LabelTemplateLibrary):
+            def __init__(self, b):
+                self._bucket = b
+                self._is_tissue = b == "tissue"
+                self._qs = QSettings(ini, QSettings.Format.IniFormat)
+                self._qs.setValue(_MIGRATION_QSETTINGS_KEY[b], "1")
+
+        return _FakeLib(bucket)
+
+    def test_selected_template_builtin_returns_standard(self, qt_app, tmp_path):
+        d = self._make_detail(qt_app)
+        lib = self._fake_lib(tmp_path, "sample")
+        lib.set_selected_key("standard")
+        d._libs["sample"] = lib
+        assert d.selected_template("sample").get("name") == "标准"
 
     def test_selected_template_library_key_resolved(self, qt_app, tmp_path):
         """A custom:<id> key should resolve via the library."""
-        from PyQt6.QtCore import QSettings
-        from app.services.label_service import LabelTemplateLibrary, _MIGRATION_QSETTINGS_KEY
-        from app.views.labels_view import _BucketColWidget
-
-        ini = str(tmp_path / "col_lib.ini")
-
-        class _FakeLib(LabelTemplateLibrary):
-            def __init__(self, bucket):
-                self._bucket = bucket
-                self._is_tissue = bucket == "tissue"
-                self._qs = QSettings(ini, QSettings.Format.IniFormat)
-                self._qs.setValue(_MIGRATION_QSETTINGS_KEY[bucket], "1")
-
-        col = _BucketColWidget("sample")
-        col._lib = _FakeLib("sample")
-        rec = col._lib.upsert({
+        d = self._make_detail(qt_app)
+        lib = self._fake_lib(tmp_path, "sample")
+        rec = lib.upsert({
             "name": "我的自定义",
             "template": {"name": "我的自定义", "rows": [{"fields": ["headerId"], "size": 9}],
                          "qr": {"ecc": "Q"}},
         })
-        col._selected_template_key = f"custom:{rec['id']}"
-        tmpl = col.selected_template()
-        assert tmpl.get("name") == "我的自定义"
+        lib.set_selected_key(f"custom:{rec['id']}")
+        d._libs["sample"] = lib
+        assert d.selected_template("sample").get("name") == "我的自定义"
 
-    def test_dims_saved_and_restored(self, qt_app):
-        col = self._make_col(qt_app, "sample")
-        col._select_size("label_60x40")
-        dims = col.selected_dims()
+    def test_dims_from_size_key(self, qt_app, tmp_path):
+        d = self._make_detail(qt_app)
+        lib = self._fake_lib(tmp_path, "sample")
+        lib.set_selected_size_key("label_60x40")
+        d._libs["sample"] = lib
+        dims = d.selected_dims("sample")
         assert dims["w"] == 60
         assert dims["h"] == 40
 
-    def test_custom_dims_when_custom_selected(self, qt_app):
-        col = self._make_col(qt_app, "sample")
-        col._custom_w = 45
-        col._custom_h = 25
-        col._select_size("custom")
-        dims = col.selected_dims()
+    def test_custom_dims_when_custom_selected(self, qt_app, tmp_path):
+        d = self._make_detail(qt_app)
+        lib = self._fake_lib(tmp_path, "sample")
+        lib.set_selected_size_key("custom")
+        d._libs["sample"] = lib
+        d._custom_dims["sample"] = {"w": 45, "h": 25}
+        dims = d.selected_dims("sample")
         assert dims["w"] == 45
         assert dims["h"] == 25
 
@@ -757,3 +793,75 @@ class TestPerTemplateBackup:
         with patch.object(sample_lib, "backup_template", wraps=sample_lib.backup_template) as mock_bt:
             sample_lib.delete(rec["id"])
         mock_bt.assert_called_once_with(rec["id"], "delete")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 新增管形/圆形标签模板 + 尺寸 (Task 4)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestNewTubeTemplates:
+    """新增8个管形/圆形模板 + 5个纸张尺寸。"""
+
+    def test_total_builtin_count(self):
+        from app.services.label_service import BUILTIN_TEMPLATES
+        assert len(BUILTIN_TEMPLATES) == 14, (
+            f"Expected 14 built-in templates (6 original + 8 new), got {len(BUILTIN_TEMPLATES)}"
+        )
+
+    def test_cryo2ml_cap_has_shape_circle(self):
+        from app.services.label_service import BUILTIN_TEMPLATES
+        assert "cryo2mlCap" in BUILTIN_TEMPLATES
+        assert BUILTIN_TEMPLATES["cryo2mlCap"].get("shape") == "circle"
+
+    def test_cryo2ml_side_exists(self):
+        from app.services.label_service import BUILTIN_TEMPLATES
+        assert "cryo2mlSide" in BUILTIN_TEMPLATES
+
+    def test_falcon_templates_exist(self):
+        from app.services.label_service import BUILTIN_TEMPLATES
+        for k in ("falcon5ml", "falcon15ml", "falcon50ml"):
+            assert k in BUILTIN_TEMPLATES, f"Missing template: {k}"
+
+    def test_bottle_and_museum_exist(self):
+        from app.services.label_service import BUILTIN_TEMPLATES
+        assert "bottle500ml" in BUILTIN_TEMPLATES
+        assert "museumDense" in BUILTIN_TEMPLATES
+
+    def test_qr_first_exists(self):
+        from app.services.label_service import BUILTIN_TEMPLATES
+        assert "qrFirst" in BUILTIN_TEMPLATES
+
+    def test_new_paper_sizes_registered(self):
+        from app.services.label_service import PAPER_SIZES
+        for k in ("label_13x13", "label_38x13", "label_45x17", "label_55x20", "label_75x25"):
+            assert k in PAPER_SIZES, f"Missing paper size: {k}"
+
+    def test_label_13x13_dimensions(self):
+        from app.services.label_service import PAPER_SIZES
+        s = PAPER_SIZES["label_13x13"]
+        assert s["w"] == 13 and s["h"] == 13
+
+    def test_label_size_keys_count(self):
+        from app.services.label_service import LABEL_SIZE_KEYS
+        assert len(LABEL_SIZE_KEYS) == 13, (
+            f"Expected 13 label sizes (8 original + 5 new), got {len(LABEL_SIZE_KEYS)}"
+        )
+
+    def test_new_sizes_in_label_size_keys(self):
+        from app.services.label_service import LABEL_SIZE_KEYS
+        for k in ("label_13x13", "label_38x13", "label_45x17", "label_55x20", "label_75x25"):
+            assert k in LABEL_SIZE_KEYS, f"Missing from LABEL_SIZE_KEYS: {k}"
+
+    def test_all_new_templates_have_rows(self):
+        from app.services.label_service import BUILTIN_TEMPLATES
+        new_keys = ("cryo2mlSide","cryo2mlCap","falcon5ml","falcon15ml",
+                    "falcon50ml","bottle500ml","qrFirst","museumDense")
+        for k in new_keys:
+            assert "rows" in BUILTIN_TEMPLATES[k], f"{k} missing 'rows'"
+
+    def test_all_new_templates_have_qr(self):
+        from app.services.label_service import BUILTIN_TEMPLATES
+        new_keys = ("cryo2mlSide","cryo2mlCap","falcon5ml","falcon15ml",
+                    "falcon50ml","bottle500ml","qrFirst","museumDense")
+        for k in new_keys:
+            assert "qr" in BUILTIN_TEMPLATES[k], f"{k} missing 'qr'"

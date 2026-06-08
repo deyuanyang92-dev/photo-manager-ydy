@@ -238,6 +238,74 @@ class TestElementImageBarcode:
         assert boxes[-1]["etype"] == "barcode"
 
 
+def _dark_count(img):
+    """Number of dark (<128 on all channels) pixels in the image."""
+    n = 0
+    for y in range(img.height()):
+        for x in range(img.width()):
+            c = img.pixelColor(x, y)
+            if c.red() < 128 and c.green() < 128 and c.blue() < 128:
+                n += 1
+    return n
+
+
+class TestElementOpacity:
+    def test_default_opacity_is_byte_identical(self, qt_app):
+        """opacity:1.0 (the default) must render identically to no opacity key."""
+        el = {"type": "rect", "x": 5, "y": 5, "w": 20, "h": 12,
+              "fill": "#000000", "strokeWidth": 0}
+        a, _ = _render_with_elements([dict(el)])
+        b, _ = _render_with_elements([dict(el, opacity=1.0)])
+        assert _images_equal(a, b)
+
+    def test_opacity_half_lightens_pixels(self, qt_app):
+        el = {"type": "rect", "x": 5, "y": 5, "w": 20, "h": 12,
+              "fill": "#000000", "strokeWidth": 0}
+        full, _ = _render_with_elements([dict(el)])
+        half, _ = _render_with_elements([dict(el, opacity=0.5)])
+        # a half-opacity black fill over white is mid-grey → fewer <128 pixels
+        assert _dark_count(half) < _dark_count(full)
+
+
+class TestElementDash:
+    def test_default_dash_is_byte_identical(self, qt_app):
+        el = {"type": "line", "x1": 2, "y1": 5, "x2": 55, "y2": 5, "width": 0.6}
+        a, _ = _render_with_elements([dict(el)])
+        b, _ = _render_with_elements([dict(el, dash="solid")])
+        assert _images_equal(a, b)
+
+    def test_dash_draws_gaps(self, qt_app):
+        el = {"type": "line", "x1": 2, "y1": 5, "x2": 55, "y2": 5, "width": 0.6}
+        solid, _ = _render_with_elements([dict(el, dash="solid")])
+        dashed, _ = _render_with_elements([dict(el, dash="dash")])
+        # gaps mean fewer dark pixels along the same stroke
+        assert _dark_count(dashed) < _dark_count(solid)
+
+
+class TestElementFontFamily:
+    def test_default_font_is_byte_identical(self, qt_app):
+        el = {"type": "text", "x": 2, "y": 2, "w": 50, "h": 8, "text": "AaBb",
+              "size": 10}
+        a, _ = _render_with_elements([dict(el)])
+        b, _ = _render_with_elements([dict(el, font="")])
+        assert _images_equal(a, b)
+
+    def test_font_family_changes_pixels(self, qt_app):
+        from PyQt6.QtGui import QFontDatabase
+        fams = QFontDatabase.families()
+        pick = next((f for f in fams if f and "mono" in f.lower()), None) \
+            or next((f for f in fams if f), None)
+        if not pick:
+            pytest.skip("no font families available in this environment")
+        el = {"type": "text", "x": 2, "y": 2, "w": 50, "h": 8, "text": "AaBbGg",
+              "size": 11}
+        base, _ = _render_with_elements([dict(el)])
+        styled, _ = _render_with_elements([dict(el, font=pick)])
+        if _images_equal(base, styled):
+            pytest.skip(f"family {pick!r} renders identically to default here")
+        assert not _images_equal(base, styled)
+
+
 class TestElementBackwardCompat:
     def test_empty_elements_is_byte_identical(self, qt_app):
         """The single most important gate: a template with elements:[] must

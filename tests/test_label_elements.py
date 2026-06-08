@@ -1,0 +1,119 @@
+"""tests/test_label_elements.py — free-form element layer schema + normalization.
+
+The free-form designer adds an optional ``elements`` list to a template: text,
+field, line, rect, ellipse, image, barcode — each freely positioned in mm.
+These tests pin the pure-Python schema/normalization (no Qt) and the
+backward-compat guarantee that templates without ``elements`` are unaffected.
+"""
+from __future__ import annotations
+
+from app.utils.label_core import normalize_elements, normalize_template
+
+
+def test_normalize_elements_none_is_empty_list():
+    assert normalize_elements(None) == []
+
+
+def test_normalize_elements_non_list_is_empty_list():
+    assert normalize_elements("nope") == []
+    assert normalize_elements({"type": "text"}) == []
+
+
+def test_text_element_gets_defaults():
+    out = normalize_elements([{"type": "text", "text": "Hi", "x": 3, "y": 4}])
+    assert len(out) == 1
+    el = out[0]
+    assert el["type"] == "text"
+    assert el["text"] == "Hi"
+    assert el["x"] == 3.0 and el["y"] == 4.0
+    assert isinstance(el["x"], float)
+    assert el["w"] > 0 and el["h"] > 0
+    assert el["color"] == "#000000"
+    assert el["align"] == "left"
+    assert el["rotation"] == 0
+    assert "size" in el and "style" in el
+
+
+def test_unknown_type_dropped():
+    out = normalize_elements([{"type": "wormhole", "x": 1},
+                              {"type": "text", "text": "ok"},
+                              {"no": "type"}])
+    assert [e["type"] for e in out] == ["text"]
+
+
+def test_extra_keys_preserved():
+    out = normalize_elements([{"type": "rect", "x": 1, "_future": "keep"}])
+    assert out[0]["_future"] == "keep"
+
+
+def test_each_type_normalises():
+    raw = [
+        {"type": "field", "key": "speciesName"},
+        {"type": "line"},
+        {"type": "rect"},
+        {"type": "ellipse"},
+        {"type": "image"},
+        {"type": "barcode"},
+    ]
+    out = normalize_elements(raw)
+    assert [e["type"] for e in out] == ["field", "line", "rect", "ellipse",
+                                        "image", "barcode"]
+    line = out[1]
+    assert {"x1", "y1", "x2", "y2", "width", "color"} <= set(line)
+    assert isinstance(line["x2"], float)
+    rect = out[2]
+    assert rect["fill"] is None and rect["stroke"] == "#000000"
+    img = out[4]
+    assert img["data"] is None and img["keepAspect"] is True
+    bc = out[5]
+    assert bc["content"] == "uniqueId" and bc["showText"] is True
+
+
+# ── Phase 1: opacity / dash / font ──────────────────────────────────────────
+
+def test_opacity_default_is_one_on_all_types():
+    raw = [{"type": t} for t in
+           ("text", "field", "line", "rect", "ellipse", "image", "barcode")]
+    for el in normalize_elements(raw):
+        assert el["opacity"] == 1.0
+        assert isinstance(el["opacity"], float)
+
+
+def test_opacity_coerced_and_clamped():
+    out = normalize_elements([
+        {"type": "rect", "opacity": "0.5"},   # str → float
+        {"type": "rect", "opacity": 2.5},     # > 1 → clamp to 1.0
+        {"type": "rect", "opacity": -0.3},    # < 0 → clamp to 0.0
+        {"type": "rect", "opacity": "junk"},  # bad → default 1.0
+    ])
+    assert out[0]["opacity"] == 0.5
+    assert out[1]["opacity"] == 1.0
+    assert out[2]["opacity"] == 0.0
+    assert out[3]["opacity"] == 1.0
+
+
+def test_dash_default_solid_on_stroke_types():
+    out = normalize_elements([{"type": "line"}, {"type": "rect"},
+                              {"type": "ellipse"}])
+    assert all(el["dash"] == "solid" for el in out)
+    # dash must stay a string, never coerced to float
+    assert isinstance(out[0]["dash"], str)
+
+
+def test_font_default_empty_on_text_field():
+    out = normalize_elements([{"type": "text"}, {"type": "field"}])
+    assert out[0]["font"] == "" and out[1]["font"] == ""
+
+
+def test_normalize_template_adds_empty_elements():
+    tmpl = normalize_template({"rows": [{"fields": [{"key": "uniqueId"}]}]})
+    assert tmpl["elements"] == []
+
+
+def test_normalize_template_normalises_existing_elements():
+    tmpl = normalize_template({
+        "rows": [],
+        "elements": [{"type": "text", "text": "Hi"}, {"type": "bogus"}],
+    })
+    assert len(tmpl["elements"]) == 1
+    assert tmpl["elements"][0]["type"] == "text"

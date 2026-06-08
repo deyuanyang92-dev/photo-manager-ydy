@@ -1773,6 +1773,12 @@ class LabelDesignerDialog(QDialog):
             el["cornerRadius"] = round(float(ch.get("value") or 0.0), 2)
         elif op == "element_rotation":
             el["rotation"] = round(float(ch.get("value") or 0.0), 1)
+        elif op == "element_opacity":
+            el["opacity"] = min(1.0, max(0.0, float(ch.get("value", 1.0) or 0.0)))
+        elif op == "element_dash":
+            el["dash"] = ch.get("value") or "solid"
+        elif op == "element_font":
+            el["font"] = ch.get("value") or ""
         elif op == "element_key":
             el["key"] = ch.get("value")
         elif op == "element_content":

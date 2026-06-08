@@ -300,28 +300,33 @@ def apply_field_visibility(
 # these and drops elements whose ``type`` is not a key here.
 ELEMENT_DEFAULTS: dict[str, dict] = {
     "text": {"x": 0.0, "y": 0.0, "w": 20.0, "h": 6.0, "text": "",
-             "size": 9, "style": "", "color": "#000000", "align": "left",
-             "rotation": 0},
+             "size": 9, "style": "", "font": "", "color": "#000000",
+             "align": "left", "rotation": 0, "opacity": 1.0},
     "field": {"x": 0.0, "y": 0.0, "w": 20.0, "h": 6.0, "key": "uniqueId",
-              "size": 9, "style": "", "color": "#000000", "align": "left",
-              "rotation": 0},
+              "size": 9, "style": "", "font": "", "color": "#000000",
+              "align": "left", "rotation": 0, "opacity": 1.0},
     "line": {"x1": 0.0, "y1": 0.0, "x2": 20.0, "y2": 0.0,
-             "width": 0.3, "color": "#000000"},
+             "width": 0.3, "color": "#000000", "dash": "solid",
+             "opacity": 1.0},
     "rect": {"x": 0.0, "y": 0.0, "w": 20.0, "h": 10.0, "stroke": "#000000",
              "strokeWidth": 0.3, "fill": None, "cornerRadius": 0,
-             "rotation": 0},
+             "dash": "solid", "rotation": 0, "opacity": 1.0},
     "ellipse": {"x": 0.0, "y": 0.0, "w": 20.0, "h": 10.0, "stroke": "#000000",
-                "strokeWidth": 0.3, "fill": None, "rotation": 0},
+                "strokeWidth": 0.3, "fill": None, "dash": "solid",
+                "rotation": 0, "opacity": 1.0},
     "image": {"x": 0.0, "y": 0.0, "w": 20.0, "h": 20.0, "data": None,
-              "path": None, "keepAspect": True, "rotation": 0},
+              "path": None, "keepAspect": True, "rotation": 0, "opacity": 1.0},
     "barcode": {"x": 0.0, "y": 0.0, "w": 30.0, "h": 12.0, "content": "uniqueId",
-                "showText": True, "rotation": 0},
+                "showText": True, "rotation": 0, "opacity": 1.0},
 }
 
 # Keys that must be coerced to float when present (geometry/measure values).
+# NOTE: ``opacity`` is a float key but is additionally clamped to [0, 1] below;
+# string/bool/list/dict keys (dash, font, points, gradient, shadow, …) must
+# NEVER be listed here or float() would corrupt them.
 _ELEMENT_FLOAT_KEYS = frozenset(
     {"x", "y", "w", "h", "x1", "y1", "x2", "y2", "width", "strokeWidth",
-     "cornerRadius", "rotation"}
+     "cornerRadius", "rotation", "opacity"}
 )
 
 
@@ -352,6 +357,8 @@ def normalize_element(raw: Any) -> Optional[dict]:
                 out[key] = float(out[key])
             except (TypeError, ValueError):
                 out[key] = float(defaults.get(key, 0.0) or 0.0)
+            if key == "opacity":
+                out[key] = min(1.0, max(0.0, out[key]))
     return out
 
 
