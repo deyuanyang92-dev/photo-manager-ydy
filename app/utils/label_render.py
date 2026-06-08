@@ -24,6 +24,8 @@ import base64
 import io
 from typing import Optional
 
+import math
+
 from PyQt6.QtCore import Qt, QRectF
 from PyQt6.QtGui import (
     QBrush,
@@ -119,6 +121,31 @@ def _apply_dash(pen: QPen, el: dict) -> None:
     style = _DASH_STYLES.get(el.get("dash") or "solid")
     if style is not None:
         pen.setStyle(style)
+
+
+def _draw_arrowhead(painter: QPainter, tip_x: float, tip_y: float,
+                    from_x: float, from_y: float, color: QColor,
+                    width_px: float) -> None:
+    """Fill a triangular arrowhead at (tip), pointing away from (from)."""
+    dx, dy = tip_x - from_x, tip_y - from_y
+    dist = math.hypot(dx, dy)
+    if dist < 1e-6:
+        return
+    ux, uy = dx / dist, dy / dist          # unit vector along the line
+    size = max(3.0, width_px * 3.5)        # arrowhead length in px
+    half = size * 0.5                      # half base width
+    bx, by = tip_x - ux * size, tip_y - uy * size  # base centre
+    px, py = -uy, ux                       # perpendicular
+    path = QPainterPath()
+    path.moveTo(tip_x, tip_y)
+    path.lineTo(bx + px * half, by + py * half)
+    path.lineTo(bx - px * half, by - py * half)
+    path.closeSubpath()
+    painter.save()
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(QBrush(color))
+    painter.drawPath(path)
+    painter.restore()
 
 
 def render_label_onto(
@@ -453,11 +480,16 @@ def _draw_elements(
             op = float(el.get("opacity", 1.0) or 0.0)
             if op < 1.0:
                 painter.setOpacity(op)
-            pen = QPen(QColor(el.get("color") or "#000000"),
-                       max(0.5, float(el.get("width") or 0.3) * ppm))
+            color = QColor(el.get("color") or "#000000")
+            wpx = max(0.5, float(el.get("width") or 0.3) * ppm)
+            pen = QPen(color, wpx)
             _apply_dash(pen, el)
             painter.setPen(pen)
             painter.drawLine(int(x1), int(y1), int(x2), int(y2))
+            if el.get("arrowEnd"):
+                _draw_arrowhead(painter, x2, y2, x1, y1, color, wpx)
+            if el.get("arrowStart"):
+                _draw_arrowhead(painter, x1, y1, x2, y2, color, wpx)
             painter.restore()
             if hit_boxes is not None:
                 bx, by = min(x1, x2), min(y1, y2)
@@ -499,7 +531,10 @@ def _draw_elements(
             flag = {"center": Qt.AlignmentFlag.AlignHCenter,
                     "right": Qt.AlignmentFlag.AlignRight}.get(
                         align, Qt.AlignmentFlag.AlignLeft)
-            painter.drawText(rect, int(flag | Qt.AlignmentFlag.AlignVCenter), text)
+            tflag = int(flag | Qt.AlignmentFlag.AlignVCenter)
+            if el.get("wrap"):
+                tflag |= int(Qt.TextFlag.TextWordWrap)
+            painter.drawText(rect, tflag, text)
         elif etype == "rect":
             pen = QPen(QColor(el.get("stroke") or "#000000"),
                        max(0.5, float(el.get("strokeWidth") or 0.3) * ppm))

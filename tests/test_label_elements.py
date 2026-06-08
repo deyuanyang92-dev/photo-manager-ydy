@@ -105,6 +105,26 @@ def test_font_default_empty_on_text_field():
     assert out[0]["font"] == "" and out[1]["font"] == ""
 
 
+# ── Phase 2: arrowheads / wrapped text ──────────────────────────────────────
+
+def test_line_arrow_defaults_false():
+    el = normalize_elements([{"type": "line"}])[0]
+    assert el["arrowStart"] is False and el["arrowEnd"] is False
+
+
+def test_text_field_wrap_defaults_false():
+    out = normalize_elements([{"type": "text"}, {"type": "field"}])
+    assert out[0]["wrap"] is False and out[1]["wrap"] is False
+
+
+def test_arrow_and_wrap_are_not_float_coerced():
+    # booleans must survive normalization unchanged (never float())
+    el = normalize_elements([{"type": "line", "arrowEnd": True}])[0]
+    assert el["arrowEnd"] is True
+    t = normalize_elements([{"type": "text", "wrap": True}])[0]
+    assert t["wrap"] is True
+
+
 def test_normalize_template_adds_empty_elements():
     tmpl = normalize_template({"rows": [{"fields": [{"key": "uniqueId"}]}]})
     assert tmpl["elements"] == []

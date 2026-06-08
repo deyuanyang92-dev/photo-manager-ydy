@@ -301,13 +301,13 @@ def apply_field_visibility(
 ELEMENT_DEFAULTS: dict[str, dict] = {
     "text": {"x": 0.0, "y": 0.0, "w": 20.0, "h": 6.0, "text": "",
              "size": 9, "style": "", "font": "", "color": "#000000",
-             "align": "left", "rotation": 0, "opacity": 1.0},
+             "align": "left", "rotation": 0, "opacity": 1.0, "wrap": False},
     "field": {"x": 0.0, "y": 0.0, "w": 20.0, "h": 6.0, "key": "uniqueId",
               "size": 9, "style": "", "font": "", "color": "#000000",
-              "align": "left", "rotation": 0, "opacity": 1.0},
+              "align": "left", "rotation": 0, "opacity": 1.0, "wrap": False},
     "line": {"x1": 0.0, "y1": 0.0, "x2": 20.0, "y2": 0.0,
              "width": 0.3, "color": "#000000", "dash": "solid",
-             "opacity": 1.0},
+             "opacity": 1.0, "arrowStart": False, "arrowEnd": False},
     "rect": {"x": 0.0, "y": 0.0, "w": 20.0, "h": 10.0, "stroke": "#000000",
              "strokeWidth": 0.3, "fill": None, "cornerRadius": 0,
              "dash": "solid", "rotation": 0, "opacity": 1.0},
@@ -510,6 +510,64 @@ def calculate_grid(
         "usableW": usable_w,
         "usableH": usable_h,
     }
+
+
+_DEFAULT_PAGE_MM = {"a4": {"w": 210, "h": 297}, "a5": {"w": 148, "h": 210}}
+
+
+def plan_label_pages(
+    items: list,
+    dims: dict,
+    paper_type: str,
+    paper: Optional[dict] = None,
+    grid_opts: Optional[dict] = None,
+) -> list[dict]:
+    """Plan where each label item lands (page + mm offset). Pure, no Qt.
+
+    Returns a placement dict per item (1:1, same order) so the painter can be a
+    thin consumer. This mirrors the geometry in ``labels_view._paint_labels``
+    exactly — including the quirks that keep printout byte-identical:
+
+      - **label paper**: one item per page (``page = i``), offset (0, 0). Blank
+        items still get their own page (the painter advances the page before it
+        skips drawing a blank).
+      - **a4/a5**: grid via :func:`calculate_grid`; ``page = i // perPage`` and
+        the slot offset uses the grid's own ``margin``/``gap``. Blank items keep
+        their slot (the painter skips drawing them, leaving a gap).
+
+    Each placement: ``{"page": int, "x_mm": float, "y_mm": float, "data": dict}``.
+    """
+    w_mm = float(dims.get("w", 60))
+    h_mm = float(dims.get("h", 40))
+
+    def _data(item):
+        return item.get("data") if isinstance(item, dict) and "data" in item else item
+
+    if paper_type in ("a4", "a5"):
+        pp = paper or _DEFAULT_PAGE_MM[paper_type]
+        grid = calculate_grid(w_mm, h_mm, float(pp["w"]), float(pp["h"]),
+                              opts=grid_opts or {})
+        margin = grid.get("margin", SHEET_MARGIN_MM)
+        gap = grid.get("gap", GRID_GAP_MM)
+        cols = grid["cols"]
+        per_page = grid["perPage"]
+        out = []
+        for i, item in enumerate(items):
+            slot = i % per_page
+            col = slot % cols
+            row = slot // cols
+            out.append({
+                "page": i // per_page,
+                "x_mm": margin + col * (w_mm + gap),
+                "y_mm": margin + row * (h_mm + gap),
+                "data": _data(item),
+            })
+        return out
+
+    return [
+        {"page": i, "x_mm": 0.0, "y_mm": 0.0, "data": _data(item)}
+        for i, item in enumerate(items)
+    ]
 
 
 def estimate_text_scale(template: Optional[dict], dims: dict) -> float:

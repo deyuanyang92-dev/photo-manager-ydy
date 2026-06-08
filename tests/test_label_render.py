@@ -306,6 +306,42 @@ class TestElementFontFamily:
         assert not _images_equal(base, styled)
 
 
+class TestLineArrowheads:
+    def test_default_no_arrow_is_byte_identical(self, qt_app):
+        el = {"type": "line", "x1": 5, "y1": 20, "x2": 50, "y2": 20, "width": 0.5}
+        a, _ = _render_with_elements([dict(el)])
+        b, _ = _render_with_elements([dict(el, arrowStart=False, arrowEnd=False)])
+        assert _images_equal(a, b)
+
+    def test_arrowend_adds_pixels_near_endpoint(self, qt_app):
+        el = {"type": "line", "x1": 5, "y1": 20, "x2": 50, "y2": 20, "width": 0.5}
+        plain, _ = _render_with_elements([dict(el)])
+        arrow, _ = _render_with_elements([dict(el, arrowEnd=True)])
+        # the filled arrowhead triangle adds dark pixels off the 1px-tall stroke
+        assert _dark_count(arrow) > _dark_count(plain)
+
+
+class TestTextWrap:
+    def test_default_no_wrap_is_byte_identical(self, qt_app):
+        el = {"type": "text", "x": 2, "y": 2, "w": 30, "h": 6, "text": "Hello",
+              "size": 9}
+        a, _ = _render_with_elements([dict(el)])
+        b, _ = _render_with_elements([dict(el, wrap=False)])
+        assert _images_equal(a, b)
+
+    def test_wrap_true_grows_text_height(self, qt_app):
+        # a long string in a narrow tall box wraps to multiple lines → taller bbox
+        el = {"type": "text", "x": 2, "y": 2, "w": 16, "h": 34,
+              "text": "alpha beta gamma delta epsilon", "size": 9}
+        nowrap, _ = _render_with_elements([dict(el)])
+        wrapped, _ = _render_with_elements([dict(el, wrap=True)])
+        bb_n, bb_w = _dark_bbox(nowrap), _dark_bbox(wrapped)
+        assert bb_n is not None and bb_w is not None
+        h_n = bb_n[3] - bb_n[1]
+        h_w = bb_w[3] - bb_w[1]
+        assert h_w > h_n, "wrapped text should occupy more vertical space"
+
+
 class TestElementBackwardCompat:
     def test_empty_elements_is_byte_identical(self, qt_app):
         """The single most important gate: a template with elements:[] must

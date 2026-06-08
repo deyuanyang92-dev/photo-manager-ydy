@@ -1779,6 +1779,12 @@ class LabelDesignerDialog(QDialog):
             el["dash"] = ch.get("value") or "solid"
         elif op == "element_font":
             el["font"] = ch.get("value") or ""
+        elif op == "element_arrowStart":
+            el["arrowStart"] = bool(ch.get("value"))
+        elif op == "element_arrowEnd":
+            el["arrowEnd"] = bool(ch.get("value"))
+        elif op == "element_wrap":
+            el["wrap"] = bool(ch.get("value"))
         elif op == "element_key":
             el["key"] = ch.get("value")
         elif op == "element_content":
