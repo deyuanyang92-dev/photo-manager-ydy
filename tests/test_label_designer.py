@@ -690,3 +690,159 @@ class TestResultAndLibrary:
         rec = lib.upsert({"name": "我的设计", "template": d.edited_template()})
         assert len(lib.records()) == n0 + 1
         assert rec["template"]["rows"]
+
+
+# ── Phase 5: grouping / hidden+locked / rotation handle / layers ────────────
+
+class TestGrouping:
+    def test_group_assigns_shared_id_to_selection(self, qt_app):
+        d = _dlg(qt_app)
+        d._add_element("rect")
+        d._add_element("ellipse")
+        d._multi = {0, 1}
+        d._group_selection()
+        els = d._tmpl["elements"]
+        g0, g1 = els[0].get("group"), els[1].get("group")
+        assert g0 is not None and g0 == g1
+
+    def test_group_is_undoable(self, qt_app):
+        d = _dlg(qt_app)
+        d._add_element("rect")
+        d._add_element("rect")
+        d._multi = {0, 1}
+        d._group_selection()
+        d._do_undo()
+        assert all(e.get("group") in (None,) for e in d._tmpl["elements"])
+
+    def test_ungroup_clears_id(self, qt_app):
+        d = _dlg(qt_app)
+        d._add_element("rect")
+        d._add_element("rect")
+        d._multi = {0, 1}
+        d._group_selection()
+        d._multi = {0}
+        d._ungroup_selection()
+        assert d._tmpl["elements"][0].get("group") is None
+
+    def test_selecting_grouped_element_expands_to_peers(self, qt_app):
+        d = _dlg(qt_app)
+        d._add_element("rect")
+        d._add_element("rect")
+        d._add_element("rect")
+        d._multi = {0, 2}
+        d._group_selection()           # elements 0 and 2 share a group
+        d._select("element", -1, 0)    # clicking one selects the whole group
+        assert d._multi == {0, 2}
+
+
+class TestHiddenLocked:
+    def test_hidden_toggle_op(self, qt_app):
+        d = _dlg(qt_app)
+        d._add_element("rect")
+        d._apply_edit({"op": "element_hidden", "index": 0, "value": True})
+        assert d._tmpl["elements"][0]["hidden"] is True
+
+    def test_locked_toggle_op(self, qt_app):
+        d = _dlg(qt_app)
+        d._add_element("rect")
+        d._apply_edit({"op": "element_locked", "index": 0, "value": True})
+        assert d._tmpl["elements"][0]["locked"] is True
+
+    def test_locked_element_not_hit_on_canvas(self, qt_app):
+        d = _dlg(qt_app)
+        d._add_element("rect")
+        d._apply_edit({"op": "element_resize", "index": 0,
+                       "x": 5, "y": 5, "w": 20, "h": 12})
+        d._apply_edit({"op": "element_locked", "index": 0, "value": True})
+        c = d._canvas
+        c.resize(600, 400)
+        c._render()
+        # a click in the locked element's box must not hit it
+        pt = QPoint(int(c._origin.x() + 10 * c._ppm),
+                    int(c._origin.y() + 10 * c._ppm))
+        assert c._hit(pt) is None
+
+
+class TestRotationHandle:
+    def test_rot_handle_detected_above_top_center(self, qt_app):
+        d = _dlg(qt_app)
+        d._add_element("rect")
+        d._apply_edit({"op": "element_resize", "index": 0,
+                       "x": 5, "y": 5, "w": 20, "h": 12})
+        d._select("element", -1, 0)
+        c = d._canvas
+        c.resize(600, 400)
+        c._render()
+        box = c._selected_box()
+        rot_pt = QPoint(int(c._origin.x() + box["x"] + box["w"] / 2),
+                        int(c._origin.y() + box["y"] - 18))
+        assert c._hit_handle(rot_pt) == "rot"
+
+    def test_line_has_no_rot_handle(self, qt_app):
+        d = _dlg(qt_app)
+        d._add_element("line")
+        d._select("element", -1, 0)
+        c = d._canvas
+        c.resize(600, 400)
+        c._render()
+        assert "rot" not in c._handle_rects(c._selected_box())
+
+    def test_rotation_drag_updates_angle(self, qt_app):
+        from PyQt6.QtGui import QMouseEvent
+        from PyQt6.QtCore import QPointF, QEvent, Qt
+        d = _dlg(qt_app)
+        d._add_element("rect")
+        d._apply_edit({"op": "element_resize", "index": 0,
+                       "x": 10, "y": 10, "w": 20, "h": 12})
+        d._select("element", -1, 0)
+        c = d._canvas
+        c.resize(600, 400)
+        c._render()
+        box = c._selected_box()
+        cx = c._origin.x() + box["x"] + box["w"] / 2
+        cy = c._origin.y() + box["y"] + box["h"] / 2
+        rot_pt = QPointF(c._origin.x() + box["x"] + box["w"] / 2,
+                         c._origin.y() + box["y"] - 18)
+
+        def _ev(kind, x, y):
+            return QMouseEvent(kind, QPointF(x, y), Qt.MouseButton.LeftButton,
+                               Qt.MouseButton.LeftButton,
+                               Qt.KeyboardModifier.NoModifier)
+        c.mousePressEvent(_ev(QEvent.Type.MouseButtonPress, rot_pt.x(), rot_pt.y()))
+        # drag the handle to the right of center → ~90 degrees
+        c.mouseMoveEvent(_ev(QEvent.Type.MouseMove, cx + 60, cy))
+        c.mouseReleaseEvent(_ev(QEvent.Type.MouseButtonRelease, cx + 60, cy))
+        rot = float(d._tmpl["elements"][0].get("rotation") or 0)
+        assert 60 < rot < 120, f"expected ~90°, got {rot}"
+
+
+class TestLayersPanel:
+    def test_panel_lists_elements_topmost_first(self, qt_app):
+        from app.widgets.label_designer_dialog import LayersPanel
+        p = LayersPanel()
+        els = [{"type": "rect"}, {"type": "text", "text": "Hi"},
+               {"type": "ellipse"}]
+        p.set_elements(els, sel_index=-1)
+        # z-order: last element is topmost → shown first
+        assert p.count() == 3
+        assert p.element_index_at_row(0) == 2   # topmost (ellipse)
+        assert p.element_index_at_row(2) == 0   # bottom (rect)
+
+    def test_panel_select_emits_index(self, qt_app):
+        from app.widgets.label_designer_dialog import LayersPanel
+        p = LayersPanel()
+        got = []
+        p.layer_selected.connect(lambda i: got.append(i))
+        p.set_elements([{"type": "rect"}, {"type": "rect"}], sel_index=-1)
+        p.setCurrentRow(0)   # topmost row → element index 1
+        assert got and got[-1] == 1
+
+    def test_panel_visibility_toggle_emits_op(self, qt_app):
+        from app.widgets.label_designer_dialog import LayersPanel
+        p = LayersPanel()
+        ops = []
+        p.layer_action.connect(lambda ch: ops.append(ch))
+        p.set_elements([{"type": "rect", "hidden": False}], sel_index=-1)
+        p.toggle_hidden_at_row(0)
+        assert ops and ops[-1]["op"] == "element_hidden"
+        assert ops[-1]["index"] == 0 and ops[-1]["value"] is True

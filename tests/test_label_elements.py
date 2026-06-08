@@ -167,6 +167,25 @@ def test_shape_custom_points_preserved():
     assert isinstance(el["points"], list)
 
 
+# ── Phase 5: group / hidden / locked universal keys ─────────────────────────
+
+def test_universal_keys_default_on_all_types():
+    raw = [{"type": t} for t in
+           ("text", "field", "line", "rect", "ellipse", "shape", "image",
+            "barcode")]
+    for el in normalize_elements(raw):
+        assert el["group"] is None
+        assert el["hidden"] is False
+        assert el["locked"] is False
+
+
+def test_universal_keys_survive_and_not_float_coerced():
+    el = normalize_elements([{"type": "rect", "group": "g1",
+                              "hidden": True, "locked": True}])[0]
+    assert el["group"] == "g1"
+    assert el["hidden"] is True and el["locked"] is True
+
+
 def test_normalize_template_adds_empty_elements():
     tmpl = normalize_template({"rows": [{"fields": [{"key": "uniqueId"}]}]})
     assert tmpl["elements"] == []

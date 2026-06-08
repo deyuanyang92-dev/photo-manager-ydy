@@ -17,6 +17,8 @@ Reused, unchanged:
 from __future__ import annotations
 
 import copy
+import math
+import uuid
 from typing import Optional
 
 from PyQt6.QtCore import Qt, QPoint, QRectF, pyqtSignal
@@ -31,6 +33,8 @@ from PyQt6.QtWidgets import (
     QInputDialog,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMenu,
     QMessageBox,
     QPushButton,
@@ -135,6 +139,7 @@ class _DesignCanvas(QWidget):
     marquee = pyqtSignal(float, float, float, float)  # box-select rect x,y,w,h (mm)
     delete_pressed = pyqtSignal()          # Del / Backspace on the canvas
     edit_requested = pyqtSignal(int)       # double-click a text element → inline edit
+    element_rotated = pyqtSignal(int, float)  # index, angle(deg) — rotation handle
 
     _HANDLES = ("nw", "n", "ne", "e", "se", "s", "sw", "w")
     _HANDLE_PX = 7
@@ -160,6 +165,7 @@ class _DesignCanvas(QWidget):
         # resize state
         self._resize_handle: Optional[str] = None
         self._resize_base: Optional[tuple] = None  # (x,y,w,h) mm at grab
+        self._rotating: bool = False               # rotation-handle drag active
         # smart-assist state
         self._snap_enabled = True
         self._grid_mm = 1.0
@@ -363,6 +369,10 @@ class _DesignCanvas(QWidget):
         # last-drawn wins (elements appended last → topmost) → iterate reversed
         for b in reversed(self._boxes):
             if b["x"] <= rx <= b["x"] + b["w"] and b["y"] <= ry <= b["y"] + b["h"]:
+                if b.get("kind") == "element":
+                    el = self._element(int(b.get("index", -1)))
+                    if el is not None and el.get("locked"):
+                        continue  # locked layer is click-through in the designer
                 return b
         return None
 
@@ -380,6 +390,12 @@ class _DesignCanvas(QWidget):
         out = {}
         for name, (hx, hy) in centers.items():
             out[name] = QRect(int(ox + hx - s / 2), int(oy + hy - s / 2), s, s)
+        # rotation grip floats above top-center — only for rotatable (non-line)
+        el = self._element(int(box.get("index", -1))) \
+            if box.get("kind") == "element" else None
+        if el is not None and el.get("type") != "line":
+            rx, ry = x + w / 2, y - 18
+            out["rot"] = QRect(int(ox + rx - s / 2), int(oy + ry - s / 2), s, s)
         return out
 
     def _hit_handle(self, pt: QPoint) -> Optional[str]:
@@ -408,6 +424,11 @@ class _DesignCanvas(QWidget):
             box = self._selected_box()
             i = int(box.get("index", -1)) if box else -1
             el = self._element(i)
+            if el is not None and handle == "rot":
+                self._rotating = True
+                self._press_pt = e.pos()
+                self._dragging = False
+                return
             if el is not None:
                 self._resize_handle = handle
                 self._resize_base = (float(el.get("x") or 0), float(el.get("y") or 0),
@@ -483,10 +504,24 @@ class _DesignCanvas(QWidget):
             self.drag_started.emit()
         if not self._dragging:
             return
-        if self._resize_handle is not None:
+        if self._rotating:
+            self._do_rotate(e)
+        elif self._resize_handle is not None:
             self._do_resize(dx / self._ppm, dy / self._ppm)
         else:
             self.dragged.emit(dx / self._ppm, dy / self._ppm)
+
+    def _do_rotate(self, e) -> None:
+        box = self._selected_box()
+        if box is None:
+            return
+        cx = self._origin.x() + box["x"] + box["w"] / 2.0
+        cy = self._origin.y() + box["y"] + box["h"] / 2.0
+        ang = math.degrees(math.atan2(e.pos().y() - cy, e.pos().x() - cx)) + 90.0
+        if e.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+            ang = round(ang / 15.0) * 15.0
+        ang = round(ang % 360.0, 1)
+        self.element_rotated.emit(int(box.get("index", -1)), ang)
 
     def _do_resize(self, dx_mm: float, dy_mm: float) -> None:
         if self._resize_base is None:
@@ -549,6 +584,7 @@ class _DesignCanvas(QWidget):
         self._dragging = False
         self._resize_handle = None
         self._resize_base = None
+        self._rotating = False
         if self._guides:
             self._guides = []
             self.update()
@@ -1175,6 +1211,96 @@ class _FloatingToolbar(QWidget):
         self.hide()
 
 
+class LayersPanel(QListWidget):
+    """Z-order layer list for the free-form elements (topmost shown first).
+
+    Rows mirror the ``elements`` list reversed (last element = topmost = row 0).
+    Click a row to select; per-row 👁/🔒 toggles emit visibility/lock ops.
+    Drag-reorder emits a reorder request (wired by the dialog).
+    """
+
+    layer_selected = pyqtSignal(int)   # element index
+    layer_action = pyqtSignal(dict)    # element_hidden / element_locked op dict
+    layer_reordered = pyqtSignal(int, int)  # src element index, dst element index
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._elements: list = []
+        self._row_to_index: list = []
+        self.setObjectName("LayersPanel")
+        self.setDragDropMode(QListWidget.DragDropMode.InternalMove)
+        self.currentRowChanged.connect(self._on_row_changed)
+        self.model().rowsMoved.connect(self._on_rows_moved)
+
+    # ── population ────────────────────────────────────────────────────────────
+    def set_elements(self, elements: list, sel_index: int = -1) -> None:
+        self._elements = list(elements or [])
+        n = len(self._elements)
+        # topmost first: row r ↔ element index (n-1-r)
+        self._row_to_index = [n - 1 - r for r in range(n)]
+        self.blockSignals(True)
+        self.clear()
+        for r, idx in enumerate(self._row_to_index):
+            it = QListWidgetItem(self._row_label(self._elements[idx], idx))
+            self.addItem(it)
+            if idx == sel_index:
+                self.setCurrentRow(r)
+        self.blockSignals(False)
+
+    @staticmethod
+    def _row_label(el: dict, idx: int) -> str:
+        et = el.get("type")
+        name = ELEMENT_TYPE_LABELS.get(et, et)
+        extra = ""
+        if et == "text":
+            extra = f"：{(el.get('text') or '')[:8]}"
+        elif et == "field":
+            extra = f"：{el.get('key') or ''}"
+        flags = ""
+        if el.get("hidden"):
+            flags += " ◌"   # hidden
+        if el.get("locked"):
+            flags += " 🔒"
+        if el.get("group"):
+            flags += " ⛓"
+        return f"{name}{extra}{flags}"
+
+    def element_index_at_row(self, row: int) -> int:
+        if 0 <= row < len(self._row_to_index):
+            return self._row_to_index[row]
+        return -1
+
+    # ── interactions ──────────────────────────────────────────────────────────
+    def _on_row_changed(self, row: int) -> None:
+        idx = self.element_index_at_row(row)
+        if idx >= 0:
+            self.layer_selected.emit(idx)
+
+    def toggle_hidden_at_row(self, row: int) -> None:
+        idx = self.element_index_at_row(row)
+        if idx < 0:
+            return
+        cur = bool(self._elements[idx].get("hidden"))
+        self.layer_action.emit({"op": "element_hidden", "index": idx,
+                                "value": not cur})
+
+    def toggle_locked_at_row(self, row: int) -> None:
+        idx = self.element_index_at_row(row)
+        if idx < 0:
+            return
+        cur = bool(self._elements[idx].get("locked"))
+        self.layer_action.emit({"op": "element_locked", "index": idx,
+                                "value": not cur})
+
+    def _on_rows_moved(self, parent, start, end, dest, drow) -> None:
+        src_idx = self.element_index_at_row(start)
+        # destination element index in the OLD list coords
+        dst_row = drow if drow < start else drow - 1
+        dst_idx = self.element_index_at_row(dst_row)
+        if src_idx >= 0 and dst_idx >= 0 and src_idx != dst_idx:
+            self.layer_reordered.emit(src_idx, dst_idx)
+
+
 class LabelDesignerDialog(QDialog):
     """Full free-form label designer."""
 
@@ -1298,6 +1424,12 @@ class LabelDesignerDialog(QDialog):
         del_b.clicked.connect(self._delete_selection)
         for w in (copy_b, paste_b, del_b):
             abar.addWidget(w)
+        abar.addSpacing(10)
+        grp_b = _btn("组合"); grp_b.setToolTip("把多选元素组合 (Ctrl+G)")
+        grp_b.clicked.connect(self._group_selection)
+        ungrp_b = _btn("取消组合"); ungrp_b.setToolTip("解散所选组 (Ctrl+Shift+G)")
+        ungrp_b.clicked.connect(self._ungroup_selection)
+        abar.addWidget(grp_b); abar.addWidget(ungrp_b)
         abar.addStretch()
         root.addLayout(abar)
 
@@ -1306,6 +1438,9 @@ class LabelDesignerDialog(QDialog):
         QShortcut(QKeySequence.StandardKey.Paste, self, activated=self._paste_clipboard)
         QShortcut(QKeySequence("Ctrl+D"), self,
                   activated=lambda: (self._copy_selection(), self._paste_clipboard()))
+        QShortcut(QKeySequence("Ctrl+G"), self, activated=self._group_selection)
+        QShortcut(QKeySequence("Ctrl+Shift+G"), self,
+                  activated=self._ungroup_selection)
 
         # Canvas | property panel
         self._canvas = _DesignCanvas()
@@ -1315,6 +1450,7 @@ class LabelDesignerDialog(QDialog):
         self._canvas.dragged.connect(self._on_dragged)
         self._canvas.nudged.connect(self._on_nudged)
         self._canvas.element_resized.connect(self._on_element_resized)
+        self._canvas.element_rotated.connect(self._on_element_rotated)
         self._canvas.multi_toggle.connect(self._toggle_multi)
         self._canvas.marquee.connect(self._marquee_select)
         self._canvas.delete_pressed.connect(self._delete_selection)
@@ -1330,9 +1466,40 @@ class LabelDesignerDialog(QDialog):
         self._float_bar.color_pick.connect(self._float_color)
         self._float_bar.z_delta.connect(self._float_z)
 
+        # right column = property panel (top) + layers panel (bottom)
+        self._layers = LayersPanel()
+        self._layers.layer_selected.connect(
+            lambda i: self._select("element", -1, i))
+        self._layers.layer_action.connect(self._apply_edit)
+        self._layers.layer_reordered.connect(self._reorder_element)
+        self._layers.itemDoubleClicked.connect(
+            lambda _it: self._layers.toggle_hidden_at_row(self._layers.currentRow()))
+
+        right = QSplitter(Qt.Orientation.Vertical)
+        right.addWidget(self._panel)
+        layers_box = QWidget()
+        lb = QVBoxLayout(layers_box)
+        lb.setContentsMargins(0, 0, 0, 0)
+        lb.setSpacing(3)
+        lrow = QHBoxLayout()
+        lrow.addWidget(QLabel("图层"))
+        lrow.addStretch()
+        eye = QPushButton("👁 隐/显"); eye.setObjectName("Outline")
+        eye.clicked.connect(
+            lambda: self._layers.toggle_hidden_at_row(self._layers.currentRow()))
+        lock = QPushButton("🔒 锁/解"); lock.setObjectName("Outline")
+        lock.clicked.connect(
+            lambda: self._layers.toggle_locked_at_row(self._layers.currentRow()))
+        lrow.addWidget(eye); lrow.addWidget(lock)
+        lb.addLayout(lrow)
+        lb.addWidget(self._layers)
+        right.addWidget(layers_box)
+        right.setStretchFactor(0, 7)
+        right.setStretchFactor(1, 3)
+
         split = QSplitter(Qt.Orientation.Horizontal)
         split.addWidget(self._canvas)
-        split.addWidget(self._panel)
+        split.addWidget(right)
         split.setStretchFactor(0, 6)
         split.setStretchFactor(1, 4)
         split.setSizes([580, 340])
@@ -1381,11 +1548,20 @@ class LabelDesignerDialog(QDialog):
         self._canvas.set_multi(getattr(self, "_multi", set()))
         self._panel._dims = self._dims
         self._panel.show_for(kind, row, field, self._tmpl)
+        layers = getattr(self, "_layers", None)
+        if layers is not None:
+            layers.set_elements(self._tmpl.get("elements") or [],
+                                sel_index=field if kind == "element" else -1)
         self._sync_float_bar()
 
     def _select(self, kind: str, row: int, field: int) -> None:
         self._sel = (kind, row, field)
         self._multi = set()            # a plain click resets the group selection
+        # selecting a grouped element pulls in its whole group (move together)
+        if kind == "element" and field >= 0:
+            peers = self._group_peers(field)
+            if len(peers) > 1:
+                self._multi = set(peers)
         self._canvas.set_selection(kind, row, field)
         self._canvas.set_multi(self._multi)
         self._panel._dims = self._dims
@@ -1639,6 +1815,13 @@ class LabelDesignerDialog(QDialog):
         self._canvas.set_guides(guides)
         self._refresh()
 
+    def _on_element_rotated(self, index: int, angle: float) -> None:
+        el = self._element_at(index)
+        if el is None:
+            return
+        el["rotation"] = round(float(angle), 1)
+        self._refresh()
+
     def _on_nudged(self, dx_mm: float, dy_mm: float) -> None:
         kind, row, field = self._sel
         if kind not in ("field", "qr", "element"):
@@ -1813,6 +1996,10 @@ class LabelDesignerDialog(QDialog):
             el["gradient"] = ch.get("value")  # dict or None clears it
         elif op == "element_shadow":
             el["shadow"] = ch.get("value")    # dict or None clears it
+        elif op == "element_hidden":
+            el["hidden"] = bool(ch.get("value"))
+        elif op == "element_locked":
+            el["locked"] = bool(ch.get("value"))
         elif op == "element_key":
             el["key"] = ch.get("value")
         elif op == "element_content":
@@ -1874,6 +2061,55 @@ class LabelDesignerDialog(QDialog):
             return multi
         kind, _row, field = self._sel
         return [field] if kind == "element" and field >= 0 else []
+
+    # ── Persistent grouping (Phase 5) ─────────────────────────────────────────
+    def _group_selection(self) -> None:
+        """Assign a shared group id to every selected element (≥2)."""
+        idx = [i for i in self._selected_element_indices()
+               if 0 <= i < len(self._elements())]
+        if len(idx) < 2:
+            return
+        self._push_undo()
+        els = self._elements()
+        gid = uuid.uuid4().hex[:8]
+        for j in idx:
+            els[j]["group"] = gid
+        self._refresh()
+
+    def _ungroup_selection(self) -> None:
+        """Clear the group id from the selection's whole group(s)."""
+        els = self._elements()
+        idx = [i for i in self._selected_element_indices() if 0 <= i < len(els)]
+        gids = {els[j].get("group") for j in idx}
+        gids.discard(None)
+        if not gids:
+            return
+        self._push_undo()
+        for e in els:
+            if e.get("group") in gids:
+                e["group"] = None
+        self._refresh()
+
+    def _group_peers(self, index: int) -> set:
+        """All element indices sharing *index*'s group (incl. itself)."""
+        els = self._elements()
+        if not (0 <= index < len(els)):
+            return set()
+        gid = els[index].get("group")
+        if gid is None:
+            return {index}
+        return {i for i, e in enumerate(els) if e.get("group") == gid}
+
+    def _reorder_element(self, src: int, dst: int) -> None:
+        """Move element *src* to list position *dst* (z-order drag-reorder)."""
+        els = self._elements()
+        if not (0 <= src < len(els)) or not (0 <= dst < len(els)) or src == dst:
+            return
+        self._push_undo()
+        el = els.pop(src)
+        els.insert(dst, el)
+        self._sel = ("element", -1, dst)
+        self._refresh()
 
     def _align_elements(self, mode: str, indices: Optional[list] = None) -> None:
         """Align elements. Reference is the selection's bounding box when ≥2 are

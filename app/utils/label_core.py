@@ -329,6 +329,17 @@ ELEMENT_DEFAULTS: dict[str, dict] = {
               "gradient": None, "shadow": None},
 }
 
+# Universal keys present on EVERY element type (filled by normalize_element if
+# absent). All render no-ops at their defaults: ``group`` (persistent grouping
+# id, renderer-ignored), ``hidden`` (skip drawing + hit box), ``locked``
+# (designer-only edit lock, renderer-ignored). Defaults keep templates authored
+# before Phase 5 byte-identical.
+_UNIVERSAL_ELEMENT_DEFAULTS: dict[str, Any] = {
+    "group": None,
+    "hidden": False,
+    "locked": False,
+}
+
 # Keys that must be coerced to float when present (geometry/measure values).
 # NOTE: ``opacity`` is a float key but is additionally clamped to [0, 1] below;
 # string/bool/list/dict keys (dash, font, points, gradient, shadow, …) must
@@ -365,6 +376,9 @@ def normalize_element(raw: Any) -> Optional[dict]:
     for key, val in raw.items():
         if key not in out and key != "type":
             out[key] = val
+    for ukey, udef in _UNIVERSAL_ELEMENT_DEFAULTS.items():
+        if ukey not in out:
+            out[ukey] = udef
     for key in list(out.keys()):
         if key in _ELEMENT_FLOAT_KEYS and out[key] is not None:
             try:

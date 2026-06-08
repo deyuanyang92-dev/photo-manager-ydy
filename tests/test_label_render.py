@@ -448,6 +448,31 @@ class TestShapeElement:
         assert _images_equal(a, b)
 
 
+class TestHiddenElement:
+    def test_hidden_default_false_byte_identical(self, qt_app):
+        el = {"type": "rect", "x": 5, "y": 5, "w": 20, "h": 12,
+              "fill": "#000000", "strokeWidth": 0}
+        a, _ = _render_with_elements([dict(el)])
+        b, _ = _render_with_elements([dict(el, hidden=False)])
+        assert _images_equal(a, b)
+
+    def test_hidden_true_draws_nothing_and_no_hit_box(self, qt_app):
+        el = {"type": "rect", "x": 5, "y": 5, "w": 20, "h": 12,
+              "fill": "#000000", "strokeWidth": 0}
+        img, boxes = _render_with_elements([dict(el, hidden=True)])
+        assert _dark_bbox(img) is None              # nothing drawn
+        assert [b for b in boxes if b["kind"] == "element"] == []  # no hit box
+
+    def test_hidden_one_of_two_still_indexes_correctly(self, qt_app):
+        _, boxes = _render_with_elements([
+            {"type": "rect", "x": 1, "y": 1, "w": 5, "h": 5, "hidden": True},
+            {"type": "rect", "x": 10, "y": 10, "w": 5, "h": 5},
+        ])
+        el = [b for b in boxes if b["kind"] == "element"]
+        # only the visible element emits a box, keyed by its real list index
+        assert len(el) == 1 and el[0]["index"] == 1
+
+
 class TestElementBackwardCompat:
     def test_empty_elements_is_byte_identical(self, qt_app):
         """The single most important gate: a template with elements:[] must

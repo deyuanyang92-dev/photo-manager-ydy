@@ -538,6 +538,8 @@ def _draw_elements(
     for i, el in enumerate(elements):
         if not isinstance(el, dict):
             continue
+        if el.get("hidden"):
+            continue  # layer hidden in designer → no pixels, no hit box
         etype = el.get("type")
         if etype == "line":
             x1 = x_off + float(el.get("x1") or 0.0) * ppm
