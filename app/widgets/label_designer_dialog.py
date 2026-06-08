@@ -121,6 +121,7 @@ class _DesignCanvas(QWidget):
     multi_toggle = pyqtSignal(int)         # Ctrl-click toggles element index in group
     marquee = pyqtSignal(float, float, float, float)  # box-select rect x,y,w,h (mm)
     delete_pressed = pyqtSignal()          # Del / Backspace on the canvas
+    edit_requested = pyqtSignal(int)       # double-click a text element → inline edit
 
     _HANDLES = ("nw", "n", "ne", "e", "se", "s", "sw", "w")
     _HANDLE_PX = 7
@@ -420,6 +421,23 @@ class _DesignCanvas(QWidget):
         self._press_pt = e.pos()
         self._dragging = False
         self.update()
+
+    def mouseDoubleClickEvent(self, e) -> None:  # noqa: N802
+        b = self._hit(e.pos())
+        if b is not None and b.get("kind") == "element":
+            self.edit_requested.emit(int(b.get("index", -1)))
+            return
+        super().mouseDoubleClickEvent(e)
+
+    def element_screen_rect(self, index: int):
+        """Device-pixel QRect of element *index*'s box, or None."""
+        from PyQt6.QtCore import QRect
+        ox, oy = self._origin.x(), self._origin.y()
+        for b in self._boxes:
+            if b.get("kind") == "element" and b.get("index") == index:
+                return QRect(int(ox + b["x"]), int(oy + b["y"]),
+                             int(b["w"]), int(b["h"]))
+        return None
 
     def _element(self, i: int) -> Optional[dict]:
         els = self._tmpl.get("elements") or []
@@ -1076,6 +1094,64 @@ class _PropertyPanel(QWidget):
 
 # ── Dialog ──────────────────────────────────────────────────────────────────────
 
+class _FloatingToolbar(QWidget):
+    """Compact quick-format bar that floats over a selected text/field element.
+
+    Mirrors the web designer's floating toolbar (app.js:16279-16449): font size,
+    bold/italic, alignment, colour — applied to the element under the cursor."""
+
+    size_delta = pyqtSignal(int)      # font-size step (±)
+    bold_toggled = pyqtSignal()
+    italic_toggled = pyqtSignal()
+    align_set = pyqtSignal(str)       # "left" | "center" | "right"
+    color_pick = pyqtSignal()
+    z_delta = pyqtSignal(int)         # raise / lower one layer
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._index = -1
+        self.setStyleSheet(
+            "background:#13303a; border:1px solid #29b9ab; border-radius:6px;")
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(4, 2, 4, 2); lay.setSpacing(3)
+
+        def mk(txt, tip, slot, w=26):
+            b = _btn(txt); b.setToolTip(tip); b.setFixedWidth(w)
+            b.clicked.connect(slot)
+            lay.addWidget(b)
+            return b
+        mk("A−", "缩小字号", lambda: self.size_delta.emit(-1))
+        mk("A＋", "放大字号", lambda: self.size_delta.emit(1))
+        mk("B", "加粗", self.bold_toggled.emit)
+        mk("I", "斜体", self.italic_toggled.emit)
+        mk("⇤", "左对齐", lambda: self.align_set.emit("left"))
+        mk("⇆", "居中", lambda: self.align_set.emit("center"))
+        mk("⇥", "右对齐", lambda: self.align_set.emit("right"))
+        mk("🎨", "颜色", self.color_pick.emit)
+        mk("↑", "上移一层", lambda: self.z_delta.emit(1))
+        mk("↓", "下移一层", lambda: self.z_delta.emit(-1))
+        self.hide()
+
+    def target_index(self) -> int:
+        return self._index
+
+    def show_for(self, index: int, rect) -> None:
+        self._index = index
+        self.adjustSize()
+        if rect is not None and self.parent() is not None:
+            x = max(0, rect.x())
+            y = rect.y() - self.height() - 4
+            if y < 0:
+                y = rect.y() + rect.height() + 4
+            self.move(x, y)
+        self.show()
+        self.raise_()
+
+    def hide_bar(self) -> None:
+        self._index = -1
+        self.hide()
+
+
 class LabelDesignerDialog(QDialog):
     """Full free-form label designer."""
 
@@ -1100,6 +1176,8 @@ class LabelDesignerDialog(QDialog):
         self._redo: list = []
         self._multi: set = set()       # extra element indices for group ops
         self._clipboard: list = []     # copied elements (normalized dicts)
+        self._inline_editor = None     # QLineEdit overlay during in-place edit
+        self._inline_index = -1
         self._drag_baseline: Optional[tuple] = None
         self._selected_key: Optional[str] = None  # chosen library key on accept
         self._setup_ui()
@@ -1209,7 +1287,17 @@ class LabelDesignerDialog(QDialog):
         self._canvas.multi_toggle.connect(self._toggle_multi)
         self._canvas.marquee.connect(self._marquee_select)
         self._canvas.delete_pressed.connect(self._delete_selection)
+        self._canvas.edit_requested.connect(self._begin_inline_edit)
         self._panel.edit.connect(self._apply_edit)
+
+        # Floating quick-format toolbar (over the canvas, for text/field elements)
+        self._float_bar = _FloatingToolbar(self._canvas)
+        self._float_bar.size_delta.connect(self._float_size_delta)
+        self._float_bar.bold_toggled.connect(lambda: self._float_style("bold"))
+        self._float_bar.italic_toggled.connect(lambda: self._float_style("italic"))
+        self._float_bar.align_set.connect(self._float_align)
+        self._float_bar.color_pick.connect(self._float_color)
+        self._float_bar.z_delta.connect(self._float_z)
 
         split = QSplitter(Qt.Orientation.Horizontal)
         split.addWidget(self._canvas)
@@ -1262,6 +1350,7 @@ class LabelDesignerDialog(QDialog):
         self._canvas.set_multi(getattr(self, "_multi", set()))
         self._panel._dims = self._dims
         self._panel.show_for(kind, row, field, self._tmpl)
+        self._sync_float_bar()
 
     def _select(self, kind: str, row: int, field: int) -> None:
         self._sel = (kind, row, field)
@@ -1270,6 +1359,54 @@ class LabelDesignerDialog(QDialog):
         self._canvas.set_multi(self._multi)
         self._panel._dims = self._dims
         self._panel.show_for(kind, row, field, self._tmpl)
+        self._sync_float_bar()
+
+    # ── Floating quick-format toolbar (Phase 2) ───────────────────────────────
+    def _sync_float_bar(self) -> None:
+        bar = getattr(self, "_float_bar", None)
+        if bar is None:
+            return
+        kind, _row, field = self._sel
+        el = self._element_at(field) if kind == "element" else None
+        if el is not None and el.get("type") in ("text", "field") and not self._multi:
+            bar.show_for(field, self._canvas.element_screen_rect(field))
+        else:
+            bar.hide_bar()
+
+    def _float_size_delta(self, d: int) -> None:
+        i = self._float_bar.target_index()
+        el = self._element_at(i)
+        if el is None:
+            return
+        cur = float(el.get("size") or 9)
+        self._apply_edit({"op": "element_size", "index": i, "value": max(4.0, cur + d)})
+
+    def _float_style(self, flag: str) -> None:
+        i = self._float_bar.target_index()
+        el = self._element_at(i)
+        if el is None:
+            return
+        on = flag not in (el.get("style") or "")
+        self._apply_edit({"op": f"element_{flag}", "index": i, "value": on})
+
+    def _float_align(self, a: str) -> None:
+        i = self._float_bar.target_index()
+        if self._element_at(i) is not None:
+            self._apply_edit({"op": "element_align", "index": i, "value": a})
+
+    def _float_color(self) -> None:
+        i = self._float_bar.target_index()
+        el = self._element_at(i)
+        if el is None:
+            return
+        col = QColorDialog.getColor(QColor(el.get("color") or "#111111"), self, "文字颜色")
+        if col.isValid():
+            self._apply_edit({"op": "element_color", "index": i, "value": col.name()})
+
+    def _float_z(self, d: int) -> None:
+        i = self._float_bar.target_index()
+        if self._element_at(i) is not None:
+            self._apply_edit({"op": "element_z", "index": i, "value": d})
 
     # ── Multi-selection (Phase 1) ─────────────────────────────────────────────
     def _toggle_multi(self, index: int) -> None:
@@ -1302,6 +1439,44 @@ class LabelDesignerDialog(QDialog):
         self._canvas.set_selection(*self._sel)
         self._canvas.set_multi(self._multi)
         self._panel.show_for(*self._sel, self._tmpl)
+
+    # ── In-place text editing (Phase 2) ───────────────────────────────────────
+    def _begin_inline_edit(self, index: int) -> None:
+        """Open a QLineEdit over a text element to edit its text in place."""
+        el = self._element_at(index)
+        if el is None or el.get("type") != "text":
+            return
+        self._commit_inline_edit()   # close any prior editor first
+        rect = self._canvas.element_screen_rect(index)
+        editor = QLineEdit(self._canvas)
+        editor.setText(str(el.get("text") or ""))
+        if rect is not None:
+            editor.setGeometry(rect.adjusted(-1, -1, 1, 1))
+        editor.setStyleSheet(
+            "QLineEdit { background:#fffbe6; color:#111; border:1px solid #29b9ab; }")
+        editor.returnPressed.connect(self._commit_inline_edit)
+        editor.editingFinished.connect(self._commit_inline_edit)
+        self._inline_editor = editor
+        self._inline_index = index
+        editor.show()
+        editor.setFocus()
+        editor.selectAll()
+
+    def _commit_inline_edit(self) -> None:
+        editor = self._inline_editor
+        if editor is None:
+            return
+        self._inline_editor = None     # guard re-entrancy from editingFinished
+        idx = self._inline_index
+        self._inline_index = -1
+        el = self._element_at(idx)
+        text = editor.text()
+        editor.deleteLater()
+        if el is not None and el.get("type") == "text" and text != el.get("text"):
+            self._push_undo()
+            el["text"] = text
+            self._sel = ("element", -1, idx)
+            self._refresh()
 
     def _copy_selection(self) -> None:
         """Copy the selected elements (deep) into the designer clipboard."""

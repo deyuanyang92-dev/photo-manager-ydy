@@ -243,6 +243,109 @@ class TestMultiSelect:
         assert len(d._tmpl["elements"]) == 1
 
 
+class TestInlineEditing:
+    """Phase 2 — double-click a text element on the canvas to edit it in place."""
+
+    def test_begin_inline_edit_opens_editor_with_current_text(self, qt_app):
+        d = _dlg(qt_app)
+        d.resize(940, 640)
+        d._add_element("text")
+        d._tmpl["elements"][0]["text"] = "原文"
+        d._refresh()
+        d._begin_inline_edit(0)
+        assert d._inline_editor is not None
+        assert d._inline_editor.text() == "原文"
+
+    def test_commit_inline_edit_writes_text(self, qt_app):
+        d = _dlg(qt_app)
+        d.resize(940, 640)
+        d._add_element("text")
+        d._refresh()
+        d._begin_inline_edit(0)
+        d._inline_editor.setText("新文字")
+        d._commit_inline_edit()
+        assert d._tmpl["elements"][0]["text"] == "新文字"
+        assert d._inline_editor is None
+
+    def test_inline_edit_is_undoable(self, qt_app):
+        d = _dlg(qt_app)
+        d.resize(940, 640)
+        d._add_element("text")
+        d._tmpl["elements"][0]["text"] = "before"
+        d._refresh()
+        d._begin_inline_edit(0)
+        d._inline_editor.setText("after")
+        d._commit_inline_edit()
+        d._do_undo()
+        assert d._tmpl["elements"][0]["text"] == "before"
+
+    def test_double_click_text_element_starts_inline_edit(self, qt_app):
+        from PyQt6.QtCore import Qt, QPointF
+        from PyQt6.QtGui import QMouseEvent
+        d = _dlg(qt_app)
+        d.resize(940, 640)
+        d._add_element("text")
+        d._tmpl["elements"][0].update({"x": 6, "y": 6, "w": 20, "h": 8})
+        d._refresh()
+        canvas = d._canvas
+        box = next(b for b in canvas._boxes
+                   if b.get("kind") == "element" and b.get("index") == 0)
+        cx = canvas._origin.x() + box["x"] + box["w"] / 2
+        cy = canvas._origin.y() + box["y"] + box["h"] / 2
+        ev = QMouseEvent(QMouseEvent.Type.MouseButtonDblClick,
+                         QPointF(cx, cy), QPointF(cx, cy),
+                         Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
+                         Qt.KeyboardModifier.NoModifier)
+        canvas.mouseDoubleClickEvent(ev)
+        assert d._inline_editor is not None
+
+
+class TestFloatingToolbar:
+    """Phase 2 — selecting a text/field element pops a floating quick toolbar."""
+
+    def test_float_bar_targets_selected_text_element(self, qt_app):
+        d = _dlg(qt_app); d.resize(940, 640)
+        d._add_element("text")
+        d._select("element", -1, 0)
+        assert d._float_bar.target_index() == 0
+
+    def test_float_bar_hidden_for_no_selection(self, qt_app):
+        d = _dlg(qt_app); d.resize(940, 640)
+        d._add_element("text")
+        d._select("element", -1, 0)
+        d._select("none", -1, -1)
+        assert d._float_bar.target_index() == -1
+
+    def test_float_bar_hidden_for_non_text_element(self, qt_app):
+        d = _dlg(qt_app); d.resize(940, 640)
+        d._add_element("rect")
+        d._select("element", -1, 0)
+        # rect has no text styling → quick toolbar should not target it
+        assert d._float_bar.target_index() == -1
+
+    def test_float_bar_size_delta_changes_element(self, qt_app):
+        d = _dlg(qt_app); d.resize(940, 640)
+        d._add_element("text")
+        d._tmpl["elements"][0]["size"] = 8
+        d._select("element", -1, 0)
+        d._float_bar.size_delta.emit(2)
+        assert d._tmpl["elements"][0]["size"] == 10
+
+    def test_float_bar_bold_toggle(self, qt_app):
+        d = _dlg(qt_app); d.resize(940, 640)
+        d._add_element("text")
+        d._select("element", -1, 0)
+        d._float_bar.bold_toggled.emit()
+        assert "bold" in d._tmpl["elements"][0].get("style", "")
+
+    def test_float_bar_align(self, qt_app):
+        d = _dlg(qt_app); d.resize(940, 640)
+        d._add_element("text")
+        d._select("element", -1, 0)
+        d._float_bar.align_set.emit("center")
+        assert d._tmpl["elements"][0]["align"] == "center"
+
+
 class TestRulersAndGuides:
     """Phase 1b — draggable reference guides; elements snap to them."""
 
