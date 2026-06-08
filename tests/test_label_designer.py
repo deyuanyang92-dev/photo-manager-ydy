@@ -489,6 +489,27 @@ class TestRowFieldEditing:
         assert len(d._tmpl["rows"]) == n
 
 
+class TestRowLineHeight:
+    """Phase 3 — per-row line-height override (web row model parity)."""
+
+    def test_set_row_line_height(self, qt_app):
+        d = _dlg(qt_app)
+        d._apply_edit({"op": "row_lineHeight", "row": 0, "value": 1.8})
+        assert d._tmpl["rows"][0]["lineHeight"] == 1.8
+
+    def test_clear_row_line_height_inherits(self, qt_app):
+        d = _dlg(qt_app)
+        d._apply_edit({"op": "row_lineHeight", "row": 0, "value": 1.8})
+        d._apply_edit({"op": "row_lineHeight", "row": 0, "value": None})
+        assert "lineHeight" not in d._tmpl["rows"][0]
+
+    def test_row_line_height_affects_render(self, qt_app):
+        from app.utils.label_core import resolve_line_height
+        d = _dlg(qt_app)
+        d._apply_edit({"op": "row_lineHeight", "row": 0, "value": 2.0})
+        assert resolve_line_height(d._tmpl, d._tmpl["rows"][0]) == 2.0
+
+
 class TestQrEditing:
     def test_qr_position_content_ecc_size(self, qt_app):
         d = _dlg(qt_app)

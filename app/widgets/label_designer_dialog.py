@@ -923,6 +923,15 @@ class _PropertyPanel(QWidget):
         self._row("前缀", prefix)
         self._row("分隔", sep)
 
+        # per-row line-height override (0 / 继承 = inherit template + global)
+        lh = QDoubleSpinBox(); lh.setRange(0.0, 3.0); lh.setSingleStep(0.1)
+        lh.setSpecialValueText("继承")   # 0.0 shows as 继承
+        lh.setValue(float(row.get("lineHeight") or 0.0))
+        lh.valueChanged.connect(lambda v: self.edit.emit(
+            {"op": "row_lineHeight", "row": row_idx,
+             "value": None if v <= 0.0 else v}))
+        self._row("行高", lh)
+
         # nudge
         left, up, down, right = _btn("←"), _btn("↑"), _btn("↓"), _btn("→")
         reset = _btn("归零")
@@ -1675,6 +1684,11 @@ class LabelDesignerDialog(QDialog):
             rows[r]["prefix"] = ch["value"]
         elif op == "row_sep":
             rows[r]["sep"] = ch["value"]
+        elif op == "row_lineHeight":
+            if ch.get("value") is None:
+                rows[r].pop("lineHeight", None)   # None → inherit template/global
+            else:
+                rows[r]["lineHeight"] = round(float(ch["value"]), 2)
         elif op == "row_dup":
             rows.insert(r + 1, copy.deepcopy(rows[r]))
             self._sel = ("field", r + 1, 0)
