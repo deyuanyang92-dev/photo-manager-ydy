@@ -26,7 +26,7 @@ from typing import Optional
 
 import math
 
-from PyQt6.QtCore import Qt, QRectF
+from PyQt6.QtCore import Qt, QPointF, QRectF
 from PyQt6.QtGui import (
     QBrush,
     QColor,
@@ -38,6 +38,7 @@ from PyQt6.QtGui import (
     QPainterPath,
     QPen,
     QPixmap,
+    QPolygonF,
 )
 
 from app.utils.label_core import qr_metrics, resolve_line_height, resolve_wrap
@@ -171,6 +172,25 @@ def _make_gradient_brush(grad: dict, rect: QRectF, mono: bool = False):
         if isinstance(stop, (list, tuple)) and len(stop) >= 2:
             g.setColorAt(min(1.0, max(0.0, float(stop[1] or 0))), QColor(stop[0]))
     return QBrush(g)
+
+
+def _poly_from_points(points, rect: QRectF) -> QPolygonF:
+    """Map unit-square [0,1] *points* into device *rect*; fall back to the rect
+    corners when the point list is missing or malformed."""
+    pts = []
+    if isinstance(points, list):
+        for p in points:
+            if isinstance(p, (list, tuple)) and len(p) >= 2:
+                try:
+                    ux, uy = float(p[0]), float(p[1])
+                except (TypeError, ValueError):
+                    continue
+                pts.append(QPointF(rect.x() + ux * rect.width(),
+                                   rect.y() + uy * rect.height()))
+    if len(pts) < 3:  # degenerate → rectangle fallback
+        pts = [rect.topLeft(), rect.topRight(),
+               rect.bottomRight(), rect.bottomLeft()]
+    return QPolygonF(pts)
 
 
 def _draw_shape_shadow(painter: QPainter, rect: QRectF, shadow: dict,
@@ -617,6 +637,30 @@ def _draw_elements(
                 brush = QBrush(QColor(fill)) if fill else Qt.BrushStyle.NoBrush
             painter.setBrush(brush)
             painter.drawEllipse(rect)
+        elif etype == "shape":
+            poly = _poly_from_points(el.get("points"), rect)
+            if el.get("shadow") and not mono:
+                sh = el["shadow"]
+                sdx = float(sh.get("dx", 0) or 0) * ppm if isinstance(sh, dict) else 0
+                sdy = float(sh.get("dy", 0) or 0) * ppm if isinstance(sh, dict) else 0
+                if sdx or sdy:
+                    off = QPolygonF([QPointF(p.x() + sdx, p.y() + sdy) for p in poly])
+                    painter.save()
+                    painter.setPen(Qt.PenStyle.NoPen)
+                    painter.setBrush(QBrush(QColor(sh.get("color") or "#808080")))
+                    painter.drawPolygon(off)
+                    painter.restore()
+            pen = QPen(QColor(el.get("stroke") or "#000000"),
+                       max(0.5, float(el.get("strokeWidth") or 0.3) * ppm))
+            _apply_dash(pen, el)
+            painter.setPen(pen)
+            grad = el.get("gradient")
+            brush = _make_gradient_brush(grad, rect, mono) if grad else None
+            if brush is None:
+                fill = el.get("fill")
+                brush = QBrush(QColor(fill)) if fill else Qt.BrushStyle.NoBrush
+            painter.setBrush(brush)
+            painter.drawPolygon(poly)
         elif etype == "image":
             pm = _load_image_pixmap(el)
             if pm is None:

@@ -320,6 +320,13 @@ ELEMENT_DEFAULTS: dict[str, dict] = {
               "path": None, "keepAspect": True, "rotation": 0, "opacity": 1.0},
     "barcode": {"x": 0.0, "y": 0.0, "w": 30.0, "h": 12.0, "content": "uniqueId",
                 "showText": True, "rotation": 0, "opacity": 1.0},
+    # generic polygon: ``points`` are unit-square coords [0,1] scaled into the
+    # (x,y,w,h) box. Default = unit square → renders identically to a rect.
+    "shape": {"x": 0.0, "y": 0.0, "w": 20.0, "h": 12.0,
+              "points": [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+              "stroke": "#000000", "strokeWidth": 0.3, "fill": None,
+              "dash": "solid", "rotation": 0, "opacity": 1.0,
+              "gradient": None, "shadow": None},
 }
 
 # Keys that must be coerced to float when present (geometry/measure values).
@@ -347,9 +354,14 @@ def normalize_element(raw: Any) -> Optional[dict]:
     if defaults is None:
         return None
     out: dict = {"type": etype}
-    # start from defaults, then overlay caller-supplied keys (incl. extras)
+    # start from defaults, then overlay caller-supplied keys (incl. extras).
+    # Deep-copy mutable defaults (e.g. shape ``points``) so elements never alias
+    # the shared ELEMENT_DEFAULTS list/dict and corrupt each other on edit.
     for key, dval in defaults.items():
-        out[key] = raw.get(key, dval) if raw.get(key, None) is not None else dval
+        if raw.get(key, None) is not None:
+            out[key] = raw.get(key)
+        else:
+            out[key] = copy.deepcopy(dval) if isinstance(dval, (list, dict)) else dval
     for key, val in raw.items():
         if key not in out and key != "type":
             out[key] = val

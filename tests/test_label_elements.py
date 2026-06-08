@@ -150,6 +150,23 @@ def test_template_monochrome_default_false():
     assert tmpl["monochrome"] is False
 
 
+# ── Phase 4: generic shape (polygon) element ────────────────────────────────
+
+def test_shape_type_normalises_with_default_points():
+    el = normalize_elements([{"type": "shape"}])[0]
+    assert el["type"] == "shape"
+    # default points = unit square (renders as a rect fallback)
+    assert el["points"] == [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]
+    assert {"x", "y", "w", "h", "stroke", "fill"} <= set(el)
+
+
+def test_shape_custom_points_preserved():
+    pts = [[0.5, 0.0], [1.0, 1.0], [0.0, 1.0]]  # triangle
+    el = normalize_elements([{"type": "shape", "points": pts}])[0]
+    assert el["points"] == pts          # list rides preserve-unknown, not float'd
+    assert isinstance(el["points"], list)
+
+
 def test_normalize_template_adds_empty_elements():
     tmpl = normalize_template({"rows": [{"fields": [{"key": "uniqueId"}]}]})
     assert tmpl["elements"] == []

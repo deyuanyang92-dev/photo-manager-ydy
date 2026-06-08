@@ -52,7 +52,20 @@ MIN_EL_MM = 2.0
 # Free-form element types offered by the "+元素" toolbar menu (type → label).
 ELEMENT_TYPE_LABELS: dict[str, str] = {
     "text": "文字", "field": "绑定字段", "line": "直线", "rect": "矩形",
-    "ellipse": "椭圆", "image": "图片", "barcode": "条码",
+    "ellipse": "椭圆", "shape": "多边形", "image": "图片", "barcode": "条码",
+}
+
+# Polygon presets for the "+元素 ▸ 多边形" submenu (name → unit-square points).
+SHAPE_PRESETS: dict[str, list] = {
+    "三角形": [[0.5, 0.0], [1.0, 1.0], [0.0, 1.0]],
+    "菱形": [[0.5, 0.0], [1.0, 0.5], [0.5, 1.0], [0.0, 0.5]],
+    "五角星": [[0.5, 0.0], [0.62, 0.38], [1.0, 0.38], [0.69, 0.61],
+              [0.81, 1.0], [0.5, 0.75], [0.19, 1.0], [0.31, 0.61],
+              [0.0, 0.38], [0.38, 0.38]],
+    "六边形": [[0.25, 0.0], [0.75, 0.0], [1.0, 0.5],
+              [0.75, 1.0], [0.25, 1.0], [0.0, 0.5]],
+    "右箭头": [[0.0, 0.3], [0.6, 0.3], [0.6, 0.0], [1.0, 0.5],
+              [0.6, 1.0], [0.6, 0.7], [0.0, 0.7]],
 }
 
 
@@ -711,7 +724,8 @@ class _PropertyPanel(QWidget):
         el = els[index]
         et = el.get("type")
         names = {"text": "文字", "field": "绑定字段", "line": "直线", "rect": "矩形",
-                 "ellipse": "椭圆", "image": "图片", "barcode": "条码"}
+                 "ellipse": "椭圆", "shape": "多边形", "image": "图片",
+                 "barcode": "条码"}
         self._title(f"元素 · {names.get(et, et)}")
 
         def _spin(val, lo=-500.0, hi=500.0, step=0.5, suffix=" mm"):
@@ -774,7 +788,7 @@ class _PropertyPanel(QWidget):
                 {"op": "element_key", "index": index, "value": combo.currentData()}))
             self._row("字段", combo)
             self._text_style_rows(index, el)
-        elif et in ("rect", "ellipse"):
+        elif et in ("rect", "ellipse", "shape"):
             stroke = QPushButton(); stroke.setFixedSize(60, 22)
             self._update_color_btn(stroke, el.get("stroke") or "#000000")
             stroke.clicked.connect(lambda _=False, b=stroke: self._pick_element_color(
@@ -1212,7 +1226,15 @@ class LabelDesignerDialog(QDialog):
         add_el = _btn("+元素 ▾")
         emenu = QMenu(add_el)
         for etype, name in ELEMENT_TYPE_LABELS.items():
-            emenu.addAction(name, lambda _=False, t=etype: self._add_element(t))
+            if etype == "shape":
+                smenu = emenu.addMenu(name)
+                for pname, pts in SHAPE_PRESETS.items():
+                    smenu.addAction(
+                        pname,
+                        lambda _=False, p=pts: self._add_element("shape", points=p))
+            else:
+                emenu.addAction(
+                    name, lambda _=False, t=etype: self._add_element(t))
         add_el.setMenu(emenu)
 
         presets_btn = _btn("模板库 ▾")
@@ -1920,10 +1942,13 @@ class LabelDesignerDialog(QDialog):
             cursor += b[s] + gap
         self._refresh()
 
-    def _add_element(self, etype: str) -> None:
+    def _add_element(self, etype: str, points: list | None = None) -> None:
         self._push_undo()
         els = self._elements()
-        els.append(_default_element(etype, self._dims))
+        el = _default_element(etype, self._dims)
+        if etype == "shape" and points:
+            el["points"] = copy.deepcopy(points)
+        els.append(el)
         self._sel = ("element", -1, len(els) - 1)
         self._refresh()
 

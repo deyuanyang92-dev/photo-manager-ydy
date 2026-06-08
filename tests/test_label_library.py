@@ -235,6 +235,16 @@ class TestLabelTemplateLibraryCRUD:
         el = tmpl["elements"][0]
         assert el["gradient"] == grad and el["shadow"] == shadow
 
+    def test_phase4_shape_points_round_trip(self, sample_lib):
+        """Phase 4 generic-shape ``points`` survive QSettings persistence."""
+        pts = [[0.5, 0.0], [1.0, 1.0], [0.0, 1.0]]
+        rec = sample_lib.upsert({"name": "多边形", "template": {
+            "rows": [], "elements": [
+                {"type": "shape", "x": 2, "y": 2, "w": 18, "h": 12,
+                 "points": pts, "fill": "#cccccc"}]}})
+        el = sample_lib.get(rec["id"])["template"]["elements"][0]
+        assert el["type"] == "shape" and el["points"] == pts
+
 
 # ── selected_key persistence ──────────────────────────────────────────────────
 

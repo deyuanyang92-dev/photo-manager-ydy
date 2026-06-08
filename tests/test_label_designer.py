@@ -59,6 +59,25 @@ class TestFreeFormElements:
         assert [e["type"] for e in d._tmpl["elements"]] == \
             ["text", "field", "line", "rect", "ellipse", "image", "barcode"]
 
+    def test_add_shape_preset_appends_polygon(self, qt_app):
+        from app.widgets.label_designer_dialog import SHAPE_PRESETS
+        d = _dlg(qt_app)
+        tri = SHAPE_PRESETS["三角形"]
+        d._add_element("shape", points=tri)
+        el = d._tmpl["elements"][-1]
+        assert el["type"] == "shape"
+        assert el["points"] == tri
+        # must be a copy, not an alias of the shared preset list
+        assert el["points"] is not tri
+        assert d._sel == ("element", -1, len(d._tmpl["elements"]) - 1)
+
+    def test_add_shape_default_is_unit_square(self, qt_app):
+        d = _dlg(qt_app)
+        d._add_element("shape")
+        el = d._tmpl["elements"][-1]
+        assert el["type"] == "shape"
+        assert el["points"] == [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]
+
     def test_element_move_updates_xy(self, qt_app):
         d = _dlg(qt_app)
         d._add_element("rect")

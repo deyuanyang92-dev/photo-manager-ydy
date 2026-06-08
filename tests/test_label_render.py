@@ -423,6 +423,31 @@ class TestMonochromeCollapse:
         assert abs(left - right) < 15
 
 
+class TestShapeElement:
+    def test_shape_triangle_draws_pixels(self, qt_app):
+        img, boxes = _render_with_elements(
+            [{"type": "shape", "x": 5, "y": 5, "w": 30, "h": 25,
+              "fill": "#000000", "strokeWidth": 0,
+              "points": [[0.5, 0.0], [1.0, 1.0], [0.0, 1.0]]}])
+        assert _dark_bbox(img) is not None
+        assert boxes[-1]["etype"] == "shape"
+
+    def test_shape_hit_box_matches_geometry(self, qt_app):
+        _, boxes = _render_with_elements(
+            [{"type": "shape", "x": 6, "y": 7, "w": 18, "h": 11}])
+        b = [bx for bx in boxes if bx["kind"] == "element"][-1]
+        assert b["etype"] == "shape"
+        assert b["x"] == 6 * SCALE and b["y"] == 7 * SCALE
+        assert b["w"] == 18 * SCALE and b["h"] == 11 * SCALE
+
+    def test_empty_elements_still_byte_identical_with_shape_registered(self, qt_app):
+        from app.utils.label_core import normalize_template
+        base = dict(_row_tmpl(qr="right"))
+        a = _img(base, DATA)
+        b = _img(normalize_template(base), DATA)
+        assert _images_equal(a, b)
+
+
 class TestElementBackwardCompat:
     def test_empty_elements_is_byte_identical(self, qt_app):
         """The single most important gate: a template with elements:[] must
