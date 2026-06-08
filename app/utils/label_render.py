@@ -33,6 +33,7 @@ from PyQt6.QtGui import (
     QFont,
     QFontMetricsF,
     QImage,
+    QLinearGradient,
     QPainter,
     QPainterPath,
     QPen,
@@ -145,6 +146,52 @@ def _draw_arrowhead(painter: QPainter, tip_x: float, tip_y: float,
     painter.setPen(Qt.PenStyle.NoPen)
     painter.setBrush(QBrush(color))
     painter.drawPath(path)
+    painter.restore()
+
+
+def _make_gradient_brush(grad: dict, rect: QRectF, mono: bool = False):
+    """Build a QBrush from a 2+-stop linear gradient dict, or None if invalid.
+
+    ``grad`` = ``{"type":"linear","angle":<deg>,"stops":[[color,pos],...]}``.
+    In *mono* mode the gradient collapses to its first stop (solid) for clean
+    B&W laser output.
+    """
+    stops = grad.get("stops") if isinstance(grad, dict) else None
+    if not isinstance(stops, list) or not stops:
+        return None
+    if mono:
+        first = stops[0]
+        return QBrush(QColor(first[0] if isinstance(first, (list, tuple)) else first))
+    angle = math.radians(float(grad.get("angle", 0) or 0))
+    # endpoints across the rect along the angle direction
+    cx, cy = rect.center().x(), rect.center().y()
+    hx, hy = math.cos(angle) * rect.width() / 2.0, math.sin(angle) * rect.height() / 2.0
+    g = QLinearGradient(cx - hx, cy - hy, cx + hx, cy + hy)
+    for stop in stops:
+        if isinstance(stop, (list, tuple)) and len(stop) >= 2:
+            g.setColorAt(min(1.0, max(0.0, float(stop[1] or 0))), QColor(stop[0]))
+    return QBrush(g)
+
+
+def _draw_shape_shadow(painter: QPainter, rect: QRectF, shadow: dict,
+                       ppm: float, is_ellipse: bool, corner_px: float = 0.0) -> None:
+    """Draw an offset filled silhouette behind a rect/ellipse (v1: no blur)."""
+    if not isinstance(shadow, dict):
+        return
+    dx = float(shadow.get("dx", 0) or 0) * ppm
+    dy = float(shadow.get("dy", 0) or 0) * ppm
+    if dx == 0 and dy == 0:
+        return
+    off = QRectF(rect.x() + dx, rect.y() + dy, rect.width(), rect.height())
+    painter.save()
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(QBrush(QColor(shadow.get("color") or "#808080")))
+    if is_ellipse:
+        painter.drawEllipse(off)
+    elif corner_px > 0:
+        painter.drawRoundedRect(off, corner_px, corner_px)
+    else:
+        painter.drawRect(off)
     painter.restore()
 
 
@@ -467,6 +514,7 @@ def _draw_elements(
     elements = tmpl.get("elements")
     if not elements:
         return
+    mono = bool(tmpl.get("monochrome"))
     for i, el in enumerate(elements):
         if not isinstance(el, dict):
             continue
@@ -478,7 +526,7 @@ def _draw_elements(
             y2 = y_off + float(el.get("y2") or 0.0) * ppm
             painter.save()
             op = float(el.get("opacity", 1.0) or 0.0)
-            if op < 1.0:
+            if op < 1.0 and not mono:
                 painter.setOpacity(op)
             color = QColor(el.get("color") or "#000000")
             wpx = max(0.5, float(el.get("width") or 0.3) * ppm)
@@ -509,7 +557,7 @@ def _draw_elements(
         rotation = float(el.get("rotation") or 0.0)
         painter.save()
         op = float(el.get("opacity", 1.0) or 0.0)
-        if op < 1.0:
+        if op < 1.0 and not mono:
             painter.setOpacity(op)
         if rotation:
             cx, cy = bx + bw / 2.0, by + bh / 2.0
@@ -536,24 +584,38 @@ def _draw_elements(
                 tflag |= int(Qt.TextFlag.TextWordWrap)
             painter.drawText(rect, tflag, text)
         elif etype == "rect":
+            cr = float(el.get("cornerRadius") or 0.0) * ppm
+            if el.get("shadow") and not mono:
+                _draw_shape_shadow(painter, rect, el["shadow"], ppm,
+                                   is_ellipse=False, corner_px=cr)
             pen = QPen(QColor(el.get("stroke") or "#000000"),
                        max(0.5, float(el.get("strokeWidth") or 0.3) * ppm))
             _apply_dash(pen, el)
             painter.setPen(pen)
-            fill = el.get("fill")
-            painter.setBrush(QBrush(QColor(fill)) if fill else Qt.BrushStyle.NoBrush)
-            cr = float(el.get("cornerRadius") or 0.0) * ppm
+            grad = el.get("gradient")
+            brush = _make_gradient_brush(grad, rect, mono) if grad else None
+            if brush is None:
+                fill = el.get("fill")
+                brush = QBrush(QColor(fill)) if fill else Qt.BrushStyle.NoBrush
+            painter.setBrush(brush)
             if cr > 0:
                 painter.drawRoundedRect(rect, cr, cr)
             else:
                 painter.drawRect(rect)
         elif etype == "ellipse":
+            if el.get("shadow") and not mono:
+                _draw_shape_shadow(painter, rect, el["shadow"], ppm,
+                                   is_ellipse=True)
             pen = QPen(QColor(el.get("stroke") or "#000000"),
                        max(0.5, float(el.get("strokeWidth") or 0.3) * ppm))
             _apply_dash(pen, el)
             painter.setPen(pen)
-            fill = el.get("fill")
-            painter.setBrush(QBrush(QColor(fill)) if fill else Qt.BrushStyle.NoBrush)
+            grad = el.get("gradient")
+            brush = _make_gradient_brush(grad, rect, mono) if grad else None
+            if brush is None:
+                fill = el.get("fill")
+                brush = QBrush(QColor(fill)) if fill else Qt.BrushStyle.NoBrush
+            painter.setBrush(brush)
             painter.drawEllipse(rect)
         elif etype == "image":
             pm = _load_image_pixmap(el)

@@ -221,6 +221,20 @@ class TestLabelTemplateLibraryCRUD:
         assert saved[0]["opacity"] == 0.4 and saved[0]["font"] == "DejaVu Sans"
         assert saved[1]["opacity"] == 0.5 and saved[1]["dash"] == "dash"
 
+    def test_phase3_gradient_shadow_round_trip(self, sample_lib):
+        """Phase 3 nested gradient/shadow dicts + monochrome flag persist."""
+        grad = {"type": "linear", "angle": 30,
+                "stops": [["#ffffff", 0.0], ["#000000", 1.0]]}
+        shadow = {"dx": 0.6, "dy": 0.6, "blur": 0, "color": "#777777"}
+        rec = sample_lib.upsert({"name": "渐变阴影", "template": {
+            "rows": [], "monochrome": True,
+            "elements": [{"type": "rect", "x": 1, "y": 1, "w": 20, "h": 10,
+                          "gradient": grad, "shadow": shadow}]}})
+        tmpl = sample_lib.get(rec["id"])["template"]
+        assert tmpl["monochrome"] is True
+        el = tmpl["elements"][0]
+        assert el["gradient"] == grad and el["shadow"] == shadow
+
 
 # ── selected_key persistence ──────────────────────────────────────────────────
 

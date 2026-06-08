@@ -342,6 +342,87 @@ class TestTextWrap:
         assert h_w > h_n, "wrapped text should occupy more vertical space"
 
 
+def _render_tmpl(tmpl, data=None, scale=SCALE):
+    """Render a full (already-shaped) template dict; return its image."""
+    from PyQt6.QtGui import QPainter, QPixmap, QColor
+    from app.utils.label_core import normalize_template
+    from app.utils.label_render import render_label_onto
+    t = normalize_template(tmpl)
+    pm = QPixmap(int(DIMS["w"] * scale), int(DIMS["h"] * scale))
+    pm.fill(QColor("white"))
+    p = QPainter(pm)
+    render_label_onto(p, t, DIMS, data or {}, px_per_mm=scale,
+                      placeholder=False, fill_bg=False, hit_boxes=None)
+    p.end()
+    return pm.toImage()
+
+
+def _region_lums(img, x0, y0, x1, y1):
+    """Mean luminance of two halves (left, right) of a device-px region."""
+    def lum(xa, xb):
+        tot = n = 0
+        for y in range(y0, y1):
+            for x in range(xa, xb):
+                c = img.pixelColor(x, y)
+                tot += (c.red() + c.green() + c.blue()) / 3.0
+                n += 1
+        return tot / max(1, n)
+    midx = (x0 + x1) // 2
+    return lum(x0, midx), lum(midx, x1)
+
+
+class TestElementGradient:
+    def test_default_no_gradient_is_byte_identical(self, qt_app):
+        el = {"type": "rect", "x": 5, "y": 5, "w": 30, "h": 20,
+              "fill": "#888888", "strokeWidth": 0}
+        a, _ = _render_with_elements([dict(el)])
+        b, _ = _render_with_elements([dict(el, gradient=None, shadow=None)])
+        assert _images_equal(a, b)
+
+    def test_gradient_fill_has_two_tones(self, qt_app):
+        grad = {"type": "linear", "angle": 0,
+                "stops": [["#ffffff", 0.0], ["#000000", 1.0]]}
+        img, _ = _render_with_elements(
+            [{"type": "rect", "x": 5, "y": 5, "w": 40, "h": 25,
+              "fill": "#000000", "strokeWidth": 0, "gradient": grad}])
+        left, right = _region_lums(img, 5 * SCALE + 2, 5 * SCALE + 2,
+                                   45 * SCALE - 2, 30 * SCALE - 2)
+        # horizontal white→black gradient: left brighter than right
+        assert left - right > 30
+
+
+class TestElementShadow:
+    def test_default_no_shadow_is_byte_identical(self, qt_app):
+        el = {"type": "rect", "x": 8, "y": 8, "w": 20, "h": 12,
+              "fill": "#000000", "strokeWidth": 0}
+        a, _ = _render_with_elements([dict(el)])
+        b, _ = _render_with_elements([dict(el, shadow=None)])
+        assert _images_equal(a, b)
+
+    def test_shadow_adds_offset_dark_region(self, qt_app):
+        el = {"type": "rect", "x": 8, "y": 8, "w": 20, "h": 12,
+              "fill": "#000000", "strokeWidth": 0}
+        plain, _ = _render_with_elements([dict(el)])
+        shadowed, _ = _render_with_elements(
+            [dict(el, shadow={"dx": 1.5, "dy": 1.5, "blur": 0,
+                              "color": "#000000"})])
+        assert _dark_count(shadowed) > _dark_count(plain)
+
+
+class TestMonochromeCollapse:
+    def test_monochrome_collapses_gradient_to_solid(self, qt_app):
+        grad = {"type": "linear", "angle": 0,
+                "stops": [["#ffffff", 0.0], ["#000000", 1.0]]}
+        el = {"type": "rect", "x": 5, "y": 5, "w": 40, "h": 25,
+              "fill": "#000000", "strokeWidth": 0, "gradient": grad}
+        mono = _render_tmpl({"rows": [], "qr": {"position": "none"},
+                             "monochrome": True, "elements": [el]})
+        left, right = _region_lums(mono, 5 * SCALE + 2, 5 * SCALE + 2,
+                                   45 * SCALE - 2, 30 * SCALE - 2)
+        # collapsed to the first stop → uniform tone across the box
+        assert abs(left - right) < 15
+
+
 class TestElementBackwardCompat:
     def test_empty_elements_is_byte_identical(self, qt_app):
         """The single most important gate: a template with elements:[] must

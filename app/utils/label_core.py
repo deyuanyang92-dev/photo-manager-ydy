@@ -310,10 +310,12 @@ ELEMENT_DEFAULTS: dict[str, dict] = {
              "opacity": 1.0, "arrowStart": False, "arrowEnd": False},
     "rect": {"x": 0.0, "y": 0.0, "w": 20.0, "h": 10.0, "stroke": "#000000",
              "strokeWidth": 0.3, "fill": None, "cornerRadius": 0,
-             "dash": "solid", "rotation": 0, "opacity": 1.0},
+             "dash": "solid", "rotation": 0, "opacity": 1.0,
+             "gradient": None, "shadow": None},
     "ellipse": {"x": 0.0, "y": 0.0, "w": 20.0, "h": 10.0, "stroke": "#000000",
                 "strokeWidth": 0.3, "fill": None, "dash": "solid",
-                "rotation": 0, "opacity": 1.0},
+                "rotation": 0, "opacity": 1.0, "gradient": None,
+                "shadow": None},
     "image": {"x": 0.0, "y": 0.0, "w": 20.0, "h": 20.0, "data": None,
               "path": None, "keepAspect": True, "rotation": 0, "opacity": 1.0},
     "barcode": {"x": 0.0, "y": 0.0, "w": 30.0, "h": 12.0, "content": "uniqueId",
@@ -440,6 +442,10 @@ def normalize_template(template: Optional[dict], opts: Optional[dict] = None) ->
 
     # free-form element layer (backward-compat: absent → [])
     out["elements"] = normalize_elements(out.get("elements"))
+    # monochrome collapse flag (designer toggle for B&W laser output):
+    # gradients → first stop, shadows skipped, opacity ignored. Default False
+    # is a render no-op → byte-identical to templates authored before Phase 3.
+    out["monochrome"] = bool(out.get("monochrome"))
     return out
 
 

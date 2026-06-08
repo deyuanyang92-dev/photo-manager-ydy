@@ -125,6 +125,31 @@ def test_arrow_and_wrap_are_not_float_coerced():
     assert t["wrap"] is True
 
 
+# ── Phase 3: gradient / shadow / monochrome ─────────────────────────────────
+
+def test_gradient_shadow_default_none():
+    out = normalize_elements([{"type": "rect"}, {"type": "ellipse"}])
+    assert out[0]["gradient"] is None and out[0]["shadow"] is None
+    assert out[1]["gradient"] is None and out[1]["shadow"] is None
+
+
+def test_gradient_nested_dict_preserved():
+    grad = {"type": "linear", "angle": 45,
+            "stops": [["#ffffff", 0.0], ["#000000", 1.0]]}
+    shadow = {"dx": 0.5, "dy": 0.5, "blur": 0, "color": "#888888"}
+    el = normalize_elements([{"type": "rect", "gradient": grad,
+                              "shadow": shadow}])[0]
+    assert el["gradient"] == grad      # nested dict rides the preserve path
+    assert el["shadow"] == shadow
+    # nested numeric values must NOT be float-coerced into the top-level
+    assert isinstance(el["gradient"]["stops"], list)
+
+
+def test_template_monochrome_default_false():
+    tmpl = normalize_template({"rows": []})
+    assert tmpl["monochrome"] is False
+
+
 def test_normalize_template_adds_empty_elements():
     tmpl = normalize_template({"rows": [{"fields": [{"key": "uniqueId"}]}]})
     assert tmpl["elements"] == []

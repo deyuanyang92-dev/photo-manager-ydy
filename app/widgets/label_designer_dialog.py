@@ -1716,6 +1716,8 @@ class LabelDesignerDialog(QDialog):
             self._tmpl["bgColor"] = ch["value"]
         elif op == "tmpl_cornerRadius":
             self._tmpl["cornerRadius"] = ch["value"]
+        elif op == "tmpl_monochrome":
+            self._tmpl["monochrome"] = bool(ch["value"])
         elif op == "field_color" and 0 <= r < len(rows):
             f = rows[r]["fields"][fi]
             if isinstance(f, dict):
@@ -1785,6 +1787,10 @@ class LabelDesignerDialog(QDialog):
             el["arrowEnd"] = bool(ch.get("value"))
         elif op == "element_wrap":
             el["wrap"] = bool(ch.get("value"))
+        elif op == "element_gradient":
+            el["gradient"] = ch.get("value")  # dict or None clears it
+        elif op == "element_shadow":
+            el["shadow"] = ch.get("value")    # dict or None clears it
         elif op == "element_key":
             el["key"] = ch.get("value")
         elif op == "element_content":
