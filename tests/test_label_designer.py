@@ -243,6 +243,63 @@ class TestMultiSelect:
         assert len(d._tmpl["elements"]) == 1
 
 
+class TestRulersAndGuides:
+    """Phase 1b — draggable reference guides; elements snap to them."""
+
+    def _canvas(self, qt_app, ppm=4.0):
+        from app.widgets.label_designer_dialog import _DesignCanvas
+        from app.utils.label_core import normalize_template
+        c = _DesignCanvas()
+        c.resize(400, 300)
+        c.set_content(normalize_template({"rows": []}), {"w": 50, "h": 30}, {})
+        c._ppm = ppm   # deterministic snap threshold (6px / ppm)
+        return c
+
+    def test_add_user_guide_stored(self, qt_app):
+        c = self._canvas(qt_app)
+        c.add_user_guide("v", 25.0)
+        c.add_user_guide("h", 10.0)
+        assert ("v", 25.0) in c._user_guides
+        assert ("h", 10.0) in c._user_guides
+
+    def test_element_snaps_to_user_guide(self, qt_app):
+        c = self._canvas(qt_app, ppm=4.0)  # thr = 6/4 = 1.5mm
+        c.add_user_guide("v", 25.0)
+        x, y, guides = c.snap(24.4, 5.0, 10.0, 6.0)
+        assert x == 25.0
+        assert ("v", 25.0) in guides
+
+    def test_no_snap_when_far_from_guide(self, qt_app):
+        c = self._canvas(qt_app, ppm=4.0)
+        c.add_user_guide("v", 25.0)
+        x, _y, _g = c.snap(10.0, 5.0, 10.0, 6.0)
+        assert x == 10.0
+
+    def test_clear_user_guides(self, qt_app):
+        c = self._canvas(qt_app)
+        c.add_user_guide("v", 25.0)
+        c.clear_user_guides()
+        assert c._user_guides == []
+
+    def test_drag_from_top_ruler_creates_vertical_guide(self, qt_app):
+        from PyQt6.QtCore import Qt, QPointF, QPoint
+        from PyQt6.QtGui import QMouseEvent
+        c = self._canvas(qt_app)
+        ox, oy = c._origin.x(), c._origin.y()
+        # press in the top margin (above the label pixmap), then release inside
+        start = QPoint(ox + 40, max(0, oy - 8))
+        for typ, pos in ((QMouseEvent.Type.MouseButtonPress, start),
+                         (QMouseEvent.Type.MouseMove, QPoint(ox + 40, oy + 30)),
+                         (QMouseEvent.Type.MouseButtonRelease, QPoint(ox + 40, oy + 30))):
+            ev = QMouseEvent(typ, QPointF(pos), QPointF(pos),
+                             Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
+                             Qt.KeyboardModifier.NoModifier)
+            {QMouseEvent.Type.MouseButtonPress: c.mousePressEvent,
+             QMouseEvent.Type.MouseMove: c.mouseMoveEvent,
+             QMouseEvent.Type.MouseButtonRelease: c.mouseReleaseEvent}[typ](ev)
+        assert any(axis == "v" for axis, _ in c._user_guides)
+
+
 class TestCanvasGroupWiring:
     """The canvas mouse/keyboard wiring drives the dialog's group selection."""
 

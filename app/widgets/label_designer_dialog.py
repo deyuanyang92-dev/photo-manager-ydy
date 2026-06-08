@@ -151,6 +151,9 @@ class _DesignCanvas(QWidget):
         self._grid_mm = 1.0
         self._snap_px = 6
         self._guides: list = []           # [("v"|"h", mm)] live alignment guides
+        self._user_guides: list = []      # persistent reference guides (designer-local)
+        self._new_guide: Optional[str] = None   # axis being dragged out of a ruler
+        self._new_guide_mm = 0.0
         self._marquee_start: Optional[QPoint] = None  # box-select anchor (widget px)
         self._marquee_rect = None                     # QRect during box-select
         self._show_guides = False         # margin/bleed overlay toggle
@@ -215,6 +218,19 @@ class _DesignCanvas(QWidget):
         else:
             p.drawRect(ox, oy, W, H)
 
+        # rulers (mm ticks in the margin) + persistent reference guides
+        self._paint_rulers(p, ox, oy, W, H)
+        if self._user_guides:
+            pen = QPen(QColor("#3da9fc"), 1)
+            p.setPen(pen)
+            for axis, gmm in self._user_guides:
+                if axis == "v":
+                    x = int(ox + gmm * self._ppm)
+                    p.drawLine(x, oy, x, oy + H)
+                else:
+                    y = int(oy + gmm * self._ppm)
+                    p.drawLine(ox, y, ox + W, y)
+
         # margin / bleed guides (designer-local, never printed)
         if self._show_guides:
             self._paint_safe_bleed(p, ox, oy, W, H)
@@ -263,6 +279,32 @@ class _DesignCanvas(QWidget):
                 else:
                     y = int(oy + mm * self._ppm)
                     p.drawLine(ox, y, ox + W, y)
+
+    def _paint_rulers(self, p: QPainter, ox: int, oy: int, W: int, H: int) -> None:
+        """Draw mm tick marks in the top + left margins around the label."""
+        if self._ppm <= 0:
+            return
+        p.setPen(QPen(QColor("#5b7a83"), 1))
+        w_mm = int(float(self._dims.get("w", 60)))
+        h_mm = int(float(self._dims.get("h", 40)))
+        step = 5 if self._ppm < 5 else 1   # coarser ticks when zoomed out
+        for mm in range(0, w_mm + 1, step):
+            x = int(ox + mm * self._ppm)
+            tick = 6 if mm % 5 == 0 else 3
+            p.drawLine(x, oy - tick, x, oy)
+        for mm in range(0, h_mm + 1, step):
+            y = int(oy + mm * self._ppm)
+            tick = 6 if mm % 5 == 0 else 3
+            p.drawLine(ox - tick, y, ox, y)
+        # live preview of the guide being dragged out of a ruler
+        if self._new_guide is not None:
+            p.setPen(QPen(QColor("#3da9fc"), 1))
+            if self._new_guide == "v":
+                x = int(ox + self._new_guide_mm * self._ppm)
+                p.drawLine(x, oy, x, oy + H)
+            else:
+                y = int(oy + self._new_guide_mm * self._ppm)
+                p.drawLine(ox, y, ox + W, y)
 
     def _paint_safe_bleed(self, p: QPainter, ox: int, oy: int, W: int, H: int) -> None:
         pen = QPen(QColor("#8aa"))
@@ -339,6 +381,13 @@ class _DesignCanvas(QWidget):
 
     def mousePressEvent(self, e) -> None:  # noqa: N802
         self.setFocus()
+        # dragging out of a ruler margin starts a new reference guide
+        axis = self._ruler_axis(e.pos())
+        if axis is not None:
+            self._new_guide = axis
+            self._new_guide_mm = self._guide_mm_at(e.pos(), axis)
+            self.update()
+            return
         # grabbing a resize handle takes priority over re-selecting / moving
         handle = self._hit_handle(e.pos())
         if handle is not None:
@@ -376,7 +425,17 @@ class _DesignCanvas(QWidget):
         els = self._tmpl.get("elements") or []
         return els[i] if 0 <= i < len(els) else None
 
+    def _guide_mm_at(self, pos: QPoint, axis: str) -> float:
+        ox, oy = self._origin.x(), self._origin.y()
+        if axis == "v":
+            return (pos.x() - ox) / self._ppm if self._ppm else 0.0
+        return (pos.y() - oy) / self._ppm if self._ppm else 0.0
+
     def mouseMoveEvent(self, e) -> None:  # noqa: N802
+        if self._new_guide is not None:
+            self._new_guide_mm = self._guide_mm_at(e.pos(), self._new_guide)
+            self.update()
+            return
         if self._marquee_start is not None:
             from PyQt6.QtCore import QRect
             self._marquee_rect = QRect(self._marquee_start, e.pos()).normalized()
@@ -429,6 +488,15 @@ class _DesignCanvas(QWidget):
                                   round(w, 2), round(h, 2))
 
     def mouseReleaseEvent(self, e) -> None:  # noqa: N802
+        if self._new_guide is not None:
+            axis = self._new_guide
+            mm = self._guide_mm_at(e.pos(), axis)
+            self._new_guide = None
+            limit = float(self._dims.get("w" if axis == "v" else "h", 60))
+            if 0.0 <= mm <= limit:   # dropped inside the label → commit guide
+                self.add_user_guide(axis, mm)
+            self.update()
+            return
         if self._marquee_start is not None:
             rect = self._marquee_rect
             self._marquee_start = None
@@ -477,6 +545,9 @@ class _DesignCanvas(QWidget):
             ew, eh = float(el.get("w") or 0), float(el.get("h") or 0)
             vx += [ex, ex + ew / 2, ex + ew]
             hy += [ey, ey + eh / 2, ey + eh]
+        # persistent user reference guides are snap targets too
+        for axis, gmm in self._user_guides:
+            (vx if axis == "v" else hy).append(float(gmm))
 
         # try snapping left/center/right of the moving box to any vx
         def _best(edges, candidates):
@@ -509,6 +580,30 @@ class _DesignCanvas(QWidget):
     def set_guides(self, guides: list) -> None:
         self._guides = guides or []
         self.update()
+
+    # ── User reference guides (Phase 1b) ──────────────────────────────────────
+    def add_user_guide(self, axis: str, mm: float) -> None:
+        """Add a persistent reference guide (axis 'v'/'h', position in mm)."""
+        if axis in ("v", "h"):
+            self._user_guides.append((axis, round(float(mm), 2)))
+            self.update()
+
+    def clear_user_guides(self) -> None:
+        self._user_guides = []
+        self.update()
+
+    def _ruler_axis(self, pos: QPoint) -> Optional[str]:
+        """Return 'v' if *pos* is in the top ruler margin, 'h' if in the left
+        ruler margin, else None. Dragging out of a ruler creates a guide."""
+        if self._pixmap is None:
+            return None
+        ox, oy = self._origin.x(), self._origin.y()
+        W, H = self._pixmap.width(), self._pixmap.height()
+        if pos.y() < oy and ox <= pos.x() <= ox + W:
+            return "v"
+        if pos.x() < ox and oy <= pos.y() <= oy + H:
+            return "h"
+        return None
 
     def set_guide_overlay(self, show: bool, safe_mm: float = 2.0, bleed_mm: float = 0.0) -> None:
         self._show_guides = show
@@ -1043,6 +1138,9 @@ class LabelDesignerDialog(QDialog):
 
         self._guide_btn = _btn("辅助线", True)
         self._guide_btn.toggled.connect(self._toggle_guide_overlay)
+        self._clear_guides_btn = _btn("清参考线")
+        self._clear_guides_btn.setToolTip("从标尺拖出参考线；点此清除全部参考线")
+        self._clear_guides_btn.clicked.connect(lambda: self._canvas.clear_user_guides())
 
         self._undo_btn = _btn("↶ 撤销")
         self._redo_btn = _btn("↷ 重做")
@@ -1056,7 +1154,8 @@ class LabelDesignerDialog(QDialog):
             smenu.addAction("复制当前自定义", self._duplicate_current)
             smenu.addAction("删除当前自定义", self._delete_current)
         saveas.setMenu(smenu)
-        for w in (add_field, add_row, add_el, qr_btn, presets_btn, self._guide_btn):
+        for w in (add_field, add_row, add_el, qr_btn, presets_btn,
+                  self._guide_btn, self._clear_guides_btn):
             bar.addWidget(w)
         bar.addStretch()
         bar.addWidget(self._undo_btn)
