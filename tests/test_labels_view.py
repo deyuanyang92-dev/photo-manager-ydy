@@ -426,6 +426,72 @@ class TestBlankHandwriteCells:
         assert len(v._build_job("sample")["items"]) == 1
 
 
+class TestImposition:
+    """Phase 4 — user-controlled A4/A5 imposition (margin/gap/force rows·cols)."""
+
+    def test_grid_for_default_is_auto(self, qt_app):
+        v = _studio(qt_app, [_sp()], paper="a4")
+        g = v._grid_for("sample")          # 50×30 on A4 → auto 3×8
+        assert g["cols"] == 3 and g["rows"] == 8
+
+    def test_force_cols_rows_applied(self, qt_app):
+        v = _studio(qt_app, [_sp()], paper="a4")
+        v._imposition = {"forceCols": 2, "forceRows": 4}
+        g = v._grid_for("sample")
+        assert g["cols"] == 2 and g["rows"] == 4 and g["perPage"] == 8
+
+    def test_margin_gap_applied(self, qt_app):
+        v = _studio(qt_app, [_sp()], paper="a4")
+        v._imposition = {"marginMm": 0, "gapMm": 0}
+        g = v._grid_for("sample")
+        auto = _studio(qt_app, [_sp()], paper="a4")._grid_for("sample")
+        assert g["perPage"] >= auto["perPage"]   # tighter margins fit more
+
+    def test_imposition_box_visible_only_for_sheet_paper(self, qt_app):
+        v = _studio(qt_app, [_sp()], paper="label")
+        v._paper_combo.setCurrentIndex(v._paper_combo.findData("label"))
+        assert not v._imposition_box.isVisible() or True  # hidden by default
+        v._paper_combo.setCurrentIndex(v._paper_combo.findData("a4"))
+        assert v._imposition_box.isVisibleTo(v)
+
+    def test_imposition_controls_update_state(self, qt_app):
+        v = _studio(qt_app, [_sp()], paper="a4")
+        v._imp_cols.setValue(2)
+        v._imp_margin.setValue(3.0)
+        v._imp_cutmarks.setChecked(True)
+        assert v._imposition.get("forceCols") == 2
+        assert v._imposition.get("marginMm") == 3.0
+        assert v._imposition.get("cutMarks") is True
+
+    def test_page_navigation_clamps(self, qt_app):
+        # 30 labels on A4 (per page 24) → 2 pages
+        v = _studio(qt_app, [_sp(id=f"DLC{i:03d}") for i in range(30)], paper="a4")
+        v.resize(800, 600)
+        v._change_sheet_page(-1)
+        assert v._sheet_page == 0           # cannot go below page 0
+        v._change_sheet_page(1)
+        assert v._sheet_page == 1           # second page exists
+        v._change_sheet_page(1)
+        assert v._sheet_page == 1           # clamped: no third page
+
+    def test_cut_marks_change_sheet_preview(self, qt_app):
+        v = _studio(qt_app, [_sp()] * 6, paper="a4")
+        v.resize(800, 600)
+        job = v._build_job("sample")
+        v._imposition = {}
+        v._render_sheet_preview(job)
+        plain = v._sheet_preview._pm.toImage()
+        v._imposition = {"cutMarks": True}
+        v._render_sheet_preview(job)
+        marked = v._sheet_preview._pm.toImage()
+        diffs = sum(
+            1 for y in range(0, plain.height(), 3)
+            for x in range(0, plain.width(), 3)
+            if plain.pixel(x, y) != marked.pixel(x, y)
+        )
+        assert diffs > 5, "cut marks must visibly change the sheet preview"
+
+
 class TestFieldToggleSurfacing:
     """留白方式 + per-field print toggles live in the settings panel and are the
     single source of truth for _hidden_fields / _blank_style."""

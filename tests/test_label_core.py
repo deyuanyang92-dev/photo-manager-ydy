@@ -46,6 +46,7 @@ from app.utils.label_core import (
     validate_print_job,
     create_print_job,
     label_data_text,
+    apply_field_visibility,
 )
 from app.services.label_service import LabelService, BUILTIN_TEMPLATES
 
@@ -365,6 +366,128 @@ class TestNormalizeField:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# apply_field_visibility — field-level print on/off + blank styles
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestApplyFieldVisibility:
+    @staticmethod
+    def _tmpl() -> dict:
+        # 3 single-field rows + 1 two-field row + a QR config.
+        return {
+            "name": "T",
+            "rows": [
+                {"fields": ["headerId"], "style": "bold", "size": 10},
+                {"fields": ["shortDate"], "size": 9},
+                {"fields": ["speciesName"], "size": 8},
+                {"fields": ["lon", "lat"], "size": 8, "sep": "/"},
+            ],
+            "qr": {"content": "uniqueId", "position": "right"},
+        }
+
+    def test_empty_hidden_returns_equal(self):
+        # Red-line: not using the feature must leave the template byte-identical.
+        import copy
+        t = self._tmpl()
+        snap = copy.deepcopy(t)
+        out = apply_field_visibility(t, set(), "placeholder", {})
+        assert out == snap
+        # input must not be mutated either
+        assert t == snap
+
+    def test_collapse_empties_row_no_prefix(self):
+        out = apply_field_visibility(t := self._tmpl(), {"shortDate"}, "collapse",
+                                     {"shortDate": "日期段"})
+        row = out["rows"][1]
+        assert row["fields"] == []
+        assert not row.get("prefix")
+
+    def test_blank_keeps_space_prefix(self):
+        out = apply_field_visibility(self._tmpl(), {"shortDate"}, "blank",
+                                     {"shortDate": "日期段"})
+        row = out["rows"][1]
+        assert row["fields"] == []
+        assert row["prefix"] == " "
+
+    def test_placeholder_prints_field_name(self):
+        out = apply_field_visibility(self._tmpl(), {"speciesName"}, "placeholder",
+                                     {"speciesName": "物种名称"})
+        row = out["rows"][2]
+        assert row["fields"] == []
+        assert "物种名称" in row["prefix"]
+        assert "：" in row["prefix"]
+
+    def test_placeholder_falls_back_to_key(self):
+        out = apply_field_visibility(self._tmpl(), {"shortDate"}, "placeholder", {})
+        assert "shortDate" in out["rows"][1]["prefix"]
+
+    def test_partial_row_keeps_visible_fields(self):
+        # Hide one of two fields in the lon/lat row → keep the other, no prefix.
+        out = apply_field_visibility(self._tmpl(), {"lon"}, "placeholder",
+                                     {"lon": "经度", "lat": "纬度"})
+        row = out["rows"][3]
+        keys = [normalize_field(f)["key"] for f in row["fields"]]
+        assert keys == ["lat"]
+        assert not row.get("prefix")
+
+    def test_qr_preserved(self):
+        out = apply_field_visibility(self._tmpl(), {"headerId", "shortDate"},
+                                     "placeholder", {})
+        assert out["qr"] == {"content": "uniqueId", "position": "right"}
+
+    def test_visible_rows_untouched(self):
+        out = apply_field_visibility(self._tmpl(), {"shortDate"}, "collapse",
+                                     {"shortDate": "日期段"})
+        # row 0 (headerId) stays as-is
+        assert normalize_field(out["rows"][0]["fields"][0])["key"] == "headerId"
+
+
+class TestApplyFieldVisibilityRenderContract:
+    """At print time (placeholder=False): collapse → row skipped (no ink);
+    blank/placeholder → row preserved (prefix draws ink)."""
+
+    @staticmethod
+    def _ink(qt_app, tmpl: dict) -> int:
+        from PyQt6.QtGui import QPixmap, QPainter, QColor
+        from app.utils.label_render import render_label_onto
+        dims = {"w": 50, "h": 30}
+        scale = 6.0
+        pm = QPixmap(int(dims["w"] * scale), int(dims["h"] * scale))
+        pm.fill(QColor("white"))
+        p = QPainter(pm)
+        # printing path: empty rows w/o prefix are skipped
+        render_label_onto(p, normalize_template(tmpl), dims, {}, px_per_mm=scale,
+                          placeholder=False)
+        p.end()
+        img = pm.toImage()
+        return sum(
+            1
+            for y in range(0, img.height(), 2)
+            for x in range(0, img.width(), 2)
+            if img.pixel(x, y) & 0xFFFFFF != 0xFFFFFF
+        )
+
+    @staticmethod
+    def _single_hidden(style: str) -> dict:
+        t = {"rows": [{"fields": ["speciesName"], "size": 10}],
+             "qr": {"position": "none"}}
+        return apply_field_visibility(t, {"speciesName"}, style,
+                                      {"speciesName": "物种名称"})
+
+    def test_collapse_row_skipped_no_ink(self, qt_app):
+        assert self._ink(qt_app, self._single_hidden("collapse")) == 0
+
+    def test_placeholder_row_draws_ink(self, qt_app):
+        # "物种名称：" prefix must render even with blank value.
+        assert self._ink(qt_app, self._single_hidden("placeholder")) > 0
+
+    def test_blank_row_not_skipped(self, qt_app):
+        # A space prefix keeps the row alive (not skipped) — may draw little/no
+        # visible ink, but the template must still carry the prefix.
+        t = self._single_hidden("blank")
+        assert normalize_template(t)["rows"][0]["prefix"] == " "
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # normalize_template
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -470,6 +593,29 @@ class TestCalculateGrid:
         g = calculate_grid(60, 40, 210, 297)
         assert g["usableW"] == 210 - 2 * SHEET_MARGIN_MM
         assert g["usableH"] == 297 - 2 * SHEET_MARGIN_MM
+
+    def test_force_cols_rows_override_auto(self):
+        g = calculate_grid(50, 30, 210, 297, opts={"forceCols": 2, "forceRows": 5})
+        assert g["cols"] == 2
+        assert g["rows"] == 5
+        assert g["perPage"] == 10
+
+    def test_force_cols_only(self):
+        auto = calculate_grid(50, 30, 210, 297)
+        g = calculate_grid(50, 30, 210, 297, opts={"forceCols": 1})
+        assert g["cols"] == 1
+        assert g["rows"] == auto["rows"]   # rows still auto
+
+    def test_force_values_clamped_to_one_minimum(self):
+        g = calculate_grid(50, 30, 210, 297, opts={"forceCols": 0, "forceRows": -3})
+        # non-positive forces are ignored → fall back to auto
+        auto = calculate_grid(50, 30, 210, 297)
+        assert g["cols"] == auto["cols"] and g["rows"] == auto["rows"]
+
+    def test_custom_gap_changes_grid(self):
+        tight = calculate_grid(50, 30, 210, 297, opts={"gapMm": 0})
+        loose = calculate_grid(50, 30, 210, 297, opts={"gapMm": 20})
+        assert tight["perPage"] >= loose["perPage"]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -740,6 +886,37 @@ class TestLabelService:
         ids = {item["data"]["speciesId"] for item in job["items"]}
         assert ids == {"DLC001", "CLC001"}
 
+    def test_fill_blank_prints_without_specimens(self):
+        """No specimen selected + fill_blank=True → one blank item so the user
+        can print N copies of the bare template (bound fields blank)."""
+        job = LabelService.build_print_job(
+            [], BUILTIN_TEMPLATES["standard"], "sample",
+            selected_indices=[], copies=3, dims={"w": 60, "h": 40},
+            fill_blank=True,
+        )
+        assert len(job["items"]) == 1
+        assert job["items"][0]["data"] == {}
+        assert job["copies"] == 3
+
+    def test_fill_blank_default_off_keeps_empty(self):
+        """Default (fill_blank=False) is unchanged — no specimens → 0 items."""
+        job = LabelService.build_print_job(
+            [], BUILTIN_TEMPLATES["standard"], "sample",
+            selected_indices=[], copies=3, dims={"w": 60, "h": 40},
+        )
+        assert job["items"] == []
+
+    def test_fill_blank_not_triggered_when_specimens_selected(self):
+        """fill_blank must NOT fabricate when the user selected specimens but a
+        bucket is legitimately empty (e.g. tissue with no R-prefix)."""
+        specimens = [_sp(id="DLC001", storage="D95E")]  # non-RNA
+        job = LabelService.build_print_job(
+            specimens, BUILTIN_TEMPLATES["tissueCompact"], "tissue",
+            selected_indices=[0], copies=2, dims={"w": 30, "h": 15},
+            fill_blank=True,
+        )
+        assert job["items"] == []  # tissue bucket stays empty, no blank fabricated
+
     def test_de_duplication_by_unique_id(self):
         sp = _sp(id="DLC001")
         # Pass same specimen three times
@@ -782,7 +959,12 @@ class TestQrEccQ:
         assert tmpl["qr"]["ecc"] == "Q"
 
     def test_builtin_templates_all_have_ecc_q(self):
-        for name, tmpl in BUILTIN_TEMPLATES.items():
+        # Original oracle-derived templates must keep ECC=Q.
+        # New tube/circle templates (Task 4) may use M/H for small-label suitability.
+        _ORIGINAL_KEYS = ("standard", "compact", "detailed",
+                          "tissueCompact", "tissueMini", "tissueCustom")
+        for name in _ORIGINAL_KEYS:
+            tmpl = BUILTIN_TEMPLATES[name]
             normalised = normalize_template(tmpl)
             assert normalised["qr"]["ecc"] == "Q", (
                 f"Template '{name}' has ecc={normalised['qr']['ecc']!r}, expected 'Q'"
@@ -881,17 +1063,16 @@ class TestLabelsView:
         # Should not crash with no project loaded
         view.on_activate()
 
-    def test_step_navigation(self, qt_app):
+    def test_step_sections_present(self, qt_app):
         from app.views.labels_view import LabelsView
         from app.app_context import AppContext
         ctx = AppContext()
         view = LabelsView(ctx)
-        # Navigate to each step without crash
-        view._go_to_step(0)
-        view._go_to_step(1)
-        view._go_to_step(2)
-        view._go_to_step(3)
-        assert view._current_step == 3
+        # Web classic Step 1-4 vertical flow.
+        assert view._step1 is not None
+        assert view._step2 is not None
+        assert view._step3 is not None
+        assert view._step4 is not None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -929,3 +1110,93 @@ class TestLabelDataText:
 
     def test_label_data_text_empty_dict(self):
         assert label_data_text({}) == ""
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# render_label_onto: shape / bgColor / field color / cornerRadius (Task 4)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestRenderShape:
+    """Tests for render_label_onto shape/bgColor/field-color/cornerRadius (Task 4)."""
+
+    def _render(self, qt_app, tmpl: dict, dims: dict, data: dict = None, scale: float = 4.0):
+        from PyQt6.QtGui import QPixmap, QPainter, QColor
+        from app.utils.label_render import render_label_onto
+        w_px = max(1, int(dims["w"] * scale))
+        h_px = max(1, int(dims["h"] * scale))
+        pm = QPixmap(w_px, h_px)
+        pm.fill(QColor("white"))
+        p = QPainter(pm)
+        render_label_onto(p, tmpl, dims, data or {}, px_per_mm=scale)
+        p.end()
+        return pm.toImage()
+
+    def test_circle_shape_no_crash(self, qt_app):
+        self._render(qt_app, {"shape": "circle", "rows": [], "lineHeight": 1.0}, {"w": 13, "h": 13})
+
+    def test_roundrect_shape_no_crash(self, qt_app):
+        self._render(qt_app,
+                     {"shape": "roundrect", "cornerRadius": 2.0, "rows": [], "lineHeight": 1.0},
+                     {"w": 40, "h": 20})
+
+    def test_default_shape_rect_no_crash(self, qt_app):
+        self._render(qt_app, {"rows": [], "lineHeight": 1.0}, {"w": 30, "h": 15})
+
+    def test_bgColor_red_produces_non_white_pixels(self, qt_app):
+        img = self._render(qt_app, {"bgColor": "#ff0000", "rows": [], "lineHeight": 1.0},
+                           {"w": 30, "h": 15})
+        has_red = any(
+            (img.pixel(x, y) >> 16 & 0xFF) > 200
+            and (img.pixel(x, y) >> 8 & 0xFF) < 50
+            and (img.pixel(x, y) & 0xFF) < 50
+            for y in range(0, img.height(), 2)
+            for x in range(0, img.width(), 2)
+        )
+        assert has_red, "bgColor=#ff0000 should produce red pixels"
+
+    def test_bgColor_default_white(self, qt_app):
+        img = self._render(qt_app, {"rows": [], "lineHeight": 1.0}, {"w": 20, "h": 10})
+        cx, cy = img.width() // 2, img.height() // 2
+        assert img.pixel(cx, cy) & 0xFFFFFF == 0xFFFFFF, "Default bgColor should be white"
+
+    def test_circle_bg_corners_stay_white(self, qt_app):
+        """fillPath to circle: corners outside ellipse stay canvas bg color (white)."""
+        img = self._render(
+            qt_app,
+            {"shape": "circle", "bgColor": "#0000ff", "rows": [], "lineHeight": 1.0},
+            {"w": 20, "h": 20},
+            scale=5.0,
+        )
+        c = img.pixel(0, 0)
+        assert c & 0xFFFFFF == 0xFFFFFF, "Top-left corner outside circle should stay white"
+
+    def test_field_color_blue_text(self, qt_app):
+        from PyQt6.QtGui import QPixmap, QPainter, QColor
+        from app.utils.label_render import render_label_onto
+        scale = 8.0
+        dims = {"w": 40, "h": 15}
+        tmpl = {
+            "rows": [{"fields": [{"key": "uniqueId", "style": "", "size": 9,
+                                  "offsetX": 0, "offsetY": 0, "color": "#0000ff"}],
+                      "align": "left"}],
+            "lineHeight": 1.3,
+        }
+        data = {"uniqueId": "TEST-001"}
+        pm = QPixmap(int(dims["w"] * scale), int(dims["h"] * scale))
+        pm.fill(QColor("white"))
+        p = QPainter(pm)
+        render_label_onto(p, tmpl, dims, data, px_per_mm=scale)
+        p.end()
+        img = pm.toImage()
+        has_blue = any(
+            (img.pixel(x, y) & 0xFF) > 180
+            and (img.pixel(x, y) >> 16 & 0xFF) < 50
+            and (img.pixel(x, y) >> 8 & 0xFF) < 50
+            for y in range(img.height())
+            for x in range(img.width())
+        )
+        assert has_blue, "field color=#0000ff should produce blue pixels"
+
+    def test_cornerRadius_rect_no_crash(self, qt_app):
+        self._render(qt_app, {"cornerRadius": 3.0, "rows": [], "lineHeight": 1.0},
+                     {"w": 50, "h": 30})

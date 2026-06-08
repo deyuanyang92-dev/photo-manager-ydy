@@ -234,6 +234,151 @@ def normalize_field(field: Any) -> dict:
     }
 
 
+def apply_field_visibility(
+    tmpl: dict,
+    hidden_keys,
+    style: str = "placeholder",
+    field_names: Optional[dict] = None,
+) -> dict:
+    """Return a copy of *tmpl* with selected field keys removed from printing.
+
+    Batch-wide field-level "print / don't print" toggle for the label studio.
+    Fields whose key is in *hidden_keys* are stripped from their row; how the
+    freed space is treated depends on *style*:
+
+      - ``"collapse"``    : drop the field(s); a now-empty row is skipped at
+                            print time (``render_label_onto`` placeholder=False),
+                            so the label tightens up.
+      - ``"blank"``       : a fully-hidden row keeps a one-space ``prefix`` so the
+                            empty line is preserved for hand-writing.
+      - ``"placeholder"`` : a fully-hidden row prints the field's Chinese name +
+                            ``：`` as a ``prefix`` (e.g. ``物种名称：``) with the
+                            value left blank to fill in by hand. *field_names*
+                            maps key → display name; unmapped keys fall back to
+                            the raw key.
+
+    Rows that mix hidden and visible fields keep only the visible fields (the
+    hidden ones are simply removed — no prefix is injected). The QR layer and
+    every other template key are untouched.
+
+    When *hidden_keys* is empty the input is returned **unchanged and unmutated**
+    — templates that never use this feature render byte-identically to before.
+    """
+    hidden = set(hidden_keys or ())
+    if not hidden:
+        return tmpl
+
+    names = field_names or {}
+    out = _clone(tmpl)
+    for row in out.get("rows") or []:
+        if not isinstance(row, dict):
+            continue
+        fields = row.get("fields") or []
+        norm = [normalize_field(f) for f in fields]
+        hidden_norm = [n for n, f in zip(norm, fields) if n["key"] in hidden]
+        if not hidden_norm:
+            continue
+        visible = [f for f, n in zip(fields, norm) if n["key"] not in hidden]
+        if visible:
+            # Partial row: keep the visible fields, drop the hidden ones.
+            row["fields"] = visible
+            continue
+        # Whole row hidden.
+        row["fields"] = []
+        if style == "collapse":
+            row.pop("prefix", None)
+        elif style == "blank":
+            row["prefix"] = " "
+        else:  # "placeholder"
+            key = hidden_norm[0]["key"]
+            row["prefix"] = f"{names.get(key, key)}："
+    return out
+
+
+# Per-type default templates for free-form elements. Coords/sizes in mm,
+# origin = label top-left. ``normalize_elements`` fills any missing key from
+# these and drops elements whose ``type`` is not a key here.
+ELEMENT_DEFAULTS: dict[str, dict] = {
+    "text": {"x": 0.0, "y": 0.0, "w": 20.0, "h": 6.0, "text": "",
+             "size": 9, "style": "", "color": "#000000", "align": "left",
+             "rotation": 0},
+    "field": {"x": 0.0, "y": 0.0, "w": 20.0, "h": 6.0, "key": "uniqueId",
+              "size": 9, "style": "", "color": "#000000", "align": "left",
+              "rotation": 0},
+    "line": {"x1": 0.0, "y1": 0.0, "x2": 20.0, "y2": 0.0,
+             "width": 0.3, "color": "#000000"},
+    "rect": {"x": 0.0, "y": 0.0, "w": 20.0, "h": 10.0, "stroke": "#000000",
+             "strokeWidth": 0.3, "fill": None, "cornerRadius": 0,
+             "rotation": 0},
+    "ellipse": {"x": 0.0, "y": 0.0, "w": 20.0, "h": 10.0, "stroke": "#000000",
+                "strokeWidth": 0.3, "fill": None, "rotation": 0},
+    "image": {"x": 0.0, "y": 0.0, "w": 20.0, "h": 20.0, "data": None,
+              "path": None, "keepAspect": True, "rotation": 0},
+    "barcode": {"x": 0.0, "y": 0.0, "w": 30.0, "h": 12.0, "content": "uniqueId",
+                "showText": True, "rotation": 0},
+}
+
+# Keys that must be coerced to float when present (geometry/measure values).
+_ELEMENT_FLOAT_KEYS = frozenset(
+    {"x", "y", "w", "h", "x1", "y1", "x2", "y2", "width", "strokeWidth",
+     "cornerRadius", "rotation"}
+)
+
+
+def normalize_element(raw: Any) -> Optional[dict]:
+    """Normalise one free-form element dict, or return None to drop it.
+
+    Fills type-specific defaults from ``ELEMENT_DEFAULTS``, coerces geometry
+    keys to float, and preserves any extra keys the caller supplied
+    (forward-compat). Returns None when *raw* is not a dict or its ``type`` is
+    unknown.
+    """
+    if not isinstance(raw, dict):
+        return None
+    etype = raw.get("type")
+    defaults = ELEMENT_DEFAULTS.get(etype)
+    if defaults is None:
+        return None
+    out: dict = {"type": etype}
+    # start from defaults, then overlay caller-supplied keys (incl. extras)
+    for key, dval in defaults.items():
+        out[key] = raw.get(key, dval) if raw.get(key, None) is not None else dval
+    for key, val in raw.items():
+        if key not in out and key != "type":
+            out[key] = val
+    for key in list(out.keys()):
+        if key in _ELEMENT_FLOAT_KEYS and out[key] is not None:
+            try:
+                out[key] = float(out[key])
+            except (TypeError, ValueError):
+                out[key] = float(defaults.get(key, 0.0) or 0.0)
+    return out
+
+
+def normalize_elements(raw: Any) -> list:
+    """Normalise the optional free-form ``elements`` layer of a template.
+
+    The free-form designer overlays arbitrary elements (text, field, line,
+    rect, ellipse, image, barcode) on top of the row-based layout. Each element
+    is a dict with a ``type`` and type-specific geometry/style keys, all coords
+    in mm with origin at the label's top-left. List order is the z-order
+    (last = topmost).
+
+    Robust to junk: a non-list returns ``[]`` (this is the backward-compat
+    guarantee — templates without ``elements`` render exactly as before).
+    Unknown ``type`` values are dropped; unrecognised extra keys are preserved
+    (forward-compat).
+    """
+    if not isinstance(raw, list):
+        return []
+    out = []
+    for el in raw:
+        norm = normalize_element(el)
+        if norm is not None:
+            out.append(norm)
+    return out
+
+
 def normalize_template(template: Optional[dict], opts: Optional[dict] = None) -> dict:
     """Normalise a label template, filling all defaults.
 
@@ -285,6 +430,9 @@ def normalize_template(template: Optional[dict], opts: Optional[dict] = None) ->
     out["qr"]["position"] = out["qr"].get("position") or "right"
     out["qr"]["sizePct"] = out["qr"].get("sizePct") or 0.4
     out["qr"]["ecc"] = out["qr"].get("ecc") or "Q"
+
+    # free-form element layer (backward-compat: absent → [])
+    out["elements"] = normalize_elements(out.get("elements"))
     return out
 
 
@@ -340,6 +488,12 @@ def calculate_grid(
     usable_h = max(0.0, page_h - 2 * margin)
     cols = max(1, int((usable_w + gap) // (label_w + gap)))
     rows = max(1, int((usable_h + gap) // (label_h + gap)))
+    # explicit forced grid overrides the auto fit (non-positive forces ignored)
+    fc, fr = opts.get("forceCols"), opts.get("forceRows")
+    if fc is not None and int(fc) > 0:
+        cols = int(fc)
+    if fr is not None and int(fr) > 0:
+        rows = int(fr)
     return {
         "cols": cols,
         "rows": rows,
@@ -399,7 +553,7 @@ def qr_metrics(template: Optional[dict], dims: dict) -> Optional[dict]:
         x = qr.get("x") or 0.0
         y = qr.get("y") or 0.0
     elif pos in ("top", "bottom"):
-        size_mm = w * (size_pct if qr.get("sizePct") else 0.55)
+        size_mm = min(w * (size_pct if qr.get("sizePct") else 0.55), min(w, h))
         x = max(0.0, (w - size_mm) / 2)
         y = max(0.0, h - size_mm) if pos == "bottom" else 0.0
     elif pos == "right":
