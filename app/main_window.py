@@ -34,16 +34,19 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Optional
 
 from PyQt6.QtCore import QSize, Qt
-from PyQt6.QtGui import QCloseEvent
+from PyQt6.QtGui import QCloseEvent, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QButtonGroup,
     QFrame,
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMenu,
     QPushButton,
+    QScrollArea,
     QStackedWidget,
     QStatusBar,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -80,6 +83,7 @@ class MainWindow(QMainWindow):
         self._build_shell()
         self._build_status_bar()
         self._wire_collab_status_bar()
+        self._wire_screenshot()
 
     # ── Shell layout ──────────────────────────────────────────────────────
 
@@ -145,10 +149,22 @@ class MainWindow(QMainWindow):
         self._nav_row.setContentsMargins(0, 0, 0, 0)
         self._nav_row.setSpacing(2)
         nav_wrap = QWidget()
+        nav_wrap.setObjectName("NavWrap")
         nav_wrap.setLayout(self._nav_row)
-        lay.addWidget(nav_wrap)
-
-        lay.addStretch()
+        # Narrow screens (e.g. 1024px) can't fit brand + switcher + all nav tabs
+        # + action buttons on one line; without this the nav buttons overflow and
+        # their labels overlap.  Hosting the nav row in a horizontal scroll area
+        # lets it shrink (and scroll) instead of overlapping.  On wide screens the
+        # content fits, no scrollbar shows, and it looks identical to before — the
+        # scroll area takes the flexible middle space that the old stretch held.
+        nav_scroll = QScrollArea()
+        nav_scroll.setObjectName("NavScroll")
+        nav_scroll.setWidget(nav_wrap)
+        nav_scroll.setWidgetResizable(True)
+        nav_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        nav_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        nav_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        lay.addWidget(nav_scroll, stretch=1)
 
         # Right side: compact global actions.
         self._btn_new_project = QPushButton("新建")
@@ -181,6 +197,29 @@ class MainWindow(QMainWindow):
         self._btn_compress.clicked.connect(lambda: self.navigate_to("workbench"))
         self._btn_compress.setCursor(Qt.CursorShape.PointingHandCursor)
         lay.addWidget(self._btn_compress)
+
+        lay.addSpacing(6)
+
+        # Screenshot tool: click = region capture; dropdown = other modes.
+        self._shot_btn = QToolButton()
+        self._shot_btn.setObjectName("IconGhost")
+        self._shot_btn.setToolTip("截图（Alt+A 区域截图）")
+        self._shot_btn.setFixedSize(34, 30)
+        self._shot_btn.setIcon(
+            icons.icon("mdi6.scissors-cutting", color=icons.TONE_MUTED,
+                       color_active=icons.TONE_ACCENT_HOVER)
+        )
+        self._shot_btn.setIconSize(QSize(18, 18))
+        self._shot_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._shot_btn.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        shot_menu = QMenu(self._shot_btn)
+        shot_menu.addAction("区域截图", lambda: self._shot_ctrl.capture_region())
+        shot_menu.addAction("全屏截图", lambda: self._shot_ctrl.capture_fullscreen())
+        shot_menu.addAction("当前窗口", lambda: self._shot_ctrl.capture_window())
+        shot_menu.addAction("当前页面", lambda: self._shot_ctrl.capture_view())
+        self._shot_btn.setMenu(shot_menu)
+        self._shot_btn.clicked.connect(lambda: self._shot_ctrl.capture_region())
+        lay.addWidget(self._shot_btn)
 
         lay.addSpacing(6)
 
@@ -461,6 +500,28 @@ class MainWindow(QMainWindow):
 
     def set_status_helicon(self, text: str) -> None:
         self._status_helicon.setText(text)
+
+    # ── Screenshot ────────────────────────────────────────────────────────
+
+    def _wire_screenshot(self) -> None:
+        """Build the screenshot controller and bind Alt+A (= macOS Option+A).
+
+        ApplicationShortcut context → Alt+A fires whenever any app window has
+        focus, never while the app is in the background. The controller is the
+        reusable entry point shared with the topbar 截图 button's mode menu.
+        """
+        from app.widgets.screenshot_controller import ScreenshotController
+
+        self._shot_ctrl = ScreenshotController(
+            self,
+            ctx=self.ctx,
+            view_provider=lambda: self._stack.currentWidget(),
+            status_cb=self.set_status_specimen,
+        )
+        sc = QShortcut(QKeySequence("Alt+A"), self)
+        sc.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        sc.activated.connect(self._shot_ctrl.capture_region)
+        self._screenshot_shortcut = sc
 
     # ── Persistence ───────────────────────────────────────────────────────
 

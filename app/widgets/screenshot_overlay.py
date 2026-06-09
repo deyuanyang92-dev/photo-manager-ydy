@@ -1,0 +1,350 @@
+"""screenshot_overlay.py — fullscreen capture + annotation editor.
+
+One widget drives every capture mode. The controller freezes the screen and
+opens this overlay, optionally with a *preset* selection rectangle:
+
+  * region     → preset=None, the user drags the rectangle out
+  * fullscreen → preset = whole screen
+  * window     → preset = the app window's rect (screen-local)
+  * view       → preset = the current page widget's rect (screen-local)
+
+After a selection exists the overlay enters *edit* mode: a floating
+:class:`ScreenshotToolbar` appears and the user can layer annotations
+(rect / arrow / pen / text / highlight / mosaic) directly on the frozen
+pixels. Terminal toolbar actions render the composited result and emit it:
+
+  actionCopy / actionSave / actionDone(QPixmap),  actionPin(QPixmap, QPoint global),
+  cancelled()
+
+The same rendered pixmap feeds clipboard, project auto-save, save-as and pin,
+so on-screen == saved == pinned, byte-for-byte.
+"""
+from __future__ import annotations
+
+from PyQt6.QtCore import QPoint, QRect, Qt, pyqtSignal
+from PyQt6.QtGui import (
+    QColor,
+    QGuiApplication,
+    QKeyEvent,
+    QMouseEvent,
+    QPainter,
+    QPixmap,
+)
+from PyQt6.QtWidgets import QLineEdit, QWidget
+
+from app.widgets.screenshot_annotations import (
+    DRAG_TOOLS,
+    Annotation,
+    Tool,
+    paint_annotation,
+)
+from app.widgets.screenshot_toolbar import ScreenshotToolbar
+
+
+class ScreenshotOverlay(QWidget):
+    actionCopy = pyqtSignal(QPixmap)
+    actionSave = pyqtSignal(QPixmap)
+    actionDone = pyqtSignal(QPixmap)
+    actionPin = pyqtSignal(QPixmap, QPoint)
+    cancelled = pyqtSignal()
+
+    def __init__(self, anchor: QWidget | None = None) -> None:
+        super().__init__()
+        self._anchor = anchor
+        self._frozen: QPixmap = QPixmap()
+        self._preset: QRect | None = None
+
+        self._sel: QRect | None = None        # finalized selection (logical)
+        self._select_origin: QPoint | None = None  # selection-phase rubber band
+
+        self._annotations: list[Annotation] = []
+        self._draft: Annotation | None = None  # annotation under construction
+        self._tool: Tool | None = None
+        self._color = QColor("#FF4040")
+        self._width = 3
+        self._text_edit: QLineEdit | None = None
+
+        self._toolbar: ScreenshotToolbar | None = None
+
+        # NOTE: no BypassWindowManagerHint — an override-redirect fullscreen
+        # window renders black on some X11 compositors (Mutter/GNOME on certain
+        # GPUs) and fails to stack above panels/docks. Let the WM manage it and
+        # rely on showFullScreen() for true full-screen coverage.
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+        )
+        self.setCursor(Qt.CursorShape.CrossCursor)
+        self.setMouseTracking(True)
+
+    # ── lifecycle ─────────────────────────────────────────────────────────
+    def start(self, preset_rect: QRect | None = None) -> None:
+        """Freeze the anchor's screen; show fullscreen. *preset_rect* is in
+        overlay-local logical coords (None → user selects a region)."""
+        screen = (self._anchor.screen() if self._anchor else None) or \
+            QGuiApplication.primaryScreen()
+        if screen is None:
+            self.close()
+            return
+        self._frozen = screen.grabWindow(0)
+        self.setGeometry(screen.geometry())
+        self._preset = preset_rect
+        if preset_rect is not None:
+            self._sel = preset_rect.intersected(self.rect())
+            self._enter_edit_mode()
+        self.showFullScreen()
+        self.raise_()
+        self.activateWindow()
+
+    # ── painting ──────────────────────────────────────────────────────────
+    def paintEvent(self, _e) -> None:
+        p = QPainter(self)
+        if not self._frozen.isNull():
+            p.drawPixmap(self.rect(), self._frozen)
+        p.fillRect(self.rect(), QColor(0, 0, 0, 120))
+
+        sel = self._live_selection()
+        if sel is None or sel.isNull():
+            self._paint_hint(p)
+            p.end()
+            return
+
+        # Un-dim the selection.
+        if not self._frozen.isNull():
+            dpr = self._frozen.devicePixelRatio()
+            src = QRect(
+                int(sel.x() * dpr), int(sel.y() * dpr),
+                int(sel.width() * dpr), int(sel.height() * dpr),
+            )
+            p.drawPixmap(sel, self._frozen, src)
+
+        # Annotations live only inside the selection.
+        p.save()
+        p.setClipRect(sel)
+        for ann in self._annotations:
+            paint_annotation(p, ann, self._frozen)
+        if self._draft is not None:
+            paint_annotation(p, self._draft, self._frozen)
+        p.restore()
+
+        pen = p.pen()
+        pen.setColor(QColor(10, 132, 255))
+        pen.setWidth(2)
+        p.setPen(pen)
+        p.drawRect(sel)
+        p.setPen(QColor(255, 255, 255))
+        p.drawText(sel.x(), max(14, sel.y() - 6), f"{sel.width()} × {sel.height()}")
+        p.end()
+
+    def _paint_hint(self, p: QPainter) -> None:
+        p.setPen(QColor(235, 235, 235))
+        p.drawText(
+            self.rect(),
+            Qt.AlignmentFlag.AlignCenter,
+            "拖动选择截图区域 · Esc 取消",
+        )
+
+    # ── selection / drawing ────────────────────────────────────────────────
+    def mousePressEvent(self, e: QMouseEvent) -> None:
+        if e.button() == Qt.MouseButton.RightButton:
+            self._cancel()
+            return
+        if e.button() != Qt.MouseButton.LeftButton:
+            return
+        if self._sel is None:
+            self._select_origin = e.pos()
+            return
+        self._start_annotation(e.pos())
+
+    def mouseMoveEvent(self, e: QMouseEvent) -> None:
+        if self._select_origin is not None:
+            self.update()
+            self._live_end = e.pos()
+        elif self._draft is not None:
+            if self._draft.tool is Tool.PEN:
+                self._draft.points.append(e.pos())
+            else:
+                self._draft.points[-1] = e.pos()
+            self.update()
+
+    def mouseReleaseEvent(self, e: QMouseEvent) -> None:
+        if e.button() != Qt.MouseButton.LeftButton:
+            return
+        if self._select_origin is not None:
+            end = e.pos()
+            rect = QRect(self._select_origin, end).normalized()
+            self._select_origin = None
+            if rect.width() < 4 or rect.height() < 4:
+                self._cancel()
+                return
+            self._sel = rect
+            self._enter_edit_mode()
+            self.update()
+        elif self._draft is not None:
+            self._commit_draft()
+
+    def keyPressEvent(self, e: QKeyEvent) -> None:
+        if e.key() == Qt.Key.Key_Escape:
+            self._cancel()
+        elif e.key() == Qt.Key.Key_Z and e.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            self._undo()
+        else:
+            super().keyPressEvent(e)
+
+    # ── annotation helpers ─────────────────────────────────────────────────
+    def _start_annotation(self, pos: QPoint) -> None:
+        if self._tool is None or self._sel is None or not self._sel.contains(pos):
+            return
+        if self._tool is Tool.TEXT:
+            self._begin_text(pos)
+            return
+        self._draft = Annotation(
+            tool=self._tool, points=[pos, pos],
+            color=QColor(self._color), width=self._width,
+        )
+        if self._tool is Tool.PEN:
+            self._draft.points = [pos]
+
+    def _commit_draft(self) -> None:
+        d = self._draft
+        self._draft = None
+        if d is None:
+            return
+        if d.tool is Tool.PEN and len(d.points) >= 2:
+            self._annotations.append(d)
+        elif d.tool in DRAG_TOOLS and not d.bounds_rect().isNull():
+            r = d.bounds_rect()
+            if r.width() >= 3 and r.height() >= 3:
+                self._annotations.append(d)
+        self.update()
+
+    def _begin_text(self, pos: QPoint) -> None:
+        self._commit_text()
+        edit = QLineEdit(self)
+        edit.setStyleSheet(
+            f"background:rgba(0,0,0,140);color:{self._color.name()};"
+            f"border:1px dashed {self._color.name()};font-size:{12 + self._width}px;"
+        )
+        edit.move(pos)
+        edit.resize(180, 26 + self._width)
+        edit.setProperty("anchor", pos)
+        edit.returnPressed.connect(self._commit_text)
+        edit.editingFinished.connect(self._commit_text)
+        edit.show()
+        edit.setFocus()
+        self._text_edit = edit
+
+    def _commit_text(self) -> None:
+        edit = self._text_edit
+        if edit is None:
+            return
+        self._text_edit = None
+        text = edit.text().strip()
+        anchor: QPoint = edit.property("anchor")
+        edit.deleteLater()
+        if text and anchor is not None:
+            self._annotations.append(
+                Annotation(
+                    tool=Tool.TEXT, points=[anchor], text=text,
+                    color=QColor(self._color), font_pt=12 + self._width,
+                )
+            )
+            self.update()
+
+    def _undo(self) -> None:
+        if self._annotations:
+            self._annotations.pop()
+            self.update()
+
+    # ── edit mode / toolbar ─────────────────────────────────────────────────
+    def _enter_edit_mode(self) -> None:
+        if self._toolbar is not None:
+            return
+        tb = ScreenshotToolbar(self)
+        tb.toolChanged.connect(self._set_tool)
+        tb.colorChanged.connect(self._set_color)
+        tb.widthChanged.connect(self._set_width)
+        tb.undoRequested.connect(self._undo)
+        tb.copyRequested.connect(lambda: self._deliver(self.actionCopy))
+        tb.saveRequested.connect(lambda: self._deliver(self.actionSave))
+        tb.pinRequested.connect(self._deliver_pin)
+        tb.doneRequested.connect(lambda: self._deliver(self.actionDone))
+        tb.cancelRequested.connect(self._cancel)
+        tb.adjustSize()
+        self._toolbar = tb
+        self._place_toolbar()
+        tb.show()
+
+    def _place_toolbar(self) -> None:
+        if self._toolbar is None or self._sel is None:
+            return
+        tb = self._toolbar
+        w, h = tb.width(), tb.height()
+        x = min(self._sel.right() - w, self.width() - w - 4)
+        x = max(4, x)
+        y = self._sel.bottom() + 8
+        if y + h > self.height() - 4:
+            y = max(4, self._sel.top() - h - 8)
+        tb.move(x, y)
+
+    def _set_tool(self, tool) -> None:
+        self._commit_text()
+        self._tool = tool
+        self.setCursor(
+            Qt.CursorShape.ArrowCursor if tool is None else Qt.CursorShape.CrossCursor
+        )
+
+    def _set_color(self, color: QColor) -> None:
+        self._color = color
+
+    def _set_width(self, width: int) -> None:
+        self._width = width
+
+    # ── delivery ────────────────────────────────────────────────────────────
+    def render_result(self) -> QPixmap:
+        """Composite the selection region + annotations into a new QPixmap."""
+        if self._sel is None or self._frozen.isNull():
+            return QPixmap()
+        sel = self._sel
+        dpr = self._frozen.devicePixelRatio()
+        phys = QRect(
+            int(sel.x() * dpr), int(sel.y() * dpr),
+            int(sel.width() * dpr), int(sel.height() * dpr),
+        )
+        out = self._frozen.copy(phys)
+        p = QPainter(out)
+        p.scale(dpr, dpr)
+        p.translate(-sel.topLeft())
+        for ann in self._annotations:
+            paint_annotation(p, ann, self._frozen)
+        p.end()
+        out.setDevicePixelRatio(dpr)
+        return out
+
+    def _deliver(self, signal) -> None:
+        self._commit_text()
+        pix = self.render_result()
+        self.close()
+        if not pix.isNull():
+            signal.emit(pix)
+
+    def _deliver_pin(self) -> None:
+        self._commit_text()
+        pix = self.render_result()
+        global_tl = self.mapToGlobal(self._sel.topLeft()) if self._sel else QPoint(0, 0)
+        self.close()
+        if not pix.isNull():
+            self.actionPin.emit(pix, global_tl)
+
+    def _cancel(self) -> None:
+        self.close()
+        self.cancelled.emit()
+
+    # ── helpers ─────────────────────────────────────────────────────────────
+    def _live_selection(self) -> QRect | None:
+        if self._sel is not None:
+            return self._sel
+        if self._select_origin is not None:
+            end = getattr(self, "_live_end", self._select_origin)
+            return QRect(self._select_origin, end).normalized()
+        return None

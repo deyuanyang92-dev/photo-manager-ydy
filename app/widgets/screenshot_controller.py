@@ -1,0 +1,148 @@
+"""screenshot_controller.py — reusable screenshot entry point.
+
+One controller owns the capture flow so any view can trigger a screenshot and
+receive the result. It computes the preset selection per mode, opens the
+:class:`ScreenshotOverlay` editor, and routes the editor's terminal actions to
+the four destinations (clipboard / project auto-save / save-as / desktop pin).
+
+Public API
+----------
+    ctrl = ScreenshotController(main_window, ctx, view_provider, status_cb)
+    ctrl.capture_region()       # drag a rectangle
+    ctrl.capture_fullscreen()   # whole screen, pre-selected
+    ctrl.capture_window()       # the app window, pre-selected
+    ctrl.capture_view()         # the current page widget, pre-selected
+    ctrl.captured.connect(slot) # QPixmap delivered on any terminal action
+
+The ``captured(QPixmap)`` signal lets a caller (e.g. a workbench "拍屏幕"
+button) grab the pixels without caring about clipboard/save plumbing.
+"""
+from __future__ import annotations
+
+from datetime import datetime
+from pathlib import Path
+from typing import Callable, Optional
+
+from PyQt6.QtCore import QObject, QPoint, QRect, pyqtSignal
+from PyQt6.QtGui import QPixmap
+from PyQt6.QtWidgets import QApplication, QWidget
+
+from app.services.screenshot_service import default_screenshot_path
+from app.utils import ui
+from app.widgets.screenshot_overlay import ScreenshotOverlay
+from app.widgets.screenshot_pin import PinWindow
+
+
+class ScreenshotController(QObject):
+    captured = pyqtSignal(QPixmap)
+
+    def __init__(
+        self,
+        main_window: QWidget,
+        ctx: object = None,
+        view_provider: Optional[Callable[[], Optional[QWidget]]] = None,
+        status_cb: Optional[Callable[[str], None]] = None,
+    ) -> None:
+        super().__init__(main_window)
+        self._win = main_window
+        self._ctx = ctx
+        self._view_provider = view_provider
+        self._status_cb = status_cb
+        self._overlay: Optional[ScreenshotOverlay] = None
+
+    # ── public capture modes ───────────────────────────────────────────────
+    def capture_region(self) -> None:
+        self._open(None)
+
+    def capture_fullscreen(self) -> None:
+        screen = self._win.screen()
+        full = QRect(QPoint(0, 0), screen.geometry().size()) if screen else None
+        self._open(full)
+
+    def capture_window(self) -> None:
+        self._open(self._screen_local_rect(self._win.window()))
+
+    def capture_view(self) -> None:
+        widget = self._view_provider() if self._view_provider else None
+        self._open(self._screen_local_rect(widget) if widget else None)
+
+    # ── core ────────────────────────────────────────────────────────────────
+    def _open(self, preset: Optional[QRect]) -> None:
+        overlay = ScreenshotOverlay(self._win)
+        overlay.actionCopy.connect(self._on_copy)
+        overlay.actionSave.connect(self._on_save)
+        overlay.actionDone.connect(self._on_done)
+        overlay.actionPin.connect(self._on_pin)
+        overlay.cancelled.connect(self._on_cancel)
+        self._overlay = overlay  # keep alive while shown
+        overlay.start(preset)
+
+    def _screen_local_rect(self, widget: Optional[QWidget]) -> Optional[QRect]:
+        """Map *widget*'s on-screen rect into overlay-local logical coords."""
+        if widget is None:
+            return None
+        screen = self._win.screen()
+        if screen is None:
+            return None
+        origin = screen.geometry().topLeft()
+        g = widget.frameGeometry() if widget is widget.window() else QRect(
+            widget.mapToGlobal(QPoint(0, 0)), widget.size()
+        )
+        return g.translated(-origin)
+
+    # ── destinations ────────────────────────────────────────────────────────
+    def _on_copy(self, pix: QPixmap) -> None:
+        QApplication.clipboard().setPixmap(pix)
+        self._status("截图已复制到剪贴板")
+        self.captured.emit(pix)
+
+    def _on_done(self, pix: QPixmap) -> None:
+        QApplication.clipboard().setPixmap(pix)
+        saved = self._auto_save(pix)
+        if saved:
+            self._status(f"截图已存项目: {saved.name}（已复制剪贴板）")
+        else:
+            self._status("截图已复制到剪贴板")
+        self.captured.emit(pix)
+
+    def _on_save(self, pix: QPixmap) -> None:
+        QApplication.clipboard().setPixmap(pix)
+        saved = self._auto_save(pix)
+        start = str(saved) if saved else "截图.png"
+        chosen = ui.get_save_file_name(self._win, "保存截图", start, "PNG 图片 (*.png)")
+        if chosen:
+            if not chosen.lower().endswith(".png"):
+                chosen += ".png"
+            pix.save(chosen, "PNG")
+            self._status(f"截图已存: {Path(chosen).name}（已复制剪贴板）")
+        elif saved:
+            self._status(f"截图已存项目: {saved.name}（已复制剪贴板）")
+        self.captured.emit(pix)
+
+    def _on_pin(self, pix: QPixmap, global_tl: QPoint) -> None:
+        win = PinWindow(pix)
+        win.show_at(global_tl)
+        QApplication.clipboard().setPixmap(pix)
+        self._status("截图已钉到桌面（已复制剪贴板）")
+        self.captured.emit(pix)
+
+    def _on_cancel(self) -> None:
+        self._overlay = None
+
+    # ── helpers ───────────────────────────────────────────────────────────
+    def _auto_save(self, pix: QPixmap) -> Optional[Path]:
+        project_dir = getattr(self._ctx, "current_project_dir", None) if self._ctx else None
+        if not project_dir:
+            return None
+        target = default_screenshot_path(project_dir, datetime.now())
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if pix.save(str(target), "PNG"):
+                return target
+        except OSError:
+            pass
+        return None
+
+    def _status(self, text: str) -> None:
+        if self._status_cb:
+            self._status_cb(text)
