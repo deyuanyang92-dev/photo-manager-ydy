@@ -349,8 +349,11 @@ class MainWindow(QMainWindow):
         """Register a BaseView subclass as a top-nav segment + stack page.
 
         The segment button is appended to the top bar in registration order;
-        the view is built eagerly and added to the stack so its index matches
-        its nav position (preserving the previous index-based contract).
+        the view itself is built **lazily** on first activation (see
+        ``_ensure_view``) so startup does not pay to construct every page —
+        only the page the user actually opens. Nothing reads stack *indices*
+        (navigation is keyed by ``view_id`` and ``setCurrentWidget``), so the
+        old "stack index == nav order" coupling is no longer required.
 
         Parameters
         ----------
@@ -378,11 +381,22 @@ class MainWindow(QMainWindow):
         self._nav_group.addButton(btn, idx)
         self._nav_buttons.append(btn)
         self._nav_row.addWidget(btn)
+        # View is NOT built here — see _ensure_view (lazy, first-activation).
 
-        # Eagerly build the view and add to stack so indices match nav order
-        view = view_cls(self.ctx)
-        self._views[view_cls.view_id] = view
-        self._stack.addWidget(view)
+    def _ensure_view(self, view_cls: type) -> BaseView:
+        """Build *view_cls* on first request, then cache + add to the stack.
+
+        Idempotent: repeat calls return the cached instance. This is the single
+        construction point for every page, so deferring it here spreads the
+        ~1.3 s "build all views" cost across first visits instead of paying it
+        up front at launch.
+        """
+        view = self._views.get(view_cls.view_id)
+        if view is None:
+            view = view_cls(self.ctx)
+            self._views[view_cls.view_id] = view
+            self._stack.addWidget(view)
+        return view
 
     def _recolor_nav_icons(self, active_idx: int) -> None:
         """Tint the active segment's glyph accent; others stay muted."""
@@ -421,7 +435,7 @@ class MainWindow(QMainWindow):
             btn.setChecked(True)
         self._recolor_nav_icons(idx)
         view_cls = self._view_classes[idx]
-        view = self._views.get(view_cls.view_id)
+        view = self._ensure_view(view_cls)
         if view:
             self._stack.setCurrentWidget(view)
             view.on_activate()

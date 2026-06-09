@@ -616,6 +616,30 @@ class CollabPanel(QWidget):
                 svc.set_group_code(info.group_code)
                 self.ctx.settings.setValue("collab/team_code", info.group_code)
 
+    def _on_manual_connect(self) -> None:
+        """Manually add a peer from the IP/port inputs (mDNS-failure fallback).
+
+        Mirrors ``_on_join_pairing``'s ``add_manual_peer`` path for the case
+        where the user types an address directly instead of pasting a pairing
+        code (VLANs / Windows Firewall block mDNS — see CollabService docs).
+        """
+        ip = self._ip_input.text().strip()
+        port_text = self._port_input.text().strip()
+        if not ip:
+            QMessageBox.warning(self, "缺少 IP", "请填写对方 IP 地址")
+            return
+        try:
+            port = int(port_text) if port_text else 5050
+        except ValueError:
+            QMessageBox.warning(self, "端口无效", f"端口必须是数字：{port_text}")
+            return
+        svc = self._svc
+        if svc is None:
+            QMessageBox.warning(self, "协作未启动", "协作服务尚未启动，无法添加对端")
+            return
+        svc.add_manual_peer(ip, port)
+        QMessageBox.information(self, "已添加对端", f"已手动添加协作对端 {ip}:{port}")
+
     def _on_diagnose(self) -> None:
         svc = self._svc
         if svc is None:

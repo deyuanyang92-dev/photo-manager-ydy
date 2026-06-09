@@ -984,6 +984,15 @@ class OverviewView(BaseView):
     def _rebuild_table(self) -> None:
         """Populate the QTableWidget from the filtered project list."""
         projects = self._filtered_projects()
+        # Suspend repaints while bulk-filling so the table paints once at the end
+        # instead of after every insertRow/setItem (no per-row flicker / relayout).
+        self._table.setUpdatesEnabled(False)
+        try:
+            self._rebuild_table_rows(projects)
+        finally:
+            self._table.setUpdatesEnabled(True)
+
+    def _rebuild_table_rows(self, projects: list) -> None:
         self._table.setRowCount(0)
 
         for proj in projects:

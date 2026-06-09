@@ -292,6 +292,42 @@ class TestGetProjectSummary:
         assert result["resultCount"] == 0
         assert result["pendingJpgCount"] == 0
 
+    def test_summary_cache_invalidates_on_file_add(self, tmp_path):
+        """The summary is memoised (avoids re-scanning thousands of JPGs on
+        every overview activation), but the cache MUST invalidate when files
+        change — adding a JPG/TIFF re-counts, never returns a stale chip."""
+        from app.services.project_service import ensure_project_dirs, get_project_summary
+        proj = tmp_path / "proj"
+        ensure_project_dirs(str(proj))
+        incoming = proj / "incoming-jpg"
+        (incoming / "shot001.jpg").write_bytes(b"")
+        assert get_project_summary(str(proj))["pendingJpgCount"] == 1
+        # second call (cache hit) must still be correct
+        assert get_project_summary(str(proj))["pendingJpgCount"] == 1
+        # add a file → dir mtime changes → cache invalidates → recount
+        (incoming / "shot002.jpg").write_bytes(b"")
+        assert get_project_summary(str(proj))["pendingJpgCount"] == 2
+        # add a result TIFF → recount
+        (proj / "results" / "A001-1.tif").write_bytes(b"")
+        assert get_project_summary(str(proj))["resultCount"] == 1
+
+    def test_summary_cache_invalidates_on_specimen_insert(self, tmp_path):
+        """Inserting a specimen (WAL write) must invalidate the cached count."""
+        import sqlite3 as _sqlite3
+        from app.services.project_service import ensure_project_dirs, get_project_summary
+        proj = tmp_path / "proj"
+        ensure_project_dirs(str(proj))
+        db_path = proj / "_data" / "project.db"
+        conn = _sqlite3.connect(str(db_path))
+        conn.execute("CREATE TABLE specimens (uid TEXT PRIMARY KEY)")
+        conn.execute("INSERT INTO specimens VALUES ('SP001')")
+        conn.commit()
+        assert get_project_summary(str(proj))["specimenCount"] == 1
+        conn.execute("INSERT INTO specimens VALUES ('SP002')")
+        conn.commit()
+        conn.close()
+        assert get_project_summary(str(proj))["specimenCount"] == 2
+
 
 # ── get_project_results ────────────────────────────────────────────────────
 

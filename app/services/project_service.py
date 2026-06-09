@@ -300,6 +300,50 @@ def seed_region_settings(
     return resolved
 
 
+# Memoised summaries, keyed by resolved project dir. Each entry is
+# ``(signature, result)``; the signature is a cheap stat() fingerprint of the
+# inputs (db + wal mtime/size, plus the mtimes of the scanned dirs). A cache hit
+# skips the expensive sqlite COUNT + iterdir over potentially thousands of JPGs —
+# the overview re-scans every project on EVERY tab activation, so this turns a
+# multi-hundred-ms freeze into a handful of stat() calls. Any real change (new
+# JPG/TIFF, specimen insert → WAL grows) shifts the signature and forces a
+# recompute, so a cache hit never returns stale counts.
+_SUMMARY_CACHE: dict[str, tuple] = {}
+
+
+def _summary_signature(db_path: Path, results_root: Path, incoming_path: Path) -> tuple:
+    def _st(p: Path):
+        # db/wal files: mtime + size. WAL grows on every insert, so an inserted
+        # specimen always shifts this even before checkpoint.
+        try:
+            s = p.stat()
+            return (s.st_mtime_ns, s.st_size)
+        except OSError:
+            return None
+
+    def _dir(p: Path):
+        # Scanned dirs: mtime + entry COUNT. Count is read via os.scandir (one
+        # readdir, NO per-entry stat) and is what makes the cache correct —
+        # directory mtime resolution can be too coarse to catch a file added in
+        # the same second, but the entry count changes immediately on add/remove.
+        try:
+            s = p.stat()
+        except OSError:
+            return None
+        try:
+            n = sum(1 for _ in os.scandir(p))
+        except OSError:
+            n = -1
+        return (s.st_mtime_ns, n)
+
+    wal = db_path.with_name(db_path.name + "-wal")
+    return (
+        _st(db_path), _st(wal),
+        _dir(results_root), _dir(results_root / "freeform"),
+        _dir(incoming_path),
+    )
+
+
 def get_project_summary(project_dir: str) -> dict:
     """Return live statistics for *project_dir*: specimen count, result TIFF count,
     pending JPG count.
@@ -311,16 +355,25 @@ def get_project_summary(project_dir: str) -> dict:
       resultCount    — .tif/.tiff files in ``results/`` and ``results/freeform/``.
       pendingJpgCount— .jpg/.jpeg files in ``incoming-jpg/`` (or legacy ``新拍JPG/``).
 
-    Always returns a dict; never raises.
+    Result is memoised by a stat() signature (see ``_SUMMARY_CACHE``) so repeat
+    calls for an unchanged project are near-free. Always returns a dict; never
+    raises.
     """
     import re
     import sqlite3 as _sqlite3
 
     root = Path(project_dir).resolve()
+    db_path = root / DATA_SUBDIR / "project.db"
+    results_root = root / RESULTS_DIR
+    incoming_path = Path(get_incoming_jpg_dir(project_dir))
+
+    sig = _summary_signature(db_path, results_root, incoming_path)
+    cached = _SUMMARY_CACHE.get(str(root))
+    if cached is not None and cached[0] == sig:
+        return dict(cached[1])   # copy → callers can't mutate the cached dict
 
     # ── specimen count ────────────────────────────────────────────────────────
     specimen_count = 0
-    db_path = root / DATA_SUBDIR / "project.db"
     if db_path.exists():
         try:
             conn = _sqlite3.connect(str(db_path))
@@ -348,13 +401,11 @@ def get_project_summary(project_dir: str) -> dict:
         except OSError:
             return 0
 
-    results_root = root / RESULTS_DIR
     result_count = _count_tifs(results_root) + _count_tifs(results_root / "freeform")
 
     # ── pending JPG count ─────────────────────────────────────────────────────
     pending_jpg_count = 0
     _jpg_re = re.compile(r"\.jpe?g$", re.IGNORECASE)
-    incoming_path = Path(get_incoming_jpg_dir(project_dir))
     if incoming_path.is_dir():
         try:
             pending_jpg_count = sum(
@@ -364,12 +415,14 @@ def get_project_summary(project_dir: str) -> dict:
         except OSError:
             pending_jpg_count = 0
 
-    return {
+    result = {
         "projectDir": str(root),
         "specimenCount": specimen_count,
         "resultCount": result_count,
         "pendingJpgCount": pending_jpg_count,
     }
+    _SUMMARY_CACHE[str(root)] = (sig, result)
+    return dict(result)
 
 
 def get_project_results(project_dir: str) -> dict:

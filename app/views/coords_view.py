@@ -1152,24 +1152,28 @@ class CoordsView(BaseView):
             self._batch_table.setRowCount(0)
             return
 
-        self._batch_table.setRowCount(len(self._batch_rows))
-        for i, row in enumerate(self._batch_rows):
-            self._batch_table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
-            raw_item = QTableWidgetItem(row["raw"])
-            if row["format_label"]:
-                raw_item.setToolTip(row["format_label"])
-            self._batch_table.setItem(i, 1, raw_item)
-            if row["error"]:
-                err_item = QTableWidgetItem(f"✗ {row['error']}")
-                err_item.setForeground(
-                    __import__("PyQt6.QtGui", fromlist=["QColor"]).QColor(_C["danger"])
-                )
-                self._batch_table.setItem(i, 2, err_item)
-                self._batch_table.setItem(i, 3, QTableWidgetItem(""))
-            else:
-                clat, clon = self._convert_coord(row["lat"], row["lon"])
-                self._batch_table.setItem(i, 2, QTableWidgetItem(self._format_val(clat, True)))
-                self._batch_table.setItem(i, 3, QTableWidgetItem(self._format_val(clon, False)))
+        self._batch_table.setUpdatesEnabled(False)   # paint once after the bulk fill
+        try:
+            self._batch_table.setRowCount(len(self._batch_rows))
+            for i, row in enumerate(self._batch_rows):
+                self._batch_table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
+                raw_item = QTableWidgetItem(row["raw"])
+                if row["format_label"]:
+                    raw_item.setToolTip(row["format_label"])
+                self._batch_table.setItem(i, 1, raw_item)
+                if row["error"]:
+                    err_item = QTableWidgetItem(f"✗ {row['error']}")
+                    err_item.setForeground(
+                        __import__("PyQt6.QtGui", fromlist=["QColor"]).QColor(_C["danger"])
+                    )
+                    self._batch_table.setItem(i, 2, err_item)
+                    self._batch_table.setItem(i, 3, QTableWidgetItem(""))
+                else:
+                    clat, clon = self._convert_coord(row["lat"], row["lon"])
+                    self._batch_table.setItem(i, 2, QTableWidgetItem(self._format_val(clat, True)))
+                    self._batch_table.setItem(i, 3, QTableWidgetItem(self._format_val(clon, False)))
+        finally:
+            self._batch_table.setUpdatesEnabled(True)
 
         # 仅首次按内容定初始列宽；之后不再重置，保留用户拖拽的列宽（格式/坐标系切换刷新时）。
         if not self._batch_cols_sized:
