@@ -161,6 +161,23 @@ class ScreenshotOverlay(QWidget):
         blank result to exercise the WSLg composite fallback)."""
         return screen.grabWindow(0)
 
+    def closeEvent(self, e) -> None:
+        """Return OS focus to the launching window on close.
+
+        The overlay is a frameless, app-modal, stays-on-top fullscreen window.
+        When it closes, most WMs auto-refocus the previous window — but WSLg /
+        XWayland does NOT, leaving the app window inactive: Qt still processes
+        events, yet the OS routes no clicks to it, so it *looks* frozen until
+        the user alt-tabs. Re-activating the anchor here fixes every exit path
+        (deliver / pin / Esc / right-click cancel) in one place.
+        """
+        anchor = self._anchor
+        if anchor is not None:
+            win = anchor.window()
+            win.raise_()
+            win.activateWindow()
+        super().closeEvent(e)
+
     # ── painting ──────────────────────────────────────────────────────────
     def paintEvent(self, _e) -> None:
         p = QPainter(self)
