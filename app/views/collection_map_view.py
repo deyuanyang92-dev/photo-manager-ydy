@@ -124,13 +124,24 @@ class CollectionMapView(BaseView):
     def _build_left_pane(self) -> QWidget:
         pane = QWidget()
         pane.setObjectName("LeftPane")
-        pane.setFixedWidth(272)
         v = QVBoxLayout(pane)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(14)
         v.addWidget(self._build_project_card(), 0)
-        v.addWidget(self._build_style_card(), 1)
-        return pane
+        v.addWidget(self._build_style_card(), 0)
+        v.addStretch(1)
+
+        # 左栏整体可滚动：窗口偏矮时「项目」卡 + 「站位标识」卡仍能完整触达，
+        # 地图右栏保持满高（不随整页滚动）。替代旧的只滚样式面板的内层 StyleScroll。
+        scroll = QScrollArea()
+        scroll.setObjectName("LeftScroll")
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setFixedWidth(272)
+        scroll.setWidget(pane)
+        return scroll
 
     def _card(self, title: str, icon_name: str = "") -> tuple[QFrame, QVBoxLayout, QHBoxLayout]:
         """统一卡片外壳：圆角 + 软阴影 + 图标标题 + 分隔线。返回 (卡片, 内容布局, 标题行)。"""
@@ -212,17 +223,10 @@ class CollectionMapView(BaseView):
         prev_row.addStretch()
         lay.addLayout(prev_row)
 
-        scroll = QScrollArea()
-        scroll.setObjectName("StyleScroll")
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        scroll.setMinimumHeight(160)
+        # 样式面板自然高度直接入卡片；左栏整体滚动由 LeftScroll 统一处理。
         self._style_panel = MarkerStylePanel()
         self._style_panel.style_changed.connect(self._on_style_changed)
-        scroll.setWidget(self._style_panel)
-        lay.addWidget(scroll, 1)
+        lay.addWidget(self._style_panel)
         return card
 
     # ── 项目行（名称 + 站位数徽章）──────────────────────────────────────────────
@@ -541,7 +545,7 @@ class CollectionMapView(BaseView):
         _ff = local_font_css()
         self.setStyleSheet(
             f"#{self.view_id}{{background:{bg};{_ff}}}"
-            f"QScrollArea#MapPageScroll,QScrollArea#StyleScroll{{background:transparent;border:none;}}"
+            f"QScrollArea#MapPageScroll,QScrollArea#LeftScroll{{background:transparent;border:none;}}"
             f"QWidget#MapPageContent,QWidget#RightPane{{background:transparent;}}"
             f"QWidget#MarkerStylePanel{{background:transparent;}}"
             f"QWidget#LeftPane{{background:transparent;}}"

@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import QEvent, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QButtonGroup,
     QGridLayout,
@@ -107,6 +107,8 @@ class HeliconParamsPanel(QWidget):
             _RADIUS_MIN, _RADIUS_MAX, self._radius)
         self._radius_slider.valueChanged.connect(self._on_radius_changed)
         self._radius_spin.valueChanged.connect(self._on_radius_changed)
+        self._radius_slider.setToolTip("拖动调整;右键复位默认 (8)")
+        self._radius_slider.installEventFilter(self)
         grid.addWidget(self._radius_lbl, 0, 0)
         grid.addWidget(self._radius_slider, 0, 1)
         grid.addWidget(self._radius_spin, 0, 2)
@@ -117,6 +119,8 @@ class HeliconParamsPanel(QWidget):
             _SMOOTH_MIN, _SMOOTH_MAX, self._smoothing)
         self._smooth_slider.valueChanged.connect(self._on_smooth_changed)
         self._smooth_spin.valueChanged.connect(self._on_smooth_changed)
+        self._smooth_slider.setToolTip("拖动调整;右键复位默认 (4)")
+        self._smooth_slider.installEventFilter(self)
         grid.addWidget(smooth_lbl, 1, 0)
         grid.addWidget(self._smooth_slider, 1, 1)
         grid.addWidget(self._smooth_spin, 1, 2)
@@ -136,6 +140,24 @@ class HeliconParamsPanel(QWidget):
         spin.setValue(val)
         spin.setFixedWidth(58)
         return slider, spin
+
+    # ── Desktop-style interaction ──────────────────────────────────────────────
+
+    def eventFilter(self, obj, event):  # noqa: N802 (Qt override)
+        """Right-click a slider → reset that param to its Helicon default.
+
+        Mirrors the Helicon Focus desktop: "To reset controls to default,
+        right-click on the slider of the parameter you want to reset."
+        """
+        if (event.type() == QEvent.Type.MouseButtonPress
+                and event.button() == Qt.MouseButton.RightButton):
+            if obj is self._radius_slider and obj.isEnabled():
+                self._radius_slider.setValue(_DEFAULT_RADIUS)
+                return True
+            if obj is self._smooth_slider:
+                self._smooth_slider.setValue(_DEFAULT_SMOOTHING)
+                return True
+        return super().eventFilter(obj, event)
 
     # ── Slots ─────────────────────────────────────────────────────────────────
 

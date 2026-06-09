@@ -1006,6 +1006,26 @@ class TestHeliconParamsPanel:
         assert w._smooth_slider.value() == 6
         assert w.get_params()["smoothing"] == 6
 
+    def test_right_click_slider_resets_to_default(self):
+        # Helicon desktop: right-click a slider resets that param to default.
+        from PyQt6.QtCore import QEvent, QPointF, Qt
+        from PyQt6.QtGui import QMouseEvent
+        from app.widgets.helicon_params_panel import HeliconParamsPanel
+        w = HeliconParamsPanel()
+        w.set_params({"method": 1, "radius": 20, "smoothing": 9})
+
+        def _right_click(slider):
+            ev = QMouseEvent(
+                QEvent.Type.MouseButtonPress, QPointF(2, 2),
+                Qt.MouseButton.RightButton, Qt.MouseButton.RightButton,
+                Qt.KeyboardModifier.NoModifier)
+            w.eventFilter(slider, ev)
+
+        _right_click(w._radius_slider)
+        _right_click(w._smooth_slider)
+        assert w.get_params()["radius"] == 8   # _DEFAULT_RADIUS
+        assert w.get_params()["smoothing"] == 4  # _DEFAULT_SMOOTHING
+
     def test_workbench_view_has_helicon_params(self):
         """WorkbenchView must expose _helicon_params (HeliconParamsPanel)."""
         from app.views.workbench_view import WorkbenchView

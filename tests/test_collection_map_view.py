@@ -279,3 +279,50 @@ class TestExport:
         out = tmp_path / "fig.pdf"
         v._do_export(str(out))
         assert out.exists() and out.stat().st_size > 0
+
+
+class TestLeftPaneScroll:
+    """采集地图左栏（项目卡 + 站位标识卡）整体可滚动 —— 窗口偏矮时底部控件
+    （标签/字段/字号等）仍可触达。回归用户报告的「下面需要滑动但缺失」。"""
+
+    def _shown(self, h: int) -> CollectionMapView:
+        v = _view()
+        v.resize(1000, h)
+        v.show()
+        QApplication.processEvents()
+        return v
+
+    def _left_scroll(self, v):
+        from PyQt6.QtWidgets import QScrollArea
+        for sa in v.findChildren(QScrollArea):
+            if sa.objectName() == "LeftScroll":
+                return sa
+        return None
+
+    def test_left_scroll_exists_and_configured(self):
+        from PyQt6.QtCore import Qt
+        v = self._shown(700)
+        ls = self._left_scroll(v)
+        assert ls is not None, "左栏缺少 LeftScroll 滚动容器"
+        assert ls.widgetResizable() is True
+        assert ls.verticalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAsNeeded
+
+    def test_style_panel_lives_inside_left_scroll(self):
+         v = self._shown(700)
+        ls = self._left_scroll(v)
+        # 样式面板必须是左栏滚动容器的后代，才能随左栏一起滚动
+        assert v._style_panel in ls.findChildren(type(v._style_panel))
+
+    def test_bottom_reachable_when_window_short(self):
+        # 矮窗口下内容溢出 → 左栏滚动条可用（maximum>0），底部控件可达
+        v = self._shown(560)
+        ls = self._left_scroll(v)
+        assert ls.widget().sizeHint().height() > ls.viewport().height()
+        assert ls.verticalScrollBar().maximum() > 0
+
+    def test_no_orphan_style_scroll(self):
+        # 旧的只滚样式面板的内层 StyleScroll 已移除（避免双滚动条）
+        from PyQt6.QtWidgets import QScrollArea
+        v = self._shown(700)
+        names = {sa.objectName() for sa in v.findChildren(QScrollArea)}
+        assert "StyleScroll" not in names
