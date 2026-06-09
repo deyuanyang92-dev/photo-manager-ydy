@@ -444,6 +444,7 @@ class WorkbenchView(BaseView):
         # results visible in the work column (not hidden behind a tab) preserves
         # at-a-glance compose/compress state.
         self._results = ResultsColumn()
+        self._results.restore_requested.connect(self._on_restore_archive)
         centre.addWidget(self._results)
 
         centre.setSizes([440, 360])
@@ -1857,6 +1858,83 @@ class WorkbenchView(BaseView):
         from app.utils import ui
         self._supp_pending = None
         ui.warn(self, "补处理", f"归档失败: {message}")
+
+    # ── 还原归档 JPG ──────────────────────────────────────────────────────────
+
+    def _on_restore_archive(self, zip_path: str) -> None:
+        """Recover the original JPGs from a result ZIP into a user-chosen folder.
+
+        Read-only against the archive + additive (writes new JPGs, deletes
+        nothing). Heavy djxl work runs off-thread in RestoreWorker.
+        """
+        from app.utils import ui
+        from PyQt6.QtWidgets import QMessageBox
+        from app.workers.restore_worker import RestoreWorker
+
+        if not zip_path or not Path(zip_path).is_file():
+            ui.warn(self, "还原原片", "归档文件不存在。")
+            return
+
+        out = ui.get_existing_directory(self, "选择还原 JPG 的输出文件夹")
+        if not out:
+            return
+
+        overwrite = False
+        try:
+            if any(True for _ in os.scandir(out)):  # 目录非空
+                reply = ui.question(
+                    self, "目标文件夹非空",
+                    "目标文件夹已有文件。同名 JPG 是否覆盖？\n（选「否」则跳过已存在的文件）",
+                )
+                overwrite = (reply == QMessageBox.StandardButton.Yes)
+        except Exception:
+            pass
+
+        count = 0
+        try:
+            import zipfile
+            with zipfile.ZipFile(zip_path) as zf:
+                count = sum(1 for n in zf.namelist() if n != "manifest.json")
+        except Exception:
+            pass
+
+        self._restore_worker = RestoreWorker(
+            zip_path, out, overwrite=overwrite, file_count=count, parent=self
+        )
+        self._restore_worker.started.connect(self._on_restore_started)
+        self._restore_worker.finished.connect(self._on_restore_finished)
+        self._restore_worker.failed.connect(self._on_restore_failed)
+        self._restore_worker.start()
+
+    def _on_restore_started(self, count: int) -> None:
+        try:
+            bar = self.window().statusBar()
+            if bar is not None:
+                n = f"{count} 张" if count else "原片"
+                bar.showMessage(f"正在还原 {n} JPG …", 4000)
+        except Exception:
+            pass
+
+    def _on_restore_finished(self, result) -> None:
+        from app.utils import ui
+        if result is None:
+            ui.critical(self, "还原原片", "还原过程出现错误。")
+            return
+        if not getattr(result, "ok", False):
+            reason = getattr(result, "reason", "") or "；".join(result.failures[:3])
+            ui.critical(self, "还原失败", reason or "还原失败，未输出文件。")
+            return
+
+        msg = f"已还原 {result.count} 张 JPG →\n{result.output_dir}"
+        if result.skipped:
+            msg += f"\n已跳过 {len(result.skipped)} 个已存在文件。"
+        if result.failures:
+            msg += f"\n{len(result.failures)} 个失败：" + "；".join(result.failures[:3])
+        ui.info(self, "还原完成", msg)
+
+    def _on_restore_failed(self, message: str) -> None:
+        from app.utils import ui
+        ui.critical(self, "还原原片", f"还原失败: {message}")
 
     def _on_import_tiff(self, uid: str, group_index: int) -> None:
         """Persist the imported TIFF association from grouping panel to DB.
