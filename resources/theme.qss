@@ -503,6 +503,11 @@ QScrollBar::handle:horizontal { background: #cbd5e1; border-radius: 5px; min-wid
 QScrollBar::handle:horizontal:hover { background: #0f766e; }
 QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
 
+/* Top-bar nav scroll: slim horizontal bar so overflow scrolling stays unobtrusive. */
+QScrollArea#NavScroll QScrollBar:horizontal { height: 5px; background: transparent; margin: 0; }
+QScrollArea#NavScroll QScrollBar::handle:horizontal { background: rgba(15,23,42,0.22); border-radius: 2px; min-width: 28px; }
+QScrollArea#NavScroll QScrollBar::handle:horizontal:hover { background: #0f766e; }
+
 /* ── Splitter ────────────────────────────────────────────────────── */
 QSplitter#WorkbenchSplitter::handle { background: transparent; }
 QSplitter::handle { background-color: transparent; }

@@ -15,6 +15,9 @@ python main.py            # 启动空骨架
 pytest tests/ -v         # 跑测试
 ```
 
+Windows 桌面双击启动：双击仓库里的 `launch_windows.cmd`。它会通过 `wsl.exe`
+进入当前 WSL 项目目录启动 GUI；如果失败，会保留错误窗口和 `/tmp/specimen-photo-workbench-launch.log`。
+
 ## 红线（绝不破）
 
 - **TIFF 永不删**。
