@@ -1048,6 +1048,53 @@ class TestHeliconParamsPanel:
         assert isinstance(w._helicon_params, HeliconParamsPanel)
 
 
+class _FakeQS:
+    """Minimal QSettings stand-in: dict-backed value(key, default)."""
+    def __init__(self, d): self._d = d
+    def value(self, k, default=None): return self._d.get(k, default)
+
+
+class TestHeliconOutputWiring:
+    """Output options (format / tiff_compression / quality) reach the Helicon CLI."""
+
+    def test_with_output_ext(self):
+        from app.views.workbench_view import WorkbenchView
+        assert WorkbenchView._with_output_ext("/a/b/x.tif", "jpg").endswith("/x.jpg")
+        assert WorkbenchView._with_output_ext("/a/b/x.tif", "tif").endswith("/x.tif")
+        # non-ascii stem preserved
+        assert WorkbenchView._with_output_ext("/a/自由合成-1.tif", "jpg").endswith("自由合成-1.jpg")
+
+    def test_output_opts_tif_default(self):
+        from app.views.workbench_view import WorkbenchView
+        from app.views.settings_view import _K_HELICON_TIFF_COMPRESSION
+        w = WorkbenchView(_make_ctx())
+        w.ctx.settings._qs = _FakeQS({_K_HELICON_TIFF_COMPRESSION: "lzw"})
+        o = w._helicon_output_opts()
+        assert o["format"] == "tif"
+        assert o["tiff_compression"] == "lzw"
+        assert o["quality"] is None
+
+    def test_output_opts_jpg(self):
+        from app.views.workbench_view import WorkbenchView
+        from app.views.settings_view import _K_HELICON_OUTPUT_FORMAT, _K_HELICON_QUALITY
+        w = WorkbenchView(_make_ctx())
+        w.ctx.settings._qs = _FakeQS({_K_HELICON_OUTPUT_FORMAT: "jpg", _K_HELICON_QUALITY: 88})
+        o = w._helicon_output_opts()
+        assert o["format"] == "jpg"
+        assert o["quality"] == 88
+        assert o["tiff_compression"] is None
+
+    def test_opts_flow_into_cli_args(self):
+        # tif → -tif:<comp> and no -j:; jpg → -j:<q> and no -tif:
+        from app.services.helicon_service import build_helicon_args
+        tif = build_helicon_args(["a.jpg"], "out.tif", method="1", radius="8",
+                                 smoothing="4", tiff_compression="lzw", quality=None)
+        assert "-tif:lzw" in tif and not any(a.startswith("-j:") for a in tif)
+        jpg = build_helicon_args(["a.jpg"], "out.jpg", method="1", radius="8",
+                                 smoothing="4", tiff_compression=None, quality=88)
+        assert "-j:88" in jpg and not any(a.startswith("-tif:") for a in jpg)
+
+
 class TestProjectSettingsDrawer:
     def test_constructs(self):
         from app.widgets.project_settings_drawer import ProjectSettingsDrawer

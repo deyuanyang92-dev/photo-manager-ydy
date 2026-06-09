@@ -45,18 +45,43 @@ def _project_db_path(resolved_dir: str) -> Path:
     return Path(resolved_dir) / "_data" / "project.db"
 
 
-def open_project_db(project_dir: str) -> sqlite3.Connection:
+def open_project_db(project_dir: str, *, create: bool = False) -> sqlite3.Connection:
     """Open (or retrieve cached) the SQLite connection for *project_dir*.
 
-    Creates ``_data/`` subfolder if missing.
+    ``create=False`` (the DEFAULT, used by every background read via
+    ``AppContext.get_db``) is a strict OPEN: the workspace's ``project.db`` must
+    already exist. If it does not — because the drive is unmounted, the share is
+    offline, or the folder was deleted — this raises
+    :class:`ProjectUnavailableError` and creates **nothing**. This is the guard
+    that stops an unmounted project from being silently re-fabricated as an
+    empty ghost on the local disk (see ``project_paths`` for the full rationale).
+
+    ``create=True`` is the deliberate path used only when a workspace is being
+    *established* (new project, or claiming an existing folder). The project
+    ROOT must already exist (its parent volume is present); only the ``_data/``
+    subfolder and the db file are materialised — never the root tree itself.
+
     Sets WAL mode, foreign_keys ON, and runs ensure_schema.
     """
+    from app.services.project_paths import (
+        ProjectUnavailableError,
+        require_project_root,
+    )
+
     resolved = str(Path(project_dir).resolve())
     if resolved in _db_cache:
         return _db_cache[resolved]
 
     db_path = _project_db_path(resolved)
-    db_path.parent.mkdir(parents=True, exist_ok=True)
+    if create:
+        # Root must already exist — never mkdir(parents=True) the whole tree,
+        # which is exactly what fabricated ghosts on phantom mountpoints.
+        require_project_root(resolved)
+        db_path.parent.mkdir(exist_ok=True)  # only the _data/ leaf, inside root
+    elif not db_path.exists():
+        raise ProjectUnavailableError(
+            f"工作区不可用（盘未挂载 / 数据库丢失）：{project_dir}"
+        )
 
     conn = sqlite3.connect(str(db_path), check_same_thread=False)
     conn.row_factory = sqlite3.Row

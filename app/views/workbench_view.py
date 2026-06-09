@@ -1317,6 +1317,9 @@ class WorkbenchView(BaseView):
         os.makedirs(incoming_dir, exist_ok=True)
         output_name = _free_compose_output_name(incoming_dir, user_name.strip() or None)
         output_path = os.path.join(incoming_dir, output_name)
+        # Honor 输出格式 (tif/jpg) — swap extension so -save: matches the encoder.
+        output_path = self._with_output_ext(output_path, self._helicon_output_opts()["format"])
+        output_name = os.path.basename(output_path)
 
         params = self._helicon_params.get_params()
 
@@ -1458,6 +1461,9 @@ class WorkbenchView(BaseView):
             preview = organize_preview(db, uid, results_dir, incoming_dir)
             output_name = preview.suggested_tiff_name
             output_path = os.path.join(results_dir, output_name)
+            # Honor 输出格式 (tif/jpg); default tif keeps the lossless archival master.
+            output_path = self._with_output_ext(output_path, self._helicon_output_opts()["format"])
+            output_name = os.path.basename(output_path)
 
             params = self._helicon_params.get_params()
 
@@ -1525,6 +1531,44 @@ class WorkbenchView(BaseView):
         except Exception as exc:
             QMessageBox.warning(self, "合成失败", f"意外错误：{exc}")
 
+    def _helicon_output_opts(self) -> dict:
+        """Read Helicon output options from settings (mirrors oracle 输出选项).
+
+        Returns ``{format, tiff_compression, quality}``. Default output is TIFF
+        (per the software's design: 输出 TIF 或 JPG, 默认 TIF). For TIF the chosen
+        TIFF compression is returned and quality is None; for JPG, quality is
+        returned and tiff_compression is None — so only the relevant CLI flag
+        (-tif: / -j:) gets emitted, exactly like the oracle.
+        """
+        from app.views.settings_view import (
+            _K_HELICON_OUTPUT_FORMAT,
+            _K_HELICON_QUALITY,
+            _K_HELICON_TIFF_COMPRESSION,
+        )
+        qs = self.ctx.settings._qs
+        fmt = "jpg" if str(qs.value(_K_HELICON_OUTPUT_FORMAT, "tif")).lower() == "jpg" else "tif"
+        if fmt == "jpg":
+            return {
+                "format": "jpg",
+                "tiff_compression": None,
+                "quality": int(qs.value(_K_HELICON_QUALITY, 95)),
+            }
+        return {
+            "format": "tif",
+            "tiff_compression": str(qs.value(_K_HELICON_TIFF_COMPRESSION, "u")) or "u",
+            "quality": None,
+        }
+
+    @staticmethod
+    def _with_output_ext(path: str, fmt: str) -> str:
+        """Swap *path*'s extension to match output format (tif/jpg).
+
+        Helicon infers the encoder from the -save: extension, so it MUST agree
+        with the -tif:/-j: flag (oracle app.js:7283-7291).
+        """
+        base, _ = os.path.splitext(path)
+        return base + (".jpg" if fmt == "jpg" else ".tif")
+
     def _run_helicon_stack(
         self,
         jpg_paths: list[str],
@@ -1540,6 +1584,10 @@ class WorkbenchView(BaseView):
         """
         from app.services.helicon_service import build_helicon_cmd
 
+        # Wire the output options (输出格式 / TIFF 压缩 / JPEG 质量) into the CLI —
+        # oracle app.js:7290-7291 (-tif: for tif, -j: for jpg). Previously these
+        # settings were saved but never applied (output was always uncompressed tif).
+        opts = self._helicon_output_opts()
         try:
             cmd = build_helicon_cmd(
                 jpg_paths=jpg_paths,
@@ -1547,6 +1595,8 @@ class WorkbenchView(BaseView):
                 method=str(params["method"]),
                 radius=str(params["radius"]),
                 smoothing=str(params["smoothing"]),
+                tiff_compression=opts["tiff_compression"],
+                quality=opts["quality"],
             )
         except RuntimeError as exc:
             on_failed(str(exc))

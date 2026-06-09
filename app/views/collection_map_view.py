@@ -125,22 +125,21 @@ class CollectionMapView(BaseView):
         pane = QWidget()
         pane.setObjectName("LeftPane")
         v = QVBoxLayout(pane)
-        # 留出滚动条轨道，避免滑块压在卡片内容右边缘上。
-        v.setContentsMargins(0, 0, 10, 0)
+        v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(14)
         v.addWidget(self._build_project_card(), 0)
         v.addWidget(self._build_style_card(), 0)
         v.addStretch(1)
 
         # 左栏整体可滚动：窗口偏矮时「项目」卡 + 「站位标识」卡仍能完整触达，
-        # 地图右栏保持满高（不随整页滚动）。替代旧的只滚样式面板的内层 StyleScroll。
+        # 地图右栏保持满高（不随整页滚动）。站位样式表单本身另有卡内滚动。
         scroll = QScrollArea()
         scroll.setObjectName("LeftScroll")
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
-        scroll.setFixedWidth(282)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setFixedWidth(272)
         scroll.setWidget(pane)
         return scroll
 
@@ -224,10 +223,19 @@ class CollectionMapView(BaseView):
         prev_row.addStretch()
         lay.addLayout(prev_row)
 
-        # 样式面板自然高度直接入卡片；左栏整体滚动由 LeftScroll 统一处理。
+        # 样式表单卡内滚动：滚动条贴在「站位标识」卡右侧，用户能直接看到可下滑。
         self._style_panel = MarkerStylePanel()
         self._style_panel.style_changed.connect(self._on_style_changed)
-        lay.addWidget(self._style_panel)
+        style_scroll = QScrollArea()
+        style_scroll.setObjectName("StyleScroll")
+        style_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        style_scroll.setWidgetResizable(True)
+        style_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        style_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        style_scroll.setMinimumHeight(260)
+        style_scroll.setMaximumHeight(360)
+        style_scroll.setWidget(self._style_panel)
+        lay.addWidget(style_scroll)
         return card
 
     # ── 项目行（名称 + 站位数徽章）──────────────────────────────────────────────
@@ -546,7 +554,8 @@ class CollectionMapView(BaseView):
         _ff = local_font_css()
         self.setStyleSheet(
             f"#{self.view_id}{{background:{bg};{_ff}}}"
-            f"QScrollArea#MapPageScroll,QScrollArea#LeftScroll{{background:transparent;border:none;}}"
+            f"QScrollArea#MapPageScroll,QScrollArea#LeftScroll,QScrollArea#StyleScroll{{background:transparent;border:none;}}"
+            f"QScrollArea#StyleScroll>QWidget>QWidget{{background:transparent;}}"
             f"QWidget#MapPageContent,QWidget#RightPane{{background:transparent;}}"
             f"QWidget#MarkerStylePanel{{background:transparent;}}"
             f"QWidget#LeftPane{{background:transparent;}}"

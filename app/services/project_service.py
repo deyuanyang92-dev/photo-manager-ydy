@@ -30,18 +30,33 @@ DATA_SUBDIR = "_data"
 
 # ── Low-level helpers ──────────────────────────────────────────────────────────
 
-def ensure_project_dirs(project_dir: str) -> dict:
+def ensure_project_dirs(project_dir: str, *, create_root: bool = False) -> dict:
     """Create the standard subdirectory layout under project_dir.
 
     Creates:  incoming-jpg/  results/  _data/
 
-    Idempotent — safe to call multiple times.
-    Returns a dict with resolved paths.
+    Idempotent — safe to call multiple times. Returns a dict with resolved paths.
+
+    ``create_root=False`` (DEFAULT) requires the project ROOT to already exist —
+    we only fill in missing *subdirectories* inside it. If the root is gone (the
+    drive is unmounted), this raises :class:`ProjectUnavailableError` instead of
+    silently re-creating the whole tree on a phantom path (the data-loss bug).
+
+    ``create_root=True`` is for *new* project creation: it may make the leaf
+    folder, but only when its parent volume is present.
 
     Oracle: project-paths.js::ensureProjectDirs
     """
-    root = Path(project_dir).resolve()
-    root.mkdir(parents=True, exist_ok=True)
+    from app.services.project_paths import (
+        require_creatable_parent,
+        require_project_root,
+    )
+
+    if create_root:
+        root = require_creatable_parent(project_dir)
+        root.mkdir(parents=True, exist_ok=True)
+    else:
+        root = require_project_root(project_dir)
 
     incoming = root / INCOMING_JPG_DIR
     results = root / RESULTS_DIR
@@ -100,7 +115,11 @@ def create_project(name: str, directory: str) -> dict:
     Oracle: server.js project creation logic.
     """
     resolved = str(Path(directory).resolve())
-    dirs = ensure_project_dirs(resolved)
+    dirs = ensure_project_dirs(resolved, create_root=True)
+    # Materialise the db now (create=True) so later background reads can use the
+    # strict open_project_db(create=False) path without fabricating anything.
+    from app.db.db_manager import open_project_db
+    open_project_db(resolved, create=True)
 
     project_id = str(uuid.uuid4())
     return {
@@ -123,7 +142,13 @@ def open_project(directory: str) -> dict:
     Oracle: server.js open-project endpoint + registerAllowedDir pattern.
     """
     resolved = str(Path(directory).resolve())
-    dirs = ensure_project_dirs(resolved)
+    # Entering/claiming a workspace: the folder must already exist (create_root
+    # =False). A gone drive raises ProjectUnavailableError rather than rebuilding
+    # a ghost. The db is then materialised (create=True) so claiming an existing
+    # but un-workspaced folder works, while a missing volume still refuses.
+    dirs = ensure_project_dirs(resolved, create_root=False)
+    from app.db.db_manager import open_project_db
+    open_project_db(resolved, create=True)
 
     # Register the project root so assert_safe() passes for its children
     default_registry.register_root(resolved)
@@ -237,8 +262,14 @@ def enter_workspace(
     Returns the resolved workspace path.
     """
     resolved = str(Path(path).resolve())
+    # Unavailability (drive unmounted / path gone) MUST surface — do not activate
+    # a dead path, or the workbench reads a ghost. Other minor errors are
+    # tolerated as before.
+    from app.services.project_paths import ProjectUnavailableError
     try:
         open_project(resolved)
+    except ProjectUnavailableError:
+        raise
     except Exception:
         pass
     ctx.current_project_dir = resolved
@@ -273,8 +304,8 @@ def seed_region_settings(
     from app.services import project_settings_service as pss
 
     resolved = str(Path(region_dir).resolve())
-    ensure_project_dirs(resolved)
-    db = open_project_db(resolved)
+    ensure_project_dirs(resolved, create_root=True)
+    db = open_project_db(resolved, create=True)
 
     code_labels = pss.load_setting(db, "code_labels", pss.DEFAULT_CODE_LABELS)
     if province:
