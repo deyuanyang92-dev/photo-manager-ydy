@@ -308,7 +308,7 @@ class TestLeftPaneScroll:
         assert ls.verticalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAsNeeded
 
     def test_style_panel_lives_inside_left_scroll(self):
-         v = self._shown(700)
+        v = self._shown(700)
         ls = self._left_scroll(v)
         # 样式面板必须是左栏滚动容器的后代，才能随左栏一起滚动
         assert v._style_panel in ls.findChildren(type(v._style_panel))
