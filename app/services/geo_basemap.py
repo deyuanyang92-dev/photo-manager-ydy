@@ -10,7 +10,10 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 _GEO_DIR = Path(__file__).resolve().parents[2] / "resources" / "geo"
 
@@ -64,7 +67,7 @@ _PRESETS: list[dict] = [
     {"id": "generated:eqearth", "name": "世界 · Equal Earth（等积，期刊常用）",
      "kind": "generated", "proj": "+proj=eqearth +lon_0=150", "extent": None, "detail": 110},
     {"id": "generated:wintri", "name": "世界 · Winkel Tripel（NatGeo 标准）",
-     "kind": "generated", "proj": "+proj=wintri", "extent": None, "detail": 110},
+     "kind": "generated", "proj": "+proj=wintri +lon_0=105", "extent": None, "detail": 110},
     {"id": "generated:mollweide", "name": "世界 · Mollweide",
      "kind": "generated", "proj": "+proj=moll +lon_0=150", "extent": None, "detail": 110},
     {"id": "generated:platecarree", "name": "世界 · 等距圆柱",
@@ -106,5 +109,6 @@ def project_points(proj: str, lons, lats):
         tr = Transformer.from_crs("EPSG:4326", proj, always_xy=True)
         xs, ys = tr.transform(lons, lats)
         return list(xs), list(ys)
-    except Exception:
+    except Exception as exc:
+        logger.warning("project_points failed for proj=%r: %s", proj, exc)
         return list(lons), list(lats)

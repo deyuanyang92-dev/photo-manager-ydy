@@ -54,6 +54,21 @@
       "dateRange": "20260604",
       "incomingJpgSubdir": "incoming-jpg",
       "resultsSubdir": "results"
+    },
+    {
+      "id": "2dc78e1c-df43-433c-9444-1072ab2fa012",
+      "name": "ggg",
+      "dir": "/media/deyuan/217ce44c-b5de-45ed-8720-deebdff85ece/photo-manger/photo-manager-ydy/11",
+      "directory": "/media/deyuan/217ce44c-b5de-45ed-8720-deebdff85ece/photo-manger/photo-manager-ydy/11",
+      "incomingJpgDir": "/media/deyuan/217ce44c-b5de-45ed-8720-deebdff85ece/photo-manger/photo-manager-ydy/11/incoming-jpg",
+      "resultsDir": "/media/deyuan/217ce44c-b5de-45ed-8720-deebdff85ece/photo-manger/photo-manager-ydy/11/results",
+      "projectCode": "PRJ-2026-04",
+      "location": "",
+      "collector": "",
+      "year": "2026",
+      "dateRange": "20260609",
+      "incomingJpgSubdir": "incoming-jpg",
+      "resultsSubdir": "results"
     }
   ]
 }

@@ -53,6 +53,13 @@ def available() -> bool:
     return _AVAILABLE
 
 
+# qtawesome glyph rendering is expensive; the same (name, color) icons are
+# requested hundreds of times (e.g. one per monitor card). Cache by spec.
+# Tone tokens are snapshotted at import (see TONE_* below), so a given colour
+# string always maps to the same glyph — caching changes nothing visually.
+_ICON_CACHE: dict = {}
+
+
 def icon(name: str, color: Optional[str] = None, **kw):
     """Return a themed QIcon for *name*, or a null QIcon when unavailable.
 
@@ -69,13 +76,19 @@ def icon(name: str, color: Optional[str] = None, **kw):
     if not _AVAILABLE:
         from PyQt6.QtGui import QIcon
         return QIcon()
+    key = (name, color or _DEFAULT, tuple(sorted(kw.items())))
+    cached = _ICON_CACHE.get(key)
+    if cached is not None:
+        return cached
     opts = {"color": color or _DEFAULT}
     opts.update(kw)
     try:
-        return _qta.icon(name, **opts)
+        result = _qta.icon(name, **opts)
     except Exception:
         from PyQt6.QtGui import QIcon
-        return QIcon()
+        result = QIcon()
+    _ICON_CACHE[key] = result
+    return result
 
 
 def set_button_icon(btn, name: str, color: Optional[str] = None,

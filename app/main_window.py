@@ -530,14 +530,26 @@ class MainWindow(QMainWindow):
 
     # ── Screenshot ────────────────────────────────────────────────────────
 
-    def _wire_screenshot(self) -> None:
-        """Build the screenshot controller and bind Alt+A (= macOS Option+A).
+    def screenshot_shortcut_seq(self) -> str:
+        """Saved screenshot key sequence string, defaulting to Alt+A."""
+        seq = self.ctx.settings._qs.value("shortcuts/screenshot_region", "", type=str) or ""
+        return seq or "Alt+A"
 
-        ApplicationShortcut context → Alt+A fires whenever any app window has
-        focus, never while the app is in the background. The controller is the
-        reusable entry point shared with the topbar 截图 button's mode menu.
+    def _wire_screenshot(self) -> None:
+        """Build the screenshot controller and bind the screenshot hotkey.
+
+        Two bindings for the same key:
+        - In-app QShortcut (ApplicationShortcut) → fires whenever any app window
+          has focus, on any page. No dependency.
+        - Global OS hotkey via pynput (optional) → also fires while the app is
+          minimised / another program is focused. Degrades to no-op if pynput
+          is absent or the platform (Wayland) blocks global grabs.
+
+        The key is user-configurable in 设置→界面→快捷键; rebind_screenshot_shortcut
+        re-applies both bindings live.
         """
         from app.widgets.screenshot_controller import ScreenshotController
+        from app.utils.global_hotkey import GlobalHotkeyManager
 
         self._shot_ctrl = ScreenshotController(
             self,
@@ -545,10 +557,28 @@ class MainWindow(QMainWindow):
             view_provider=lambda: self._stack.currentWidget(),
             status_cb=self.set_status_specimen,
         )
-        sc = QShortcut(QKeySequence("Alt+A"), self)
+
+        seq = self.screenshot_shortcut_seq()
+        sc = QShortcut(QKeySequence(seq), self)
         sc.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        sc.setAutoRepeat(False)  # holding the key must fire once, not stack overlays
         sc.activated.connect(self._shot_ctrl.capture_region)
         self._screenshot_shortcut = sc
+
+        # Global system-wide hotkey (queued → main-thread capture_region).
+        self._global_hotkey = GlobalHotkeyManager(self)
+        self._global_hotkey.triggered.connect(
+            self._shot_ctrl.capture_region, Qt.ConnectionType.QueuedConnection
+        )
+        self._global_hotkey.set_hotkey(seq)
+
+    def rebind_screenshot_shortcut(self, seq: str) -> None:
+        """Re-apply the screenshot key (in-app + global) after a settings change."""
+        seq = seq or "Alt+A"
+        if getattr(self, "_screenshot_shortcut", None) is not None:
+            self._screenshot_shortcut.setKey(QKeySequence(seq))
+        if getattr(self, "_global_hotkey", None) is not None:
+            self._global_hotkey.set_hotkey(seq)
 
     # ── Persistence ───────────────────────────────────────────────────────
 
@@ -570,6 +600,10 @@ class MainWindow(QMainWindow):
         self.ctx.settings.save_geometry(self.saveGeometry())
         self.ctx.settings.save_window_state(self.saveState())
         self.ctx.settings.sync()
+        # Stop the global hotkey listener thread before exit.
+        gh = getattr(self, "_global_hotkey", None)
+        if gh is not None:
+            gh.stop()
         # Gracefully stop collaboration service so mDNS un-registers before exit
         svc = getattr(self.ctx, "collab_service", None)
         if svc is not None:

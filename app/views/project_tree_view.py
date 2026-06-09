@@ -28,6 +28,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from app.config.theme import local_font_css
 from app.services import project_tree_service as pts
 from app.utils import ui
 from app.views.base_view import BaseView
@@ -126,8 +127,9 @@ class ProjectTreeView(BaseView):
         bg, panel, border = g("bg", "#0a1e24"), g("panel_2", "#0e2329"), g("border", "#21424a")
         text, muted, accent = g("text", "#c8dcd6"), g("muted", "#7fa49b"), g("accent", "#4fd1b8")
         accent_fg = g("accent_fg", "#ffffff")
+        _ff = local_font_css()
         self.setStyleSheet(
-            f"#{self.view_id}{{background:{bg};}}"
+            f"#{self.view_id}{{{_ff}background:{bg};}}"
             f"QLabel{{color:{text};background:transparent;}}"
             f"QLabel#PaneTitle{{color:{text};font-weight:600;font-size:15px;}}"
             f"QLabel#Muted{{color:{muted};font-size:12px;}}"

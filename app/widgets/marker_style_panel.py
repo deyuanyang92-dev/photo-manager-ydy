@@ -33,7 +33,8 @@ _DEFAULT = {
 }
 
 _SHAPES = ["圆", "三角", "方", "星", "倒三角"]
-_LABEL_SOURCES = [("label", "名称/站位"), ("count", "记录数"), ("none", "无")]
+# 标签来源与 collection_record_service.MARKER_LABEL_SOURCES 对齐（站位/断面/地区/经纬度…）。
+from app.services.collection_record_service import MARKER_LABEL_SOURCES as _LABEL_SOURCES
 
 
 class MarkerStylePanel(QWidget):
@@ -43,6 +44,7 @@ class MarkerStylePanel(QWidget):
 
     def __init__(self, initial: Optional[dict] = None, parent=None) -> None:
         super().__init__(parent)
+        self.setObjectName("MarkerStylePanel")
         self._style = {**_DEFAULT, **(initial or {})}
         self._build()
         self._load_into_controls()
@@ -54,14 +56,26 @@ class MarkerStylePanel(QWidget):
 
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
-        v.setSpacing(7)
+        v.setSpacing(8)
 
-        _LW = 52  # 右对齐定宽标签（窄卡内对齐，足够「描边宽/不透明」三字）
+        _LW = 56  # 右对齐定宽标签（窄卡内对齐，足够「描边宽/不透明」三字）
+
+        def section(text):
+            # 段标题前留出气口，与上一段拉开，读起来不挤（首段无上间距）。
+            if v.count():
+                v.addSpacing(4)
+            lbl = QLabel(text)
+            lbl.setObjectName("StyleSection")
+            v.addWidget(lbl)
 
         def row(label, w, help_text=None):
             if isinstance(w, (QSpinBox, QDoubleSpinBox, QComboBox, QPushButton)):
-                w.setFixedHeight(28)
-            v.addWidget(form_row(label, w, help_text=help_text, label_width=_LW))
+                w.setFixedHeight(30)
+            fr = form_row(label, w, help_text=help_text, label_width=_LW)
+            v.addWidget(fr)
+            return fr
+
+        section("外观")
 
         self._shape = QComboBox()
         self._shape.addItems(_SHAPES)
@@ -95,6 +109,8 @@ class MarkerStylePanel(QWidget):
         self._alpha.valueChanged.connect(self._on_change)
         row("不透明", self._alpha)
 
+        section("标签")
+
         self._show_label = QCheckBox("显示标签")
         self._show_label.toggled.connect(self._on_change)
         v.addWidget(self._show_label)
@@ -103,12 +119,12 @@ class MarkerStylePanel(QWidget):
         for key, txt in _LABEL_SOURCES:
             self._label_source.addItem(txt, key)
         self._label_source.currentIndexChanged.connect(self._on_change)
-        row("标签", self._label_source)
+        self._row_label_src = row("字段", self._label_source, help_text="标签显示哪个字段")
 
         self._label_size = QSpinBox()
         self._label_size.setRange(5, 40)
         self._label_size.valueChanged.connect(self._on_change)
-        row("字号", self._label_size)
+        self._row_label_size = row("字号", self._label_size)
 
     # ── 状态同步 ──────────────────────────────────────────────────────────────
 
@@ -126,6 +142,13 @@ class MarkerStylePanel(QWidget):
         self._paint_btn(self._fill_btn, s["fill"])
         self._paint_btn(self._edge_btn, s["edge"])
         self._block(False)
+        self._sync_label_enabled()
+
+    def _sync_label_enabled(self) -> None:
+        """未勾「显示标签」→ 灰掉字段/字号行，视觉上分清主次。"""
+        on = self._show_label.isChecked()
+        self._row_label_src.setEnabled(on)
+        self._row_label_size.setEnabled(on)
 
     def _block(self, on: bool) -> None:
         for w in (self._shape, self._size, self._edge_w, self._alpha,
@@ -160,6 +183,7 @@ class MarkerStylePanel(QWidget):
 
     def _on_change(self, *_a) -> None:
         self._collect()
+        self._sync_label_enabled()
         self._emit()
 
     def _collect(self) -> None:

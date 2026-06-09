@@ -148,6 +148,30 @@ def map_points(db: sqlite3.Connection, level: str) -> list[dict]:
     return out
 
 
+# 站位标识可作为标签来源的字段（marker_style_panel 的「标签」下拉与之对齐）。
+MARKER_LABEL_SOURCES = (
+    ("label", "名称/站位"), ("station", "站位"), ("site", "断面/采集地"),
+    ("province", "地区"), ("lonlat", "经纬度"), ("count", "记录数"), ("none", "无"),
+)
+
+
+def marker_label(point: dict, src: str) -> str:
+    """按标签来源 *src* 取地图点 *point* 的显示文本。未知/无 → 空串。"""
+    if src in (None, "none"):
+        return ""
+    if src == "count":
+        c = point.get("count")
+        return "" if c is None else str(c)
+    if src == "lonlat":
+        lon, lat = point.get("lon"), point.get("lat")
+        if lon is None or lat is None:
+            return ""
+        return f"{lon:.4f},{lat:.4f}"
+    if src == "label":
+        return str(point.get("label") or "")
+    return str(point.get(src) or "")   # station / site / province
+
+
 def map_points_across(dbs, level: str) -> list[dict]:
     """跨多个项目库聚合地图点（采集地图「全部项目」用）。
 

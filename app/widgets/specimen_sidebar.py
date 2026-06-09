@@ -191,7 +191,7 @@ class SpecimenSidebar(QWidget):
         self._collab_sync.setObjectName("MutedSmall")
         cs_lay.addWidget(self._collab_sync)
 
-        self._collab_mgr_btn = QPushButton("协作管理")
+        self._collab_mgr_btn = QPushButton("协作面板")
         self._collab_mgr_btn.setObjectName("Ghost")
         self._collab_mgr_btn.setFixedHeight(26)
         self._collab_mgr_btn.clicked.connect(self.collab_manager_requested.emit)
@@ -280,6 +280,8 @@ class SpecimenSidebar(QWidget):
         self._list.clear()
         query = text.strip().lower()
         shown = 0
+        svc = getattr(self.ctx, "collab_service", None)
+
         for entry in self._all_items:
             uid: str = entry["uid"]
             name: str = entry["name"]
@@ -293,6 +295,12 @@ class SpecimenSidebar(QWidget):
                 display_parts.append(name)
             elif name_cn:
                 display_parts.append(name_cn)
+
+            # Append collab badge if task exists
+            badge = self._collab_badge(uid, svc)
+            if badge:
+                display_parts.append(badge)
+
             display_text = "\n".join(display_parts)
 
             item = QListWidgetItem(display_text)
@@ -410,6 +418,32 @@ class SpecimenSidebar(QWidget):
         self.print_labels_requested.emit(uid)
         return True
 
+    # ── Collab badge helpers ──────────────────────────────────────────────────
+
+    @staticmethod
+    def _collab_badge(uid: str, svc) -> str:
+        """Return a short collab status badge string for *uid*, or "" if none."""
+        if svc is None or not svc.is_running():
+            return ""
+        task = svc.store.get(uid)
+        if task is None:
+            return ""
+        sv = task.status.value if hasattr(task.status, "value") else str(task.status)
+        # Check if this device owns the task
+        hostname = svc._hostname if hasattr(svc, "_hostname") else ""
+        is_mine = task.device_id == hostname if task.device_id else False
+        if sv == "conflict":
+            return "🔴 冲突"
+        if is_mine:
+            return "🟢 我"
+        if task.assignee:
+            return f"🔵 {task.assignee[:4]}"
+        return "🔵 已认领"
+
+    def _refresh_collab_badges(self) -> None:
+        """Re-apply the current filter to refresh collab badges."""
+        self._apply_filter(self._search_edit.text())
+
     # ── Collab strip update ───────────────────────────────────────────────────
 
     def _open_collab_view(self) -> None:
@@ -447,3 +481,6 @@ class SpecimenSidebar(QWidget):
 
         task_count = len(service.store.all())
         self._collab_sync.setText(f"同步编号: {task_count} 条")
+
+        # Refresh badges in the specimen list
+        self._refresh_collab_badges()

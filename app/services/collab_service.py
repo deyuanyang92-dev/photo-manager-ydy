@@ -54,6 +54,8 @@ from typing import Any, Callable, Optional
 
 from PyQt6.QtCore import QObject, QThread, QTimer, pyqtSignal
 
+from app.models.activity_log import ActivityEntry, ActivityLog
+
 logger = logging.getLogger(__name__)
 
 
@@ -280,7 +282,8 @@ class TaskStore:
 
 # ── FastAPI application ───────────────────────────────────────────────────────
 
-def _build_fastapi_app(store: TaskStore, node_info_fn: Callable[[], dict]) -> Any:
+def _build_fastapi_app(store: TaskStore, node_info_fn: Callable[[], dict],
+                       activity_log: Optional[ActivityLog] = None) -> Any:
     """Build and return the FastAPI app.  Imported lazily to avoid startup cost.
 
     The fastapi names are bound into module globals (``global`` below) so that
@@ -340,6 +343,9 @@ def _build_fastapi_app(store: TaskStore, node_info_fn: Callable[[], dict]) -> An
         status_raw = body.get("status")
         if not uid or not status_raw:
             raise HTTPException(status_code=400, detail="uid and status required")
+        local_group = node_info_fn().get("groupCode", "")
+        if not local_group or body.get("groupCode", "") != local_group:
+            raise HTTPException(status_code=403, detail="collaboration group mismatch")
         try:
             to_status = TaskStatus(status_raw)
             task = store.update_status(uid, to_status, assignee=body.get("assignee"))
@@ -391,6 +397,9 @@ def _build_fastapi_app(store: TaskStore, node_info_fn: Callable[[], dict]) -> An
         the UI subscribe to signals for richer handling.
         """
         body = await request.json()
+        local_group = node_info_fn().get("groupCode", "")
+        if not local_group or body.get("groupCode", "") != local_group:
+            raise HTTPException(status_code=403, detail="collaboration group mismatch")
         uid = body.get("uid", "")
         kind = body.get("kind", "")
         count = int(body.get("count", 0))
@@ -406,6 +415,9 @@ def _build_fastapi_app(store: TaskStore, node_info_fn: Callable[[], dict]) -> An
         CollabService.specimen_received signal for richer handling.
         """
         body = await request.json()
+        local_group = node_info_fn().get("groupCode", "")
+        if not local_group or body.get("groupCode", "") != local_group:
+            raise HTTPException(status_code=403, detail="collaboration group mismatch")
         uid = body.get("uid", "")
         logger.debug("collab: specimen push received uid=%s", uid)
         return {"ok": True, "uid": uid}
@@ -414,6 +426,37 @@ def _build_fastapi_app(store: TaskStore, node_info_fn: Callable[[], dict]) -> An
     async def list_specimens() -> list:
         """Return local specimen records.  Stubbed — override via app context."""
         return []
+
+    @app.get("/api/collab/activity")
+    async def get_activity() -> list:
+        """Return recent activity entries from this node."""
+        if activity_log is None:
+            return []
+        return activity_log.to_dicts()
+
+    @app.post("/api/collab/activity")
+    async def receive_activity(request: Request) -> dict:
+        """Receive an activity entry pushed from a peer (best-effort).
+
+        Double guard: LAN IP check (defense-in-depth) + matching groupCode.
+        """
+        if activity_log is None:
+            return {"ok": True}
+        client_host = request.client.host if request.client else ""
+        import ipaddress
+        try:
+            addr = ipaddress.ip_address(client_host)
+            if not addr.is_private and client_host not in ("127.0.0.1", "::1"):
+                raise HTTPException(status_code=403, detail="sender not in LAN")
+        except ValueError:
+            raise HTTPException(status_code=403, detail="invalid sender address")
+        body = await request.json()
+        local_group = node_info_fn().get("groupCode", "")
+        if not local_group or body.get("groupCode", "") != local_group:
+            raise HTTPException(status_code=403, detail="collaboration group mismatch")
+        entry = ActivityEntry.from_dict(body)
+        activity_log.append(entry)
+        return {"ok": True}
 
     return app
 
@@ -433,11 +476,13 @@ class CollabServerThread(QThread):
     server_error = pyqtSignal(str)
 
     def __init__(self, store: TaskStore, node_info_fn: Callable[[], dict],
-                 preferred_port: int = 5050) -> None:
+                 preferred_port: int = 5050,
+                 activity_log: Optional[ActivityLog] = None) -> None:
         super().__init__()
         self._store = store
         self._node_info_fn = node_info_fn
         self._preferred_port = preferred_port
+        self._activity_log = activity_log
         self._actual_port: Optional[int] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
@@ -468,7 +513,7 @@ class CollabServerThread(QThread):
             return
 
         self._actual_port = port
-        app = _build_fastapi_app(self._store, self._node_info_fn)
+        app = _build_fastapi_app(self._store, self._node_info_fn, self._activity_log)
 
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
@@ -705,10 +750,13 @@ class CollabService(QObject):
     server_ready     = pyqtSignal(int)         # port
     offline_drafts_changed = pyqtSignal()      # draft queue added/cleared
     diagnostics_changed = pyqtSignal()         # self-diagnostics list updated
+    activity_logged  = pyqtSignal()            # new activity entry appended
+    specimen_status_changed = pyqtSignal(str)  # uid whose collab status changed
 
     def __init__(self, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
         self.store = TaskStore()
+        self.activity_log = ActivityLog()
         self._peers: dict[str, PeerInfo] = {}   # key = "ip:port"
         self._peers_lock = threading.Lock()
         self._hostname = socket.gethostname()
@@ -752,6 +800,7 @@ class CollabService(QObject):
             store=self.store,
             node_info_fn=self._node_info,
             preferred_port=preferred_port,
+            activity_log=self.activity_log,
         )
         self._server_thread.started_on_port.connect(self._on_server_started)
         self._server_thread.server_error.connect(
@@ -790,6 +839,23 @@ class CollabService(QObject):
     def is_running(self) -> bool:
         """True between start() and stop()."""
         return self._running
+
+    # ── Activity logging ──────────────────────────────────────────────────
+
+    def _log_activity(self, action: str, target_uid: str = "",
+                      actor: str = "", detail: str = "",
+                      severity: str = "info") -> None:
+        """Append an entry to the activity log and emit *activity_logged*."""
+        if not actor:
+            actor = self._hostname
+        self.activity_log.append(ActivityEntry(
+            actor=actor,
+            action=action,
+            target_uid=target_uid,
+            detail=detail,
+            severity=severity,
+        ))
+        self.activity_logged.emit()
 
     # ── Collaboration group ───────────────────────────────────────────────
 
@@ -1025,6 +1091,7 @@ class CollabService(QObject):
             self._peers[key] = PeerInfo(ip=ip, port=port, hostname=hostname)
         logger.info("collab: peer found %s (%s:%d)", hostname, ip, port)
         self.peers_changed.emit()
+        self._log_activity("joined", actor=hostname, detail=f"{hostname} 加入了协作组")
         # Enrich with group_code / project_name from /api/node/info so the peer
         # can pass the group filter.  HTTP → do it off the main thread.
         peer = self._peers[key]
@@ -1033,9 +1100,11 @@ class CollabService(QObject):
     def _on_peer_lost(self, ip: str, port: int) -> None:
         key = f"{ip}:{port}"
         with self._peers_lock:
-            self._peers.pop(key, None)
+            peer = self._peers.pop(key, None)
+        hostname = peer.hostname if peer else f"{ip}:{port}"
         logger.info("collab: peer lost %s:%d", ip, port)
         self.peers_changed.emit()
+        self._log_activity("left", actor=hostname, detail=f"{hostname} 离开了协作组")
 
     def add_manual_peer(self, ip: str, port: int) -> None:
         """Manually register a peer (fallback when mDNS fails across VLANs)."""
@@ -1088,6 +1157,7 @@ class CollabService(QObject):
 
         if changed_total:
             self.tasks_changed.emit()
+            self._log_activity("status_changed", detail=f"同步更新了 {changed_total} 条任务")
 
     def _sync_peer(self, peer: PeerInfo) -> int:
         """Pull /api/collab/tasks from one peer and merge.  Returns changed count."""
@@ -1121,6 +1191,7 @@ class CollabService(QObject):
         if self.store.exists(uid):
             msg = f"409: UID '{uid}' already exists on this device"
             self.conflict_detected.emit(uid)
+            self._log_activity("conflict", uid, detail=f"编号 {uid} 在本机已存在", severity="error")
             return False, msg
 
         # 2. Remote check — broadcast POST to same-group peers, abort on first 409
@@ -1132,6 +1203,7 @@ class CollabService(QObject):
             ok, conflict_msg = self._remote_create(peer, uid, assignee, device_id)
             if not ok:
                 self.conflict_detected.emit(uid)
+                self._log_activity("conflict", uid, detail=f"编号 {uid} 在远程设备已存在", severity="error")
                 return False, conflict_msg
 
         # 3. Record locally
@@ -1144,6 +1216,8 @@ class CollabService(QObject):
             return False, str(exc)
 
         self.tasks_changed.emit()
+        self._log_activity("claimed", uid, detail=f"认领了编号 {uid}")
+        self.specimen_status_changed.emit(uid)
         return True, "ok"
 
     def _remote_create(self, peer: PeerInfo, uid: str,
@@ -1369,6 +1443,8 @@ class CollabService(QObject):
                 pass
 
         self.tasks_changed.emit()
+        self._log_activity("released", uid, detail=f"释放了编号 {uid}")
+        self.specimen_status_changed.emit(uid)
 
     def void_task(self, uid: str) -> None:
         """Revoke a UID claim.  Alias for :meth:`release_task` (release = reuse).

@@ -382,11 +382,11 @@ class WorkbenchView(BaseView):
         self._sidebar.activate_requested.connect(self._on_sidebar_activate)
         self._sidebar.deactivate_requested.connect(self._on_sidebar_deactivate)
         self._sidebar.new_specimen_requested.connect(self._on_new_specimen)
-        self._sidebar.collab_manager_requested.connect(self._on_open_collab_manager)
+        self._sidebar.collab_manager_requested.connect(self._on_open_collab_panel)
         self._sidebar.print_labels_requested.connect(self._on_print_labels)
         outer.addWidget(self._sidebar)
 
-        # Wire collab service signals → sidebar strip refresh
+        # Wire collab service signals → sidebar strip refresh + collab card refresh
         svc = getattr(self.ctx, "collab_service", None)
         if svc is not None:
             svc.peers_changed.connect(
@@ -398,6 +398,8 @@ class WorkbenchView(BaseView):
             svc.server_ready.connect(
                 lambda _port: self._sidebar.update_collab_status(svc)
             )
+            # Refresh collab card when tasks change (if a specimen is selected)
+            svc.tasks_changed.connect(self._refresh_collab_card)
         self._sidebar.update_collab_status(svc)
 
         # ── Centre ①: vertical splitter (monitor top, grouping bottom) ───────
@@ -442,6 +444,7 @@ class WorkbenchView(BaseView):
         # results visible in the work column (not hidden behind a tab) preserves
         # at-a-glance compose/compress state.
         self._results = ResultsColumn()
+        self._results.restore_requested.connect(self._on_restore_archive)
         centre.addWidget(self._results)
 
         centre.setSizes([440, 360])
@@ -510,6 +513,11 @@ class WorkbenchView(BaseView):
         self._metadata.save_requested.connect(self._on_save_metadata)
         self._metadata.metadata_changed.connect(lambda *_: self._schedule_rail_save())
         right_lay.addWidget(self._metadata)
+
+        # 卡4 协作状态（默认折叠）
+        from app.widgets.collab_specimen_card import CollabSpecimenCard
+        self._collab_card = CollabSpecimenCard(self.ctx)
+        right_lay.addWidget(self._collab_card)
         right_lay.addStretch(1)
 
         right_scroll = QScrollArea()
@@ -530,7 +538,22 @@ class WorkbenchView(BaseView):
         # 3-zone proportions: sidebar : centre stage (monitor/grouping/results)
         # : naming rail.
         outer.setSizes([280, 760, 380])
-        body_lay.addWidget(outer, stretch=1)
+
+        # The three columns' min widths sum to ~1166 px (250+520+320 + handles).
+        # On narrower windows (≤1166, e.g. 1024 remote desktops / WSLg HiDPI),
+        # childrenCollapsible=False means the splitter can't shrink below that,
+        # so the rightmost rail (保存方式) was clipped off the window edge.
+        # Hosting the splitter in a horizontal scroll area makes the overflow
+        # scrollable instead of clipped.  On wide windows widgetResizable lets
+        # the splitter fill the viewport, no scrollbar shows, layout identical.
+        outer_scroll = QScrollArea()
+        outer_scroll.setObjectName("WorkbenchScroll")
+        outer_scroll.setWidget(outer)
+        outer_scroll.setWidgetResizable(True)
+        outer_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        outer_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        outer_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        body_lay.addWidget(outer_scroll, stretch=1)
 
         # ── Project settings drawer (overlay, hidden by default) ────────────
         from app.widgets.project_settings_drawer import ProjectSettingsDrawer
@@ -538,6 +561,12 @@ class WorkbenchView(BaseView):
         self._settings_drawer = ProjectSettingsDrawer(self.ctx, parent=self)
         self._settings_drawer.setFixedWidth(380)
         self._settings_drawer.closed.connect(self._settings_scrim.hide)
+
+        # ── Collab panel drawer (overlay, hidden by default) ───────────────
+        from app.widgets.collab_panel import CollabPanel
+        self._collab_scrim = _DrawerScrim(self._close_collab_panel, parent=self)
+        self._collab_panel = CollabPanel(self.ctx, parent=self)
+        self._collab_panel.closed.connect(self._collab_scrim.hide)
 
         # ── No-project banner ───────────────────────────────────────────────
         self._no_project_banner = QLabel(
@@ -1009,6 +1038,7 @@ class WorkbenchView(BaseView):
                 self._naming.load_specimen(sp_dict)
                 self._metadata.load_specimen(sp)
                 self._taxon_card.load_specimen(sp)
+                self._collab_card.load_specimen(uid)
         except Exception:
             pass
 
@@ -1090,12 +1120,12 @@ class WorkbenchView(BaseView):
                     "SELECT uid, jpg_paths FROM grouping"
                 ).fetchall()
                 import json as _json
+                from app.services.monitor_service import _resolved
                 for row in rows:
                     uid = row[0]
                     paths = _json.loads(row[1] or "[]")
                     for p in paths:
-                        resolved = str(Path(p).resolve())
-                        attr.path_to_uid[resolved] = uid
+                        attr.path_to_uid[_resolved(p)] = uid
             except Exception:
                 pass
 
@@ -1829,6 +1859,83 @@ class WorkbenchView(BaseView):
         self._supp_pending = None
         ui.warn(self, "补处理", f"归档失败: {message}")
 
+    # ── 还原归档 JPG ──────────────────────────────────────────────────────────
+
+    def _on_restore_archive(self, zip_path: str) -> None:
+        """Recover the original JPGs from a result ZIP into a user-chosen folder.
+
+        Read-only against the archive + additive (writes new JPGs, deletes
+        nothing). Heavy djxl work runs off-thread in RestoreWorker.
+        """
+        from app.utils import ui
+        from PyQt6.QtWidgets import QMessageBox
+        from app.workers.restore_worker import RestoreWorker
+
+        if not zip_path or not Path(zip_path).is_file():
+            ui.warn(self, "还原原片", "归档文件不存在。")
+            return
+
+        out = ui.get_existing_directory(self, "选择还原 JPG 的输出文件夹")
+        if not out:
+            return
+
+        overwrite = False
+        try:
+            if any(True for _ in os.scandir(out)):  # 目录非空
+                reply = ui.question(
+                    self, "目标文件夹非空",
+                    "目标文件夹已有文件。同名 JPG 是否覆盖？\n（选「否」则跳过已存在的文件）",
+                )
+                overwrite = (reply == QMessageBox.StandardButton.Yes)
+        except Exception:
+            pass
+
+        count = 0
+        try:
+            import zipfile
+            with zipfile.ZipFile(zip_path) as zf:
+                count = sum(1 for n in zf.namelist() if n != "manifest.json")
+        except Exception:
+            pass
+
+        self._restore_worker = RestoreWorker(
+            zip_path, out, overwrite=overwrite, file_count=count, parent=self
+        )
+        self._restore_worker.started.connect(self._on_restore_started)
+        self._restore_worker.finished.connect(self._on_restore_finished)
+        self._restore_worker.failed.connect(self._on_restore_failed)
+        self._restore_worker.start()
+
+    def _on_restore_started(self, count: int) -> None:
+        try:
+            bar = self.window().statusBar()
+            if bar is not None:
+                n = f"{count} 张" if count else "原片"
+                bar.showMessage(f"正在还原 {n} JPG …", 4000)
+        except Exception:
+            pass
+
+    def _on_restore_finished(self, result) -> None:
+        from app.utils import ui
+        if result is None:
+            ui.critical(self, "还原原片", "还原过程出现错误。")
+            return
+        if not getattr(result, "ok", False):
+            reason = getattr(result, "reason", "") or "；".join(result.failures[:3])
+            ui.critical(self, "还原失败", reason or "还原失败，未输出文件。")
+            return
+
+        msg = f"已还原 {result.count} 张 JPG →\n{result.output_dir}"
+        if result.skipped:
+            msg += f"\n已跳过 {len(result.skipped)} 个已存在文件。"
+        if result.failures:
+            msg += f"\n{len(result.failures)} 个失败：" + "；".join(result.failures[:3])
+        ui.info(self, "还原完成", msg)
+
+    def _on_restore_failed(self, message: str) -> None:
+        from app.utils import ui
+        ui.critical(self, "还原原片", f"还原失败: {message}")
+
     def _on_import_tiff(self, uid: str, group_index: int) -> None:
         """Persist the imported TIFF association from grouping panel to DB.
 
@@ -2245,12 +2352,33 @@ class WorkbenchView(BaseView):
         except Exception:
             return None
 
-    def _on_open_collab_manager(self) -> None:
-        """Open the CollabManagerDialog from the sidebar 'collab_manager_requested' signal."""
-        from app.widgets.collab_manager_dialog import CollabManagerDialog
-        svc = getattr(self.ctx, "collab_service", None)
-        dlg = CollabManagerDialog(svc, parent=self)
-        dlg.exec()
+    def _on_open_collab_panel(self) -> None:
+        """Show collab panel drawer positioned at the right edge."""
+        self._collab_panel.refresh()
+        try:
+            win_rect = self.rect()
+            self._collab_scrim.setGeometry(win_rect)
+            self._collab_scrim.show()
+            self._collab_scrim.raise_()
+            p = self._collab_panel
+            p.setGeometry(
+                win_rect.right() - p.width(), 0,
+                p.width(), win_rect.height()
+            )
+            p.show()
+            p.raise_()
+        except Exception:
+            self._collab_panel.show()
+
+    def _close_collab_panel(self) -> None:
+        """Dismiss the collab panel and its backdrop scrim."""
+        self._collab_scrim.hide()
+        self._collab_panel._on_close()
+
+    def _refresh_collab_card(self) -> None:
+        """Refresh the right-rail collab card when tasks change."""
+        if self._current_uid:
+            self._collab_card.load_specimen(self._current_uid)
 
     def _on_open_settings(self) -> None:
         """Show project settings drawer positioned at the right edge."""

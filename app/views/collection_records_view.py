@@ -32,6 +32,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from app.config.theme import local_font_css
 from app.services import collection_record_service as crs
 from app.views.base_view import BaseView
 from app.widgets._form_row import form_row
@@ -160,8 +161,9 @@ class CollectionRecordsView(BaseView):
         text, muted, accent = g("text", "#c8dcd6"), g("muted", "#7fa49b"), g("accent", "#4fd1b8")
         accent_fg = g("accent_fg", "#ffffff")
         hdr_bg = g("accent", "#2c5f8a")
+        _ff = local_font_css()
         self.setStyleSheet(
-            f"#{self.view_id}{{background:{bg};}}"
+            f"#{self.view_id}{{{_ff}background:{bg};}}"
             f"QLabel{{color:{text};background:transparent;}}"
             f"QLabel#SectionTitle{{color:{muted};font-weight:600;font-size:12px;}}"
             f"QLabel#PaneTitle{{color:{text};font-weight:600;font-size:15px;}}"

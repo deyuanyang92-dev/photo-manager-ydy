@@ -29,7 +29,7 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import (
     QDialog,
@@ -337,10 +337,11 @@ class _ArchiveCard(_ResultCardBase):
         " stop:0.4 rgba(74,144,217,0.10), stop:1 #091b20);"
     )
 
-    def __init__(self, info: dict, open_fn=None,
+    def __init__(self, info: dict, open_fn=None, restore_fn=None,
                  thumb_size: int = _DEFAULT_THUMB,
                  parent: Optional[QWidget] = None) -> None:
         self._open_fn = open_fn
+        self._restore_fn = restore_fn
         super().__init__(info, thumb_provider=None,
                          thumb_size=thumb_size, parent=parent)
 
@@ -366,12 +367,20 @@ class _ArchiveCard(_ResultCardBase):
         state_lbl.setObjectName("MutedSmall")
         row.addWidget(state_lbl)
         row.addStretch()
+        p = self._info.get("path", "")
+        if self._restore_fn:
+            restore_btn = QPushButton("还原")
+            restore_btn.setObjectName("Ghost")
+            restore_btn.setFixedHeight(26)
+            restore_btn.setToolTip("无损还原出原始 JPG 到指定文件夹")
+            icons.set_button_icon(restore_btn, "mdi6.folder-download-outline", size=14)
+            restore_btn.clicked.connect(lambda _, _p=p: self._restore_fn(_p))
+            row.addWidget(restore_btn)
         if self._open_fn:
             open_btn = QPushButton("📂")
             open_btn.setObjectName("Ghost")
             open_btn.setFixedSize(26, 26)
             open_btn.setToolTip("在文件夹中显示")
-            p = self._info.get("path", "")
             open_btn.clicked.connect(lambda _, _p=p: self._open_fn(_p))
             row.addWidget(open_btn)
         body_lay.addLayout(row)
@@ -458,6 +467,8 @@ def _pair_results(composed_tiffs: list, archive_zips: list) -> list:
 
 class ResultsColumn(QWidget):
     """② 成果内容 column: collapsible, zoomable, paired TIFF↔ZIP rows."""
+
+    restore_requested = pyqtSignal(str)  # ZIP 绝对路径 → 还原原片 JPG
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -565,6 +576,7 @@ class ResultsColumn(QWidget):
             if zinfo is not None:
                 zcard = _ArchiveCard(
                     zinfo, open_fn=self._open_in_explorer,
+                    restore_fn=lambda p: self.restore_requested.emit(p),
                     thumb_size=self._thumb_size,
                 )
                 self._cards.append(zcard)

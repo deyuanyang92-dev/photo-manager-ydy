@@ -96,6 +96,7 @@ _K_WB_FILE_VIEW_MODE = "workbench/file_view_mode"
 # ── Global UI settings (mirrors renderGlobalSettings) ────────────────────────
 
 _K_UI_FONT_SCALE = "ui/font_scale"          # float 0.7–1.5, default 1.0
+_K_UI_FONT_FAMILY = "ui/font_family"        # str, "" = 系统默认 CJK 栈
 _K_UI_ICON_GPS = "ui/icon_gps"             # default "📡"
 _K_UI_ICON_MAP = "ui/icon_map"             # default "📍"
 _K_UI_ICON_FOLDER = "ui/icon_folder"       # default "📁"
@@ -104,12 +105,34 @@ _K_DEBUG_USE_REAL_COMPRESSION = "debug/use_real_compression"  # default False
 
 _THEME_CHOICES = ("classic_light", "lab_light", "graphite_focus")
 
+# Families we surface first in the 字体 picker (those that ship CJK glyphs),
+# when installed.  Everything else follows alphabetically.
+_PREFERRED_FONT_FAMILIES = (
+    "Noto Sans CJK SC", "Noto Sans SC", "Source Han Sans SC",
+    "Microsoft YaHei", "微软雅黑", "PingFang SC", "Hiragino Sans GB",
+    "Heiti SC", "WenQuanYi Micro Hei", "Noto Serif CJK SC", "Songti SC",
+)
+
+
+def _installed_font_families() -> list:
+    """Installed font families, CJK-capable ones first, hidden faces dropped."""
+    try:
+        from PyQt6.QtGui import QFontDatabase
+        fams = list(QFontDatabase.families())
+    except Exception:
+        return []
+    installed = {f for f in fams if not f.startswith(("@", "."))}
+    preferred = [f for f in _PREFERRED_FONT_FAMILIES if f in installed]
+    rest = sorted(f for f in installed if f not in preferred)
+    return preferred + rest
+
 # ── Keyboard shortcuts (mirrors ensureShortcutsSettings) ─────────────────────
 
 _K_SHORTCUT_MONITOR_ACTIVATE = "shortcuts/monitor_activate"
 _K_SHORTCUT_MONITOR_DEACTIVATE = "shortcuts/monitor_deactivate"
 _K_SHORTCUT_LABELS_PRINT = "shortcuts/labels_print"
 _K_SHORTCUT_LABELS_NEXT = "shortcuts/labels_next"
+_K_SHORTCUT_SCREENSHOT = "shortcuts/screenshot_region"   # 默认 Alt+A，系统级全局
 
 _RECENT_MAX = 10
 
@@ -827,6 +850,15 @@ class SettingsView(BaseView):
         form.setVerticalSpacing(10)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
+        # Tip: point users to the new collab panel
+        tip = QLabel(
+            "💡 日常协作操作已移至工作台的「协作面板」"
+            "（点击侧边栏底部的「协作面板」按钮即可打开）。以下为高级设置。"
+        )
+        tip.setObjectName("MutedSmall")
+        tip.setWordWrap(True)
+        form.addRow(tip)
+
         self._collab_enabled_chk = QCheckBox("启用局域网协作（重启或切换后生效）")
         self._collab_enabled_chk.toggled.connect(self._on_collab_enabled_toggled)
         form.addRow("协作", self._collab_enabled_chk)
@@ -966,14 +998,25 @@ class SettingsView(BaseView):
         tab.body.addWidget(theme_box)
         tab.body.addSpacing(12)
 
-        # ── 字体缩放 ──────────────────────────────────────────────────────────
-        font_box = QGroupBox("字体缩放")
-        font_v = QVBoxLayout(font_box)
-        font_v.setSpacing(8)
+        # ── 字体 ──────────────────────────────────────────────────────────────
+        font_box = QGroupBox("字体")
+        font_form = QFormLayout(font_box)
+        font_form.setHorizontalSpacing(16)
+        font_form.setVerticalSpacing(8)
 
-        font_row = QHBoxLayout()
-        font_row.setContentsMargins(0, 0, 0, 0)
-        font_row.setSpacing(10)
+        # 字体族选择 — 系统默认 + 已安装字体列表（CJK 优先排前）
+        self._font_family_combo = QComboBox()
+        self._font_family_combo.addItem("系统默认（自动）", "")
+        for fam in _installed_font_families():
+            self._font_family_combo.addItem(fam, fam)
+        self._font_family_combo.setToolTip("选择全局字体，立即生效并在下次启动保持")
+        self._font_family_combo.currentIndexChanged.connect(self._on_font_family_changed)
+        font_form.addRow("字体", self._font_family_combo)
+
+        # 字体大小 — 缩放倍率 + 百分比
+        size_row = QHBoxLayout()
+        size_row.setContentsMargins(0, 0, 0, 0)
+        size_row.setSpacing(10)
 
         self._font_scale_spin = QDoubleSpinBox()
         self._font_scale_spin.setRange(0.7, 1.5)
@@ -981,23 +1024,21 @@ class SettingsView(BaseView):
         self._font_scale_spin.setDecimals(2)
         self._font_scale_spin.setValue(1.0)
         self._font_scale_spin.setFixedWidth(80)
-        self._font_scale_spin.setToolTip(
-            "全局字体缩放，0.7–1.5；改变后重启生效（对应 CSS --font-scale）"
-        )
-        font_row.addWidget(self._font_scale_spin)
+        self._font_scale_spin.setToolTip("全局字体大小倍率，0.7–1.5；立即生效")
+        size_row.addWidget(self._font_scale_spin)
 
         self._font_scale_pct_label = QLabel("100%")
         self._font_scale_pct_label.setObjectName("Muted")
-        font_row.addWidget(self._font_scale_pct_label)
-        font_row.addStretch()
-        font_v.addLayout(font_row)
+        size_row.addWidget(self._font_scale_pct_label)
+        size_row.addStretch()
+        font_form.addRow("字体大小", size_row)
 
         self._font_scale_spin.valueChanged.connect(self._on_font_scale_changed)
 
-        note = QLabel("修改后下次启动生效（Qt 全局字体缩放）")
+        note = QLabel("字体与字体大小修改后立即生效，并在下次启动保持。")
         note.setObjectName("MutedSmall")
         note.setWordWrap(True)
-        font_v.addWidget(note)
+        font_form.addRow("", note)
 
         tab.body.addWidget(font_box)
         tab.body.addSpacing(12)
@@ -1044,6 +1085,24 @@ class SettingsView(BaseView):
         shortcut_form = QFormLayout(shortcut_box)
         shortcut_form.setHorizontalSpacing(16)
         shortcut_form.setVerticalSpacing(8)
+
+        # 截图（系统级全局，默认 Alt+A）
+        self._sc_screenshot = QKeySequenceEdit()
+        self._sc_screenshot.setToolTip(
+            "区域截图快捷键，默认 Alt+A；改动立即生效，系统级全局（后台也可触发）"
+        )
+        self._sc_screenshot.editingFinished.connect(self._on_screenshot_shortcut_changed)
+        shortcut_form.addRow("区域截图（全局）", self._sc_screenshot)
+
+        from app.utils.global_hotkey import available as _gh_available
+        if not _gh_available():
+            gh_note = QLabel(
+                "提示：未安装 pynput，截图快捷键仅在本软件窗口前台时可用；"
+                "安装 pynput 后支持系统级全局触发（pip install pynput）。"
+            )
+            gh_note.setObjectName("MutedSmall")
+            gh_note.setWordWrap(True)
+            shortcut_form.addRow("", gh_note)
 
         # monitor scope
         self._sc_monitor_activate = QKeySequenceEdit()
@@ -1243,8 +1302,16 @@ class SettingsView(BaseView):
         except (TypeError, ValueError):
             font_scale = 1.0
         font_scale = max(0.7, min(1.5, font_scale))
+        self._font_scale_spin.blockSignals(True)
         self._font_scale_spin.setValue(font_scale)
+        self._font_scale_spin.blockSignals(False)
         self._font_scale_pct_label.setText(f"{round(font_scale * 100)}%")
+
+        saved_family = qs.value(_K_UI_FONT_FAMILY, "", type=str) or ""
+        fam_idx = self._font_family_combo.findData(saved_family)
+        self._font_family_combo.blockSignals(True)
+        self._font_family_combo.setCurrentIndex(fam_idx if fam_idx >= 0 else 0)
+        self._font_family_combo.blockSignals(False)
 
         self._icon_gps_edit.setText(qs.value(_K_UI_ICON_GPS, ""))
         self._icon_map_edit.setText(qs.value(_K_UI_ICON_MAP, ""))
@@ -1263,6 +1330,10 @@ class SettingsView(BaseView):
         self._sc_labels_print.setKeySequence(QKeySequence(str(sc_lp)))
         sc_ln = qs.value(_K_SHORTCUT_LABELS_NEXT, "")
         self._sc_labels_next.setKeySequence(QKeySequence(str(sc_ln)))
+        sc_shot = qs.value(_K_SHORTCUT_SCREENSHOT, "") or "Alt+A"
+        self._sc_screenshot.blockSignals(True)
+        self._sc_screenshot.setKeySequence(QKeySequence(str(sc_shot)))
+        self._sc_screenshot.blockSignals(False)
 
         # Preset list widget
         self._refresh_preset_list_widget()
@@ -1558,14 +1629,42 @@ class SettingsView(BaseView):
         self._refresh_collab_health()
 
     def _on_font_scale_changed(self, value: float) -> None:
-        """Realtime: update percentage label and persist (mirrors web fontSlider input)."""
+        """Realtime: update percentage label, persist, and re-skin the app."""
         self._font_scale_pct_label.setText(f"{round(value * 100)}%")
         self._save_ui()
+        self._apply_typography_live()
+
+    def _on_font_family_changed(self) -> None:
+        """字体族切换 → 立即生效 + 持久化。"""
+        self._save_ui()
+        self._apply_typography_live()
+
+    def _on_screenshot_shortcut_changed(self) -> None:
+        """截图快捷键录制完成 → 持久化 + 立即重绑（窗口内 + 系统全局）。"""
+        self._save_ui()
+        seq = self._sc_screenshot.keySequence().toString() or "Alt+A"
+        from app.main_window import MainWindow
+        for w in QApplication.instance().topLevelWidgets():
+            if isinstance(w, MainWindow):
+                w.rebind_screenshot_shortcut(seq)
+                break
+
+    def _apply_typography_live(self) -> None:
+        """Push current 字体 / 字体大小 into the live theme + default font."""
+        from app.config.theme import set_typography, apply_theme, apply_default_font
+        family = self._font_family_combo.currentData() or ""
+        set_typography(scale=self._font_scale_spin.value(), family=str(family))
+        app = QApplication.instance()
+        if app is not None:
+            apply_default_font(app)
+            app.setStyleSheet(apply_theme(self.ctx.settings.current_theme))
+        _refresh_palette()
 
     def _save_ui(self) -> None:
         """Persist 界面 tab settings (fontScale / icons / shortcuts / useRealCompression)."""
         qs = self.ctx.settings._qs
         qs.setValue(_K_UI_FONT_SCALE, self._font_scale_spin.value())
+        qs.setValue(_K_UI_FONT_FAMILY, self._font_family_combo.currentData() or "")
         qs.setValue(_K_UI_ICON_GPS, self._icon_gps_edit.text())
         qs.setValue(_K_UI_ICON_MAP, self._icon_map_edit.text())
         qs.setValue(_K_UI_ICON_FOLDER, self._icon_folder_edit.text())
@@ -1590,6 +1689,10 @@ class SettingsView(BaseView):
         qs.setValue(
             _K_SHORTCUT_LABELS_NEXT,
             self._sc_labels_next.keySequence().toString(),
+        )
+        qs.setValue(
+            _K_SHORTCUT_SCREENSHOT,
+            self._sc_screenshot.keySequence().toString(),
         )
         self.ctx.settings.sync()
 
@@ -1679,28 +1782,43 @@ class SettingsView(BaseView):
 
     # ── Helicon button handlers (web: 检测 / 保存 / 清除自定义 / 重新探测) ───
 
+    def _show_status(self, msg: str, timeout_ms: int = 3000) -> None:
+        """Show a brief message on the main window status bar."""
+        win = self.window()
+        if hasattr(win, "statusBar"):
+            bar = win.statusBar()
+            if bar:
+                bar.showMessage(msg, timeout_ms)
+
     def _on_test_click(self) -> None:
-        """检测 — save path then auto-detect (mirrors web testBtn handler)."""
+        """检测 — validate custom path then auto-detect (mirrors web testBtn handler)."""
+        custom = self._helicon_exe_edit.text().strip()
+        if custom:
+            self._show_status("正在验证自定义路径…")
+        else:
+            self._show_status("正在自动探测 Helicon Focus…")
         self._save_helicon()
-        self._detect_helicon()
+        self._detect_helicon(custom_path=custom)
 
     def _on_save_click(self) -> None:
         """保存 — persist custom path."""
         self._save_helicon()
         self._refresh_helicon_display()
+        self._show_status("✓ Helicon 设置已保存")
 
     def _on_clear_click(self) -> None:
         """清除自定义 — wipe custom path and re-detect."""
         self._helicon_exe_edit.clear()
         self._save_helicon()
         self._detect_helicon()
+        self._show_status("已清除自定义路径，已重新探测")
 
-    def _detect_helicon(self) -> None:
+    def _detect_helicon(self, custom_path: str = "") -> None:
         """重新探测 / auto-detect — calls helicon_service.detect_helicon()."""
         try:
             from app.services.helicon_service import detect_helicon, reset_helicon_cache
             reset_helicon_cache()
-            found = detect_helicon()
+            found = detect_helicon(custom_path=custom_path)
         except Exception:
             found = None
 
@@ -1714,6 +1832,7 @@ class SettingsView(BaseView):
                 f"font-size: 12px; font-weight: 600; color: {_C_SUCCESS};"
                 "background: transparent;"
             )
+            self._show_status(f"✓ 检测成功: {found}", 5000)
         else:
             self._detected_path_label.setText("（未检测到）")
             self._effective_path_label.setText("—")
@@ -1722,6 +1841,10 @@ class SettingsView(BaseView):
                 f"font-size: 12px; font-weight: 600; color: {_C_WARN};"
                 "background: transparent;"
             )
+            if custom_path:
+                self._show_status("✗ 自定义路径无效，自动探测也未找到 Helicon Focus", 5000)
+            else:
+                self._show_status("✗ 未检测到 Helicon Focus（Windows 专有工具，Linux 下需通过 WSL 路径配置）", 5000)
 
     # ── Project directory ─────────────────────────────────────────────────
 

@@ -355,3 +355,141 @@ def archive_group(
 def _iso_now() -> str:
     from datetime import datetime, timezone
     return datetime.now(tz=timezone.utc).isoformat()
+
+
+# ── restore_archive — one-click recover original JPGs from a ZIP ───────────────
+
+@dataclass
+class RestoreResult:
+    output_dir: str
+    restored: list[str] = field(default_factory=list)  # 还原成功的 JPG 绝对路径
+    skipped: list[str] = field(default_factory=list)    # 已存在被跳过(overwrite=False)
+    failures: list[str] = field(default_factory=list)   # 文件名 + 原因
+    count: int = 0
+    ok: bool = True
+    reason: str = ""
+
+
+def restore_archive(
+    zip_path: str,
+    output_dir: str,
+    overwrite: bool = False,
+) -> RestoreResult:
+    """Recover the original JPGs from an archive ZIP (read-only, additive).
+
+    Reverses archive_group: extract each JXL and re-decode it with djxl back to
+    the original JPG (bit-exact — JXL stores JPEGs losslessly). Entries stored as
+    raw JPG (the cjxl-unavailable fallback) are copied out directly.
+
+    Safety: this only READS the ZIP and WRITES new JPGs under output_dir. It never
+    deletes anything. If any .jxl entry is present but djxl is unavailable, it
+    aborts before writing anything (no half-products).
+
+    Args:
+        zip_path:   Archive ZIP produced by archive_group.
+        output_dir: Where to write recovered JPGs (created if absent).
+        overwrite:  If False, existing target files are skipped, not overwritten.
+
+    Returns:
+        RestoreResult.
+    """
+    if not os.path.isfile(zip_path):
+        raise FileNotFoundError(f"归档文件不存在: {zip_path}")
+    os.makedirs(output_dir, exist_ok=True)
+
+    temp_dir = tempfile.mkdtemp(prefix="specimen-restore-")
+    restored: list[str] = []
+    skipped: list[str] = []
+    failures: list[str] = []
+
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            names = zf.namelist()
+            zf.extractall(temp_dir)
+
+        # ── Build entries: (archiveName, originalName, originalSize|None) ──────
+        manifest_path = os.path.join(temp_dir, "manifest.json")
+        entries: list[tuple[str, str, Optional[int]]] = []
+        if os.path.isfile(manifest_path):
+            with open(manifest_path, "r", encoding="utf-8") as fh:
+                manifest = json.load(fh)
+            for f in manifest.get("files", []):
+                entries.append((
+                    f["archiveName"],
+                    f.get("originalName") or f["archiveName"],
+                    f.get("originalSize"),
+                ))
+        else:
+            # manifest 缺失 → 退化:按 ZIP 内文件名还原(.jxl → stem.jpg)
+            for name in names:
+                if name == "manifest.json":
+                    continue
+                if name.lower().endswith(".jxl"):
+                    original = Path(name).stem + ".jpg"
+                else:
+                    original = name
+                entries.append((name, original, None))
+
+        # ── djxl gate: any .jxl but no djxl → abort, write nothing ────────────
+        needs_djxl = any(a.lower().endswith(".jxl") for a, _, _ in entries)
+        if needs_djxl and not has_djxl():
+            return RestoreResult(
+                output_dir=output_dir,
+                ok=False,
+                reason="缺少 djxl 解码工具，无法还原 JXL，未输出任何文件",
+                failures=["缺少 djxl 解码工具"],
+            )
+
+        for archive_name, original_name, original_size in entries:
+            src = os.path.join(temp_dir, archive_name)
+            dst = os.path.join(output_dir, original_name)
+
+            if not os.path.isfile(src):
+                failures.append(f"{archive_name}：归档内缺失")
+                continue
+            if os.path.isfile(dst) and not overwrite:
+                skipped.append(dst)
+                continue
+
+            try:
+                if archive_name.lower().endswith(".jxl"):
+                    subprocess.run(
+                        ["djxl", src, dst],
+                        check=True,
+                        capture_output=True,
+                        timeout=120,
+                    )
+                    if not os.path.isfile(dst) or os.path.getsize(dst) <= 0:
+                        failures.append(f"{original_name}：还原输出异常")
+                        if os.path.isfile(dst):
+                            os.unlink(dst)
+                        continue
+                    if original_size is not None and os.path.getsize(dst) != original_size:
+                        failures.append(
+                            f"{original_name}：大小与清单不一致"
+                            f"（{os.path.getsize(dst)}≠{original_size}）"
+                        )
+                        os.unlink(dst)
+                        continue
+                else:
+                    shutil.copy2(src, dst)
+                restored.append(dst)
+            except Exception as e:
+                failures.append(f"{original_name}：{e}")
+                if os.path.isfile(dst):
+                    try:
+                        os.unlink(dst)
+                    except OSError:
+                        pass
+
+        return RestoreResult(
+            output_dir=output_dir,
+            restored=restored,
+            skipped=skipped,
+            failures=failures,
+            count=len(restored),
+            ok=(len(failures) == 0),
+        )
+
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)

@@ -9,7 +9,7 @@
 QWidget {
     background-color: #f4f6f8;
     color: #17212b;
-    font-family: "Noto Sans SC", "Source Han Sans SC", "Noto Sans CJK SC", "Microsoft YaHei", "PingFang SC", "Segoe UI", sans-serif;
+    font-family: "Noto Sans CJK SC", "Noto Sans SC", "Source Han Sans SC", "Microsoft YaHei", 微软雅黑, "PingFang SC", "Hiragino Sans GB", "Heiti SC", "WenQuanYi Micro Hei", "Segoe UI", Arial, sans-serif;
     font-size: 13px;
     selection-background-color: #0f766e;
     selection-color: #f4f6f8;
@@ -31,8 +31,9 @@ QFrame#TopBar {
     border: none;
     border-bottom: 1px solid rgba(15,23,42,0.08);
 }
+QFrame#TopBarDivider { background: rgba(15,23,42,0.13); border: none; }
 QLabel#BrandWord {
-    font-family: "Noto Serif SC", "Source Han Serif SC", "Songti SC", SimSun, Georgia, serif;
+    font-family: "Noto Serif CJK SC", "Noto Serif SC", "Source Han Serif SC", "Songti SC", STSong, SimSun, 宋体, Georgia, serif;
     font-size: 13px;
     font-weight: 600;
     color: #17212b;
@@ -128,7 +129,7 @@ QStackedWidget { background: transparent; border: none; }
 
 /* ── Workspace header ────────────────────────────────────────────── */
 QLabel#WorkspaceTitle {
-    font-family: "Noto Sans SC", "Source Han Sans SC", "Noto Sans CJK SC", "Microsoft YaHei", "PingFang SC", "Segoe UI", sans-serif;
+    font-family: "Noto Sans CJK SC", "Noto Sans SC", "Source Han Sans SC", "Microsoft YaHei", 微软雅黑, "PingFang SC", "Hiragino Sans GB", "Heiti SC", "WenQuanYi Micro Hei", "Segoe UI", Arial, sans-serif;
     font-size: 18px;
     font-weight: 600;
     color: #17212b;
@@ -230,7 +231,7 @@ QLabel { background: transparent; color: #17212b; }
 QLabel#Muted { color: #64748b; }
 QLabel#MutedSmall { color: #94a3b8; font-size: 11px; }
 QLabel#Accent { color: #0f766e; }
-QLabel#Title { font-family: "Noto Serif SC", "Source Han Serif SC", "Songti SC", SimSun, Georgia, serif; font-size: 20px; font-weight: 600; color: #17212b; }
+QLabel#Title { font-family: "Noto Serif CJK SC", "Noto Serif SC", "Source Han Serif SC", "Songti SC", STSong, SimSun, 宋体, Georgia, serif; font-size: 20px; font-weight: 600; color: #17212b; }
 QLabel#Section, QLabel#CardTitle {
     font-size: 11px;
     font-weight: 700;

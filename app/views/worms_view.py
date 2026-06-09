@@ -58,6 +58,7 @@ from PyQt6.QtWidgets import (
 
 from app.views.base_view import BaseView
 from app.services.worms_service import WormsService
+from app.config.theme import local_font_css
 
 if TYPE_CHECKING:
     from app.app_context import AppContext
@@ -304,9 +305,10 @@ class _ResultItemWidget(QWidget):
 
         self.setObjectName("WResultItem")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        _ff = local_font_css()
         self.setStyleSheet(
             "QWidget#WResultItem {"
-            f"  background: transparent; border: 1px solid transparent;"
+            f"  {_ff} background: transparent; border: 1px solid transparent;"
             f"  border-radius: 6px;"
             "}"
             "QWidget#WResultItem:hover {"
@@ -584,8 +586,9 @@ class _DetailPanel(QWidget):
         super().__init__(parent)
         _refresh_palette()
         self.setObjectName("WDetailPanel")
+        _ff = local_font_css()
         self.setStyleSheet(
-            f"QWidget#WDetailPanel {{ background:{_C_PANEL};"
+            f"QWidget#WDetailPanel {{ {_ff} background:{_C_PANEL};"
             f"  border:1px solid {_C_BORDER}; border-radius:8px; }}"
         )
 
@@ -1603,8 +1606,9 @@ class WormsMatchDialog(QDialog):
         self.setWindowTitle("WoRMS 匹配物种")
         self.setMinimumSize(680, 480)
         self.setModal(True)
+        _ff = local_font_css()
         self.setStyleSheet(
-            f"QDialog {{ background:{_C_BG}; color:{_C_TEXT}; }}"
+            f"QDialog {{ {_ff}background:{_C_BG}; color:{_C_TEXT}; }}"
             f"QLabel {{ color:{_C_TEXT}; background:transparent; }}"
         )
         self._build_ui()
@@ -2028,8 +2032,9 @@ class WormsQuickFillDialog(QDialog):
         self.setWindowTitle("从 WoRMS 查找分类")
         self.setMinimumSize(540, 440)
         self.setModal(True)
+        _ff = local_font_css()
         self.setStyleSheet(
-            f"QDialog {{ background:{_C_BG}; color:{_C_TEXT}; }}"
+            f"QDialog {{ {_ff}background:{_C_BG}; color:{_C_TEXT}; }}"
             f"QLabel {{ color:{_C_TEXT}; background:transparent; }}"
         )
         self._build_ui()

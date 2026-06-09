@@ -15,6 +15,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
+from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import QVBoxLayout, QWidget
 
 import matplotlib
@@ -85,7 +86,9 @@ _SHAPE_MAP = {"圆": "o", "三角": "^", "方": "s", "星": "*", "倒三角": "v
 
 
 class PublicationMapWidget(QWidget):
-    """matplotlib 出版底图画布。"""
+    """matplotlib 出版底图画布（支持鼠标滚轮缩放 + 拖拽平移）。"""
+
+    zoom_changed = pyqtSignal(float)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -94,6 +97,15 @@ class PublicationMapWidget(QWidget):
         self._points: list[dict] = []
         self._style: dict = dict(_DEFAULT_STYLE)
         self._img_cache: Optional[tuple[str, object]] = None  # (path, ndarray)
+        self._with_points: bool = True
+
+        # ── zoom / pan state ──
+        self._ax: Optional[object] = None
+        self._home_xlim: Optional[tuple[float, float]] = None
+        self._home_ylim: Optional[tuple[float, float]] = None
+        self._view_xlim: Optional[tuple[float, float]] = None
+        self._view_ylim: Optional[tuple[float, float]] = None
+        self._pan_start: Optional[tuple[float, float]] = None
 
         self._fig = Figure(figsize=(8, 5), constrained_layout=True)
         self._canvas = FigureCanvasQTAgg(self._fig)
@@ -101,18 +113,76 @@ class PublicationMapWidget(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.addWidget(self._canvas)
 
+        # matplotlib event connections
+        self._canvas.mpl_connect("scroll_event", self._on_mpl_scroll)
+        self._canvas.mpl_connect("button_press_event", self._on_mpl_press)
+        self._canvas.mpl_connect("motion_notify_event", self._on_mpl_motion)
+        self._canvas.mpl_connect("button_release_event", self._on_mpl_release)
+
     # ── public API ────────────────────────────────────────────────────────────
 
     def set_basemap(self, entry: Optional[dict], calibration: Optional[dict] = None) -> None:
         """选底图。*calibration* = sidecar dict（含 'model'）或 None。"""
         self._entry = entry
         self._calib_model = (calibration or {}).get("model") if calibration else None
+        # 底图切换 → 重置视口
+        self._view_xlim = None
+        self._view_ylim = None
 
     def set_points(self, points: list[dict]) -> None:
         self._points = list(points or [])
 
     def set_style(self, style: dict) -> None:
         self._style = {**_DEFAULT_STYLE, **(style or {})}
+
+    # ── zoom / pan public API ────────────────────────────────────────────────
+
+    def zoom_in(self) -> None:
+        self._zoom_by(1.5)
+
+    def zoom_out(self) -> None:
+        self._zoom_by(1 / 1.5)
+
+    def zoom_to_fit(self) -> None:
+        """重置到初始视口（全部可见）。"""
+        if self._ax is None or self._home_xlim is None:
+            return
+        self._view_xlim = self._home_xlim
+        self._view_ylim = self._home_ylim
+        self._ax.set_xlim(self._home_xlim)
+        self._ax.set_ylim(self._home_ylim)
+        self._canvas.draw_idle()
+        self.zoom_changed.emit(1.0)
+
+    def current_zoom(self) -> float:
+        """缩放倍率（1.0 = 全图可见）。"""
+        if self._home_xlim is None or self._view_xlim is None:
+            return 1.0
+        home_span = self._home_xlim[1] - self._home_xlim[0]
+        view_span = self._view_xlim[1] - self._view_xlim[0]
+        return home_span / view_span if view_span > 0 else 1.0
+
+    def set_zoom_factor(self, factor: float) -> None:
+        """直接设置缩放倍率（1.0 = 全图可见），保持当前视口中心。"""
+        if self._ax is None or self._home_xlim is None:
+            return
+        factor = max(0.1, factor)
+        xlim = self._ax.get_xlim()
+        ylim = self._ax.get_ylim()
+        cx = (xlim[0] + xlim[1]) / 2
+        cy = (ylim[0] + ylim[1]) / 2
+        hw = (self._home_xlim[1] - self._home_xlim[0]) / 2 / factor
+        hh = (self._home_ylim[1] - self._home_ylim[0]) / 2 / factor
+        new_xlim = (cx - hw, cx + hw)
+        new_ylim = (cy - hh, cy + hh)
+        self._ax.set_xlim(new_xlim)
+        self._ax.set_ylim(new_ylim)
+        self._view_xlim = new_xlim
+        self._view_ylim = new_ylim
+        self._canvas.draw_idle()
+        self.zoom_changed.emit(factor)
+
+    # ── rendering ────────────────────────────────────────────────────────────
 
     def render(self, with_points: bool = True) -> None:
         """重画整图。with_points=False → 仅底图（不画站位点）。"""
@@ -129,6 +199,15 @@ class PublicationMapWidget(QWidget):
             ax.set_facecolor("#eef3f2")
             self._scatter_lonlat(ax)
             ax.set_aspect("equal", adjustable="datalim")
+
+        # 保存初始视口
+        self._ax = ax
+        self._home_xlim = ax.get_xlim()
+        self._home_ylim = ax.get_ylim()
+        # 恢复之前的缩放/平移状态
+        if self._view_xlim is not None:
+            ax.set_xlim(self._view_xlim)
+            ax.set_ylim(self._view_ylim)
         self._canvas.draw_idle()
 
     def export(self, path: str, fmt: Optional[str] = None, dpi: int = 300,
@@ -169,7 +248,10 @@ class PublicationMapWidget(QWidget):
         ax.imshow(arr)            # origin='upper'：像素 (0,0) 在左上
         ax.axis("off")
         if self._calib_model is None:
-            ax.set_title("未校准 — 点击「校准」后才能精确落点", fontsize=10)
+            ax.set_title(
+                "未校准 · 点「校准」标定经纬度，或改用『世界·Robinson』等生成底图（免校准、精确落点）",
+                fontsize=9,
+            )
             return
         self._scatter_pixels(ax)
 
@@ -228,12 +310,19 @@ class PublicationMapWidget(QWidget):
             ax.plot(xs, ys, color="#c9c4ba", linewidth=0.3, zorder=2)
 
     def _scatter_generated(self, ax, proj) -> None:
+        import math
         from app.services import geo_basemap as gb
         pts = [p for p in self._points
                if p.get("lon") is not None and p.get("lat") is not None]
         if not pts:
             return
         xs, ys = gb.project_points(proj, [p["lon"] for p in pts], [p["lat"] for p in pts])
+        # 过滤掉投影后 NaN/inf 的点
+        valid = [(x, y, p) for x, y, p in zip(xs, ys, pts)
+                 if math.isfinite(x) and math.isfinite(y)]
+        if not valid:
+            return
+        xs, ys, pts = [v[0] for v in valid], [v[1] for v in valid], [v[2] for v in valid]
         self._do_scatter(ax, xs, ys, pts)
 
     def _scatter_pixels(self, ax) -> None:
@@ -267,9 +356,78 @@ class PublicationMapWidget(QWidget):
             alpha=st["alpha"], marker=marker, zorder=5,
         )
         if st.get("show_label") and st.get("label_source") not in (None, "none"):
+            from app.services.collection_record_service import marker_label
             src = st["label_source"]
             for x, y, p in zip(list(xs), list(ys), pts):
-                txt = str(p.get("count") if src == "count" else p.get("label") or "")
+                txt = marker_label(p, src)
                 if txt:
                     ax.annotate(txt, (x, y), textcoords="offset points", xytext=(6, 4),
                                 fontsize=st["label_size"], color=st["label_color"], zorder=6)
+
+    # ── zoom / pan internals ─────────────────────────────────────────────────
+
+    def _on_mpl_scroll(self, event) -> None:
+        """鼠标滚轮缩放（以光标为中心）。"""
+        if self._ax is None or event.inaxes != self._ax:
+            return
+        if event.xdata is None or event.ydata is None:
+            return
+        factor = 1.3 if event.button == "up" else 1 / 1.3
+        xlim = self._ax.get_xlim()
+        ylim = self._ax.get_ylim()
+        xdata, ydata = event.xdata, event.ydata
+        new_xlim = (xdata - (xdata - xlim[0]) / factor,
+                    xdata + (xlim[1] - xdata) / factor)
+        new_ylim = (ydata - (ydata - ylim[0]) / factor,
+                    ydata + (ylim[1] - ydata) / factor)
+        self._ax.set_xlim(new_xlim)
+        self._ax.set_ylim(new_ylim)
+        self._view_xlim = new_xlim
+        self._view_ylim = new_ylim
+        self._canvas.draw_idle()
+        self.zoom_changed.emit(self.current_zoom())
+
+    def _on_mpl_press(self, event) -> None:
+        if event.button != 1 or self._ax is None or event.inaxes != self._ax:
+            return
+        if event.xdata is None or event.ydata is None:
+            return
+        self._pan_start = (event.xdata, event.ydata)
+
+    def _on_mpl_motion(self, event) -> None:
+        if self._pan_start is None:
+            return
+        if event.inaxes != self._ax or event.xdata is None or event.ydata is None:
+            return
+        dx = self._pan_start[0] - event.xdata
+        dy = self._pan_start[1] - event.ydata
+        xlim = self._ax.get_xlim()
+        ylim = self._ax.get_ylim()
+        new_xlim = (xlim[0] + dx, xlim[1] + dx)
+        new_ylim = (ylim[0] + dy, ylim[1] + dy)
+        self._ax.set_xlim(new_xlim)
+        self._ax.set_ylim(new_ylim)
+        self._view_xlim = new_xlim
+        self._view_ylim = new_ylim
+        self._canvas.draw_idle()
+
+    def _on_mpl_release(self, event) -> None:
+        self._pan_start = None
+
+    def _zoom_by(self, factor: float) -> None:
+        if self._ax is None:
+            return
+        xlim = self._ax.get_xlim()
+        ylim = self._ax.get_ylim()
+        cx = (xlim[0] + xlim[1]) / 2
+        cy = (ylim[0] + ylim[1]) / 2
+        hw = (xlim[1] - xlim[0]) / 2 / factor
+        hh = (ylim[1] - ylim[0]) / 2 / factor
+        new_xlim = (cx - hw, cx + hw)
+        new_ylim = (cy - hh, cy + hh)
+        self._ax.set_xlim(new_xlim)
+        self._ax.set_ylim(new_ylim)
+        self._view_xlim = new_xlim
+        self._view_ylim = new_ylim
+        self._canvas.draw_idle()
+        self.zoom_changed.emit(self.current_zoom())

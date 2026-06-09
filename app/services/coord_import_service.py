@@ -29,6 +29,40 @@ TARGET_LABELS = {
 
 COORD_SYSTEMS = ("WGS84", "GCJ02", "BD09")
 
+# 示例文件表头 + 演示行（列名与 _guess_header 的命中词一致，导入时自动识别）。
+SAMPLE_HEADERS = ["地区", "断面", "站位", "站位说明", "经度", "纬度"]
+SAMPLE_ROWS = [
+    ["浙江", "三门湾", "B2", "潮间带泥滩", "121.6543", "29.1234"],
+    ["浙江", "三门湾", "B3", "低潮区礁石", "121°39'42\"E", "29°07'18\"N"],
+    ["福建", "罗源湾", "L1", "养殖区", "119.7500", "26.4500"],
+]
+SAMPLE_MAPPING = {
+    "province": "地区", "site": "断面", "station": "站位",
+    "station_label": "站位说明", "lon": "经度", "lat": "纬度",
+}
+
+
+def sample_table() -> tuple[list[str], list[dict]]:
+    """返回内置示例表，供 UI 直接预览，不必先保存 CSV 再打开。"""
+    return list(SAMPLE_HEADERS), [
+        {SAMPLE_HEADERS[i]: (row[i] if i < len(row) else "") for i in range(len(SAMPLE_HEADERS))}
+        for row in SAMPLE_ROWS
+    ]
+
+
+def sample_preview_rows(coord_system: str = "WGS84") -> list[dict]:
+    """示例表按默认列映射解析后的结果；用于展示经纬度解析预览。"""
+    _headers, rows = sample_table()
+    return normalize_rows(rows, SAMPLE_MAPPING, coord_system=coord_system)
+
+
+def write_sample_file(path: str) -> None:
+    """写一个示例站位表（CSV）供用户参照填写。UTF-8 BOM，Excel 直接打开不乱码。"""
+    with open(path, "w", encoding="utf-8-sig", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(SAMPLE_HEADERS)
+        w.writerows(SAMPLE_ROWS)
+
 
 # ── 读表 ───────────────────────────────────────────────────────────────────────
 
