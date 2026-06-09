@@ -1,28 +1,33 @@
 """helicon_params_panel.py — Helicon Focus rendering-params editor.
 
-Strict replication of the Helicon Focus desktop "Rendering" tab parameters:
-a vertical list of rendering-method radios (Method A weighted average / Method B
-depth map / Method C pyramid), a Radius slider+spinbox, and a Smoothing
-slider+spinbox. Radius is disabled for Method C because Helicon only uses the
-radius in methods A/B (heliconsoft.com/helicon-focus-main-parameters/ — "it is
-only available in A and B methods"). Factory defaults: method B, radius 8,
-smoothing 4.
+Faithful Qt port of the web oracle's Helicon "Rendering method" panel
+(``app.js:7095–7324``, ``renderHeliconConfigModal``):
 
-Ranges follow the Helicon 8 GUI (radius 1–40, smoothing 0–20). The public docs
-give the defaults and the A/B-only radius rule but not the exact slider maxima,
-so those bounds are best-known values, not doc-confirmed.
+  - Rendering method radios, value 0/1/2 (app.js:7101-7104):
+      0 = Method A (weighted average)
+      1 = Method B (depth map)
+      2 = Method C (pyramid)
+  - Radius   slider+number, range 0–8 step 0.5 (FLOAT)  — app.js:7145
+  - Smoothing slider+number, range 0–8 step 1   (INT)    — app.js:7147
+  - Reset button → Method B / Radius 8 / Smoothing 4     — app.js:7311-7318
 
-Public API preserved for callers (config dialog + workbench):
-``get_params()`` / ``set_params({method, radius, smoothing})`` and the
-``params_changed`` signal.
+Radius is disabled for Method C (Helicon uses radius only for A/B). Ranges and
+the float radius mirror the oracle exactly — do NOT substitute Helicon's own
+desktop slider bounds; this project's behavioral oracle is the web prototype.
+
+Public API: ``get_params()`` / ``set_params({method, radius, smoothing})`` and
+``params_changed``. ``get_params()['radius']`` is an int when whole (8 → ``8``)
+and a float otherwise (4.5 → ``4.5``), so the CLI renders ``-rp:8`` / ``-rp:4.5``
+like the oracle (app.js:7288 uses ``parseFloat``).
 """
 from __future__ import annotations
 
 from typing import Optional
 
-from PyQt6.QtCore import QEvent, Qt, pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QButtonGroup,
+    QDoubleSpinBox,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -34,16 +39,19 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-# Helicon factory defaults.
+# Oracle factory defaults (app.js:7311-7318 Reset).
 _DEFAULT_METHOD = 1       # Method B (depth map)
-_DEFAULT_RADIUS = 8
+_DEFAULT_RADIUS = 8.0
 _DEFAULT_SMOOTHING = 4
 
-# Helicon 8 GUI slider bounds (best-known; not doc-confirmed maxima).
-_RADIUS_MIN, _RADIUS_MAX = 1, 40
-_SMOOTH_MIN, _SMOOTH_MAX = 0, 20
+# Oracle slider ranges (app.js:7145, 7147).
+_RADIUS_MIN, _RADIUS_MAX, _RADIUS_STEP = 0.0, 8.0, 0.5
+_SMOOTH_MIN, _SMOOTH_MAX = 0, 8
 
-# (label, tooltip) per method — labels mirror the Helicon desktop radios.
+# Radius slider is integer-only in Qt → scale by 1/_RADIUS_STEP (×2).
+_R_SCALE = int(round(1.0 / _RADIUS_STEP))  # 2
+
+# (label, tooltip) per method — labels mirror the oracle radios.
 _METHODS = [
     ("Method A (weighted average)",
      "Computes a per-pixel contrast weight, then averages all source pixels."),
@@ -61,7 +69,7 @@ class HeliconParamsPanel(QWidget):
     Signals
     -------
     params_changed()
-        Emitted whenever any parameter changes (not on ``set_params``).
+        Emitted on any user change (not on ``set_params``).
     """
 
     params_changed = pyqtSignal()
@@ -69,7 +77,7 @@ class HeliconParamsPanel(QWidget):
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self._method: int = _DEFAULT_METHOD
-        self._radius: int = _DEFAULT_RADIUS
+        self._radius: float = _DEFAULT_RADIUS
         self._smoothing: int = _DEFAULT_SMOOTHING
         self._setup_ui()
         self._apply_method_enable()
@@ -103,26 +111,36 @@ class HeliconParamsPanel(QWidget):
         grid.setHorizontalSpacing(8)
         grid.setVerticalSpacing(8)
 
+        # Radius — float 0–8 step 0.5: int slider (×2) + double spinbox.
         self._radius_lbl = QLabel("Radius:")
         self._radius_lbl.setObjectName("MutedSmall")
-        self._radius_slider, self._radius_spin = self._make_slider_spin(
-            _RADIUS_MIN, _RADIUS_MAX, self._radius)
-        self._radius_slider.valueChanged.connect(self._on_radius_changed)
-        self._radius_spin.valueChanged.connect(self._on_radius_changed)
-        self._radius_slider.setToolTip("拖动调整;右键复位默认 (8)")
-        self._radius_slider.installEventFilter(self)
+        self._radius_slider = QSlider(Qt.Orientation.Horizontal)
+        self._radius_slider.setRange(int(_RADIUS_MIN * _R_SCALE), int(_RADIUS_MAX * _R_SCALE))
+        self._radius_slider.setValue(int(self._radius * _R_SCALE))
+        self._radius_spin = QDoubleSpinBox()
+        self._radius_spin.setRange(_RADIUS_MIN, _RADIUS_MAX)
+        self._radius_spin.setSingleStep(_RADIUS_STEP)
+        self._radius_spin.setDecimals(1)
+        self._radius_spin.setValue(self._radius)
+        self._radius_spin.setFixedWidth(64)
+        self._radius_slider.valueChanged.connect(self._on_radius_slider)
+        self._radius_spin.valueChanged.connect(self._on_radius_spin)
         grid.addWidget(self._radius_lbl, 0, 0)
         grid.addWidget(self._radius_slider, 0, 1)
         grid.addWidget(self._radius_spin, 0, 2)
 
+        # Smoothing — int 0–8 step 1: slider + spinbox.
         smooth_lbl = QLabel("Smoothing:")
         smooth_lbl.setObjectName("MutedSmall")
-        self._smooth_slider, self._smooth_spin = self._make_slider_spin(
-            _SMOOTH_MIN, _SMOOTH_MAX, self._smoothing)
+        self._smooth_slider = QSlider(Qt.Orientation.Horizontal)
+        self._smooth_slider.setRange(_SMOOTH_MIN, _SMOOTH_MAX)
+        self._smooth_slider.setValue(self._smoothing)
+        self._smooth_spin = QSpinBox()
+        self._smooth_spin.setRange(_SMOOTH_MIN, _SMOOTH_MAX)
+        self._smooth_spin.setValue(self._smoothing)
+        self._smooth_spin.setFixedWidth(64)
         self._smooth_slider.valueChanged.connect(self._on_smooth_changed)
         self._smooth_spin.valueChanged.connect(self._on_smooth_changed)
-        self._smooth_slider.setToolTip("拖动调整;右键复位默认 (4)")
-        self._smooth_slider.installEventFilter(self)
         grid.addWidget(smooth_lbl, 1, 0)
         grid.addWidget(self._smooth_slider, 1, 1)
         grid.addWidget(self._smooth_spin, 1, 2)
@@ -130,8 +148,7 @@ class HeliconParamsPanel(QWidget):
         grid.setColumnStretch(1, 1)
         root.addLayout(grid)
 
-        # Reset 按钮 —— 复刻 Helicon 桌面端面板底部 Reset:
-        # 一键复位 渲染方法 / Radius / Smoothing 到出厂默认。
+        # Reset button — oracle app.js:7311-7318 (Method B / Radius 8 / Smoothing 4).
         reset_row = QHBoxLayout()
         reset_row.setContentsMargins(0, 4, 0, 0)
         self._reset_btn = QPushButton("Reset")
@@ -144,36 +161,6 @@ class HeliconParamsPanel(QWidget):
 
         root.addStretch()
 
-    def _make_slider_spin(
-        self, lo: int, hi: int, val: int
-    ) -> tuple[QSlider, QSpinBox]:
-        slider = QSlider(Qt.Orientation.Horizontal)
-        slider.setRange(lo, hi)
-        slider.setValue(val)
-        spin = QSpinBox()
-        spin.setRange(lo, hi)
-        spin.setValue(val)
-        spin.setFixedWidth(58)
-        return slider, spin
-
-    # ── Desktop-style interaction ──────────────────────────────────────────────
-
-    def eventFilter(self, obj, event):  # noqa: N802 (Qt override)
-        """Right-click a slider → reset that param to its Helicon default.
-
-        Mirrors the Helicon Focus desktop: "To reset controls to default,
-        right-click on the slider of the parameter you want to reset."
-        """
-        if (event.type() == QEvent.Type.MouseButtonPress
-                and event.button() == Qt.MouseButton.RightButton):
-            if obj is self._radius_slider and obj.isEnabled():
-                self._radius_slider.setValue(_DEFAULT_RADIUS)
-                return True
-            if obj is self._smooth_slider:
-                self._smooth_slider.setValue(_DEFAULT_SMOOTHING)
-                return True
-        return super().eventFilter(obj, event)
-
     # ── Slots ─────────────────────────────────────────────────────────────────
 
     def _on_method_changed(self, method_id: int) -> None:
@@ -182,41 +169,50 @@ class HeliconParamsPanel(QWidget):
         self.params_changed.emit()
 
     def _apply_method_enable(self) -> None:
-        # Radius is used only by methods A/B; Helicon greys it out for C.
+        # Radius is used only by methods A/B; disabled for C (pyramid).
         radius_on = self._method != 2
         self._radius_lbl.setEnabled(radius_on)
         self._radius_slider.setEnabled(radius_on)
         self._radius_spin.setEnabled(radius_on)
 
-    def _on_radius_changed(self, value: int) -> None:
+    def _on_radius_slider(self, raw: int) -> None:
+        value = raw / _R_SCALE
         if value == self._radius:
             return
         self._radius = value
-        self._sync(self._radius_slider, self._radius_spin, value)
+        self._radius_spin.blockSignals(True)
+        self._radius_spin.setValue(value)
+        self._radius_spin.blockSignals(False)
+        self.params_changed.emit()
+
+    def _on_radius_spin(self, value: float) -> None:
+        if value == self._radius:
+            return
+        self._radius = value
+        raw = int(round(value * _R_SCALE))
+        if self._radius_slider.value() != raw:
+            self._radius_slider.blockSignals(True)
+            self._radius_slider.setValue(raw)
+            self._radius_slider.blockSignals(False)
         self.params_changed.emit()
 
     def _on_smooth_changed(self, value: int) -> None:
         if value == self._smoothing:
             return
         self._smoothing = value
-        self._sync(self._smooth_slider, self._smooth_spin, value)
-        self.params_changed.emit()
-
-    @staticmethod
-    def _sync(slider: QSlider, spin: QSpinBox, value: int) -> None:
-        """Mirror ``value`` onto the sibling widget without re-firing signals."""
-        for w in (slider, spin):
+        for w in (self._smooth_slider, self._smooth_spin):
             if w.value() != value:
                 w.blockSignals(True)
                 w.setValue(value)
                 w.blockSignals(False)
+        self.params_changed.emit()
 
     # ── Public API ────────────────────────────────────────────────────────────
 
     def reset_to_defaults(self) -> None:
-        """Reset method/radius/smoothing to Helicon factory defaults (B / 8 / 4).
+        """Reset to oracle factory defaults: Method B / Radius 8 / Smoothing 4.
 
-        Mirrors the Helicon desktop panel's bottom "Reset" button. Emits
+        Mirrors the oracle Reset button (app.js:7311-7318). Emits
         ``params_changed`` so listeners (settings auto-save) persist the reset.
         """
         self.set_params({
@@ -227,12 +223,14 @@ class HeliconParamsPanel(QWidget):
         self.params_changed.emit()
 
     def get_params(self) -> dict:
-        """Return current params: {method: int, radius: int, smoothing: int}."""
-        return {
-            "method": self._method,
-            "radius": self._radius,
-            "smoothing": self._smoothing,
-        }
+        """Return {method:int, radius:(int|float), smoothing:int}.
+
+        Radius is int when whole (8 → 8) else float (4.5 → 4.5), so the CLI
+        renders ``-rp:8`` / ``-rp:4.5`` exactly like the oracle (app.js:7288).
+        """
+        r = self._radius
+        radius = int(r) if float(r).is_integer() else r
+        return {"method": self._method, "radius": radius, "smoothing": self._smoothing}
 
     def set_params(self, params: dict) -> None:
         """Load params into the UI (does not emit ``params_changed``)."""
@@ -243,19 +241,18 @@ class HeliconParamsPanel(QWidget):
                 rb.setChecked(True)
             self._apply_method_enable()
         if "radius" in params:
-            self._set_silent(
-                self._radius_slider, self._radius_spin,
-                int(round(float(params["radius"]))))
+            self._radius_spin.blockSignals(True)
+            self._radius_spin.setValue(float(params["radius"]))
+            self._radius_spin.blockSignals(False)
             self._radius = self._radius_spin.value()
+            self._radius_slider.blockSignals(True)
+            self._radius_slider.setValue(int(round(self._radius * _R_SCALE)))
+            self._radius_slider.blockSignals(False)
         if "smoothing" in params:
-            self._set_silent(
-                self._smooth_slider, self._smooth_spin,
-                int(round(float(params["smoothing"]))))
+            self._smooth_spin.blockSignals(True)
+            self._smooth_spin.setValue(int(round(float(params["smoothing"]))))
+            self._smooth_spin.blockSignals(False)
             self._smoothing = self._smooth_spin.value()
-
-    @staticmethod
-    def _set_silent(slider: QSlider, spin: QSpinBox, value: int) -> None:
-        for w in (slider, spin):
-            w.blockSignals(True)
-            w.setValue(value)
-            w.blockSignals(False)
+            self._smooth_slider.blockSignals(True)
+            self._smooth_slider.setValue(self._smoothing)
+            self._smooth_slider.blockSignals(False)

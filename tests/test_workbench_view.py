@@ -996,41 +996,39 @@ class TestHeliconParamsPanel:
         w.set_params({"method": 0})
         assert w._radius_slider.isEnabled()
 
+    def test_oracle_ranges(self):
+        # Ranges mirror the web oracle app.js:7145/7147 — Radius 0–8 (float,
+        # step 0.5), Smoothing 0–8 (int). NOT Helicon's own desktop bounds.
+        from app.widgets.helicon_params_panel import HeliconParamsPanel
+        w = HeliconParamsPanel()
+        assert w._radius_spin.minimum() == 0.0
+        assert w._radius_spin.maximum() == 8.0
+        assert w._radius_spin.singleStep() == 0.5
+        assert w._smooth_spin.minimum() == 0
+        assert w._smooth_spin.maximum() == 8
+        # float radius round-trips
+        w.set_params({"radius": 4.5})
+        assert w.get_params()["radius"] == 4.5
+        # whole radius returns as int → CLI -rp:8 not -rp:8.0
+        w.set_params({"radius": 8})
+        assert w.get_params()["radius"] == 8
+        assert isinstance(w.get_params()["radius"], int)
+
     def test_radius_slider_spin_synced(self):
         from app.widgets.helicon_params_panel import HeliconParamsPanel
         w = HeliconParamsPanel()
-        w._radius_slider.setValue(12)
-        assert w._radius_spin.value() == 12
-        assert w.get_params()["radius"] == 12
+        w._radius_spin.setValue(4.5)          # float, 0–8 step 0.5
+        assert w._radius_slider.value() == 9   # 4.5 × 2 (int slider scaling)
+        assert w.get_params()["radius"] == 4.5
         w._smooth_spin.setValue(6)
         assert w._smooth_slider.value() == 6
         assert w.get_params()["smoothing"] == 6
 
-    def test_right_click_slider_resets_to_default(self):
-        # Helicon desktop: right-click a slider resets that param to default.
-        from PyQt6.QtCore import QEvent, QPointF, Qt
-        from PyQt6.QtGui import QMouseEvent
-        from app.widgets.helicon_params_panel import HeliconParamsPanel
-        w = HeliconParamsPanel()
-        w.set_params({"method": 1, "radius": 20, "smoothing": 9})
-
-        def _right_click(slider):
-            ev = QMouseEvent(
-                QEvent.Type.MouseButtonPress, QPointF(2, 2),
-                Qt.MouseButton.RightButton, Qt.MouseButton.RightButton,
-                Qt.KeyboardModifier.NoModifier)
-            w.eventFilter(slider, ev)
-
-        _right_click(w._radius_slider)
-        _right_click(w._smooth_slider)
-        assert w.get_params()["radius"] == 8   # _DEFAULT_RADIUS
-        assert w.get_params()["smoothing"] == 4  # _DEFAULT_SMOOTHING
-
     def test_reset_button_restores_defaults(self):
-        # Helicon desktop panel has a bottom "Reset" button.
+        # Oracle Reset button (app.js:7311-7318) → Method B / Radius 8 / Smoothing 4.
         from app.widgets.helicon_params_panel import HeliconParamsPanel
         w = HeliconParamsPanel()
-        w.set_params({"method": 0, "radius": 25, "smoothing": 9})
+        w.set_params({"method": 0, "radius": 2, "smoothing": 1})
         fired = []
         w.params_changed.connect(lambda: fired.append(1))
         w._reset_btn.click()
@@ -1369,15 +1367,15 @@ class TestComposePreviewDialog:
         dlg = _ComposeWorkbenchDialog(
             [str(jpg1), str(jpg2)],
             str(tiff),
-            {"method": 1, "radius": 9, "smoothing": 3},
+            {"method": 1, "radius": 4.5, "smoothing": 3},
             angle_label="背面",
         )
 
         assert dlg.windowTitle() == "合成工作台"
         assert dlg.selected_jpgs() == [str(jpg1), str(jpg2)]
         assert dlg.params()["method"] == 1
-        # Helicon radius is an integer (desktop GUI spinbox) — fractional input rounds.
-        assert dlg.params()["radius"] == 9
+        # Oracle radius is float (0–8 step 0.5) — fractional values round-trip.
+        assert dlg.params()["radius"] == 4.5
         assert dlg.params()["smoothing"] == 3
 
 

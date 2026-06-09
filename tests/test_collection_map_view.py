@@ -305,7 +305,12 @@ class TestLeftPaneScroll:
         ls = self._left_scroll(v)
         assert ls is not None, "左栏缺少 LeftScroll 滚动容器"
         assert ls.widgetResizable() is True
-        assert ls.verticalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        assert ls.verticalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOn
+
+    def test_left_scroll_keeps_bar_outside_cards(self):
+        v = self._shown(700)
+        ls = self._left_scroll(v)
+        assert ls.widget().layout().contentsMargins().right() >= 10
 
     def test_style_panel_lives_inside_left_scroll(self):
         v = self._shown(700)

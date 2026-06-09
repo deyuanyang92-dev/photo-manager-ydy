@@ -125,7 +125,8 @@ class CollectionMapView(BaseView):
         pane = QWidget()
         pane.setObjectName("LeftPane")
         v = QVBoxLayout(pane)
-        v.setContentsMargins(0, 0, 0, 0)
+        # 留出滚动条轨道，避免滑块压在卡片内容右边缘上。
+        v.setContentsMargins(0, 0, 10, 0)
         v.setSpacing(14)
         v.addWidget(self._build_project_card(), 0)
         v.addWidget(self._build_style_card(), 0)
@@ -138,8 +139,8 @@ class CollectionMapView(BaseView):
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        scroll.setFixedWidth(272)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        scroll.setFixedWidth(282)
         scroll.setWidget(pane)
         return scroll
 
