@@ -70,6 +70,8 @@ class ScreenshotController(QObject):
 
     # ── core ────────────────────────────────────────────────────────────────
     def _open(self, preset: Optional[QRect]) -> None:
+        if self._overlay is not None and self._overlay.isVisible():
+            return  # one overlay at a time; ignore re-entry while shown
         overlay = ScreenshotOverlay(self._win)
         overlay.actionCopy.connect(self._on_copy)
         overlay.actionSave.connect(self._on_save)

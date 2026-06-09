@@ -267,9 +267,10 @@ class PublicationMapWidget(QWidget):
             alpha=st["alpha"], marker=marker, zorder=5,
         )
         if st.get("show_label") and st.get("label_source") not in (None, "none"):
+            from app.services.collection_record_service import marker_label
             src = st["label_source"]
             for x, y, p in zip(list(xs), list(ys), pts):
-                txt = str(p.get("count") if src == "count" else p.get("label") or "")
+                txt = marker_label(p, src)
                 if txt:
                     ax.annotate(txt, (x, y), textcoords="offset points", xytext=(6, 4),
                                 fontsize=st["label_size"], color=st["label_color"], zorder=6)

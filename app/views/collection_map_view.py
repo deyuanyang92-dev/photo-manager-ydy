@@ -26,12 +26,14 @@ from PyQt6.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QPushButton,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
 
+from app.config.icons import TONE_ACCENT, TONE_MUTED, icon, set_button_icon
 from app.services import basemap_registry as br
 from app.services import collection_record_service as crs
 from app.services import project_settings_service as pss
@@ -106,44 +108,72 @@ class CollectionMapView(BaseView):
         v.addStretch(1)
         return pane
 
-    def _card(self, title: str) -> tuple[QFrame, QVBoxLayout]:
-        """统一卡片外壳：圆角 + 软阴影 + 标题。返回 (卡片, 内容布局)。"""
+    def _card(self, title: str, icon_name: str = "") -> tuple[QFrame, QVBoxLayout, QHBoxLayout]:
+        """统一卡片外壳：圆角 + 软阴影 + 图标标题 + 分隔线。返回 (卡片, 内容布局, 标题行)。"""
         from app.config.effects import apply_card_shadow
+        from app.widgets._collapse import set_layout_children_visible
         card = QFrame()
         card.setObjectName("Card")
         outer = QVBoxLayout(card)
         outer.setContentsMargins(14, 12, 14, 12)
-        outer.setSpacing(8)
+        outer.setSpacing(9)
+        head_row = QHBoxLayout()
+        head_row.setSpacing(7)
+        # 收起/展开 ▾/▸ 切换（隐藏分隔线及以下全部内容，只留标题行）
+        chevron = QPushButton()
+        chevron.setObjectName("CollapseBtn")
+        chevron.setFixedSize(18, 18)
+        chevron.setCursor(Qt.CursorShape.PointingHandCursor)
+        head_row.addWidget(chevron)
+        if icon_name:
+            ic = QLabel()
+            ic.setPixmap(icon(icon_name, color=TONE_ACCENT).pixmap(16, 16))
+            ic.setFixedWidth(18)
+            head_row.addWidget(ic)
         head = QLabel(title)
         head.setObjectName("CardTitle")
-        outer.addWidget(head)
+        head_row.addWidget(head)
+        head_row.addStretch(1)
+        outer.addLayout(head_row)
+        div = QFrame()
+        div.setObjectName("CardDiv")
+        div.setFixedHeight(1)
+        outer.addWidget(div)
         apply_card_shadow(card, blur=16, y=3, alpha=28)
-        return card, outer
+
+        def toggle():
+            collapsed = not getattr(card, "_collapsed", False)
+            card._collapsed = collapsed
+            set_layout_children_visible(outer, 1, not collapsed)  # 1 = 分隔线起
+            set_button_icon(chevron, "mdi6.chevron-right" if collapsed else "mdi6.chevron-down",
+                            color=TONE_MUTED, size=15)
+        set_button_icon(chevron, "mdi6.chevron-down", color=TONE_MUTED, size=15)
+        chevron.clicked.connect(toggle)
+        return card, outer, head_row
 
     def _build_project_card(self) -> QFrame:
-        card, lay = self._card("项目")
-        # 标题行右侧「+」新建项目入口（CardTitle 已由 _card 加在首行；这里追加按钮行）
-        head_row = QHBoxLayout()
-        head_row.addStretch(1)
-        self._add_proj_btn = QPushButton("+")
+        card, lay, head_row = self._card("项目", "mdi6.folder-multiple-outline")
+        # 标题行右侧「+」新建项目入口
+        self._add_proj_btn = QPushButton()
         self._add_proj_btn.setObjectName("AddProjBtn")
-        self._add_proj_btn.setFixedSize(24, 24)
-        self._add_proj_btn.setToolTip("新建项目")
+        self._add_proj_btn.setFixedSize(26, 26)
+        self._add_proj_btn.setToolTip("新建 / 打开项目")
         self._add_proj_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._add_proj_btn.clicked.connect(self._on_add_project)
+        set_button_icon(self._add_proj_btn, "mdi6.plus", color=TONE_ACCENT, size=16)
+        self._add_proj_btn.clicked.connect(self._on_add_menu)
         head_row.addWidget(self._add_proj_btn)
-        lay.addLayout(head_row)
         self._proj_list = QListWidget()
         self._proj_list.setObjectName("ProjList")
         self._proj_list.setFrameShape(QFrame.Shape.NoFrame)
         self._proj_list.setSpacing(2)
-        self._proj_list.setMaximumHeight(220)
+        self._proj_list.setMinimumHeight(158)
+        self._proj_list.setMaximumHeight(232)
         self._proj_list.itemSelectionChanged.connect(self._on_project_changed)
         lay.addWidget(self._proj_list)
         return card
 
     def _build_style_card(self) -> QFrame:
-        card, lay = self._card("站位标识")
+        card, lay, _hr = self._card("站位标识", "mdi6.map-marker-outline")
         # 实时预览色块
         prev_row = QHBoxLayout()
         prev_row.addWidget(QLabel("预览"))
@@ -162,21 +192,38 @@ class CollectionMapView(BaseView):
     def _make_project_item(self, name: str, count: Optional[int], directory):
         item = QListWidgetItem()
         item.setData(Qt.ItemDataRole.UserRole, directory)
-        w = QWidget()
-        h = QHBoxLayout(w)
-        h.setContentsMargins(10, 6, 8, 6)
+        row = QFrame()
+        row.setObjectName("ProjRow")
+        h = QHBoxLayout(row)
+        h.setContentsMargins(8, 5, 10, 5)
+        h.setSpacing(9)
+
+        bar = QFrame()              # 选中态左侧 accent 指示条
+        bar.setObjectName("ProjBar")
+        bar.setFixedWidth(3)
+        h.addWidget(bar)
+
+        avatar = QLabel(name[:1] or "·")   # 首字母圆标
+        avatar.setObjectName("ProjAvatar")
+        avatar.setFixedSize(28, 28)
+        avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        h.addWidget(avatar)
+
+        col = QVBoxLayout()
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(1)
         nm = QLabel(name)
         nm.setObjectName("ProjName")
-        h.addWidget(nm, 1)
-        w._sel_labels = [nm]   # 选中态需手动 repolish 的子控件
-        if count is not None:
-            badge = QLabel(str(count))
-            badge.setObjectName("ProjBadge")
-            badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            h.addWidget(badge)
-            w._sel_labels.append(badge)
-        item.setSizeHint(w.sizeHint())
-        return item, w
+        sub = QLabel(f"{count} 站位" if count is not None else "—")
+        sub.setObjectName("ProjSub")
+        col.addWidget(nm)
+        col.addWidget(sub)
+        h.addLayout(col, 1)
+
+        # 选中态需手动 repolish 的子控件（含行框本身，驱动底色/指示条/圆标变色）
+        row._sel_labels = [row, bar, avatar, nm, sub]
+        item.setSizeHint(row.sizeHint())
+        return item, row
 
     def _restyle_proj_selection(self) -> None:
         """setItemWidget 子控件不吃 ::item:selected → 用 [sel] 属性手动同步选中态。"""
@@ -204,6 +251,11 @@ class CollectionMapView(BaseView):
         title.setObjectName("PaneTitle")
         bar.addWidget(title)
         bar.addSpacing(10)
+        seg = QFrame()                       # 分段控件容器（站位/断面/地区）
+        seg.setObjectName("SegGroup")
+        seg_l = QHBoxLayout(seg)
+        seg_l.setContentsMargins(3, 3, 3, 3)
+        seg_l.setSpacing(3)
         grp = QButtonGroup(self)
         grp.setExclusive(True)
         for lvl, label in _LEVELS:
@@ -215,7 +267,8 @@ class CollectionMapView(BaseView):
             btn.clicked.connect(lambda _=False, l=lvl: self._set_level(l))
             grp.addButton(btn)
             self._level_btns[lvl] = btn
-            bar.addWidget(btn)
+            seg_l.addWidget(btn)
+        bar.addWidget(seg)
         bar.addStretch()
         self._count_lbl = QLabel("")
         self._count_lbl.setObjectName("CountLbl")
@@ -232,17 +285,21 @@ class CollectionMapView(BaseView):
         bar2.addWidget(self._basemap_combo)
         self._calibrate_btn = QPushButton("校准")
         self._calibrate_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        set_button_icon(self._calibrate_btn, "mdi6.crosshairs-gps", color=TONE_MUTED, size=15)
         self._calibrate_btn.clicked.connect(self._on_calibrate)
         self._calibrate_btn.setEnabled(False)
         bar2.addWidget(self._calibrate_btn)
         self._import_btn = QPushButton("导入经纬度")
         self._import_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        set_button_icon(self._import_btn, "mdi6.import", color=TONE_MUTED, size=15)
         self._import_btn.clicked.connect(self._on_import_coords)
         bar2.addWidget(self._import_btn)
         bar2.addStretch()
         self._export_btn = QPushButton("导出图")
         self._export_btn.setObjectName("Primary")
         self._export_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        set_button_icon(self._export_btn, "mdi6.tray-arrow-down",
+                        color=_theme()("accent_fg", "#ffffff"), size=15)
         self._export_btn.clicked.connect(self._on_export)
         bar2.addWidget(self._export_btn)
         v.addLayout(bar2)
@@ -255,6 +312,8 @@ class CollectionMapView(BaseView):
         self._pub_map = PublicationMapWidget()
         self._stack.addWidget(self._tile_map)
         self._stack.addWidget(self._pub_map)
+        self._stack.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._stack.customContextMenuRequested.connect(self._on_map_context_menu)
         v.addWidget(self._stack, 1)
 
         self._info_card = self._build_info_card()
@@ -300,36 +359,56 @@ class CollectionMapView(BaseView):
         accent_fg = g("accent_fg", "#ffffff")
         surface = g("modal_surface", panel)
         accent_soft = g("accent_soft", "rgba(79,209,184,0.14)")
+        inset = g("panel_inset", panel)
+        hover = g("nav_segment_hover_bg", accent_soft)
         self.setStyleSheet(
             f"#{self.view_id}{{background:{bg};}}"
             f"QWidget#LeftPane{{background:transparent;}}"
             f"QFrame#Card{{background:{panel};border:1px solid {border};border-radius:10px;}}"
+            f"QFrame#CardDiv{{background:{border};border:none;}}"
             f"QLabel{{color:{text};background:transparent;}}"
             f"QLabel#CardTitle{{color:{text};font-weight:600;font-size:14px;}}"
+            f"QLabel#StyleSection{{color:{muted};font-weight:600;font-size:11px;"
+            f"letter-spacing:1px;margin-top:2px;}}"
+            f"QPushButton#CollapseBtn{{background:transparent;border:none;border-radius:9px;}}"
+            f"QPushButton#CollapseBtn:hover{{background:{hover};}}"
             f"QLabel#PaneTitle{{color:{text};font-weight:600;font-size:15px;}}"
             f"QLabel#SectionTitle{{color:{muted};font-weight:600;font-size:12px;}}"
             f"QLabel#CountLbl{{color:{muted};font-size:12px;}}"
-            # 项目列表：行=自定义 widget。选中底色沿用全局 theme.qss 的浅 teal
-            #   (QListWidget::item:selected)，不与之抢；选中文字走动态属性 [sel="1"]
-            #   改为 accent 深色加粗（浅底上可读），由 _restyle_proj_selection 设置 + repolish。
-            #   setItemWidget 的子控件不吃 ::item:selected 伪态，故必须用属性。
+            # 新建项目「+」圆形 ghost 按钮
+            f"QPushButton#AddProjBtn{{background:{accent_soft};border:none;border-radius:13px;}}"
+            f"QPushButton#AddProjBtn:hover{{background:{hover};}}"
+            # 项目列表：行=自定义 QFrame#ProjRow，选中态全走 [sel="1"] 动态属性，
+            #   由 _restyle_proj_selection 设置 + repolish（setItemWidget 子控件不吃 ::item:selected）。
+            #   左侧 ProjBar 指示条 + accent_soft 行底 + 首字母圆标反色。
             f"QListWidget#ProjList{{background:transparent;border:none;}}"
-            f"QListWidget#ProjList::item{{border-radius:7px;margin:1px 0;}}"
-            f"QLabel#ProjName{{color:{text};font-size:13px;background:transparent;}}"
-            f'QLabel#ProjName[sel="1"]{{color:{accent};font-weight:700;}}'
-            f"QLabel#ProjBadge{{color:{accent};background:{accent_soft};border-radius:9px;"
-            f"min-width:18px;padding:1px 7px;font-size:11px;font-weight:600;}}"
-            f'QLabel#ProjBadge[sel="1"]{{color:#ffffff;background:{accent};}}'
+            f"QListWidget#ProjList::item{{border:none;margin:2px 0;padding:0;}}"
+            f"QListWidget#ProjList::item:selected{{background:transparent;}}"
+            f"QFrame#ProjRow{{background:transparent;border-radius:9px;}}"
+            f"QFrame#ProjRow:hover{{background:{hover};}}"
+            f'QFrame#ProjRow[sel="1"]{{background:{accent_soft};}}'
+            f"QFrame#ProjBar{{background:transparent;border-radius:1px;}}"
+            f'QFrame#ProjBar[sel="1"]{{background:{accent};}}'
+            f"QLabel#ProjAvatar{{background:{accent_soft};color:{accent};border-radius:14px;"
+            f"font-size:13px;font-weight:700;}}"
+            f'QLabel#ProjAvatar[sel="1"]{{background:{accent};color:{accent_fg};}}'
+            f"QLabel#ProjName{{color:{text};font-size:13px;font-weight:600;background:transparent;}}"
+            f'QLabel#ProjName[sel="1"]{{color:{accent};}}'
+            f"QLabel#ProjSub{{color:{muted};font-size:11px;background:transparent;}}"
+            f'QLabel#ProjSub[sel="1"]{{color:{accent};}}'
             f"QComboBox{{background:{panel};color:{text};border:1px solid {border};"
             f"border-radius:5px;padding:4px 8px;}}"
-            f"QPushButton#LevelBtn{{background:{panel};color:{text};border:1px solid {border};"
-            f"border-radius:5px;padding:5px 14px;font-size:13px;}}"
-            f"QPushButton#LevelBtn:hover{{background:{border};}}"
-            f"QPushButton#LevelBtn:checked{{background:{accent};color:{accent_fg};"
-            f"border:1px solid {accent};font-weight:600;}}"
+            # 粒度分段控件（站位/断面/地区）
+            f"QFrame#SegGroup{{background:{inset};border:1px solid {border};border-radius:9px;}}"
+            f"QPushButton#LevelBtn{{background:transparent;color:{text};border:none;"
+            f"border-radius:6px;padding:5px 14px;font-size:13px;}}"
+            f"QPushButton#LevelBtn:hover{{background:{hover};}}"
+            f"QPushButton#LevelBtn:checked{{background:{accent};color:{accent_fg};font-weight:600;}}"
             f"QPushButton{{background:{panel};color:{text};border:1px solid {border};"
             f"border-radius:5px;padding:5px 12px;font-size:13px;}}"
+            f"QPushButton:hover{{background:{hover};}}"
             f"QPushButton#Primary{{background:{accent};color:{accent_fg};border:1px solid {accent};}}"
+            f"QPushButton#Primary:hover{{background:{g('accent_hover', accent)};}}"
             f"QFrame#InfoCard{{background:{surface};border:1px solid {border};border-radius:8px;}}"
             f"QLabel#InfoTitle{{color:{text};font-weight:600;font-size:14px;}}"
             f"QPushButton#CloseBtn{{background:transparent;color:{muted};border:none;font-size:16px;}}"
@@ -398,18 +477,40 @@ class CollectionMapView(BaseView):
         self._restyle_proj_selection()
         self._reload()
 
+    def _on_add_menu(self) -> None:
+        """卡片「+」→ 弹菜单：新建项目 / 打开已有项目（以前用过的工作区）。"""
+        menu = QMenu(self)
+        menu.addAction(icon("mdi6.folder-plus-outline"), "新建项目…").triggered.connect(
+            self._on_add_project)
+        menu.addAction(icon("mdi6.folder-open-outline"), "打开已有项目…").triggered.connect(
+            self._on_open_project)
+        menu.exec(self._add_proj_btn.mapToGlobal(self._add_proj_btn.rect().bottomLeft()))
+
     def _on_add_project(self) -> None:
-        """卡片内「+」→ 新建项目；建完刷新列表并选中，停留在采集地图（不跳工作区）。"""
+        """新建项目；建完刷新列表并选中，停留在采集地图（不跳工作区）。"""
         from app.views.project_dialog import ProjectDialog
-        from app.views.overview_view import _load_projects, _save_projects
+        from app.views.overview_view import _load_projects
 
         existing = _load_projects()
         dlg = ProjectDialog(mode="new", existing_projects=existing, parent=self, light=True)
         if dlg.exec() != ProjectDialog.DialogCode.Accepted:
             return
-        proj = dlg.result_project()
+        self._register_and_select(dlg.result_project(), "新建项目失败")
+
+    def _on_open_project(self) -> None:
+        """打开磁盘上已有工作区（以前用过、未在列表里的项目目录）。"""
+        from app.views.project_dialog import ProjectDialog
+
+        dlg = ProjectDialog(mode="open", parent=self)
+        if dlg.exec() != ProjectDialog.DialogCode.Accepted:
+            return
+        self._register_and_select(dlg.result_project(), "打开项目失败")
+
+    def _register_and_select(self, proj, err_title: str) -> None:
+        """把项目写入注册表（去重）、选中为过滤器并激活当前项目、刷新地图。"""
         if not proj:
             return
+        from app.views.overview_view import _load_projects, _save_projects
         try:
             all_projects = _load_projects()
             existing_dirs = {p.get("directory") or p.get("dir") for p in all_projects}
@@ -417,14 +518,13 @@ class CollectionMapView(BaseView):
             if d not in existing_dirs:
                 all_projects.append(proj)
                 _save_projects(all_projects)
-            # 选中新项目作为过滤器并激活为当前项目，停留在地图
             self._project_filter = d
             self.ctx.current_project_dir = d
-            self._populate_projects()   # 重读注册表、重建列表、按 _project_filter 选中
-            self._reload()              # 按选中项目刷新地图
+            self._populate_projects()
+            self._reload()
         except Exception as exc:
             from app.utils.ui import warn
-            warn(self, "新建项目失败", str(exc))
+            warn(self, err_title, str(exc))
 
     def _pick_target_project(self) -> Optional[str]:
         """全部项目模式下选导入目标：已知项目 + 「新建项目…」。返回 directory 或 None。"""
@@ -445,6 +545,13 @@ class CollectionMapView(BaseView):
             if name == choice:
                 return d
         return None
+
+    def _on_map_context_menu(self, pos) -> None:
+        """地图区右键菜单 → 导入经纬度。"""
+        menu = QMenu(self)
+        act = menu.addAction(icon("mdi6.import"), "导入经纬度…")
+        act.triggered.connect(self._on_import_coords)
+        menu.exec(self._stack.mapToGlobal(pos))
 
     def _on_import_coords(self) -> None:
         """右栏「导入经纬度」→ 选目标项目 → 复用 CoordImportDialog → 导入后刷新地图。

@@ -292,7 +292,12 @@ class MonitorPanel(QWidget):
         self.ctx = ctx
         self._scan_result: Optional["ScanResult"] = None
         self._active_uid: Optional[str] = None
+        self._last_scan_sig = None  # change-detection: skip rebuild when unchanged
         self._cards: list[_FileCard] = []  # all current cards (for selection ops)
+        # Incremental rebuild: reuse card widgets across scans keyed by file
+        # path, so a single new photo builds one card instead of rebuilding all.
+        self._card_by_key: dict[str, _FileCard] = {}
+        self._card_sig_by_key: dict[str, tuple] = {}
         self._hide_archived: bool = False
         self._setup_ui()
 
@@ -541,13 +546,44 @@ class MonitorPanel(QWidget):
         self._activate_state.style().polish(self._activate_state)
 
     def load_scan(self, scan_result: "ScanResult") -> None:
-        """Populate the grid from a completed scan result."""
+        """Populate the grid from a completed scan result.
+
+        The workbench polls this every 2 s.  Rebuilding the whole card grid
+        each tick (tearing down + recreating every ``_FileCard``) is the main
+        UI-jank source, so skip the rebuild when nothing the grid renders has
+        changed since the last scan.
+        """
+        sig = self._scan_signature(scan_result)
         self._scan_result = scan_result
+        if sig == self._last_scan_sig:
+            return
+        self._last_scan_sig = sig
         self._rebuild_grid()
+
+    def _scan_signature(self, scan_result: "ScanResult"):
+        """Cheap fingerprint of everything the card grid renders.
+
+        Includes the active UID because it changes card highlighting.
+        """
+        if scan_result is None:
+            return None
+
+        def fp(e):
+            return (
+                e.name, e.mtime, e.size,
+                e.attributed_specimen_id, e.is_grouped, e.composed_tiff,
+            )
+
+        return (
+            self._active_uid,
+            tuple(fp(e) for e in scan_result.jpg_files),
+            tuple(fp(e) for e in scan_result.tiff_files),
+        )
 
     def clear(self) -> None:
         """Remove all cards and show empty state."""
         self._scan_result = None
+        self._last_scan_sig = None
         self._cards = []
         self._clear_grid()
         self._stat_label.setText("无项目")
@@ -562,9 +598,9 @@ class MonitorPanel(QWidget):
     # ── Internal ──────────────────────────────────────────────────────────────
 
     def _rebuild_grid(self) -> None:
-        self._clear_grid()
-        self._cards = []
         if not self._scan_result:
+            self._clear_grid()
+            self._cards = []
             self._empty_label.show()
             return
 
@@ -573,26 +609,14 @@ class MonitorPanel(QWidget):
         all_files = jpgs + tiffs
 
         if not all_files:
+            self._clear_grid()
+            self._cards = []
             self._empty_label.show()
             jpg_c = tiff_c = 0
         else:
             self._empty_label.hide()
             jpg_c, tiff_c = len(jpgs), len(tiffs)
-            cols = 2
-            for idx, entry in enumerate(all_files):
-                card = _FileCard(
-                    entry, self._active_uid, self,
-                    on_add_to_group=self._on_ctx_add_to_group,
-                    on_assign_uid=self._on_ctx_assign_uid,
-                    on_unassign=self._on_ctx_unassign,
-                )
-                card.assign_requested.connect(self.assign_requested)
-                card.deactivate_requested.connect(self.unassign_requested)
-                card.selection_toggled.connect(self._on_card_selection_toggled)
-                self._grid.addWidget(card, idx // cols, idx % cols)
-                self._cards.append(card)
-            for c in range(cols):
-                self._grid.setColumnStretch(c, 1)
+            self._sync_cards(all_files)
 
         self._stat_label.setText(f"JPG {jpg_c} · TIFF {tiff_c}")
         self._stat_today.setText(f"{jpg_c} 张")
@@ -613,11 +637,76 @@ class MonitorPanel(QWidget):
         else:
             self._unattr_warning.hide()
 
+    def _card_render_sig(self, entry) -> tuple:
+        """Everything that changes how a card looks (path is the reuse key)."""
+        uid = getattr(entry, "attributed_specimen_id", None)
+        return (
+            getattr(entry, "kind", "jpg"),
+            uid,
+            bool(uid) and uid == self._active_uid,
+            getattr(entry, "composed_tiff", None),
+            getattr(entry, "archived", None),
+            getattr(entry, "is_grouped", False),
+        )
+
+    def _make_card(self, entry) -> "_FileCard":
+        card = _FileCard(
+            entry, self._active_uid, self,
+            on_add_to_group=self._on_ctx_add_to_group,
+            on_assign_uid=self._on_ctx_assign_uid,
+            on_unassign=self._on_ctx_unassign,
+        )
+        card.assign_requested.connect(self.assign_requested)
+        card.deactivate_requested.connect(self.unassign_requested)
+        card.selection_toggled.connect(self._on_card_selection_toggled)
+        return card
+
+    def _sync_cards(self, all_files: list) -> None:
+        """Reconcile the card grid with *all_files*, reusing widgets.
+
+        Only files that are new or whose visual signature changed get a fresh
+        card; everything else is repositioned in place (cheap), so the common
+        "one new photo arrived" case builds a single card instead of all.
+        """
+        cols = 2
+        desired = {getattr(f, "path", ""): f for f in all_files}
+
+        # Drop cards for files that vanished.
+        for key in list(self._card_by_key):
+            if key not in desired:
+                card = self._card_by_key.pop(key)
+                self._card_sig_by_key.pop(key, None)
+                card.setParent(None)
+                card.deleteLater()
+
+        # Detach all remaining cards from the grid (reposition without delete).
+        while self._grid.count():
+            self._grid.takeAt(0)
+
+        self._cards = []
+        for idx, f in enumerate(all_files):
+            key = getattr(f, "path", "")
+            sig = self._card_render_sig(f)
+            card = self._card_by_key.get(key)
+            if card is None or self._card_sig_by_key.get(key) != sig:
+                if card is not None:
+                    card.setParent(None)
+                    card.deleteLater()
+                card = self._make_card(f)
+                self._card_by_key[key] = card
+                self._card_sig_by_key[key] = sig
+            self._grid.addWidget(card, idx // cols, idx % cols)
+            self._cards.append(card)
+        for c in range(cols):
+            self._grid.setColumnStretch(c, 1)
+
     def _clear_grid(self) -> None:
         while self._grid.count():
             item = self._grid.takeAt(0)
             if item and item.widget():
                 item.widget().deleteLater()
+        self._card_by_key = {}
+        self._card_sig_by_key = {}
 
     def _on_hide_archived_toggled(self, checked: bool) -> None:
         self._hide_archived = checked

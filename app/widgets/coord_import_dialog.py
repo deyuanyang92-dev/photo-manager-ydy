@@ -58,7 +58,11 @@ class CoordImportDialog(QDialog):
         self._file_lbl = QLabel("未选择文件")
         btn_file = QPushButton("选择文件 (Excel/CSV/TXT)…")
         btn_file.clicked.connect(self._pick_file)
+        btn_sample = QPushButton("下载示例")
+        btn_sample.setToolTip("导出一个示例站位表（CSV），按其列填好后再导入。")
+        btn_sample.clicked.connect(self._save_sample)
         top.addWidget(btn_file)
+        top.addWidget(btn_sample)
         top.addWidget(self._file_lbl, 1)
         v.addLayout(top)
 
@@ -171,6 +175,17 @@ class CoordImportDialog(QDialog):
         return n_ok, n_err
 
     # ── UI 事件 ───────────────────────────────────────────────────────────────
+
+    def _save_sample(self) -> None:
+        path = ui.get_save_file_name(
+            self, "保存示例站位表", "站位导入示例.csv", "CSV (*.csv)",
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".csv"):
+            path += ".csv"
+        cis.write_sample_file(path)
+        ui.info(self, "示例已保存", f"示例站位表已保存到：\n{path}\n按其列填好后即可导入。")
 
     def _pick_file(self) -> None:
         path = ui.get_open_file_name(

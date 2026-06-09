@@ -30,6 +30,22 @@ from typing import Optional
 from app.utils.path_utils import normalize_path, is_wsl_runtime
 
 
+# Path.resolve() hits the filesystem (an lstat per path component + symlink
+# walk). scan_project runs every 2 s and resolves every JPG twice, so the same
+# paths are re-resolved hundreds of times a second — the dominant scan cost.
+# Symlink topology is static within a session, so memoise by raw path string.
+_RESOLVE_CACHE: dict[str, str] = {}
+
+
+def _resolved(path: str) -> str:
+    """Cached ``str(Path(path).resolve())``."""
+    r = _RESOLVE_CACHE.get(path)
+    if r is None:
+        r = str(Path(path).resolve())
+        _RESOLVE_CACHE[path] = r
+    return r
+
+
 # ── Public data classes ───────────────────────────────────────────────────────
 
 @dataclass
@@ -102,7 +118,7 @@ def attribute_jpg(
     monitor-service.js:107-109 explains: old photos (mtime < activation) would
     never be attributed if we compared against mtime.
     """
-    rp = str(Path(entry.path).resolve())
+    rp = _resolved(entry.path)
 
     # P0: blacklist → None
     if rp in attr.explicit_unassigns:
@@ -331,12 +347,12 @@ def scan_project(
                 import json as _json
                 for p in _json.loads(raw):
                     if p:
-                        grouped_paths.add(str(Path(p).resolve()))
+                        grouped_paths.add(_resolved(p))
     except Exception:
         pass  # table may not exist; degrade gracefully
 
     for f in jpg_files:
-        f.is_grouped = str(Path(f.path).resolve()) in grouped_paths
+        f.is_grouped = _resolved(f.path) in grouped_paths
 
     # Sort by mtime desc (mirrors monitor-service.js:368-370)
     jpg_files.sort(key=lambda f: f.mtime, reverse=True)

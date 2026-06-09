@@ -547,6 +547,7 @@ class MainWindow(QMainWindow):
         )
         sc = QShortcut(QKeySequence("Alt+A"), self)
         sc.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        sc.setAutoRepeat(False)  # holding the key must fire once, not stack overlays
         sc.activated.connect(self._shot_ctrl.capture_region)
         self._screenshot_shortcut = sc
 

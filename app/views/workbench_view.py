@@ -530,7 +530,22 @@ class WorkbenchView(BaseView):
         # 3-zone proportions: sidebar : centre stage (monitor/grouping/results)
         # : naming rail.
         outer.setSizes([280, 760, 380])
-        body_lay.addWidget(outer, stretch=1)
+
+        # The three columns' min widths sum to ~1166 px (250+520+320 + handles).
+        # On narrower windows (≤1166, e.g. 1024 remote desktops / WSLg HiDPI),
+        # childrenCollapsible=False means the splitter can't shrink below that,
+        # so the rightmost rail (保存方式) was clipped off the window edge.
+        # Hosting the splitter in a horizontal scroll area makes the overflow
+        # scrollable instead of clipped.  On wide windows widgetResizable lets
+        # the splitter fill the viewport, no scrollbar shows, layout identical.
+        outer_scroll = QScrollArea()
+        outer_scroll.setObjectName("WorkbenchScroll")
+        outer_scroll.setWidget(outer)
+        outer_scroll.setWidgetResizable(True)
+        outer_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        outer_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        outer_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        body_lay.addWidget(outer_scroll, stretch=1)
 
         # ── Project settings drawer (overlay, hidden by default) ────────────
         from app.widgets.project_settings_drawer import ProjectSettingsDrawer
@@ -1090,12 +1105,12 @@ class WorkbenchView(BaseView):
                     "SELECT uid, jpg_paths FROM grouping"
                 ).fetchall()
                 import json as _json
+                from app.services.monitor_service import _resolved
                 for row in rows:
                     uid = row[0]
                     paths = _json.loads(row[1] or "[]")
                     for p in paths:
-                        resolved = str(Path(p).resolve())
-                        attr.path_to_uid[resolved] = uid
+                        attr.path_to_uid[_resolved(p)] = uid
             except Exception:
                 pass
 

@@ -397,7 +397,8 @@ class TileMapWidget(QWidget):
             src = style.get("label_source", "count")  # 无样式时默认 count = v1 外观
             if src == "none":
                 continue
-            txt = str(p.get("label") or "") if src == "label" else str(p.get("count") or "")
+            from app.services.collection_record_service import marker_label
+            txt = marker_label(p, src)
             if txt:
                 painter.setPen(QPen(edge))
                 from PyQt6.QtCore import QRect
