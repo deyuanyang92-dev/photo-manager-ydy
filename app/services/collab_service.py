@@ -343,6 +343,9 @@ def _build_fastapi_app(store: TaskStore, node_info_fn: Callable[[], dict],
         status_raw = body.get("status")
         if not uid or not status_raw:
             raise HTTPException(status_code=400, detail="uid and status required")
+        local_group = node_info_fn().get("groupCode", "")
+        if not local_group or body.get("groupCode", "") != local_group:
+            raise HTTPException(status_code=403, detail="collaboration group mismatch")
         try:
             to_status = TaskStatus(status_raw)
             task = store.update_status(uid, to_status, assignee=body.get("assignee"))
@@ -394,6 +397,9 @@ def _build_fastapi_app(store: TaskStore, node_info_fn: Callable[[], dict],
         the UI subscribe to signals for richer handling.
         """
         body = await request.json()
+        local_group = node_info_fn().get("groupCode", "")
+        if not local_group or body.get("groupCode", "") != local_group:
+            raise HTTPException(status_code=403, detail="collaboration group mismatch")
         uid = body.get("uid", "")
         kind = body.get("kind", "")
         count = int(body.get("count", 0))
@@ -409,6 +415,9 @@ def _build_fastapi_app(store: TaskStore, node_info_fn: Callable[[], dict],
         CollabService.specimen_received signal for richer handling.
         """
         body = await request.json()
+        local_group = node_info_fn().get("groupCode", "")
+        if not local_group or body.get("groupCode", "") != local_group:
+            raise HTTPException(status_code=403, detail="collaboration group mismatch")
         uid = body.get("uid", "")
         logger.debug("collab: specimen push received uid=%s", uid)
         return {"ok": True, "uid": uid}
@@ -429,10 +438,18 @@ def _build_fastapi_app(store: TaskStore, node_info_fn: Callable[[], dict],
     async def receive_activity(request: Request) -> dict:
         """Receive an activity entry pushed from a peer (best-effort).
 
-        Requires matching groupCode — same guard as /tasks/create and /tasks/release.
+        Double guard: LAN IP check (defense-in-depth) + matching groupCode.
         """
         if activity_log is None:
             return {"ok": True}
+        client_host = request.client.host if request.client else ""
+        import ipaddress
+        try:
+            addr = ipaddress.ip_address(client_host)
+            if not addr.is_private and client_host not in ("127.0.0.1", "::1"):
+                raise HTTPException(status_code=403, detail="sender not in LAN")
+        except ValueError:
+            raise HTTPException(status_code=403, detail="invalid sender address")
         body = await request.json()
         local_group = node_info_fn().get("groupCode", "")
         if not local_group or body.get("groupCode", "") != local_group:

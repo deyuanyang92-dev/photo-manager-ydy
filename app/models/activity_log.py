@@ -12,6 +12,14 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 
+_VALID_ACTIONS = frozenset({
+    "claimed", "released", "status_changed", "conflict",
+    "photo_index", "joined", "left",
+})
+_VALID_SEVERITIES = frozenset({"info", "warn", "error"})
+_MAX_FIELD_LEN = 200
+
+
 @dataclass
 class ActivityEntry:
     """A single collaboration activity event."""
@@ -39,13 +47,19 @@ class ActivityEntry:
 
     @classmethod
     def from_dict(cls, d: dict) -> "ActivityEntry":
+        action = d.get("action", "")
+        severity = d.get("severity", "info")
+        if action and action not in _VALID_ACTIONS:
+            action = "unknown"
+        if severity not in _VALID_SEVERITIES:
+            severity = "info"
         return cls(
-            timestamp=d.get("timestamp", ""),
-            actor=d.get("actor", ""),
-            action=d.get("action", ""),
-            target_uid=d.get("targetUid", ""),
-            detail=d.get("detail", ""),
-            severity=d.get("severity", "info"),
+            timestamp=str(d.get("timestamp", ""))[:30],
+            actor=str(d.get("actor", ""))[:_MAX_FIELD_LEN],
+            action=action,
+            target_uid=str(d.get("targetUid", ""))[:_MAX_FIELD_LEN],
+            detail=str(d.get("detail", ""))[:_MAX_FIELD_LEN],
+            severity=severity,
         )
 
 

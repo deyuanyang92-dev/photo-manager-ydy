@@ -529,7 +529,8 @@ class CollabPanel(QWidget):
             import httpx
         except ImportError:
             return
-        payload = {"uid": uid, "status": new_status, "deviceId": socket.gethostname()}
+        payload = {"uid": uid, "status": new_status, "deviceId": socket.gethostname(),
+                   "groupCode": self._svc.group_code}
         for peer in peers:
             try:
                 httpx.post(
