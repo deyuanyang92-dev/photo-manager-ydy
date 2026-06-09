@@ -1611,8 +1611,9 @@ QCheckBox::indicator, QRadioButton::indicator {{
     border-radius: 5px;
     background-color: {t["input_bg"]};
 }}
+QRadioButton::indicator {{ border-radius: 8px; }}
 QCheckBox::indicator:hover, QRadioButton::indicator:hover {{ border-color: {t["accent"]}; }}
-QCheckBox::indicator:checked {{ background-color: {t["accent"]}; border-color: {t["accent"]}; }}
+QCheckBox::indicator:checked, QRadioButton::indicator:checked {{ background-color: {t["accent"]}; border-color: {t["accent"]}; }}
 
 /* ── Table / Tree ────────────────────────────────────────────────── */
 QTableWidget, QTableView, QTreeView {{

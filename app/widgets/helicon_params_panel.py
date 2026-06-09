@@ -1,9 +1,20 @@
-"""helicon_params_panel.py — Helicon Focus parameter editor widget.
+"""helicon_params_panel.py — Helicon Focus rendering-params editor.
 
-Mirrors the Helicon params side-panel in the web compose preview page
-(app.js renderComposePage params section: method A/B/C + radius + smoothing).
+Strict replication of the Helicon Focus desktop "Rendering" tab parameters:
+a vertical list of rendering-method radios (Method A weighted average / Method B
+depth map / Method C pyramid), a Radius slider+spinbox, and a Smoothing
+slider+spinbox. Radius is disabled for Method C because Helicon only uses the
+radius in methods A/B (heliconsoft.com/helicon-focus-main-parameters/ — "it is
+only available in A and B methods"). Factory defaults: method B, radius 8,
+smoothing 4.
 
-Oracle: app.js:6884–6914 (compose page params panel).
+Ranges follow the Helicon 8 GUI (radius 1–40, smoothing 0–20). The public docs
+give the defaults and the A/B-only radius rule but not the exact slider maxima,
+so those bounds are best-known values, not doc-confirmed.
+
+Public API preserved for callers (config dialog + workbench):
+``get_params()`` / ``set_params({method, radius, smoothing})`` and the
+``params_changed`` signal.
 """
 from __future__ import annotations
 
@@ -12,165 +23,161 @@ from typing import Optional
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QButtonGroup,
-    QFrame,
-    QHBoxLayout,
+    QGridLayout,
     QLabel,
-    QPushButton,
+    QRadioButton,
     QSlider,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
+# Helicon factory defaults.
+_DEFAULT_METHOD = 1       # Method B (depth map)
+_DEFAULT_RADIUS = 8
+_DEFAULT_SMOOTHING = 4
+
+# Helicon 8 GUI slider bounds (best-known; not doc-confirmed maxima).
+_RADIUS_MIN, _RADIUS_MAX = 1, 40
+_SMOOTH_MIN, _SMOOTH_MAX = 0, 20
+
+# (label, tooltip) per method — labels mirror the Helicon desktop radios.
+_METHODS = [
+    ("Method A (weighted average)",
+     "Computes a per-pixel contrast weight, then averages all source pixels."),
+    ("Method B (depth map)",
+     "Selects the source image with the sharpest pixel and builds a depth map."),
+    ("Method C (pyramid)",
+     "Pyramid (high/low frequency) approach; best for >100 frames. "
+     "Radius is not used by this method."),
+]
+
 
 class HeliconParamsPanel(QWidget):
-    """Helicon Focus method/radius/smoothing editor.
+    """Helicon Focus rendering-method / radius / smoothing editor.
 
     Signals
     -------
     params_changed()
-        Emitted whenever any parameter changes.
+        Emitted whenever any parameter changes (not on ``set_params``).
     """
 
     params_changed = pyqtSignal()
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
-        self._method: int = 0
-        self._radius: float = 4.0
-        self._smoothing: int = 4
-        self._collapsed: bool = False
+        self._method: int = _DEFAULT_METHOD
+        self._radius: int = _DEFAULT_RADIUS
+        self._smoothing: int = _DEFAULT_SMOOTHING
         self._setup_ui()
+        self._apply_method_enable()
 
     # ── UI ────────────────────────────────────────────────────────────────────
 
     def _setup_ui(self) -> None:
         root = QVBoxLayout(self)
         root.setContentsMargins(12, 12, 12, 12)
-        root.setSpacing(10)
+        root.setSpacing(8)
 
-        sec = QFrame()
-        sec.setObjectName("Panel")
-        sec_lay = QVBoxLayout(sec)
-        sec_lay.setContentsMargins(12, 8, 12, 10)
-        sec_lay.setSpacing(8)
+        meth_lbl = QLabel("Rendering method:")
+        meth_lbl.setObjectName("Section")
+        root.addWidget(meth_lbl)
 
-        hdr = QHBoxLayout()
-        hdr.setContentsMargins(0, 0, 0, 0)
-        title = QLabel("Helicon 参数")
-        title.setObjectName("Section")
-        hdr.addWidget(title)
-        hdr.addStretch()
-        self._collapse_btn = QPushButton("▼")
-        self._collapse_btn.setObjectName("Ghost")
-        self._collapse_btn.setFixedSize(24, 20)
-        self._collapse_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._collapse_btn.clicked.connect(self._toggle_collapsed)
-        hdr.addWidget(self._collapse_btn)
-        sec_lay.addLayout(hdr)
-
-        # Collapsible body
-        self._body = QWidget()
-        body_lay = QVBoxLayout(self._body)
-        body_lay.setContentsMargins(0, 0, 0, 0)
-        body_lay.setSpacing(8)
-
-        # Method A/B/C toggle buttons
-        meth_row = QHBoxLayout()
-        meth_row.setContentsMargins(0, 0, 0, 0)
-        meth_row.setSpacing(4)
-        meth_lbl = QLabel("方法")
-        meth_lbl.setObjectName("MutedSmall")
-        meth_row.addWidget(meth_lbl)
-        self._method_btns: list[QPushButton] = []
         self._btn_group = QButtonGroup(self)
         self._btn_group.setExclusive(True)
-        for i, label in enumerate(["A", "B", "C"]):
-            btn = QPushButton(label)
-            btn.setCheckable(True)
-            btn.setChecked(i == self._method)
-            btn.setFixedSize(32, 26)
-            btn.setObjectName("Primary" if i == self._method else "Outline")
-            self._btn_group.addButton(btn, i)
-            self._method_btns.append(btn)
-            meth_row.addWidget(btn)
-        meth_row.addStretch()
+        self._method_radios: list[QRadioButton] = []
+        for i, (text, tip) in enumerate(_METHODS):
+            rb = QRadioButton(text)
+            rb.setToolTip(tip)
+            rb.setChecked(i == self._method)
+            rb.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._btn_group.addButton(rb, i)
+            self._method_radios.append(rb)
+            root.addWidget(rb)
         self._btn_group.idClicked.connect(self._on_method_changed)
-        body_lay.addLayout(meth_row)
 
-        # Radius slider (stored as x10 integer for int slider, 1.0–30.0 range)
-        self._radius_slider, self._radius_lbl = self._make_slider(
-            "半径", 10, 300, int(self._radius * 10), body_lay, is_radius=True
-        )
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 6, 0, 0)
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(8)
+
+        self._radius_lbl = QLabel("Radius:")
+        self._radius_lbl.setObjectName("MutedSmall")
+        self._radius_slider, self._radius_spin = self._make_slider_spin(
+            _RADIUS_MIN, _RADIUS_MAX, self._radius)
         self._radius_slider.valueChanged.connect(self._on_radius_changed)
+        self._radius_spin.valueChanged.connect(self._on_radius_changed)
+        grid.addWidget(self._radius_lbl, 0, 0)
+        grid.addWidget(self._radius_slider, 0, 1)
+        grid.addWidget(self._radius_spin, 0, 2)
 
-        # Smoothing slider (1–10)
-        self._smooth_slider, self._smooth_lbl = self._make_slider(
-            "平滑", 1, 10, self._smoothing, body_lay, is_radius=False
-        )
+        smooth_lbl = QLabel("Smoothing:")
+        smooth_lbl.setObjectName("MutedSmall")
+        self._smooth_slider, self._smooth_spin = self._make_slider_spin(
+            _SMOOTH_MIN, _SMOOTH_MAX, self._smoothing)
         self._smooth_slider.valueChanged.connect(self._on_smooth_changed)
+        self._smooth_spin.valueChanged.connect(self._on_smooth_changed)
+        grid.addWidget(smooth_lbl, 1, 0)
+        grid.addWidget(self._smooth_slider, 1, 1)
+        grid.addWidget(self._smooth_spin, 1, 2)
 
-        sec_lay.addWidget(self._body)
-        root.addWidget(sec)
+        grid.setColumnStretch(1, 1)
+        root.addLayout(grid)
         root.addStretch()
 
-    def _make_slider(
-        self, label: str, min_val: int, max_val: int, init: int,
-        parent_lay, *, is_radius: bool
-    ) -> tuple[QSlider, QLabel]:
-        # Web oracle layout: label-left + value-right on top row, full-width slider below
-        wrap = QVBoxLayout()
-        wrap.setContentsMargins(0, 0, 0, 0)
-        wrap.setSpacing(4)
-
-        header = QHBoxLayout()
-        header.setContentsMargins(0, 0, 0, 0)
-        lbl_text = QLabel(label)
-        lbl_text.setObjectName("MutedSmall")
-        display = f"{init / 10:.1f}" if is_radius else str(init)
-        val_lbl = QLabel(display)
-        val_lbl.setObjectName("MutedSmall")
-        header.addWidget(lbl_text)
-        header.addStretch()
-        header.addWidget(val_lbl)
-
+    def _make_slider_spin(
+        self, lo: int, hi: int, val: int
+    ) -> tuple[QSlider, QSpinBox]:
         slider = QSlider(Qt.Orientation.Horizontal)
-        slider.setRange(min_val, max_val)
-        slider.setValue(init)
-
-        wrap.addLayout(header)
-        wrap.addWidget(slider)
-        parent_lay.addLayout(wrap)
-        return slider, val_lbl
+        slider.setRange(lo, hi)
+        slider.setValue(val)
+        spin = QSpinBox()
+        spin.setRange(lo, hi)
+        spin.setValue(val)
+        spin.setFixedWidth(58)
+        return slider, spin
 
     # ── Slots ─────────────────────────────────────────────────────────────────
 
-    def _toggle_collapsed(self) -> None:
-        self._collapsed = not self._collapsed
-        self._body.setVisible(not self._collapsed)
-        self._collapse_btn.setText("▶" if self._collapsed else "▼")
-
     def _on_method_changed(self, method_id: int) -> None:
         self._method = method_id
-        for i, btn in enumerate(self._method_btns):
-            btn.setObjectName("Primary" if i == method_id else "Outline")
-            btn.style().unpolish(btn)
-            btn.style().polish(btn)
+        self._apply_method_enable()
         self.params_changed.emit()
 
+    def _apply_method_enable(self) -> None:
+        # Radius is used only by methods A/B; Helicon greys it out for C.
+        radius_on = self._method != 2
+        self._radius_lbl.setEnabled(radius_on)
+        self._radius_slider.setEnabled(radius_on)
+        self._radius_spin.setEnabled(radius_on)
+
     def _on_radius_changed(self, value: int) -> None:
-        self._radius = value / 10.0
-        self._radius_lbl.setText(f"{self._radius:.1f}")
+        if value == self._radius:
+            return
+        self._radius = value
+        self._sync(self._radius_slider, self._radius_spin, value)
         self.params_changed.emit()
 
     def _on_smooth_changed(self, value: int) -> None:
+        if value == self._smoothing:
+            return
         self._smoothing = value
-        self._smooth_lbl.setText(str(value))
+        self._sync(self._smooth_slider, self._smooth_spin, value)
         self.params_changed.emit()
+
+    @staticmethod
+    def _sync(slider: QSlider, spin: QSpinBox, value: int) -> None:
+        """Mirror ``value`` onto the sibling widget without re-firing signals."""
+        for w in (slider, spin):
+            if w.value() != value:
+                w.blockSignals(True)
+                w.setValue(value)
+                w.blockSignals(False)
 
     # ── Public API ────────────────────────────────────────────────────────────
 
     def get_params(self) -> dict:
-        """Return current params dict: {method: int, radius: float, smoothing: int}."""
+        """Return current params: {method: int, radius: int, smoothing: int}."""
         return {
             "method": self._method,
             "radius": self._radius,
@@ -178,22 +185,27 @@ class HeliconParamsPanel(QWidget):
         }
 
     def set_params(self, params: dict) -> None:
-        """Load params dict into the UI (does not emit params_changed)."""
+        """Load params into the UI (does not emit ``params_changed``)."""
         if "method" in params:
             self._method = int(params["method"])
-            btn = self._btn_group.button(self._method)
-            if btn:
-                btn.setChecked(True)
-            self._on_method_changed(self._method)
+            rb = self._btn_group.button(self._method)
+            if rb:
+                rb.setChecked(True)
+            self._apply_method_enable()
         if "radius" in params:
-            self._radius = float(params["radius"])
-            self._radius_slider.blockSignals(True)
-            self._radius_slider.setValue(int(self._radius * 10))
-            self._radius_lbl.setText(f"{self._radius:.1f}")
-            self._radius_slider.blockSignals(False)
+            self._set_silent(
+                self._radius_slider, self._radius_spin,
+                int(round(float(params["radius"]))))
+            self._radius = self._radius_spin.value()
         if "smoothing" in params:
-            self._smoothing = int(params["smoothing"])
-            self._smooth_slider.blockSignals(True)
-            self._smooth_slider.setValue(self._smoothing)
-            self._smooth_lbl.setText(str(self._smoothing))
-            self._smooth_slider.blockSignals(False)
+            self._set_silent(
+                self._smooth_slider, self._smooth_spin,
+                int(round(float(params["smoothing"]))))
+            self._smoothing = self._smooth_spin.value()
+
+    @staticmethod
+    def _set_silent(slider: QSlider, spin: QSpinBox, value: int) -> None:
+        for w in (slider, spin):
+            w.blockSignals(True)
+            w.setValue(value)
+            w.blockSignals(False)

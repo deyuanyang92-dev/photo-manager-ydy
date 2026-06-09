@@ -970,6 +970,42 @@ class TestHeliconParamsPanel:
         assert p["radius"] == 8.0
         assert p["smoothing"] == 4
 
+    def test_method_radios_replicate_helicon_desktop(self):
+        # Strict replication of Helicon Focus desktop: three rendering-method
+        # radios whose labels describe the algorithm (weighted average / depth
+        # map / pyramid), not bare A/B/C.
+        from app.widgets.helicon_params_panel import HeliconParamsPanel
+        w = HeliconParamsPanel()
+        labels = [rb.text().lower() for rb in w._method_radios]
+        assert len(labels) == 3
+        assert "weighted average" in labels[0]
+        assert "depth map" in labels[1]
+        assert "pyramid" in labels[2]
+
+    def test_method_c_disables_radius_but_keeps_value(self):
+        # Helicon: Radius is used only by methods A/B; the desktop greys it out
+        # for Method C. The stored value must survive so it persists/round-trips.
+        from app.widgets.helicon_params_panel import HeliconParamsPanel
+        w = HeliconParamsPanel()
+        w.set_params({"method": 2, "radius": 7, "smoothing": 5})
+        assert not w._radius_slider.isEnabled()
+        assert not w._radius_spin.isEnabled()
+        assert w._smooth_slider.isEnabled()  # smoothing still applies to C
+        assert w.get_params()["radius"] == 7
+        # switching back to A re-enables radius
+        w.set_params({"method": 0})
+        assert w._radius_slider.isEnabled()
+
+    def test_radius_slider_spin_synced(self):
+        from app.widgets.helicon_params_panel import HeliconParamsPanel
+        w = HeliconParamsPanel()
+        w._radius_slider.setValue(12)
+        assert w._radius_spin.value() == 12
+        assert w.get_params()["radius"] == 12
+        w._smooth_spin.setValue(6)
+        assert w._smooth_slider.value() == 6
+        assert w.get_params()["smoothing"] == 6
+
     def test_workbench_view_has_helicon_params(self):
         """WorkbenchView must expose _helicon_params (HeliconParamsPanel)."""
         from app.views.workbench_view import WorkbenchView
@@ -1299,14 +1335,15 @@ class TestComposePreviewDialog:
         dlg = _ComposeWorkbenchDialog(
             [str(jpg1), str(jpg2)],
             str(tiff),
-            {"method": 1, "radius": 8.5, "smoothing": 3},
+            {"method": 1, "radius": 9, "smoothing": 3},
             angle_label="背面",
         )
 
         assert dlg.windowTitle() == "合成工作台"
         assert dlg.selected_jpgs() == [str(jpg1), str(jpg2)]
         assert dlg.params()["method"] == 1
-        assert dlg.params()["radius"] == 8.5
+        # Helicon radius is an integer (desktop GUI spinbox) — fractional input rounds.
+        assert dlg.params()["radius"] == 9
         assert dlg.params()["smoothing"] == 3
 
 
