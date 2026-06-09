@@ -442,7 +442,7 @@ class SpecimenSidebar(QWidget):
 
     def _refresh_collab_badges(self) -> None:
         """Re-apply the current filter to refresh collab badges."""
-        self._apply_filter(self._search_edit.text())
+        self._apply_filter(self._search.text())
 
     # ── Collab strip update ───────────────────────────────────────────────────
 
