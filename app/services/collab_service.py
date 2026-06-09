@@ -429,20 +429,14 @@ def _build_fastapi_app(store: TaskStore, node_info_fn: Callable[[], dict],
     async def receive_activity(request: Request) -> dict:
         """Receive an activity entry pushed from a peer (best-effort).
 
-        Validates that the sender IP is from a private/LAN subnet — this
-        service is LAN-only P2P, so public-IP sources are rejected.
+        Requires matching groupCode — same guard as /tasks/create and /tasks/release.
         """
         if activity_log is None:
             return {"ok": True}
-        client_host = request.client.host if request.client else ""
-        import ipaddress
-        try:
-            addr = ipaddress.ip_address(client_host)
-            if not addr.is_private and client_host not in ("127.0.0.1", "::1"):
-                raise HTTPException(status_code=403, detail="sender not in LAN")
-        except ValueError:
-            raise HTTPException(status_code=403, detail="invalid sender address")
         body = await request.json()
+        local_group = node_info_fn().get("groupCode", "")
+        if not local_group or body.get("groupCode", "") != local_group:
+            raise HTTPException(status_code=403, detail="collaboration group mismatch")
         entry = ActivityEntry.from_dict(body)
         activity_log.append(entry)
         return {"ok": True}
