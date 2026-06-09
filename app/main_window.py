@@ -78,7 +78,11 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle("标本影像")
         self.resize(1440, 900)
-        self.setMinimumSize(1040, 660)
+        # Minimum width must stay below common small/remote-desktop screens
+        # (e.g. 1024×768). At 1040 the window can't shrink to fit a 1024-wide
+        # screen, so its right edge — the screenshot/settings/Helicon cluster —
+        # is pushed off-screen and the topbar reads as crowded.
+        self.setMinimumSize(940, 600)
 
         self._build_shell()
         self._build_status_bar()
@@ -166,10 +170,19 @@ class MainWindow(QMainWindow):
         nav_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         lay.addWidget(nav_scroll, stretch=1)
 
-        # Right side: compact global actions.
+        # Divider: separate the flexible nav region from the fixed action cluster
+        # so the right side reads as one tidy group rather than buttons crowding
+        # the tabs.
+        lay.addSpacing(12)
+        lay.addWidget(self._topbar_divider())
+        lay.addSpacing(12)
+
+        # Right side: compact global actions. Uniform 30px height keeps every
+        # control on one baseline; uniform 6px gaps keep the cluster even.
         self._btn_new_project = QPushButton("新建")
         self._btn_new_project.setObjectName("Outline")
         self._btn_new_project.setToolTip("新建一个项目工作区目录")
+        self._btn_new_project.setFixedHeight(30)
         icons.set_button_icon(self._btn_new_project, "mdi6.plus",
                               color=icons.TONE_MUTED, size=15)
         self._btn_new_project.clicked.connect(self._on_new_project)
@@ -181,6 +194,7 @@ class MainWindow(QMainWindow):
         self._btn_open_ws = QPushButton("打开")
         self._btn_open_ws.setObjectName("Outline")
         self._btn_open_ws.setToolTip("打开已有项目工作区目录")
+        self._btn_open_ws.setFixedHeight(30)
         icons.set_button_icon(self._btn_open_ws, "mdi6.folder-open-outline",
                               color=icons.TONE_MUTED, size=15)
         self._btn_open_ws.clicked.connect(self._on_open_workspace)
@@ -192,19 +206,24 @@ class MainWindow(QMainWindow):
         self._btn_compress = QPushButton("归档")
         self._btn_compress.setObjectName("Outline")
         self._btn_compress.setToolTip("智能压缩归档（JPG→JXL→ZIP）")
+        self._btn_compress.setFixedHeight(30)
         icons.set_button_icon(self._btn_compress, "mdi6.archive-outline",
                               color=icons.TONE_MUTED, size=15)
         self._btn_compress.clicked.connect(lambda: self.navigate_to("workbench"))
         self._btn_compress.setCursor(Qt.CursorShape.PointingHandCursor)
         lay.addWidget(self._btn_compress)
 
-        lay.addSpacing(6)
+        # Thin divider before the icon-only tools, grouping text buttons apart
+        # from the icon cluster.
+        lay.addSpacing(10)
+        lay.addWidget(self._topbar_divider())
+        lay.addSpacing(10)
 
         # Screenshot tool: click = region capture; dropdown = other modes.
         self._shot_btn = QToolButton()
         self._shot_btn.setObjectName("IconGhost")
         self._shot_btn.setToolTip("截图（Alt+A 区域截图）")
-        self._shot_btn.setFixedSize(34, 30)
+        self._shot_btn.setFixedSize(44, 30)  # extra width for the dropdown caret
         self._shot_btn.setIcon(
             icons.icon("mdi6.scissors-cutting", color=icons.TONE_MUTED,
                        color_active=icons.TONE_ACCENT_HOVER)
@@ -241,6 +260,7 @@ class MainWindow(QMainWindow):
         self._btn_helicon = QPushButton("Helicon")
         self._btn_helicon.setObjectName("Primary")
         self._btn_helicon.setToolTip("Helicon Focus 景深合成")
+        self._btn_helicon.setFixedHeight(30)
         icons.set_button_icon(self._btn_helicon, "mdi6.image-filter-center-focus",
                               color=icons.TONE_ON_ACCENT, size=15)
         self._btn_helicon.clicked.connect(self._open_helicon_config)
@@ -248,6 +268,13 @@ class MainWindow(QMainWindow):
         lay.addWidget(self._btn_helicon)
 
         return bar
+
+    def _topbar_divider(self) -> QFrame:
+        """A short, subtle vertical hairline that groups topbar clusters."""
+        line = QFrame()
+        line.setObjectName("TopBarDivider")
+        line.setFixedSize(1, 22)
+        return line
 
     def _build_context_bar(self) -> QFrame:
         """Hidden compatibility bar for active-specimen state.

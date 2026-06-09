@@ -67,9 +67,23 @@ from app.views.registry import ALL_VIEWS
 
 
 def main() -> int:
+    # HiDPI: pass through the exact fractional scale (125%/150% on Windows,
+    # Retina on macOS) instead of rounding it. Rounding mismatches QSS px
+    # font-sizes against widget geometry → clipped/overlapping text on
+    # fractional-DPI displays. Must be set before QApplication is constructed.
+    from PyQt6.QtCore import Qt
+    QApplication.setHighDpiScaleFactorRoundingPolicy(
+        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+    )
+
     app = QApplication(sys.argv)
     app.setApplicationName("标本照片工作台")
     app.setOrganizationName("SpecimenPhotoWorkbench")
+    # ASCII app id for the WM/desktop layer. X11 WM_CLASS is Latin-1 only, so a
+    # CJK applicationName leaks in as mojibake in GNOME's notification/title
+    # ("「标本影像」 is ready"). An ASCII desktopFileName gives the WM a clean id
+    # without touching applicationName (which keys QSettings storage).
+    app.setDesktopFileName("specimen-photo-workbench")
 
     # ── Fonts (bundled Noto Sans/Serif SC + JetBrains Mono if present;
     #    web-parity system fallback otherwise) ──────────────────────────

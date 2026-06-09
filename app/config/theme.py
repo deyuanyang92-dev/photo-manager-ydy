@@ -800,13 +800,17 @@ TOKENS: dict[str, str] = dict(THEME_CLASSIC_LIGHT)
 
 # ── Font stacks (web-parity fallback when bundled fonts absent) ────────────
 
+# Stacks are ordered CJK-first so apply_default_font() picks a Chinese-capable
+# family on every OS: Noto Sans CJK SC (Linux), Microsoft YaHei (Windows),
+# PingFang SC (macOS). Latin/generic names trail as last-resort fallbacks.
 _SANS_FONTS = (
     "Noto Sans CJK SC", "Noto Sans SC", "Source Han Sans SC",
-    "Microsoft YaHei", "PingFang SC", "Segoe UI", "sans-serif",
+    "Microsoft YaHei", "微软雅黑", "PingFang SC", "Hiragino Sans GB",
+    "Heiti SC", "WenQuanYi Micro Hei", "Segoe UI", "Arial", "sans-serif",
 )
 _SERIF_FONTS = (
     "Noto Serif CJK SC", "Noto Serif SC", "Source Han Serif SC", "Songti SC",
-    "SimSun", "Georgia", "serif",
+    "STSong", "SimSun", "宋体", "Georgia", "serif",
 )
 _MONO_FONTS = (
     "JetBrains Mono", "Cascadia Code", "SF Mono", "Consolas",
@@ -956,6 +960,7 @@ QFrame#TopBar {{
     border: none;
     border-bottom: 1px solid {t["topbar_border"]};
 }}
+QFrame#TopBarDivider {{ background: {t["border_medium"]}; border: none; }}
 QLabel#BrandWord {{
     font-family: {serif};
     font-size: {t["font_body"]};
