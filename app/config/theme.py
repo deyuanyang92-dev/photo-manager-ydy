@@ -801,11 +801,11 @@ TOKENS: dict[str, str] = dict(THEME_CLASSIC_LIGHT)
 # ── Font stacks (web-parity fallback when bundled fonts absent) ────────────
 
 _SANS_FONTS = (
-    "Noto Sans SC", "Source Han Sans SC", "Noto Sans CJK SC",
+    "Noto Sans CJK SC", "Noto Sans SC", "Source Han Sans SC",
     "Microsoft YaHei", "PingFang SC", "Segoe UI", "sans-serif",
 )
 _SERIF_FONTS = (
-    "Noto Serif SC", "Source Han Serif SC", "Songti SC",
+    "Noto Serif CJK SC", "Noto Serif SC", "Source Han Serif SC", "Songti SC",
     "SimSun", "Georgia", "serif",
 )
 _MONO_FONTS = (
@@ -859,6 +859,32 @@ def load_fonts(app) -> dict[str, bool]:
     return result
 
 
+def apply_default_font(app) -> Optional[str]:
+    """Set the app's default font to the first *installed* family in FONT_SANS.
+
+    Qt's default ("Ubuntu" on this distro) lacks CJK glyphs, so initial widget
+    layout is measured with the wrong metrics and CJK falls back unpredictably
+    — the cause of the startup text-overlap and garbled-glyph reports. Pinning
+    the default font to a real installed CJK family up front (before any window
+    is built) makes first-paint metrics match the QSS font, killing both. Picks
+    per-platform automatically (Noto Sans CJK SC on Linux, Microsoft YaHei on
+    Windows, PingFang SC on macOS). Size is left at the system default — the
+    QSS ``font-size`` rules still drive on-screen sizing.
+    """
+    try:
+        from PyQt6.QtGui import QFont, QFontDatabase
+    except Exception:
+        return None
+    families = set(QFontDatabase.families())
+    for fam in FONT_SANS:
+        if fam == "sans-serif":
+            break
+        if fam in families:
+            app.setFont(QFont(fam))
+            return fam
+    return None
+
+
 def build_qss() -> str:
     """Generate the full Qt stylesheet from the active TOKENS dict."""
     t = TOKENS
@@ -866,16 +892,21 @@ def build_qss() -> str:
     serif = _font_family(FONT_SERIF)
     mono = _font_family(FONT_MONO)
 
-    # Gradient shorthands (reused across many rules).
-    canvas_grad = (
+    # Gradient shorthands (reused across many rules). In performance mode the
+    # large surface gradients (canvas/panel/topbar) collapse to flat solids —
+    # gradient fills over large repainted areas are costly on remote desktops.
+    # Small accent-button gradients stay (negligible cost, affordance signal).
+    from app.config import effects as _fx
+    perf = _fx.PERFORMANCE_MODE
+    canvas_grad = t['bg_grad_top'] if perf else (
         f"qlineargradient(x1:0, y1:0, x2:0, y2:1,"
         f" stop:0 {t['bg_grad_top']}, stop:1 {t['bg_grad_bottom']})"
     )
-    panel_grad = (
+    panel_grad = t['panel'] if perf else (
         f"qlineargradient(x1:0, y1:0, x2:0, y2:1,"
         f" stop:0 {t['panel_top']}, stop:0.06 {t['panel']}, stop:1 {t['panel_bottom']})"
     )
-    panel2_grad = (
+    panel2_grad = t['panel_2_top'] if perf else (
         f"qlineargradient(x1:0, y1:0, x2:0, y2:1,"
         f" stop:0 {t['panel_2_top']}, stop:1 {t['panel_2_bottom']})"
     )
@@ -887,7 +918,7 @@ def build_qss() -> str:
         f"qlineargradient(x1:0, y1:0, x2:0, y2:1,"
         f" stop:0 {t['accent_hover']}, stop:1 {t['accent']})"
     )
-    topbar_grad = (
+    topbar_grad = t['topbar_top'] if perf else (
         f"qlineargradient(x1:0, y1:0, x2:0, y2:1,"
         f" stop:0 {t['topbar_top']}, stop:1 {t['topbar_bottom']})"
     )

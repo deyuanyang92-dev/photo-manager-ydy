@@ -951,6 +951,18 @@ class SettingsView(BaseView):
         theme_note.setWordWrap(True)
         theme_form.addRow("", theme_note)
 
+        self._perf_mode_chk = QCheckBox("性能模式（关闭卡片阴影与背景渐变）")
+        self._perf_mode_chk.setToolTip(
+            "远程桌面/低性能环境下减少重绘，操作更顺滑；重启后生效。"
+        )
+        self._perf_mode_chk.stateChanged.connect(self._on_perf_mode_changed)
+        theme_form.addRow("性能", self._perf_mode_chk)
+
+        perf_note = QLabel("远程控制 Linux 卡顿时建议开启；界面会变扁平，重启生效。")
+        perf_note.setObjectName("MutedSmall")
+        perf_note.setWordWrap(True)
+        theme_form.addRow("", perf_note)
+
         tab.body.addWidget(theme_box)
         tab.body.addSpacing(12)
 
@@ -1222,6 +1234,10 @@ class SettingsView(BaseView):
         self._theme_combo.setCurrentIndex(max(0, theme_idx))
         self._theme_combo.blockSignals(False)
 
+        self._perf_mode_chk.blockSignals(True)
+        self._perf_mode_chk.setChecked(self.ctx.settings.performance_mode)
+        self._perf_mode_chk.blockSignals(False)
+
         try:
             font_scale = float(qs.value(_K_UI_FONT_SCALE, 1.0))
         except (TypeError, ValueError):
@@ -1250,6 +1266,12 @@ class SettingsView(BaseView):
 
         # Preset list widget
         self._refresh_preset_list_widget()
+
+    def _on_perf_mode_changed(self) -> None:
+        self.ctx.settings.performance_mode = self._perf_mode_chk.isChecked()
+        self.ctx.settings.sync()
+        from app.utils import ui
+        ui.info(self, "性能模式", "已保存。重启软件后生效。")
 
     def _on_theme_changed(self) -> None:
         key = self._theme_combo.currentData() or "classic_light"

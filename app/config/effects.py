@@ -12,6 +12,12 @@ from typing import Optional
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import QGraphicsDropShadowEffect, QWidget
 
+# Performance mode (set once at startup from settings, before any card is built).
+# When True, apply_card_shadow becomes a no-op — QGraphicsDropShadowEffect forces
+# software compositing and large dirty rects, the main jank source over remote
+# desktops. Flat cards render far fewer pixels per frame.
+PERFORMANCE_MODE = False
+
 
 def apply_card_shadow(
     widget: QWidget,
@@ -19,13 +25,18 @@ def apply_card_shadow(
     blur: int = 18,
     y: int = 4,
     alpha: int = 36,
-) -> QGraphicsDropShadowEffect:
+) -> Optional[QGraphicsDropShadowEffect]:
     """Attach a soft, downward drop shadow to *widget* and return it.
 
     Tuned for dark-canvas elevation: a wide, low-alpha blur that reads as
     ambient depth rather than a hard outline.  Each widget needs its own
     effect instance (Qt forbids sharing), so callers create one per card.
+
+    In performance mode this is a no-op (returns ``None``) — no effect is
+    attached, so the card paints flat and cheap.
     """
+    if PERFORMANCE_MODE:
+        return None
     eff = QGraphicsDropShadowEffect(widget)
     eff.setBlurRadius(blur)
     eff.setXOffset(0)

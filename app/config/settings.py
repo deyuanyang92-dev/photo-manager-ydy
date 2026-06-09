@@ -92,6 +92,15 @@ class AppSettings:
     def current_theme(self, name: str) -> None:
         self._qs.setValue("appearance/theme", name)
 
+    @property
+    def performance_mode(self) -> bool:
+        """Drop card shadows + canvas gradients for smoother remote-desktop use."""
+        return self._qs.value("appearance/performance_mode", False, type=bool)
+
+    @performance_mode.setter
+    def performance_mode(self, val: bool) -> None:
+        self._qs.setValue("appearance/performance_mode", bool(val))
+
     # ── LAN collaboration ─────────────────────────────────────────────
 
     @property
