@@ -3,8 +3,8 @@
 The shell was reworked from a left QListWidget sidebar into a horizontal
 segmented top-nav + context bar.  These tests pin the new contract:
 
-  - register_view() appends a checkable #NavSegment button per view and
-    builds the matching stack page (indices stay aligned with nav order).
+  - register_view() appends a checkable #NavSegment button per view; the
+    matching stack page is built lazily on first navigation (not at register).
   - navigate_to(view_id) checks the right segment, shows the right page,
     and calls on_activate().
   - The context bar (project switcher + active badge) reflects ctx state.
@@ -15,6 +15,8 @@ Runs headless (QT_QPA_PLATFORM=offscreen).
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -68,9 +70,14 @@ def test_register_view_adds_segment_and_page():
     assert btn.objectName() == "NavSegment"
     assert btn.isCheckable()
     assert btn.text() == "测试页"
-    # Page added to the stack, index aligned with nav order.
+    # Lazy build: register_view wires the nav segment but does NOT construct the
+    # page — that happens on first activation (keeps startup cheap).
+    assert win._stack.count() == 0
+    assert "dummy" not in win._views
+    # First navigation builds + mounts it.
+    win.navigate_to("dummy")
     assert win._stack.count() == 1
-    assert win._views["dummy"] is win._stack.widget(0)
+    assert win._views["dummy"] is win._stack.currentWidget()
 
 
 def test_nav_segments_are_exclusive():
@@ -93,8 +100,8 @@ def test_nav_segments_are_exclusive():
 def test_navigate_to_shows_page_and_activates():
     win = _fresh_window()
     win.register_view(_DummyView)
+    win.navigate_to("dummy")          # lazy build happens here
     view = win._views["dummy"]
-    win.navigate_to("dummy")
     assert win._stack.currentWidget() is view
     assert view.activated >= 1
 
@@ -139,6 +146,35 @@ def test_all_views_register():
     for cls in ALL_VIEWS:
         win.register_view(cls)
     assert len(win._nav_buttons) == len(ALL_VIEWS)
+    # Lazy build: nothing constructed until visited.
+    assert win._stack.count() == 0
+    # Visiting every view builds them all without error.
+    for cls in ALL_VIEWS:
+        win.navigate_to(cls.view_id)
     assert win._stack.count() == len(ALL_VIEWS)
     # settings cog navigation target exists.
     assert "settings" in win._views
+
+
+# ── Startup stays lean: heavy libs are NOT imported at launch ──────────────
+# Locks the lazy-import wins. matplotlib (~1.8 s) must load only when the
+# 采集地图 tab is opened; openpyxl only when exporting. Run in a clean
+# subprocess so other tests' imports don't pollute sys.modules.
+
+def test_startup_does_not_import_heavy_libs():
+    code = (
+        "import os; os.environ['QT_QPA_PLATFORM']='offscreen';"
+        "from PyQt6.QtWidgets import QApplication; app=QApplication([]);"
+        "from app.app_context import AppContext;"
+        "from app.main_window import MainWindow;"
+        "from app.views.registry import ALL_VIEWS;"
+        "ctx=AppContext(); win=MainWindow(ctx);"
+        "[win.register_view(c) for c in ALL_VIEWS];"
+        "import sys;"
+        "assert 'matplotlib' not in sys.modules, 'matplotlib imported at startup';"
+        "assert 'openpyxl' not in sys.modules, 'openpyxl imported at startup';"
+        "print('OK')"
+    )
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert "OK" in r.stdout

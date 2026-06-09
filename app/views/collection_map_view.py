@@ -39,8 +39,11 @@ from app.services.project_service import list_projects
 from app.utils import ui
 from app.views.base_view import BaseView
 from app.widgets.marker_style_panel import MarkerStylePanel
-from app.widgets.publication_map_widget import PublicationMapWidget
 from app.widgets.tile_map_widget import TileMapWidget
+# NOTE: PublicationMapWidget pulls in matplotlib (~1.8 s import). It is imported
+# lazily at construction (see _build_*) so app startup — which eagerly imports
+# this module via the view registry — does not pay the matplotlib cost unless
+# the user actually opens the 采集地图 tab.
 
 if TYPE_CHECKING:
     from app.app_context import AppContext
@@ -252,6 +255,7 @@ class CollectionMapView(BaseView):
         self._tile_map = TileMapWidget()
         self._tile_map.interactive_marker = False
         self._tile_map.point_clicked.connect(self._on_point_clicked)
+        from app.widgets.publication_map_widget import PublicationMapWidget
         self._pub_map = PublicationMapWidget()
         self._stack.addWidget(self._tile_map)
         self._stack.addWidget(self._pub_map)

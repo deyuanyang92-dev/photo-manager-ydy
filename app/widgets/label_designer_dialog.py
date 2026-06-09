@@ -530,9 +530,15 @@ class _DesignCanvas(QWidget):
 
     def mouseMoveEvent(self, e) -> None:  # noqa: N802
         if self._panning and self._press_pt is not None:
-            self._pan += e.pos() - self._press_pt
+            delta = e.pos() - self._press_pt
+            self._pan += delta
             self._press_pt = e.pos()
-            self._render()
+            # Pan only shifts the canvas origin — the label pixmap is unchanged,
+            # so skip the expensive render_label_onto() rebuild and just move the
+            # cached pixmap. (_origin is computed as centre + _pan, so shifting it
+            # by the same delta keeps it consistent with _render().)
+            self._origin += delta
+            self.update()
             return
         if self._new_guide is not None:
             self._new_guide_mm = self._guide_mm_at(e.pos(), self._new_guide)

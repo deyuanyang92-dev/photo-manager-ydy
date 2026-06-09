@@ -359,19 +359,23 @@ class CollectionRecordsView(BaseView):
 
     def _reload(self) -> None:
         self._table.blockSignals(True)
-        self._table.setRowCount(0)
-        db = self.ctx.get_db()
-        records = crs.list_records(db) if db is not None else []
-        for rec in records:
-            row = self._table.rowCount()
-            self._table.insertRow(row)
-            for col, (key, _lbl) in enumerate(_TABLE_COLS):
-                val = rec.get(key)
-                item = QTableWidgetItem("" if val is None else str(val))
-                if col == 0:
-                    item.setData(Qt.ItemDataRole.UserRole, rec.get("id"))
-                self._table.setItem(row, col, item)
-        self._table.blockSignals(False)
+        self._table.setUpdatesEnabled(False)   # paint once after the bulk fill
+        try:
+            self._table.setRowCount(0)
+            db = self.ctx.get_db()
+            records = crs.list_records(db) if db is not None else []
+            for rec in records:
+                row = self._table.rowCount()
+                self._table.insertRow(row)
+                for col, (key, _lbl) in enumerate(_TABLE_COLS):
+                    val = rec.get(key)
+                    item = QTableWidgetItem("" if val is None else str(val))
+                    if col == 0:
+                        item.setData(Qt.ItemDataRole.UserRole, rec.get("id"))
+                    self._table.setItem(row, col, item)
+        finally:
+            self._table.setUpdatesEnabled(True)
+            self._table.blockSignals(False)
         self._count_lbl.setText(f"{len(records)} 条")
 
     def _on_row_selected(self) -> None:
@@ -465,13 +469,17 @@ class CollectionRecordsView(BaseView):
             self._grid_ps_lbl.setText("（未设地区/样地：可在项目设置或上层目录填写）")
 
         self._grid.blockSignals(True)
-        self._grid.setRowCount(0)
-        db = self.ctx.get_db()
-        records = crs.list_records(db) if db is not None else []
-        for rec in records:
-            self._grid_append_row(rec)
-        self._grid_append_row(None)  # trailing blank row for quick add
-        self._grid.blockSignals(False)
+        self._grid.setUpdatesEnabled(False)   # paint once after the bulk fill
+        try:
+            self._grid.setRowCount(0)
+            db = self.ctx.get_db()
+            records = crs.list_records(db) if db is not None else []
+            for rec in records:
+                self._grid_append_row(rec)
+            self._grid_append_row(None)  # trailing blank row for quick add
+        finally:
+            self._grid.setUpdatesEnabled(True)
+            self._grid.blockSignals(False)
 
     def _grid_append_row(self, rec: Optional[dict]) -> None:
         row = self._grid.rowCount()

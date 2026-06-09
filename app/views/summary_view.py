@@ -44,7 +44,9 @@ from PyQt6.QtWidgets import (
 )
 
 from app.models.specimen import Specimen
-from app.services.export_service import COLUMNS as EXPORT_COLUMNS, export_excel
+# NOTE: export_service pulls in openpyxl at import. It is imported lazily inside
+# the export handlers so app startup (which eagerly imports this view via the
+# registry) does not pay the openpyxl cost unless the user actually exports.
 from app.views.base_view import BaseView
 
 if True:  # TYPE_CHECKING guard
@@ -720,6 +722,7 @@ class SummaryView(BaseView):
         if not path:
             return
         try:
+            from app.services.export_service import export_excel
             out = export_excel(specs, path)
             QMessageBox.information(self, "导出成功", f"已保存到：\n{out}")
         except Exception as exc:
@@ -820,6 +823,7 @@ class SummaryView(BaseView):
         self._btn_save.setText("保存中…")
 
         try:
+            from app.services.export_service import export_excel
             export_excel(specs, out_path)
             self._save_msg_lbl.setStyleSheet(f"font-size:12px;color:{_C_ACCENT};")
             self._save_msg_lbl.setText(f"✓ 已保存：{out_path}")
