@@ -17,3 +17,8 @@ build/
 .claude/
 .playwright-mcp/
 .codegraph/
+
+# 本地测试项目数据 / 截图 / 个人脚本（勿上传）
+/11/
+截图*.png
+ccswitch.sh

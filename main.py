@@ -85,6 +85,13 @@ def main() -> int:
     # without touching applicationName (which keys QSettings storage).
     app.setDesktopFileName("specimen-photo-workbench")
 
+    # ── App icon (window + taskbar). Multi-res .ico → crisp at every size;
+    #    absent file degrades to Qt's default, never crashes. ──────────────
+    from PyQt6.QtGui import QIcon
+    _icon_path = Path(__file__).resolve().parent / "resources" / "branding" / "app.ico"
+    if _icon_path.exists():
+        app.setWindowIcon(QIcon(str(_icon_path)))
+
     # ── Fonts (bundled Noto Sans/Serif SC + JetBrains Mono if present;
     #    web-parity system fallback otherwise) ──────────────────────────
     load_fonts(app)

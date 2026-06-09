@@ -197,16 +197,17 @@ def _resolve_helicon_exe(path_input: str) -> Optional[str]:
     return None
 
 
-def detect_helicon() -> Optional[str]:
+def detect_helicon(custom_path: str = "") -> Optional[str]:
     """Detect Helicon Focus executable path.
 
-    Three-level detection (mirrors helicon.js:hasHelicon):
+    Four-level detection (mirrors helicon.js:hasHelicon + custom path):
+      0. Custom path (user-supplied, highest priority).
       1. HELICON_FOCUS_PATH env var (exe or install dir).
       2. HELICON_FOCUS_DIR  env var (install dir).
       3. Known install dirs.
 
     Returns path to .exe or None if not found.
-    Cache result for session lifetime.
+    Cache result for session lifetime (reset via reset_helicon_cache).
 
     NOTE: Registry query (helicon.js level-3) is omitted in the Python
     implementation; it requires Windows registry access which is not
@@ -214,6 +215,14 @@ def detect_helicon() -> Optional[str]:
     fallback covers the same common cases.
     """
     global _helicon_exe_cache
+
+    # Level 0: Custom path (always re-checked, bypasses cache)
+    if custom_path:
+        found = _resolve_helicon_exe(custom_path)
+        if found:
+            _helicon_exe_cache = found
+            return found
+
     if _helicon_exe_cache is not None:
         return _helicon_exe_cache if _helicon_exe_cache else None
 
