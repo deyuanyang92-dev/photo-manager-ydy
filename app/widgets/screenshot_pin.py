@@ -79,7 +79,11 @@ class PinWindow(QWidget):
     def keyPressEvent(self, e) -> None:
         if e.key() == Qt.Key.Key_Escape:
             self.close()
-        elif e.key() == Qt.Key.Key_C and e.modifiers() & Qt.KeyboardModifier.ControlModifier:
+        elif e.key() == Qt.Key.Key_C and (
+            e.modifiers() & Qt.KeyboardModifier.ControlModifier
+            or e.modifiers() & Qt.KeyboardModifier.MetaModifier
+        ):
+            # Ctrl or Meta — Mac Cmd arrives as Meta over a remote link to Linux.
             QApplication.clipboard().setPixmap(self._pixmap)
 
     def closeEvent(self, e) -> None:

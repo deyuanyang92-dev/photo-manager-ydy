@@ -183,11 +183,27 @@ class ScreenshotOverlay(QWidget):
         elif self._draft is not None:
             self._commit_draft()
 
+    @staticmethod
+    def _is_cmd(e: QKeyEvent) -> bool:
+        """True if Ctrl (Linux/Windows) or Meta is held.
+
+        Mac keyboards used over a remote-desktop link to this Linux app send
+        Cmd as Meta/Super rather than Ctrl, so accept either — keeps copy/undo
+        working for native Ctrl and for Mac-Cmd-over-remote alike.
+        """
+        mods = e.modifiers()
+        return bool(
+            mods & Qt.KeyboardModifier.ControlModifier
+            or mods & Qt.KeyboardModifier.MetaModifier
+        )
+
     def keyPressEvent(self, e: QKeyEvent) -> None:
         if e.key() == Qt.Key.Key_Escape:
             self._cancel()
-        elif e.key() == Qt.Key.Key_Z and e.modifiers() & Qt.KeyboardModifier.ControlModifier:
+        elif e.key() == Qt.Key.Key_Z and self._is_cmd(e):
             self._undo()
+        elif e.key() == Qt.Key.Key_C and self._is_cmd(e) and self._sel is not None:
+            self._deliver(self.actionCopy)
         else:
             super().keyPressEvent(e)
 

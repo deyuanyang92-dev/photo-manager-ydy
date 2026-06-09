@@ -19,11 +19,13 @@ button) grab the pixels without caring about clipboard/save plumbing.
 """
 from __future__ import annotations
 
+import os
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
-from PyQt6.QtCore import QObject, QPoint, QRect, pyqtSignal
+from PyQt6.QtCore import QMimeData, QObject, QPoint, QRect, QUrl, pyqtSignal
 from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import QApplication, QWidget
 
@@ -92,12 +94,12 @@ class ScreenshotController(QObject):
 
     # ── destinations ────────────────────────────────────────────────────────
     def _on_copy(self, pix: QPixmap) -> None:
-        QApplication.clipboard().setPixmap(pix)
+        self._to_clipboard(pix)
         self._status("截图已复制到剪贴板")
         self.captured.emit(pix)
 
     def _on_done(self, pix: QPixmap) -> None:
-        QApplication.clipboard().setPixmap(pix)
+        self._to_clipboard(pix)
         saved = self._auto_save(pix)
         if saved:
             self._status(f"截图已存项目: {saved.name}（已复制剪贴板）")
@@ -106,7 +108,7 @@ class ScreenshotController(QObject):
         self.captured.emit(pix)
 
     def _on_save(self, pix: QPixmap) -> None:
-        QApplication.clipboard().setPixmap(pix)
+        self._to_clipboard(pix)
         saved = self._auto_save(pix)
         start = str(saved) if saved else "截图.png"
         chosen = ui.get_save_file_name(self._win, "保存截图", start, "PNG 图片 (*.png)")
@@ -122,7 +124,7 @@ class ScreenshotController(QObject):
     def _on_pin(self, pix: QPixmap, global_tl: QPoint) -> None:
         win = PinWindow(pix)
         win.show_at(global_tl)
-        QApplication.clipboard().setPixmap(pix)
+        self._to_clipboard(pix)
         self._status("截图已钉到桌面（已复制剪贴板）")
         self.captured.emit(pix)
 
@@ -130,6 +132,34 @@ class ScreenshotController(QObject):
         self._overlay = None
 
     # ── helpers ───────────────────────────────────────────────────────────
+    def _to_clipboard(self, pix: QPixmap) -> None:
+        """Put the shot on the clipboard in three formats at once.
+
+        ``setPixmap`` alone only exposes raw image data, which terminal-based
+        tools (e.g. pasting into the Claude Code prompt) on Linux can't read —
+        they grab a *file path*, not a bitmap. So also write a temp PNG and
+        expose its ``file://`` URL plus its path as text. Raw-bitmap consumers,
+        file-URL consumers, and plain-text paste all then work.
+        """
+        md = QMimeData()
+        md.setImageData(pix.toImage())
+        path = self._temp_png(pix)
+        if path is not None:
+            md.setUrls([QUrl.fromLocalFile(str(path))])
+            md.setText(str(path))
+        QApplication.clipboard().setMimeData(md)
+
+    def _temp_png(self, pix: QPixmap) -> Optional[Path]:
+        try:
+            fd, name = tempfile.mkstemp(prefix="shot-", suffix=".png")
+            os.close(fd)
+            target = Path(name)
+            if pix.save(str(target), "PNG"):
+                return target
+        except OSError:
+            pass
+        return None
+
     def _auto_save(self, pix: QPixmap) -> Optional[Path]:
         project_dir = getattr(self._ctx, "current_project_dir", None) if self._ctx else None
         if not project_dir:
