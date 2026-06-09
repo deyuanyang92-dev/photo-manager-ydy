@@ -68,6 +68,9 @@ def build_helicon_args(
     magnification: Optional[str] = None,
     interpolation: Optional[str] = None,
     depth_map_feathering: Optional[str] = None,
+    dust_map: Optional[str] = None,
+    save_project: bool = False,
+    save_3d: bool = False,
 ) -> list[str]:
     """Build the Helicon Focus CLI argument list.
 
@@ -149,6 +152,14 @@ def build_helicon_args(
         args.append("-im:" + str(interpolation))
     if depth_map_feathering is not None:
         args.append("-dmf:" + str(depth_map_feathering))
+
+    # Extra output options (Oracle: helicon.js:163-168)
+    if dust_map:
+        args.append("-dustmap:" + _win(dust_map))
+    if save_project:
+        args.append("-project:")
+    if save_3d:
+        args.append("-3d")
 
     return args
 

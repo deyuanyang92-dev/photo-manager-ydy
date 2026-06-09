@@ -67,6 +67,48 @@ from app.services.worms_service import WormsService
 if False:  # TYPE_CHECKING
     from app.app_context import AppContext
 
+# ── Theme colours — resolved from the LIVE active theme ───────────────────────
+# Previously these were hardcoded deep-teal constants, which force-painted the
+# whole 内置分类库 page dark regardless of the chosen theme → under a light theme
+# the table text / labels (which the theme paints dark) became invisible.  Now
+# they are refreshed from the active theme tokens by _refresh_palette(), called
+# at the top of _setup_ui() and at the start of every standalone widget/dialog
+# defined in this file, so each f-string picks up the live palette.
+_C_PANEL = "#10242a"
+_C_INPUT = "#061c1e"
+_C_TEXT = "#eef3ef"
+_C_TEXT_SOFT = "#cfe0db"
+_C_MUTED = "#87a2a1"
+_C_DIM = "#5f7d7a"
+_C_ACCENT = "#29b9ab"
+_C_ACCENT_HI = "#31d4c4"
+_C_DANGER = "#e66e63"
+_C_BORDER = "rgba(145, 182, 181, 0.18)"
+_C_ACCENT_SOFT = "rgba(41, 185, 171, 0.10)"
+_C_DANGER_SOFT = "rgba(230, 110, 99, 0.10)"
+
+
+def _refresh_palette() -> None:
+    """Rebind the module `_C_*` colours to the current theme tokens."""
+    global _C_PANEL, _C_INPUT, _C_TEXT, _C_TEXT_SOFT
+    global _C_MUTED, _C_DIM, _C_ACCENT, _C_ACCENT_HI
+    global _C_DANGER, _C_BORDER, _C_ACCENT_SOFT, _C_DANGER_SOFT
+    from app.config.theme import TOKENS
+    g = TOKENS.get
+    _C_PANEL = g("panel", _C_PANEL)
+    _C_INPUT = g("input_bg", _C_INPUT)
+    _C_TEXT = g("text", _C_TEXT)
+    _C_TEXT_SOFT = g("text_soft", _C_TEXT_SOFT)
+    _C_MUTED = g("muted", _C_MUTED)
+    _C_DIM = g("muted_dim", _C_DIM)
+    _C_ACCENT = g("accent", _C_ACCENT)
+    _C_ACCENT_HI = g("accent_hover", _C_ACCENT_HI)
+    _C_DANGER = g("danger", _C_DANGER)
+    _C_BORDER = g("border", _C_BORDER)
+    _C_ACCENT_SOFT = g("accent_soft", _C_ACCENT_SOFT)
+    _C_DANGER_SOFT = g("danger_soft", _C_DANGER_SOFT)
+
+
 # ── Paths ─────────────────────────────────────────────────────────────────────
 _HERE = Path(__file__).resolve().parent           # app/views/
 _PROJECT_ROOT = _HERE.parent.parent               # photo-platform-ydy-v3/
@@ -277,7 +319,7 @@ class _TaxonTableModel(QAbstractTableModel):
             if role == Qt.ItemDataRole.DisplayRole:
                 return str(self._page_offset + row + 1)
             if role == Qt.ItemDataRole.ForegroundRole:
-                return QColor("#5f7d7a")
+                return QColor(_C_DIM)
             return None
 
         # ── Dynamic data columns ───────────────────────────────────────
@@ -289,10 +331,12 @@ class _TaxonTableModel(QAbstractTableModel):
                 val = rec.get(self._columns[data_idx]["key"], "")
                 return str(val) if val else ""
             if role == Qt.ItemDataRole.ForegroundRole:
-                return QColor("#29b9ab") if is_user else QColor("#87a2a1")
+                return QColor(_C_ACCENT) if is_user else QColor(_C_MUTED)
             if role == Qt.ItemDataRole.BackgroundRole:
                 if is_user:
-                    return QColor(41, 185, 171, 10)
+                    c = QColor(_C_ACCENT)
+                    c.setAlpha(10)
+                    return c
             if role == Qt.ItemDataRole.UserRole:
                 return rec
             return None
@@ -303,7 +347,7 @@ class _TaxonTableModel(QAbstractTableModel):
             if role == Qt.ItemDataRole.DisplayRole:
                 return "用户" if is_user else "种子"
             if role == Qt.ItemDataRole.ForegroundRole:
-                return QColor("#29b9ab") if is_user else QColor("#5f7d7a")
+                return QColor(_C_ACCENT) if is_user else QColor(_C_DIM)
             return None
 
         # ── 操作 column ────────────────────────────────────────────────
@@ -443,6 +487,7 @@ class _HistoryDialog(QDialog):
         history: Optional[list[dict[str, Any]]] = None,
     ) -> None:
         super().__init__(parent)
+        _refresh_palette()
         self.setWindowTitle("编辑历史")
         self.setMinimumWidth(560)
         self.setMinimumHeight(320)
@@ -459,7 +504,7 @@ class _HistoryDialog(QDialog):
 
         info = QLabel("选择历史版本后点击「回滚」，将把该快照填入编辑框（需再点确定保存）。")
         info.setWordWrap(True)
-        info.setStyleSheet("color:#87a2a1; font-size:11px;")
+        info.setStyleSheet(f"color:{_C_MUTED}; font-size:11px;")
         layout.addWidget(info)
 
         self._list = QListWidget()
@@ -507,6 +552,7 @@ class _TaxonFacetPanel(QFrame):
 
     def __init__(self, column_key: str, column_label: str, all_records: list[dict[str, Any]], current_predicate: Optional[dict[str, Any]] = None, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent, Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool)
+        _refresh_palette()
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
         self.setObjectName("TaxonFacetPanel")
         self._col_key = column_key
@@ -516,14 +562,14 @@ class _TaxonFacetPanel(QFrame):
         self._search_text = ""
         self._build_ui()
         self._fill_values()
-        self.setStyleSheet("QFrame#TaxonFacetPanel { background: #10242a; border: 1px solid rgba(145,182,181,0.25); border-radius: 8px; }")
+        self.setStyleSheet(f"QFrame#TaxonFacetPanel {{ background: {_C_PANEL}; border: 1px solid {_C_BORDER}; border-radius: 8px; }}")
         self.setMinimumWidth(280)
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 14, 14, 10)
         layout.setSpacing(8)
-        layout.addWidget(self._make_label(f"{self._col_label} 筛选", "13px", "600", "#eef3ef"))
+        layout.addWidget(self._make_label(f"{self._col_label} 筛选", "13px", "600", _C_TEXT))
         sort_row = QHBoxLayout()
         for txt, d in [("升序", "asc"), ("降序", "desc")]:
             b = QPushButton(txt); b.setObjectName("Outline"); b.setFixedHeight(24)
@@ -537,9 +583,9 @@ class _TaxonFacetPanel(QFrame):
             b = QPushButton(txt); b.setObjectName("Outline"); b.setFixedHeight(22); b.clicked.connect(fn); sel_row.addWidget(b)
         self._btn_found = QPushButton("选搜索结果"); self._btn_found.setObjectName("Outline"); self._btn_found.setFixedHeight(22)
         self._btn_found.setEnabled(False); self._btn_found.clicked.connect(self._on_select_found); sel_row.addWidget(self._btn_found); sel_row.addStretch(); layout.addLayout(sel_row)
-        self._meta_label = QLabel(""); self._meta_label.setStyleSheet("color: #87a2a1; font-size: 11px; background: transparent;"); layout.addWidget(self._meta_label)
+        self._meta_label = QLabel(""); self._meta_label.setStyleSheet(f"color: {_C_MUTED}; font-size: 11px; background: transparent;"); layout.addWidget(self._meta_label)
         self._values_list = QListWidget(); self._values_list.setMaximumHeight(200)
-        self._values_list.setStyleSheet("QListWidget { background: #061c1e; border: 1px solid rgba(145,182,181,0.12); border-radius: 4px; } QListWidget::item { color: #eef3ef; padding: 3px 6px; }")
+        self._values_list.setStyleSheet(f"QListWidget {{ background: {_C_INPUT}; border: 1px solid {_C_BORDER}; border-radius: 4px; }} QListWidget::item {{ color: {_C_TEXT}; padding: 3px 6px; }}")
         layout.addWidget(self._values_list, 1)
         act_row = QHBoxLayout(); act_row.setSpacing(6)
         btn_ok = QPushButton("确定"); btn_ok.setObjectName("Primary"); btn_ok.setFixedHeight(28); btn_ok.clicked.connect(self._on_apply); act_row.addWidget(btn_ok)
@@ -655,6 +701,7 @@ class _WormsMatchDialog(QDialog):
 
     def __init__(self, row: dict[str, Any], worms_svc: "WormsService", parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
+        _refresh_palette()
         self._row = row; self._svc = worms_svc; self._selected: Optional[dict[str, Any]] = None
         self._chain: list[dict[str, Any]] = []; self._worker: Optional[_WormsSearchWorker] = None; self._result: Optional[dict[str, Any]] = None
         self.setWindowTitle("WoRMS 匹配物种"); self.setMinimumWidth(680); self.setMinimumHeight(420)
@@ -662,22 +709,22 @@ class _WormsMatchDialog(QDialog):
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self); layout.setContentsMargins(18, 18, 18, 14); layout.setSpacing(10)
-        t = QLabel("WoRMS 匹配物种"); t.setStyleSheet("font-size: 16px; font-weight: 600; color: #eef3ef;"); layout.addWidget(t)
-        o = QLabel(f"原始种名：{self._row.get('species', '')}"); o.setStyleSheet("color: #87a2a1; font-size: 12px;"); layout.addWidget(o)
+        t = QLabel("WoRMS 匹配物种"); t.setStyleSheet(f"font-size: 16px; font-weight: 600; color: {_C_TEXT};"); layout.addWidget(t)
+        o = QLabel(f"原始种名：{self._row.get('species', '')}"); o.setStyleSheet(f"color: {_C_MUTED}; font-size: 12px;"); layout.addWidget(o)
         sr = QHBoxLayout(); sr.setSpacing(8)
         self._search_input = QLineEdit(); self._search_input.setPlaceholderText("输入科学名"); self._search_input.setText(self._row.get("species", "")); self._search_input.returnPressed.connect(self._do_search); sr.addWidget(self._search_input, 1)
-        self._fuzzy_check = QCheckBox("模糊匹配"); self._fuzzy_check.setStyleSheet("color: #87a2a1;"); sr.addWidget(self._fuzzy_check)
+        self._fuzzy_check = QCheckBox("模糊匹配"); self._fuzzy_check.setStyleSheet(f"color: {_C_MUTED};"); sr.addWidget(self._fuzzy_check)
         bs = QPushButton("搜索"); bs.setObjectName("Outline"); bs.setFixedWidth(60); bs.clicked.connect(self._do_search); sr.addWidget(bs); layout.addLayout(sr)
-        self._error_label = QLabel(""); self._error_label.setStyleSheet("color: #e66e63; font-size: 11px;"); self._error_label.hide(); layout.addWidget(self._error_label)
-        self._loading_label = QLabel("正在查询 WoRMS..."); self._loading_label.setStyleSheet("color: #29b9ab; font-size: 12px;"); self._loading_label.hide(); layout.addWidget(self._loading_label)
+        self._error_label = QLabel(""); self._error_label.setStyleSheet(f"color: {_C_DANGER}; font-size: 11px;"); self._error_label.hide(); layout.addWidget(self._error_label)
+        self._loading_label = QLabel("正在查询 WoRMS..."); self._loading_label.setStyleSheet(f"color: {_C_ACCENT}; font-size: 12px;"); self._loading_label.hide(); layout.addWidget(self._loading_label)
         body = QSplitter(Qt.Orientation.Horizontal); body.setHandleWidth(6)
-        self._results_list = QListWidget(); self._results_list.setStyleSheet("QListWidget { background: #0d1e24; border: 1px solid rgba(145,182,181,0.12); border-radius: 4px; } QListWidget::item { color: #eef3ef; padding: 6px 8px; } QListWidget::item:selected { background: #1e3a5f; }")
+        self._results_list = QListWidget(); self._results_list.setStyleSheet(f"QListWidget {{ background: {_C_PANEL}; border: 1px solid {_C_BORDER}; border-radius: 4px; }} QListWidget::item {{ color: {_C_TEXT}; padding: 6px 8px; }} QListWidget::item:selected {{ background: {_C_ACCENT}; }}")
         self._results_list.currentItemChanged.connect(self._on_result_selected); body.addWidget(self._results_list)
-        df = QFrame(); df.setStyleSheet("QFrame { background: #0d1e24; border: 1px solid rgba(145,182,181,0.12); border-radius: 4px; }")
+        df = QFrame(); df.setStyleSheet(f"QFrame {{ background: {_C_PANEL}; border: 1px solid {_C_BORDER}; border-radius: 4px; }}")
         dl = QVBoxLayout(df); dl.setContentsMargins(10, 10, 10, 10); dl.setSpacing(4)
-        dt = QLabel("采用后保存的 WoRMS 分类链"); dt.setStyleSheet("font-size: 11px; font-weight: 600; color: #87a2a1; background: transparent;"); dl.addWidget(dt)
-        self._chain_label = QLabel("选择候选后预览标准分类阶元"); self._chain_label.setStyleSheet("color: #5f7d7a; font-size: 11px; background: transparent;"); self._chain_label.setWordWrap(True); self._chain_label.setAlignment(Qt.AlignmentFlag.AlignTop); dl.addWidget(self._chain_label)
-        self._chain_loading_label = QLabel("加载分类链..."); self._chain_loading_label.setStyleSheet("color: #29b9ab; font-size: 11px; background: transparent;"); self._chain_loading_label.hide(); dl.addWidget(self._chain_loading_label); dl.addStretch()
+        dt = QLabel("采用后保存的 WoRMS 分类链"); dt.setStyleSheet(f"font-size: 11px; font-weight: 600; color: {_C_MUTED}; background: transparent;"); dl.addWidget(dt)
+        self._chain_label = QLabel("选择候选后预览标准分类阶元"); self._chain_label.setStyleSheet(f"color: {_C_DIM}; font-size: 11px; background: transparent;"); self._chain_label.setWordWrap(True); self._chain_label.setAlignment(Qt.AlignmentFlag.AlignTop); dl.addWidget(self._chain_label)
+        self._chain_loading_label = QLabel("加载分类链..."); self._chain_loading_label.setStyleSheet(f"color: {_C_ACCENT}; font-size: 11px; background: transparent;"); self._chain_loading_label.hide(); dl.addWidget(self._chain_loading_label); dl.addStretch()
         body.addWidget(df); body.setSizes([340, 300]); layout.addWidget(body, 1)
         ar = QHBoxLayout(); ar.setSpacing(8)
         ms = self._row.get("mappingStatus", ""); bl = "重新匹配并保存" if ms and ms != "unprocessed" else "采用并保存"
@@ -696,7 +743,7 @@ class _WormsMatchDialog(QDialog):
     def _on_results_ready(self, hits: list[dict[str, Any]]) -> None:
         self._loading_label.hide(); self._results_list.clear()
         if not hits:
-            item = QListWidgetItem("未找到候选，请修改关键词或启用模糊匹配。"); item.setFlags(Qt.ItemFlag.NoItemFlags); item.setForeground(QColor("#5f7d7a")); self._results_list.addItem(item); return
+            item = QListWidgetItem("未找到候选，请修改关键词或启用模糊匹配。"); item.setFlags(Qt.ItemFlag.NoItemFlags); item.setForeground(QColor(_C_DIM)); self._results_list.addItem(item); return
         for rec in hits:
             name = rec.get("valid_name") or rec.get("scientificname") or ""; aphia = rec.get("valid_AphiaID") or rec.get("AphiaID", ""); status = rec.get("status", "")
             chain_str = " > ".join(p for p in [rec.get("class"), rec.get("order"), rec.get("family"), rec.get("genus")] if p)
@@ -740,22 +787,23 @@ class _TaxonReviewDialog(QDialog):
 
     def __init__(self, row: dict[str, Any], parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
+        _refresh_palette()
         self._row = row; self._result: Optional[dict[str, Any]] = None
         self.setWindowTitle("审核 WoRMS 匹配"); self.setMinimumWidth(440); self._build_ui()
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self); layout.setContentsMargins(18, 18, 18, 14); layout.setSpacing(10)
-        t = QLabel("审核 WoRMS 匹配"); t.setStyleSheet("font-size: 16px; font-weight: 600; color: #eef3ef;"); layout.addWidget(t)
-        o = QLabel(f"原始种名：{self._row.get('species', '')}"); o.setStyleSheet("color: #87a2a1; font-size: 12px;"); layout.addWidget(o)
+        t = QLabel("审核 WoRMS 匹配"); t.setStyleSheet(f"font-size: 16px; font-weight: 600; color: {_C_TEXT};"); layout.addWidget(t)
+        o = QLabel(f"原始种名：{self._row.get('species', '')}"); o.setStyleSheet(f"color: {_C_MUTED}; font-size: 12px;"); layout.addWidget(o)
         candidates = self._row.get("mappingCandidates") or []
         if not candidates:
-            e = QLabel("没有自动候选，可标记为未找到后重新运行更新。"); e.setStyleSheet("color: #5f7d7a; font-size: 12px;"); e.setWordWrap(True); layout.addWidget(e)
+            e = QLabel("没有自动候选，可标记为未找到后重新运行更新。"); e.setStyleSheet(f"color: {_C_DIM}; font-size: 12px;"); e.setWordWrap(True); layout.addWidget(e)
         else:
             for cand in candidates:
-                rf = QFrame(); rf.setStyleSheet("QFrame { background: #0d1e24; border: 1px solid rgba(145,182,181,0.12); border-radius: 4px; }")
+                rf = QFrame(); rf.setStyleSheet(f"QFrame {{ background: {_C_PANEL}; border: 1px solid {_C_BORDER}; border-radius: 4px; }}")
                 rl = QHBoxLayout(rf); rl.setContentsMargins(10, 8, 10, 8); rl.setSpacing(8)
                 aphia = cand.get("valid_AphiaID") or cand.get("AphiaID") or ""; name = cand.get("valid_name") or cand.get("scientificname") or ""
-                info = QLabel(f"{name} · AphiaID {aphia}"); info.setStyleSheet("color: #eef3ef; font-size: 12px; background: transparent;"); rl.addWidget(info, 1)
+                info = QLabel(f"{name} · AphiaID {aphia}"); info.setStyleSheet(f"color: {_C_TEXT}; font-size: 12px; background: transparent;"); rl.addWidget(info, 1)
                 bu = QPushButton("采用"); bu.setObjectName("Primary"); bu.setFixedWidth(56)
                 bu.clicked.connect(lambda _=False, c=cand: self._on_use(c)); rl.addWidget(bu); layout.addWidget(rf)
         ar = QHBoxLayout(); ar.setSpacing(8)
@@ -778,6 +826,7 @@ class _ChipButton(QPushButton):
 
     def __init__(self, text: str, checked: bool = True, parent: Optional[QWidget] = None) -> None:
         super().__init__(text, parent)
+        _refresh_palette()
         self.setCheckable(True)
         self.setChecked(checked)
         self._refresh_style()
@@ -786,16 +835,16 @@ class _ChipButton(QPushButton):
     def _refresh_style(self) -> None:
         if self.isChecked():
             self.setStyleSheet(
-                "QPushButton { background: #29b9ab; color: #061c1e; font-weight: 600;"
-                " border: none; border-radius: 6px; padding: 4px 10px; font-size: 12px; }"
-                "QPushButton:hover { background: #31d4c4; }"
+                f"QPushButton {{ background: {_C_ACCENT}; color: {_C_INPUT}; font-weight: 600;"
+                f" border: none; border-radius: 6px; padding: 4px 10px; font-size: 12px; }}"
+                f"QPushButton:hover {{ background: {_C_ACCENT_HI}; }}"
             )
         else:
             self.setStyleSheet(
-                "QPushButton { background: #10242a; color: #87a2a1;"
-                " border: 1px solid rgba(145,182,181,0.18); border-radius: 6px;"
-                " padding: 4px 10px; font-size: 12px; }"
-                "QPushButton:hover { color: #eef3ef; border-color: #29b9ab; }"
+                f"QPushButton {{ background: {_C_PANEL}; color: {_C_MUTED};"
+                f" border: 1px solid {_C_BORDER}; border-radius: 6px;"
+                f" padding: 4px 10px; font-size: 12px; }}"
+                f"QPushButton:hover {{ color: {_C_TEXT}; border-color: {_C_ACCENT}; }}"
             )
 
 
@@ -806,6 +855,7 @@ class _ViewTabButton(QPushButton):
 
     def __init__(self, text: str, parent: Optional[QWidget] = None) -> None:
         super().__init__(text, parent)
+        _refresh_palette()
         self.setCheckable(True)
         self._refresh_style()
         self.toggled.connect(lambda _: self._refresh_style())
@@ -813,14 +863,14 @@ class _ViewTabButton(QPushButton):
     def _refresh_style(self) -> None:
         if self.isChecked():
             self.setStyleSheet(
-                "QPushButton { background: #29b9ab; color: #061c1e; font-weight: 600;"
-                " border: none; border-radius: 6px; padding: 6px 14px; font-size: 12px; }"
+                f"QPushButton {{ background: {_C_ACCENT}; color: {_C_INPUT}; font-weight: 600;"
+                f" border: none; border-radius: 6px; padding: 6px 14px; font-size: 12px; }}"
             )
         else:
             self.setStyleSheet(
-                "QPushButton { background: transparent; color: #87a2a1;"
-                " border: none; border-radius: 6px; padding: 6px 14px; font-size: 12px; }"
-                "QPushButton:hover { color: #eef3ef; background: rgba(41,185,171,0.1); }"
+                f"QPushButton {{ background: transparent; color: {_C_MUTED};"
+                f" border: none; border-radius: 6px; padding: 6px 14px; font-size: 12px; }}"
+                f"QPushButton:hover {{ color: {_C_TEXT}; background: {_C_ACCENT_SOFT}; }}"
             )
 
 
@@ -880,11 +930,11 @@ class _ActionDelegate(QStyledItemDelegate):
             painter.drawText(rect, _Qt.AlignmentFlag.AlignCenter, text)
 
         # Edit button — always shown in original view
-        _draw_btn(edit_rect, "编辑", "#87a2a1", "rgba(145,182,181,0.3)")
+        _draw_btn(edit_rect, "编辑", _C_MUTED, _C_BORDER)
 
         # Delete button — only for user records
         if is_user:
-            _draw_btn(del_rect, "删除", "#e66e63", "rgba(230,110,99,0.4)")
+            _draw_btn(del_rect, "删除", _C_DANGER, _C_DANGER_SOFT)
 
         painter.restore()
 
@@ -970,6 +1020,7 @@ class TaxonomyView(BaseView):
     # ── BaseView._setup_ui ────────────────────────────────────────────
 
     def _setup_ui(self) -> None:
+        _refresh_palette()
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
@@ -989,12 +1040,12 @@ class TaxonomyView(BaseView):
         header_frame = QFrame()
         header_frame.setObjectName("TaxonHeader")
         header_frame.setStyleSheet(
-            "QFrame#TaxonHeader { border: none;"
-            " border-bottom: 1px solid rgba(145,182,181,0.10); }"
+            f"QFrame#TaxonHeader {{ border: none;"
+            f" border-bottom: 1px solid {_C_BORDER}; }}"
         )
         header_layout = QVBoxLayout(header_frame)
-        header_layout.setContentsMargins(24, 20, 24, 0)
-        header_layout.setSpacing(12)
+        header_layout.setContentsMargins(24, 12, 24, 0)
+        header_layout.setSpacing(8)
 
         # taxon-table-title-row
         title_row = QHBoxLayout()
@@ -1003,15 +1054,15 @@ class TaxonomyView(BaseView):
         page_title = QLabel("内置分类库")
         page_title.setObjectName("TaxonPageTitle")
         page_title.setStyleSheet(
-            "QLabel { font-size: 18px; font-weight: 600; color: #eef3ef;"
-            " background: transparent; }"
+            f"QLabel {{ font-size: 18px; font-weight: 600; color: {_C_TEXT};"
+            f" background: transparent; }}"
         )
         title_row.addWidget(page_title)
 
         self._stats_label = QLabel("共 0 条")
         self._stats_label.setObjectName("Muted")
         self._stats_label.setStyleSheet(
-            "QLabel { font-size: 13px; color: #87a2a1; background: transparent; }"
+            f"QLabel {{ font-size: 13px; color: {_C_MUTED}; background: transparent; }}"
         )
         title_row.addWidget(self._stats_label)
 
@@ -1020,7 +1071,7 @@ class TaxonomyView(BaseView):
         # taxon-view-switch (3 tabs + "图表" toggle) in a capsule frame
         switch_wrapper = QFrame()
         switch_wrapper.setStyleSheet(
-            "QFrame { background: #10242a; border-radius: 8px; padding: 2px; }"
+            f"QFrame {{ background: {_C_PANEL}; border-radius: 8px; padding: 2px; }}"
         )
         switch_inner = QHBoxLayout(switch_wrapper)
         switch_inner.setContentsMargins(3, 3, 3, 3)
@@ -1052,7 +1103,7 @@ class TaxonomyView(BaseView):
         # taxon-col-controls (only in "original" view)
         self._col_ctrl_frame = QFrame()
         col_ctrl_layout = QHBoxLayout(self._col_ctrl_frame)
-        col_ctrl_layout.setContentsMargins(0, 4, 0, 12)
+        col_ctrl_layout.setContentsMargins(0, 2, 0, 6)
         col_ctrl_layout.setSpacing(16)
 
         # 类群 group
@@ -1060,8 +1111,8 @@ class TaxonomyView(BaseView):
         level_group.setSpacing(6)
         level_label = QLabel("类群")
         level_label.setStyleSheet(
-            "QLabel { color: #5f7d7a; font-size: 11px; font-weight: 600;"
-            " background: transparent; }"
+            f"QLabel {{ color: {_C_DIM}; font-size: 11px; font-weight: 600;"
+            f" background: transparent; }}"
         )
         level_group.addWidget(level_label)
 
@@ -1080,8 +1131,8 @@ class TaxonomyView(BaseView):
         lang_group.setSpacing(6)
         lang_label = QLabel("语言")
         lang_label.setStyleSheet(
-            "QLabel { color: #5f7d7a; font-size: 11px; font-weight: 600;"
-            " background: transparent; }"
+            f"QLabel {{ color: {_C_DIM}; font-size: 11px; font-weight: 600;"
+            f" background: transparent; }}"
         )
         lang_group.addWidget(lang_label)
 
@@ -1096,6 +1147,40 @@ class TaxonomyView(BaseView):
         col_ctrl_layout.addLayout(lang_group)
         col_ctrl_layout.addStretch()
 
+        # ── 字体 / 行高 调节 ─────────────────────────────────────────
+        font_group = QHBoxLayout()
+        font_group.setSpacing(4)
+        font_lbl = QLabel("字号")
+        font_lbl.setStyleSheet(
+            f"QLabel {{ color: {_C_DIM}; font-size: 11px; font-weight: 600;"
+            f" background: transparent; }}"
+        )
+        font_group.addWidget(font_lbl)
+
+        self._font_size: int = 12
+        btn_font_minus = QPushButton("−")
+        btn_font_minus.setFixedSize(22, 22)
+        btn_font_minus.setStyleSheet(
+            f"QPushButton {{ background: {_C_PANEL}; border: 1px solid {_C_BORDER};"
+            f" border-radius: 4px; color: {_C_TEXT_SOFT}; font-size: 13px; font-weight: bold; }}"
+            f"QPushButton:hover {{ border-color: {_C_ACCENT}; color: {_C_ACCENT}; }}"
+        )
+        self._font_size_lbl = QLabel("12")
+        self._font_size_lbl.setFixedWidth(22)
+        self._font_size_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._font_size_lbl.setStyleSheet(f"color: {_C_TEXT_SOFT}; font-size: 11px; background: transparent;")
+        btn_font_plus = QPushButton("+")
+        btn_font_plus.setFixedSize(22, 22)
+        btn_font_plus.setStyleSheet(btn_font_minus.styleSheet())
+
+        btn_font_minus.clicked.connect(lambda: self._adjust_font(-1))
+        btn_font_plus.clicked.connect(lambda: self._adjust_font(1))
+
+        font_group.addWidget(btn_font_minus)
+        font_group.addWidget(self._font_size_lbl)
+        font_group.addWidget(btn_font_plus)
+        col_ctrl_layout.addLayout(font_group)
+
         header_layout.addWidget(self._col_ctrl_frame)
         ctrl_v.addWidget(header_frame)
 
@@ -1103,12 +1188,12 @@ class TaxonomyView(BaseView):
         toolbar_frame = QFrame()
         toolbar_frame.setObjectName("TaxonToolbar")
         toolbar_frame.setStyleSheet(
-            "QFrame#TaxonToolbar { border: none;"
-            " border-bottom: 1px solid rgba(145,182,181,0.10); }"
+            f"QFrame#TaxonToolbar {{ border: none;"
+            f" border-bottom: 1px solid {_C_BORDER}; }}"
         )
         toolbar_layout = QVBoxLayout(toolbar_frame)
-        toolbar_layout.setContentsMargins(24, 12, 24, 12)
-        toolbar_layout.setSpacing(10)
+        toolbar_layout.setContentsMargins(24, 8, 24, 8)
+        toolbar_layout.setSpacing(8)
 
         # filter bar (taxon-table-filter-bar)
         filter_row = QHBoxLayout()
@@ -1152,7 +1237,7 @@ class TaxonomyView(BaseView):
 
         self._filter_active_label = QLabel("")
         self._filter_active_label.setStyleSheet(
-            "QLabel { color: #29b9ab; font-size: 11px; background: transparent; }"
+            f"QLabel {{ color: {_C_ACCENT}; font-size: 11px; background: transparent; }}"
         )
         self._filter_active_label.hide()
         filter_row.addWidget(self._filter_active_label)
@@ -1173,12 +1258,12 @@ class TaxonomyView(BaseView):
         # Thin separator
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.VLine)
-        sep.setStyleSheet("QFrame { color: rgba(145,182,181,0.15); }")
+        sep.setStyleSheet(f"QFrame {{ color: {_C_BORDER}; }}")
         action_row.addWidget(sep)
 
         self._selection_note = QLabel("已选 0 条")
         self._selection_note.setStyleSheet(
-            "QLabel { color: #87a2a1; font-size: 11px; background: transparent; }"
+            f"QLabel {{ color: {_C_MUTED}; font-size: 11px; background: transparent; }}"
         )
         action_row.addWidget(self._selection_note)
 
@@ -1195,7 +1280,7 @@ class TaxonomyView(BaseView):
         # Thin separator
         sep2 = QFrame()
         sep2.setFrameShape(QFrame.Shape.VLine)
-        sep2.setStyleSheet("QFrame { color: rgba(145,182,181,0.15); }")
+        sep2.setStyleSheet(f"QFrame {{ color: {_C_BORDER}; }}")
         action_row.addWidget(sep2)
 
         self._btn_worms_sel = QPushButton("WoRMS 更新所选")
@@ -1216,7 +1301,7 @@ class TaxonomyView(BaseView):
         # Thin separator
         sep3 = QFrame()
         sep3.setFrameShape(QFrame.Shape.VLine)
-        sep3.setStyleSheet("QFrame { color: rgba(145,182,181,0.15); }")
+        sep3.setStyleSheet(f"QFrame {{ color: {_C_BORDER}; }}")
         action_row.addWidget(sep3)
 
         btn_export_xlsx = QPushButton("导出 Excel")
@@ -1250,7 +1335,7 @@ class TaxonomyView(BaseView):
         ctrl_scroll.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum
         )
-        ctrl_scroll.setMaximumHeight(220)
+        ctrl_scroll.setMaximumHeight(200)
         ctrl_scroll.setStyleSheet(
             "QScrollArea { background: transparent; border: none; }"
         )
@@ -1261,17 +1346,19 @@ class TaxonomyView(BaseView):
 
         self._table = QTableView()
         self._table.setModel(self._model)
-        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
         self._table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._table.setAlternatingRowColors(True)
         self._table.setSortingEnabled(False)  # server-side sort via API
         self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self._table.horizontalHeader().setStretchLastSection(False)
+        self._table.horizontalHeader().setSectionsMovable(True)   # drag to reorder columns
+        self._table.horizontalHeader().setMinimumSectionSize(40)
         self._table.verticalHeader().setVisible(False)
         self._table.doubleClicked.connect(self._on_row_double_click)
         self._table.selectionModel().selectionChanged.connect(self._on_selection_changed)
-        # Row height
+        # Row height (default 32px, scales with font size)
         self._table.verticalHeader().setDefaultSectionSize(32)
 
         # Column widths for checkbox / # columns
@@ -1281,6 +1368,9 @@ class TaxonomyView(BaseView):
         self._action_delegate = _ActionDelegate(self._table)
         self._action_delegate.edit_requested.connect(self._edit_record)
         self._action_delegate.delete_requested.connect(self._delete_record)
+
+        # Ctrl+C → copy selected cells in Excel format (tab-separated cols, newline rows)
+        self._table.keyPressEvent = self._table_key_press
 
         # Right-click context menu (mirrors openTaxonRowMenu in app.js)
         self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -1308,8 +1398,8 @@ class TaxonomyView(BaseView):
         self._loading_label = QLabel("加载中…")
         self._loading_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._loading_label.setStyleSheet(
-            "QLabel { color: #29b9ab; font-size: 14px; background: transparent;"
-            " padding: 24px; }"
+            f"QLabel {{ color: {_C_ACCENT}; font-size: 14px; background: transparent;"
+            f" padding: 24px; }}"
         )
         self._loading_label.hide()
 
@@ -1322,30 +1412,30 @@ class TaxonomyView(BaseView):
         self._job_panel_frame = QFrame()
         self._job_panel_frame.setObjectName("TaxonJobPanel")
         self._job_panel_frame.setStyleSheet(
-            "QFrame#TaxonJobPanel { background: #0d2630;"
-            " border: 1px solid rgba(145,182,181,0.18); border-radius: 6px;"
-            " margin: 4px 24px; }"
+            f"QFrame#TaxonJobPanel {{ background: {_C_PANEL};"
+            f" border: 1px solid {_C_BORDER}; border-radius: 6px;"
+            f" margin: 4px 24px; }}"
         )
         _jpanel_layout = QHBoxLayout(self._job_panel_frame)
         _jpanel_layout.setContentsMargins(12, 8, 12, 8)
         _jpanel_layout.setSpacing(12)
         self._job_title_label = QLabel("WoRMS 任务")
-        self._job_title_label.setStyleSheet("font-weight: 600; color: #29b9ab; font-size: 12px; background: transparent;")
+        self._job_title_label.setStyleSheet(f"font-weight: 600; color: {_C_ACCENT}; font-size: 12px; background: transparent;")
         _jpanel_layout.addWidget(self._job_title_label)
         self._job_progress_label = QLabel("")
-        self._job_progress_label.setStyleSheet("color: #87a2a1; font-size: 11px; background: transparent;")
+        self._job_progress_label.setStyleSheet(f"color: {_C_MUTED}; font-size: 11px; background: transparent;")
         _jpanel_layout.addWidget(self._job_progress_label)
         self._job_bar = QProgressBar()
         self._job_bar.setFixedHeight(8)
         self._job_bar.setTextVisible(False)
         self._job_bar.setStyleSheet(
-            "QProgressBar { background: #061c1e; border: none; border-radius: 4px; }"
-            "QProgressBar::chunk { background: #29b9ab; border-radius: 4px; }"
+            f"QProgressBar {{ background: {_C_INPUT}; border: none; border-radius: 4px; }}"
+            f"QProgressBar::chunk {{ background: {_C_ACCENT}; border-radius: 4px; }}"
         )
         self._job_bar.setFixedWidth(120)
         _jpanel_layout.addWidget(self._job_bar)
         self._job_counts_label = QLabel("")
-        self._job_counts_label.setStyleSheet("color: #87a2a1; font-size: 11px; background: transparent;")
+        self._job_counts_label.setStyleSheet(f"color: {_C_MUTED}; font-size: 11px; background: transparent;")
         _jpanel_layout.addWidget(self._job_counts_label)
         self._btn_job_pause = QPushButton("暂停")
         self._btn_job_pause.setObjectName("Outline")
@@ -1370,8 +1460,8 @@ class TaxonomyView(BaseView):
         pager_frame = QFrame()
         pager_frame.setObjectName("TaxonPager")
         pager_frame.setStyleSheet(
-            "QFrame#TaxonPager { border: none;"
-            " border-top: 1px solid rgba(145,182,181,0.10); }"
+            f"QFrame#TaxonPager {{ border: none;"
+            f" border-top: 1px solid {_C_BORDER}; }}"
         )
         pager_layout = QHBoxLayout(pager_frame)
         pager_layout.setContentsMargins(24, 10, 24, 10)
@@ -1387,13 +1477,13 @@ class TaxonomyView(BaseView):
         self._page_info = QLabel("第 1 / 1 页（共 0 条）")
         self._page_info.setObjectName("TaxonPageInfo")
         self._page_info.setStyleSheet(
-            "QLabel { color: #87a2a1; font-size: 12px; background: transparent; }"
+            f"QLabel {{ color: {_C_MUTED}; font-size: 12px; background: transparent; }}"
         )
         pager_layout.addWidget(self._page_info)
 
         jump_label = QLabel("跳到")
         jump_label.setStyleSheet(
-            "QLabel { color: #5f7d7a; font-size: 12px; background: transparent; }"
+            f"QLabel {{ color: {_C_DIM}; font-size: 12px; background: transparent; }}"
         )
         pager_layout.addWidget(jump_label)
 
@@ -1416,7 +1506,7 @@ class TaxonomyView(BaseView):
         # stats summary at right of pager
         self._footer_label = QLabel("")
         self._footer_label.setStyleSheet(
-            "QLabel { color: #5f7d7a; font-size: 11px; background: transparent; }"
+            f"QLabel {{ color: {_C_DIM}; font-size: 11px; background: transparent; }}"
         )
         pager_layout.addWidget(self._footer_label)
 
@@ -1534,14 +1624,14 @@ class TaxonomyView(BaseView):
         layout.setContentsMargins(18, 18, 18, 14)
         layout.setSpacing(12)
         title = QLabel("按目统计")
-        title.setStyleSheet("font-size: 16px; font-weight: 600; color: #eef3ef;")
+        title.setStyleSheet(f"font-size: 16px; font-weight: 600; color: {_C_TEXT};")
         layout.addWidget(title)
         subtitle = QLabel("显示当前筛选条件下数量最多的前 12 个目。")
-        subtitle.setStyleSheet("font-size: 12px; color: #87a2a1;")
+        subtitle.setStyleSheet(f"font-size: 12px; color: {_C_MUTED};")
         layout.addWidget(subtitle)
         body = QFrame()
         body.setStyleSheet(
-            "QFrame { background: #10242a; border: 1px solid rgba(145,182,181,0.14); border-radius: 8px; }"
+            f"QFrame {{ background: {_C_PANEL}; border: 1px solid {_C_BORDER}; border-radius: 8px; }}"
         )
         body_layout = QVBoxLayout(body)
         body_layout.setContentsMargins(14, 14, 14, 14)
@@ -1553,7 +1643,7 @@ class TaxonomyView(BaseView):
                 row_layout.setSpacing(10)
                 name = QLabel(label)
                 name.setMinimumWidth(130)
-                name.setStyleSheet("color: #eef3ef; font-size: 12px;")
+                name.setStyleSheet(f"color: {_C_TEXT}; font-size: 12px;")
                 row_layout.addWidget(name)
                 bar = QProgressBar()
                 bar.setRange(0, max_count)
@@ -1561,20 +1651,20 @@ class TaxonomyView(BaseView):
                 bar.setTextVisible(False)
                 bar.setFixedHeight(12)
                 bar.setStyleSheet(
-                    "QProgressBar { background: #061c1e; border: none; border-radius: 6px; }"
-                    "QProgressBar::chunk { background: #29b9ab; border-radius: 6px; }"
+                    f"QProgressBar {{ background: {_C_INPUT}; border: none; border-radius: 6px; }}"
+                    f"QProgressBar::chunk {{ background: {_C_ACCENT}; border-radius: 6px; }}"
                 )
                 row_layout.addWidget(bar, 1)
                 value = QLabel(str(count))
                 value.setMinimumWidth(36)
                 value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                value.setStyleSheet("color: #87a2a1; font-size: 12px;")
+                value.setStyleSheet(f"color: {_C_MUTED}; font-size: 12px;")
                 row_layout.addWidget(value)
                 body_layout.addLayout(row_layout)
         else:
             empty = QLabel("暂无可统计记录")
             empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            empty.setStyleSheet("color: #87a2a1; padding: 28px;")
+            empty.setStyleSheet(f"color: {_C_MUTED}; padding: 28px;")
             body_layout.addWidget(empty)
         layout.addWidget(body, 1)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
@@ -1608,6 +1698,47 @@ class TaxonomyView(BaseView):
         action_col = _COL_DATA_START + len(self._model.columns()) + 1
         self._table.setItemDelegateForColumn(action_col, self._action_delegate)
         self._table.resizeColumnToContents(action_col)
+
+    def _table_key_press(self, event: "QKeyEvent") -> None:
+        """Handle Ctrl+C on the table: copy selected cells in Excel/CSV format."""
+        from PyQt6.QtCore import QItemSelection
+        from PyQt6.QtGui import QKeyEvent, QKeySequence
+        from PyQt6.QtWidgets import QAbstractItemView
+
+        if event.matches(QKeySequence.StandardKey.Copy):
+            indexes = self._table.selectionModel().selectedIndexes()
+            if not indexes:
+                return
+            # Sort by row then column
+            indexes = sorted(indexes, key=lambda i: (i.row(), i.column()))
+            rows: dict[int, list] = {}
+            for idx in indexes:
+                rows.setdefault(idx.row(), []).append(idx)
+            lines = []
+            for row_idxs in rows.values():
+                parts = []
+                for idx in sorted(row_idxs, key=lambda i: i.column()):
+                    val = self._model.data(idx, Qt.ItemDataRole.DisplayRole)
+                    parts.append(str(val) if val is not None else "")
+                lines.append("\t".join(parts))
+            from PyQt6.QtWidgets import QApplication
+            QApplication.clipboard().setText("\n".join(lines))
+            return
+        # Fall through to default handling
+        QTableView.keyPressEvent(self._table, event)
+
+    def _adjust_font(self, delta: int) -> None:
+        """Increase or decrease table font size. Mirrors Excel-style zoom."""
+        self._font_size = max(8, min(20, self._font_size + delta))
+        self._font_size_lbl.setText(str(self._font_size))
+        f = self._table.font()
+        f.setPointSize(self._font_size)
+        self._table.setFont(f)
+        self._table.horizontalHeader().setFont(f)
+        # Row height scales with font (approx 2× font pt size)
+        row_h = max(22, int(self._font_size * 2.2))
+        self._table.verticalHeader().setDefaultSectionSize(row_h)
+        self._table.viewport().update()
 
     # ── Search / filter ───────────────────────────────────────────────────────
 
@@ -1801,7 +1932,7 @@ class TaxonomyView(BaseView):
         if rec is None:
             return
         menu = QMenu(self._table)
-        menu.setStyleSheet("QMenu { background: #10242a; color: #eef3ef; border: 1px solid rgba(145,182,181,0.2); border-radius: 6px; } QMenu::item { padding: 6px 18px; font-size: 12px; } QMenu::item:selected { background: rgba(41,185,171,0.15); } QMenu::separator { background: rgba(145,182,181,0.12); height: 1px; margin: 4px 0; }")
+        menu.setStyleSheet(f"QMenu {{ background: {_C_PANEL}; color: {_C_TEXT}; border: 1px solid {_C_BORDER}; border-radius: 6px; }} QMenu::item {{ padding: 6px 18px; font-size: 12px; }} QMenu::item:selected {{ background: {_C_ACCENT_SOFT}; }} QMenu::separator {{ background: {_C_BORDER}; height: 1px; margin: 4px 0; }}")
         title_action = menu.addAction(rec.get("species") or rec.get("class") or "当前记录")
         title_action.setEnabled(False)
         menu.addSeparator()
@@ -1997,18 +2128,21 @@ class TaxonomyView(BaseView):
         self._load_page()
 
     def _edit_record(self, rec: dict[str, Any]) -> None:
+        """Edit record. Mirrors web openTaxonomyTableModal('edit'):
+        - user: records → update in place
+        - seed: records → open dialog pre-filled with seed data, save creates a user override
+        """
         if self._svc is None:
             return
-        if not rec.get("recordId", "").startswith("user:"):
-            QMessageBox.information(
-                self, "只读",
-                "种子库条目不可编辑（仅用户新增的条目支持编辑）"
-            )
-            return
+        is_user = rec.get("recordId", "").startswith("user:")
         dlg = _RecordDialog(self, record=rec)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        self._svc.update(rec["recordId"], dlg.get_record())
+        if is_user:
+            self._svc.update(rec["recordId"], dlg.get_record())
+        else:
+            # Seed record: create user override entry (mirrors web findUserEntryForCurrent + learn)
+            self._svc.learn(dlg.get_record())
         self._load_page()
 
     def _delete_record(self, rec: dict[str, Any]) -> None:

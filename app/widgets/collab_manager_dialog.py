@@ -569,17 +569,17 @@ class CollabManagerDialog(QDialog):
             return
         reply = QMessageBox.question(
             self, "确认作废",
-            f"确定要作废编号 {uid} 吗？\n作废后不会删除照片文件。",
+            f"确定要作废编号 {uid} 吗？\n作废后不会删除照片文件，"
+            f"该编号将被释放，可被任何人重新使用。",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
         try:
-            from app.services.collab_service import TaskStatus
-            self._svc.store.update_status(uid, TaskStatus.VOID)
-            self._broadcast_status_update(uid, "void")
+            # Release = delete locally + broadcast to peers → UID reclaimable.
+            self._svc.release_task(uid)
             self._refresh_tasks()
-        except ValueError as exc:
+        except Exception as exc:  # noqa: BLE001
             self._show_banner(f"作废失败：{exc}")
 
     def _on_resolve_conflict(self, uid: str) -> None:

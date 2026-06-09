@@ -18,11 +18,12 @@ from pathlib import Path
 
 from typing import Optional
 
-from PyQt6.QtCore import Qt, QMarginsF, QPoint, QSizeF, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QPainter, QPageSize, QPen, QPixmap
+from PyQt6.QtCore import Qt, QPoint, QTimer, pyqtSignal
+from PyQt6.QtGui import QColor, QPainter, QPen, QPixmap
 from PyQt6.QtPrintSupport import QPrinter, QPrintDialog, QAbstractPrintDialog
 from PyQt6.QtWidgets import (
     QButtonGroup,
+    QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -55,6 +56,7 @@ from app.services.label_service import (
     LabelService,
     LabelTemplateLibrary,
     key_from_id,
+    load_specimen_dicts,
     resolve_template,
 )
 from app.utils.label_core import (
@@ -63,6 +65,7 @@ from app.utils.label_core import (
     has_rna_tissue,
     unique_id,
 )
+from app.utils.label_print import build_printer, paint_jobs
 from app.utils.label_render import (
     render_label_onto,
     render_label_pixmap as _render_label_pixmap,   # noqa: F401  (back-compat re-export)
@@ -112,7 +115,9 @@ class _ClickablePreview(QLabel):
 
 
 class _PannablePreview(QWidget):
-    """Sheet-layout preview that supports drag-to-pan."""
+    """Sheet-layout preview that supports drag-to-pan + double-click to enlarge."""
+
+    doubleClicked = pyqtSignal()
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -121,6 +126,10 @@ class _PannablePreview(QWidget):
         self._pan_y = 0
         self._press_pt: Optional[QPoint] = None
         self.setCursor(Qt.CursorShape.OpenHandCursor)
+        self.setToolTip("双击放大预览整页 A4 排版")
+
+    def mouseDoubleClickEvent(self, e) -> None:
+        self.doubleClicked.emit()
 
     def setPixmap(self, pm: QPixmap) -> None:
         self._pm = pm
@@ -132,8 +141,10 @@ class _PannablePreview(QWidget):
         p = QPainter(self)
         p.fillRect(self.rect(), QColor("#ffffff"))
         if self._pm is not None:
-            x = (self.width() - self._pm.width()) // 2 + self._pan_x
-            y = (self.height() - self._pm.height()) // 2 + self._pan_y
+            # 用设备无关尺寸居中：HiDPI 下 pixmap 物理像素 = 逻辑×dpr，裸 width() 会偏。
+            sz = self._pm.deviceIndependentSize()
+            x = int((self.width() - sz.width()) // 2 + self._pan_x)
+            y = int((self.height() - sz.height()) // 2 + self._pan_y)
             p.drawPixmap(x, y, self._pm)
 
     def mousePressEvent(self, e) -> None:
@@ -214,14 +225,6 @@ class LabelsView(BaseView):
         self._project_hint.setObjectName("Muted")
         h.addWidget(self._project_hint)
         h.addStretch()
-        self._variant_buttons: dict[str, QPushButton] = {}
-        for key, text in (("studio", "打印台"), ("sheet", "排版"), ("plain", "极简")):
-            btn = QPushButton(text)
-            btn.setObjectName("ModeBtn")
-            btn.setCheckable(True)
-            btn.clicked.connect(lambda _=False, k=key: self._set_variant(k))
-            self._variant_buttons[key] = btn
-            h.addWidget(btn)
         outer.addWidget(header)
 
         self._main_splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -249,7 +252,8 @@ class LabelsView(BaseView):
         self._step3.config_changed.connect(self._on_config_changed)
         self._step4.print_requested.connect(self._print)
 
-        self._set_variant("studio")
+        self._apply_variant_layout("studio")
+        self._refresh_print_studio()
 
     def _build_specimen_panel(self) -> QWidget:
         panel = QFrame()
@@ -433,6 +437,10 @@ class LabelsView(BaseView):
         self._preview_summary = QLabel("")
         self._preview_summary.setObjectName("Muted")
         top.addWidget(self._preview_summary)
+        self._btn_open_sheet = QPushButton("放大整页")
+        self._btn_open_sheet.setObjectName("GhostBtn")
+        self._btn_open_sheet.clicked.connect(self._open_sheet_preview)
+        top.addWidget(self._btn_open_sheet)
         root.addLayout(top)
 
         self._label_preview = _ClickablePreview()
@@ -444,6 +452,7 @@ class LabelsView(BaseView):
         self._sheet_preview = _PannablePreview()
         self._sheet_preview.setObjectName("SheetCanvas")
         self._sheet_preview.setMinimumHeight(170)
+        self._sheet_preview.doubleClicked.connect(self._open_sheet_preview)
 
         # 两预览框之间用竖向 splitter，让用户上下拖拽改变高度比（默认仍是 2:1 观感）。
         self._preview_split = QSplitter(Qt.Orientation.Vertical)
@@ -673,24 +682,13 @@ class LabelsView(BaseView):
         self._fields_box.hide()
 
         root.addWidget(QLabel("标签尺寸"))
-        # 尺寸快捷按钮（移植自第二设计 LabelDetailPanel chip 排）
-        self._size_chip_wrap = QWidget()
-        chip_grid = QGridLayout(self._size_chip_wrap)
-        chip_grid.setContentsMargins(0, 0, 0, 0)
-        chip_grid.setSpacing(6)
-        self._size_group = QButtonGroup(self)
-        self._size_group.setExclusive(True)
-        self._size_chips: dict[str, QPushButton] = {}
-        for i, key in enumerate(list(LABEL_SIZE_KEYS) + ["custom"]):
+        # 尺寸下拉（预设 + 自定义）
+        self._size_combo = QComboBox()
+        for key in list(LABEL_SIZE_KEYS) + ["custom"]:
             name = PAPER_SIZES[key]["name"] if key in PAPER_SIZES else "自定义"
-            chip = QPushButton(name)
-            chip.setObjectName("SizeChip")
-            chip.setCheckable(True)
-            chip.clicked.connect(lambda _=False, k=key: self._on_size_chip(k))
-            self._size_group.addButton(chip)
-            self._size_chips[key] = chip
-            chip_grid.addWidget(chip, i // 3, i % 3)
-        root.addWidget(self._size_chip_wrap)
+            self._size_combo.addItem(name, key)
+        self._size_combo.currentIndexChanged.connect(self._on_size_combo)
+        root.addWidget(self._size_combo)
 
         # 自定义 W×H（仅 size==custom 时显示）
         self._size_custom_row = QWidget()
@@ -761,8 +759,14 @@ class LabelsView(BaseView):
         self._btn_print_tissue = QPushButton("打印 RNAlater")
         self._btn_print_tissue.setObjectName("PrintBtn")
         self._btn_print_tissue.clicked.connect(lambda: self._print("tissue"))
+        # 一键同时打印「样品瓶 + RNAlater 组织管」(单个打印对话框)。
+        # 仅当有 R 前缀标本(组织管桶非空)时才有意义。
+        self._btn_print_both = QPushButton("打印（样品瓶＋组织管）")
+        self._btn_print_both.setObjectName("PrintBtn")
+        self._btn_print_both.clicked.connect(self._print_both)
         root.addWidget(self._btn_print_sample)
         root.addWidget(self._btn_print_tissue)
+        root.addWidget(self._btn_print_both)
         root.addStretch()
         return panel
 
@@ -918,10 +922,11 @@ QPushButton#PrintBtn:disabled {{
         self._template_combo.blockSignals(blocked)
 
         size_key = lib.selected_size_key() or DEFAULT_SIZE_KEY[bucket]
-        chip = self._size_chips.get(size_key) or self._size_chips.get(DEFAULT_SIZE_KEY[bucket])
-        if chip is not None:
-            chip.setChecked(True)
-        is_custom = size_key == "custom"
+        sb = self._size_combo.blockSignals(True)
+        si = self._size_combo.findData(size_key)
+        self._size_combo.setCurrentIndex(si if si >= 0 else 0)
+        self._size_combo.blockSignals(sb)
+        is_custom = self._size_combo.currentData() == "custom"
         self._size_custom_row.setVisible(is_custom)
         if is_custom:
             d = self._step3.dims(bucket)
@@ -973,6 +978,8 @@ QPushButton#PrintBtn:disabled {{
         self._btn_tissue_bucket.setChecked(self._active_bucket == "tissue")
         self._btn_print_sample.setEnabled(sample_n > 0)
         self._btn_print_tissue.setEnabled(tissue_n > 0)
+        # 一键打两张只在两桶都有内容时才有意义(否则等同于单独打样品瓶)。
+        self._btn_print_both.setEnabled(sample_n > 0 and tissue_n > 0)
 
         job = sample_job if self._active_bucket == "sample" else tissue_job
         items = job.get("items") or []
@@ -1010,10 +1017,119 @@ QPushButton#PrintBtn:disabled {{
             painter.drawLine(cx, cy + sy * gap, cx, cy + sy * (gap + arm))
         painter.restore()
 
+    def _open_sheet_preview(self) -> None:
+        """双击底部缩略图 → 弹出大窗，高清预览整页排版。
+
+        24-up 整页铺一屏每格很小，文字看着像横杠。这里放进可滚动画布 + 缩放
+        （➕/➖/适应窗口 或 Ctrl+滚轮），放大后每格的真实标签内容清晰可读。
+        """
+        dlg = QDialog(self)
+        dlg.setWindowTitle("排版预览 — 整页（Ctrl+滚轮 或 ➕/➖ 缩放，拖动滚动条查看）")
+        dlg.setModal(True)
+        v = QVBoxLayout(dlg)
+        v.setContentsMargins(12, 12, 12, 12)
+        v.setSpacing(8)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(False)
+        scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        scroll.setStyleSheet("background:#e9edf0;")
+        canvas = QLabel()
+        canvas.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        canvas.setStyleSheet("background:#ffffff; border:1px solid #c8d0d8;")
+        scroll.setWidget(canvas)
+        v.addWidget(scroll, stretch=1)
+
+        bar = QHBoxLayout()
+        page_lbl = QLabel("")
+        page_lbl.setStyleSheet("color:#4b5563;")
+        btn_out = QPushButton("➖")
+        btn_in = QPushButton("➕")
+        btn_fit = QPushButton("适应窗口")
+        btn_prev = QPushButton("◀ 上一页")
+        btn_next = QPushButton("下一页 ▶")
+        btn_close = QPushButton("关闭")
+        bar.addWidget(page_lbl)
+        bar.addStretch()
+        for b in (btn_out, btn_in, btn_fit, btn_prev, btn_next, btn_close):
+            bar.addWidget(b)
+        v.addLayout(bar)
+
+        scr = self.screen() or QApplication.primaryScreen()
+        avail = scr.availableGeometry() if scr else None
+        fit_h = int((avail.height() * 0.80) if avail else 820)
+        fit_h = max(540, min(fit_h, 1080))
+        dpr = float(canvas.devicePixelRatioF() or 1.0)
+        state = {"zoom": 1.0}   # 1.0 = 适应窗口；最高 5×
+
+        def _redraw() -> None:
+            job_now = self._build_job(self._active_bucket)
+            ph = int(fit_h * state["zoom"])
+            pw = int(ph * 0.74) + 60        # A4 竖版纵横比 + 两侧留边
+            canvas.setPixmap(self._paint_sheet(job_now, pw, ph, dpr))
+            canvas.setFixedSize(pw, ph)
+            items = job_now.get("items") or []
+            paper = job_now.get("paperType") or "label"
+            if paper in ("a4", "a5"):
+                grid = calculate_grid(
+                    float(job_now["dims"]["w"]), float(job_now["dims"]["h"]),
+                    float(PAPER_SIZES[paper]["w"]), float(PAPER_SIZES[paper]["h"]),
+                    opts=self._grid_opts())
+                per = max(1, grid["cols"] * grid["rows"])
+                total = max(1, (len(items) + per - 1) // per) if items else 1
+            else:
+                total = 1
+            page_lbl.setText(
+                f"第 {self._sheet_page + 1} / {total} 页 · {int(state['zoom'] * 100)}%")
+            btn_prev.setEnabled(self._sheet_page > 0)
+            btn_next.setEnabled(self._sheet_page < total - 1)
+
+        def _set_zoom(z: float) -> None:
+            state["zoom"] = max(1.0, min(5.0, z))
+            _redraw()
+
+        def _step(delta: int) -> None:
+            self._sheet_page = max(0, self._sheet_page + delta)
+            self._refresh_print_studio()   # keep inline thumbnail in sync + clamp page
+            _redraw()
+
+        def _wheel(e) -> None:
+            if e.modifiers() & Qt.KeyboardModifier.ControlModifier:
+                _set_zoom(state["zoom"] * (1.25 if e.angleDelta().y() > 0 else 0.8))
+                e.accept()
+            else:
+                QScrollArea.wheelEvent(scroll, e)
+
+        scroll.wheelEvent = _wheel
+        btn_out.clicked.connect(lambda: _set_zoom(state["zoom"] * 0.8))
+        btn_in.clicked.connect(lambda: _set_zoom(state["zoom"] * 1.25))
+        btn_fit.clicked.connect(lambda: _set_zoom(1.0))
+        btn_prev.clicked.connect(lambda: _step(-1))
+        btn_next.clicked.connect(lambda: _step(1))
+        btn_close.clicked.connect(dlg.accept)
+
+        win_w = min(int(fit_h * 0.74) + 110, (avail.width() - 40) if avail else 900)
+        dlg.resize(win_w, fit_h + 96)
+        _redraw()
+        dlg.exec()
+
     def _render_sheet_preview(self, job: dict) -> None:
         w = max(280, self._sheet_preview.width() or 420)
         h = max(150, self._sheet_preview.height() or 190)
-        pm = QPixmap(w, h)
+        # HiDPI：按屏幕 devicePixelRatio 渲染，避免合成器放大导致发虚（大标签预览用
+        # dpr=2.0；排版预览此前用裸逻辑像素，在 Windows 缩放下模糊）。painter 仍以
+        # 逻辑像素作图，下方所有坐标无需改动。
+        dpr = self._sheet_preview.devicePixelRatioF() or 1.0
+        self._sheet_preview.setPixmap(self._paint_sheet(job, w, h, dpr))
+
+    def _paint_sheet(self, job: dict, w: int, h: int, dpr: float = 1.0) -> QPixmap:
+        """Render the A4/A5/小标签 排版 sheet into a pixmap (w×h logical px).
+
+        Shared by the inline thumbnail and the large 双击 preview dialog so both
+        show byte-identical layout — only the size differs.
+        """
+        pm = QPixmap(int(w * dpr), int(h * dpr))
+        pm.setDevicePixelRatio(dpr)
         pm.fill(QColor("#ffffff"))
         painter = QPainter(pm)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -1067,17 +1183,26 @@ QPushButton#PrintBtn:disabled {{
             # 回退到彩色占位方块。否则在格子里渲染真实标签（所见即所得排版）。
             wysiwyg = per_page <= 48
             note_suffix = "" if wysiwyg else " · 格子过多，省略内容预览"
+            # 预览铺满整页：每个格子都画标签，看清排版铺满情况。i < page_count 的格
+            # 子是本次真正会打印的；超出的格子用半透明"幽灵"——仅排版示意，不会打印
+            # （实际打印仍按 job items）。选中不足时循环重复，无选中时用示例数据。
             for i in range(per_page):
                 c, r = i % cols, i // cols
                 x = int(page_x + c * cell_w + 3)
                 y = int(page_y + r * cell_h + 3)
                 rw, rh = max(6, int(cell_w - 6)), max(6, int(cell_h - 6))
-                if wysiwyg and i < page_count:
-                    # 白底纸张 + 真实标签内容（fill_bg=False，沿用上面白底）。
-                    painter.fillRect(x, y, rw, rh, QColor("#ffffff"))
-                    item = items[base + i]
-                    data = item.get("data") if isinstance(item, dict) and "data" in item else item
+                real = i < page_count
+                if wysiwyg:
+                    if page_count > 0:
+                        src = items[base + (i % page_count)]
+                        data = (src.get("data")
+                                if isinstance(src, dict) and "data" in src else src)
+                    else:
+                        data = specimen_to_label_data(_DEMO_SPECIMEN)
+                    if job.get("_previewDemoWhenBlank") and not data:
+                        data = specimen_to_label_data(_DEMO_SPECIMEN)
                     painter.save()
+                    painter.fillRect(x, y, rw, rh, QColor("#ffffff"))
                     painter.setClipRect(x, y, rw, rh)
                     ppm = min(rw / w_mm, rh / h_mm)
                     render_label_onto(
@@ -1089,7 +1214,7 @@ QPushButton#PrintBtn:disabled {{
                     painter.setPen(QPen(QColor("#7b8794"), 1))
                 else:
                     painter.fillRect(x, y, rw, rh,
-                                     QColor("#e8f4f2") if i < page_count else QColor("#f8fafc"))
+                                     QColor("#e8f4f2") if real else QColor("#f8fafc"))
                 if is_circle:
                     painter.drawEllipse(x, y, rw, rh)
                 else:
@@ -1098,11 +1223,15 @@ QPushButton#PrintBtn:disabled {{
                     self._draw_crop_marks(painter, x, y, rw, rh)
             painter.setPen(QColor("#4b5563"))
             page_note = f" · 第 {self._sheet_page + 1}/{total_pages} 页" if total_pages > 1 else ""
+            ghost_note = (
+                f" · 重复内容为排版示意（实印 {page_count} 张）"
+                if wysiwyg and 0 < page_count < per_page else "")
             painter.drawText(
                 18, h - 12,
-                f"{paper['name']} · {cols}列 × {rows}行 · 本页最多 {per_page} 张{note_suffix}{page_note}")
+                f"{paper['name']} · {cols}列 × {rows}行 · 本页最多 {per_page} 张"
+                f"{note_suffix}{page_note}{ghost_note}")
         painter.end()
-        self._sheet_preview.setPixmap(pm)
+        return pm
 
     def _on_template_changed(self, index: int) -> None:
         key = self._template_combo.itemData(index)
@@ -1111,7 +1240,8 @@ QPushButton#PrintBtn:disabled {{
         self._libs[self._active_bucket].set_selected_key(key)
         self._on_config_changed()
 
-    def _on_size_chip(self, key: str) -> None:
+    def _on_size_combo(self, _idx: int) -> None:
+        key = self._size_combo.currentData()
         if not key:
             return
         self._step3._on_size(self._active_bucket, key)
@@ -1247,34 +1377,7 @@ QPushButton#PrintBtn:disabled {{
                 pass
 
     def _load_specimens(self) -> None:
-        specimens: list[dict] = []
-        db = self.ctx.get_db()
-        if db is not None:
-            try:
-                rows = db.execute("SELECT * FROM specimens ORDER BY id").fetchall()
-                for row in rows:
-                    d = dict(row)
-                    specimens.append({
-                        "province":       d.get("province"),
-                        "site":           d.get("site"),
-                        "station":        d.get("station"),
-                        "id":             d.get("id"),
-                        "storage":        d.get("storage"),
-                        "collectionDate": d.get("collection_date"),
-                        "photoDate":      d.get("photo_date"),
-                        "species":        d.get("scientific_name_cn") or d.get("scientific_name"),
-                        "latin":          d.get("scientific_name") or "",
-                        "collector":      d.get("collector"),
-                        "photographer":   d.get("photographer"),
-                        "family":         d.get("family"),
-                        "region":         d.get("geo_area") or "",
-                        "lon":            str(d.get("lon") or ""),
-                        "lat":            str(d.get("lat") or ""),
-                        "geoArea":        d.get("geo_area") or "",
-                        "photoNotes":     d.get("photo_notes") or "",
-                    })
-            except Exception:
-                pass
+        specimens = load_specimen_dicts(self.ctx.get_db())
         self._specimens = specimens
         self._label_edits = {}  # reset per-specimen overrides on project reload
         self._hidden_fields = set()  # reset field-visibility toggles on reload
@@ -1401,6 +1504,17 @@ QPushButton#PrintBtn:disabled {{
             # ("编号" is supported, not required)
             fill_blank=True,
         )
+        items = job.get("items") or []
+        if (
+            bucket == "sample"
+            and paper_type in ("a4", "a5")
+            and not indices
+            and len(items) == 1
+            and not (items[0].get("data") if isinstance(items[0], dict) else items[0])
+        ):
+            # Preview-only: show demo content in the sheet layout when the job is
+            # a standalone blank label. The printer still receives data == {}.
+            job["_previewDemoWhenBlank"] = True
         # sheet-level 空白手写标签：A4/A5 排版时在末尾追加 N 张空白标签（手写）。
         # 预览与打印同读 job["items"]，故只需注入一次。
         if paper_type in ("a4", "a5") and self._blank_cells > 0:
@@ -1409,36 +1523,37 @@ QPushButton#PrintBtn:disabled {{
             job["labels"] = list(job.get("labels") or []) + [{} for _ in range(self._blank_cells)]
         return job
 
-    # ── Printing (QPrinter paint path — unchanged behavior) ─────────────────
+    # ── Printing (delegates to the shared label_print adapter) ──────────────
 
     def _print(self, bucket: str) -> None:
-        """Print the given bucket using QPrinter → QPrintDialog."""
+        """Print a single bucket via QPrintDialog → shared paint adapter."""
         job = self._build_job(bucket)
-        items = job.get("items") or []
-        if not items:
+        if not (job.get("items") or []):
             QMessageBox.information(
                 self, "打印",
                 "本桶没有可打印标签。\n"
                 + ("（RNAlater 组织管标签仅对 R 前缀标本生成）" if bucket == "tissue" else "")
             )
             return
+        self._run_print_dialog([job])
 
-        dims = job.get("dims") or {}
-        w_mm = float(dims.get("w", 60))
-        h_mm = float(dims.get("h", 40))
+    def _print_both(self) -> None:
+        """一键同时打印「样品瓶 + RNAlater 组织管」于单个打印对话框。"""
+        jobs = [j for j in (self._build_job("sample"), self._build_job("tissue"))
+                if (j.get("items") or [])]
+        if not jobs:
+            QMessageBox.information(self, "打印", "没有可打印标签。")
+            return
+        self._run_print_dialog(jobs)
 
-        paper_type = job.get("paperType") or "label"
-        printer = QPrinter(QPrinter.PrinterMode.HighResolution)
-        if paper_type in ("a4", "a5"):
-            std = QPageSize.PageSizeId.A4 if paper_type == "a4" else QPageSize.PageSizeId.A5
-            printer.setPageSize(QPageSize(std))
-            printer.setPageMargins(QMarginsF(0, 0, 0, 0), QPageSize.Unit.Millimeter)
-        else:
-            page_size = QPageSize(QSizeF(w_mm, h_mm), QPageSize.Unit.Millimeter, "Custom")
-            printer.setPageSize(page_size)
-            printer.setPageMargins(QMarginsF(2, 2, 2, 2), QPageSize.Unit.Millimeter)
+    def _run_print_dialog(self, jobs: list[dict]) -> None:
+        """Open ONE QPrintDialog and paint all *jobs* onto the chosen printer.
+
+        Paper is configured from the first job; subsequent jobs are appended
+        after a page break (see :func:`label_print.paint_jobs`).
+        """
+        printer = build_printer(jobs[0])
         printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
-
         with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
             tmp_path = f.name
         printer.setOutputFileName(tmp_path)
@@ -1448,79 +1563,9 @@ QPushButton#PrintBtn:disabled {{
         if dialog.exec() != QPrintDialog.DialogCode.Accepted:
             return
 
-        self._paint_labels(printer, job)
-
-    def _paint_labels(self, printer: QPrinter, job: dict) -> None:
-        """Paint all label items. A4/A5 → grid; label paper → 1 per page."""
-        items = job.get("items") or []
-        dims = job.get("dims") or {}
-        tmpl = job.get("template") or {}
-        paper_type = job.get("paperType") or "label"
-        w_mm = float(dims.get("w", 60))
-        h_mm = float(dims.get("h", 40))
-
-        painter = QPainter()
-        if not painter.begin(printer):
-            return
-
-        dpi = printer.resolution()
-        mm_to_dot = dpi / 25.4
-
-        if paper_type in ("a4", "a5"):
-            paper = PAPER_SIZES.get(paper_type, {"w": 210, "h": 297})
-            grid = calculate_grid(w_mm, h_mm, float(paper["w"]), float(paper["h"]),
-                                  opts=self._grid_opts())
-            margin_mm = grid.get("margin", 8.0)
-            gap_mm = grid.get("gap", 2.0)
-            cols = grid["cols"]
-            per_page = grid["perPage"]
-            cut_marks = bool(self._imposition.get("cutMarks"))
-            page_no = 0
-            for slot_idx, item in enumerate(items):
-                data = item.get("data") if isinstance(item, dict) else item
-                if not data:
-                    continue
-                page = slot_idx // per_page
-                if page > page_no:
-                    printer.newPage()
-                    page_no = page
-                slot = slot_idx % per_page
-                col = slot % cols
-                row = slot // cols
-                x_off = int((margin_mm + col * (w_mm + gap_mm)) * mm_to_dot)
-                y_off = int((margin_mm + row * (h_mm + gap_mm)) * mm_to_dot)
-                self._paint_one_label(painter, tmpl, dims, data, x_off, y_off, dpi, mm_to_dot)
-                if cut_marks:
-                    self._draw_crop_marks(
-                        painter, x_off, y_off,
-                        int(w_mm * mm_to_dot), int(h_mm * mm_to_dot),
-                        arm=int(2 * mm_to_dot), gap=int(0.5 * mm_to_dot))
-        else:
-            for page_idx, item in enumerate(items):
-                if page_idx > 0:
-                    printer.newPage()
-                data = item.get("data") if isinstance(item, dict) else item
-                if not data:
-                    continue
-                self._paint_one_label(painter, tmpl, dims, data, 0, 0, dpi, mm_to_dot)
-
-        painter.end()
-
-    def _paint_one_label(
-        self,
-        painter: QPainter,
-        tmpl: dict,
-        dims: dict,
-        data: dict,
-        x_off: int,
-        y_off: int,
-        dpi: int,
-        mm_to_dot: float,
-    ) -> None:
-        """Paint one label at device offset (x_off, y_off) via the unified
-        renderer — guaranteeing the printout matches the on-screen preview."""
-        render_label_onto(
-            painter, tmpl, dims, data,
-            px_per_mm=mm_to_dot, x_off=float(x_off), y_off=float(y_off),
-            placeholder=False, fill_bg=True,
+        paint_jobs(
+            printer, jobs,
+            grid_opts=self._grid_opts(),
+            cut_marks=bool(self._imposition.get("cutMarks")),
+            draw_crop_marks=self._draw_crop_marks,
         )

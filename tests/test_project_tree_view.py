@@ -59,9 +59,9 @@ def test_builds_tree_from_root(qtbot, tmp_path, ctx):
     assert "雷州半岛多样性" in top.text(0)
     child_texts = [top.child(i).text(0) for i in range(top.childCount())]
     assert any("断面a" in t for t in child_texts)
-    # adopted workspace is tagged
-    assert any("断面a" in t and "已有数据" in t for t in child_texts)
-    assert any("断面b" in t and "已有数据" not in t for t in child_texts)
+    # workspace nodes (have project.db) are tagged 工作区; plain folders/regions are not
+    assert any("断面a" in t and "工作区" in t for t in child_texts)
+    assert any("断面b" in t and "工作区" not in t for t in child_texts)
 
 
 def test_no_root_shows_placeholder(qtbot, ctx):
@@ -72,11 +72,19 @@ def test_no_root_shows_placeholder(qtbot, ctx):
     assert "未选根目录" in view._root_lbl.text()
 
 
-def test_enter_node_sets_ctx_and_root(qtbot, tmp_path, ctx):
+def test_enter_node_sets_ctx_and_root(qtbot, tmp_path, ctx, monkeypatch):
     root = tmp_path / "proj"
     leaf = root / "断面a"
     leaf.mkdir(parents=True)
     ctx.settings.project_tree_root = str(root)
+
+    # Isolate the recent-list write to a tmp file (don't touch the repo's
+    # tracked data/user_projects.json).
+    recent_json = tmp_path / "user_projects.json"
+    monkeypatch.setattr(
+        "app.services.project_service.default_user_projects_json_path",
+        lambda: str(recent_json),
+    )
 
     view = ProjectTreeView(ctx)
     qtbot.addWidget(view)
@@ -97,3 +105,8 @@ def test_enter_node_sets_ctx_and_root(qtbot, tmp_path, ctx):
     # entering must lazily create the workspace layout
     assert (leaf / "_data").is_dir()
     assert (leaf / "incoming-jpg").is_dir()
+    # entering also records the node into the recent-workspaces list so it
+    # surfaces in 最近工作区 (the two views share one source of truth)
+    import json
+    recorded = json.loads(recent_json.read_text(encoding="utf-8"))["projects"]
+    assert any(p.get("directory") == str(leaf.resolve()) for p in recorded)

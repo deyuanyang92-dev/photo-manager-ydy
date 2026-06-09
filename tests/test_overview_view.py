@@ -123,7 +123,7 @@ class TestConstruction:
 
     def test_nav_title(self):
         from app.views.overview_view import OverviewView
-        assert OverviewView.nav_title == "项目总览"
+        assert OverviewView.nav_title == "最近工作区"
 
     def test_nav_icon(self):
         from app.views.overview_view import OverviewView

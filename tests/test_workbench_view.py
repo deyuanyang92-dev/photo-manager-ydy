@@ -276,17 +276,15 @@ class TestNamingPanel:
         # Must include the sequence number
         assert "-3-" in rid
 
-    def test_rna_warning_shown_for_r_prefix(self):
-        """R-prefix storage: warning label must NOT be explicitly hidden."""
+    def test_rna_warning_tooltip_for_r_prefix(self):
+        """R-prefix storage: RNA note is tooltip-only, not a permanent banner."""
         from app.widgets.naming_panel import NamingPanel
         ctx = _make_ctx()
         w = NamingPanel(ctx)
         w._storage.setText("RD75E")
         w._update_preview()
-        # In offscreen mode the widget is not shown(), so isVisible() is always
-        # False.  We verify instead that the label is not explicitly hidden
-        # (i.e. show() was called — the label's own hide/show state).
-        assert not w._rna_warning.isHidden()
+        assert w._rna_warning.isHidden()
+        assert "RNAlater" in w._storage_combo.toolTip()
 
     def test_rna_warning_hidden_for_non_r_prefix(self):
         from app.widgets.naming_panel import NamingPanel
@@ -461,7 +459,11 @@ class TestMetadataPanel:
         )
         w.load_specimen(sp)
         assert w._collector.text() == "张三"
-        assert w._scientific_name.text() == "Conus textile"
+        # 分类字段已迁到独立的「分类标签」卡片（TaxonCardPanel）；元数据卡不再持有。
+        from app.widgets.taxon_card_panel import TaxonCardPanel
+        tc = TaxonCardPanel(ctx)
+        tc.load_specimen(sp)
+        assert tc.field_values()["scientific_name"] == "Conus textile"
 
 
 # ── MonitorPanel ──────────────────────────────────────────────────────────────
@@ -543,80 +545,6 @@ class TestResultsColumn:
         assert isinstance(w._results, ResultsColumn)
 
 
-# ── MetaScoreRing ─────────────────────────────────────────────────────────────
-
-class TestMetaScoreRing:
-    def test_ring_constructs(self):
-        from app.widgets.metadata_panel import MetaScoreRing
-        ring = MetaScoreRing()
-        assert ring.score() == 0
-
-    def test_set_score_clamps(self):
-        from app.widgets.metadata_panel import MetaScoreRing
-        ring = MetaScoreRing()
-        ring.set_score(150)
-        assert ring.score() == 100
-        ring.set_score(-5)
-        assert ring.score() == 0
-
-    def test_set_score_normal(self):
-        from app.widgets.metadata_panel import MetaScoreRing
-        ring = MetaScoreRing()
-        ring.set_score(75)
-        assert ring.score() == 75
-
-    def test_metadata_panel_has_score_ring(self):
-        """MetadataPanel must have a _score_ring attribute."""
-        from app.widgets.metadata_panel import MetadataPanel, MetaScoreRing
-        ctx = _make_ctx()
-        w = MetadataPanel(ctx)
-        assert hasattr(w, "_score_ring")
-        assert isinstance(w._score_ring, MetaScoreRing)
-
-    def test_load_specimen_updates_ring(self):
-        """Loading a fully-complete specimen should set score > 0."""
-        from app.widgets.metadata_panel import MetadataPanel
-        from app.models.specimen import Specimen
-        ctx = _make_ctx()
-        w = MetadataPanel(ctx)
-        sp = Specimen(
-            uid="FJ-XM-B2-DLC001-T95E-20260601",
-            scientific_name="Conus textile",
-            family="Conidae",
-            collector="张三",
-            lon=120.123,
-            lat=25.456,
-        )
-        w.load_specimen(sp)
-        assert w._score_ring.score() == 100
-
-    def test_load_specimen_partial_score(self):
-        """Specimen with only 2 of 5 fields filled → 40 %."""
-        from app.widgets.metadata_panel import MetadataPanel
-        from app.models.specimen import Specimen
-        ctx = _make_ctx()
-        w = MetadataPanel(ctx)
-        sp = Specimen(
-            uid="FJ-XM-B2-DLC001-T95E-20260601",
-            scientific_name="Conus textile",
-            collector="张三",
-        )
-        w.load_specimen(sp)
-        assert w._score_ring.score() == 40
-
-    def test_clear_resets_ring(self):
-        from app.widgets.metadata_panel import MetadataPanel
-        from app.models.specimen import Specimen
-        ctx = _make_ctx()
-        w = MetadataPanel(ctx)
-        sp = Specimen(uid="FJ-XM-B2-DLC001-T95E-20260601", scientific_name="X",
-                      family="Y", collector="Z", lon=1.0, lat=2.0)
-        w.load_specimen(sp)
-        assert w._score_ring.score() == 100
-        w.clear()
-        assert w._score_ring.score() == 0
-
-
 class TestLabelsUidSelection:
     def test_select_uid_selects_only_matching_specimen(self, tmp_path):
         from app.views.labels_view import LabelsView
@@ -643,6 +571,74 @@ class TestLabelsUidSelection:
         selected = view._step1.selected_indices()
         assert len(selected) == 1
         assert view._specimens[selected[0]]["id"] == "BLC001"
+        db.close()
+
+
+class TestWorkbenchQuickPrint:
+    """一键直接打印: 用持久化模板直出默认打印机, 跳过预览/对话框;
+    无默认打印机 / 无可打印内容时降级回标签工作室。"""
+
+    def _wb(self, tmp_path, storage):
+        from app.views.workbench_view import WorkbenchView
+        project_dir = str(tmp_path)
+        db = _make_db(str(tmp_path / "project.db"))
+        uid = f"FJ-XM-B2-DLC001-{storage}-20260601"
+        db.execute(
+            """INSERT INTO specimens
+               (uid, id, province, site, station, storage,
+                collection_date, photo_date, owner_project_dir)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
+            (uid, "DLC001", "FJ", "XM", "B2", storage,
+             "20260601", "20260601", project_dir),
+        )
+        db.commit()
+        ctx = _make_ctx(project_dir=project_dir, db=db)
+        return WorkbenchView(ctx), ctx, uid, db
+
+    def test_quick_print_rna_prints_two_jobs(self, tmp_path, monkeypatch):
+        from PyQt6.QtPrintSupport import QPrinterInfo
+        import app.utils.label_print as lp
+        captured = {}
+
+        def _fake_paint(printer, jobs, **kw):
+            captured["buckets"] = [j["bucket"] for j in jobs]
+            return True
+
+        monkeypatch.setattr(QPrinterInfo, "defaultPrinterName",
+                            staticmethod(lambda: "FakePrinter"))
+        monkeypatch.setattr(lp, "paint_jobs", _fake_paint)
+        w, ctx, uid, db = self._wb(tmp_path, "RD75E")   # R-prefix → tissue too
+        assert w._quick_print_labels(uid) is True
+        assert captured["buckets"] == ["sample", "tissue"]
+        db.close()
+
+    def test_quick_print_no_default_printer_returns_false(self, tmp_path, monkeypatch):
+        from PyQt6.QtPrintSupport import QPrinterInfo
+        monkeypatch.setattr(QPrinterInfo, "defaultPrinterName",
+                            staticmethod(lambda: ""))
+        w, ctx, uid, db = self._wb(tmp_path, "D95E")
+        assert w._quick_print_labels(uid) is False
+        db.close()
+
+    def test_on_print_labels_falls_back_to_studio(self, tmp_path, monkeypatch):
+        from PyQt6.QtPrintSupport import QPrinterInfo
+        monkeypatch.setattr(QPrinterInfo, "defaultPrinterName",
+                            staticmethod(lambda: ""))   # no printer → fallback
+        w, ctx, uid, db = self._wb(tmp_path, "D95E")
+        w._on_print_labels(uid)
+        assert ctx.pending_label_uid == uid   # studio handoff set
+        db.close()
+
+    def test_on_print_labels_quick_path_no_fallback(self, tmp_path, monkeypatch):
+        from PyQt6.QtPrintSupport import QPrinterInfo
+        import app.utils.label_print as lp
+        monkeypatch.setattr(QPrinterInfo, "defaultPrinterName",
+                            staticmethod(lambda: "FakePrinter"))
+        monkeypatch.setattr(lp, "paint_jobs", lambda printer, jobs, **kw: True)
+        w, ctx, uid, db = self._wb(tmp_path, "D95E")
+        w._on_print_labels(uid)
+        # quick print succeeded → no studio handoff.
+        assert ctx.pending_label_uid != uid
         db.close()
 
 
@@ -1234,27 +1230,27 @@ class TestNamingPanelDupCheck:
 # ── metaReverseGeocode (MetadataPanel) ───────────────────────────────────────
 
 class TestMetadataPanelGeocode:
-    """Tests for _on_reverse_geocode and _NominatimWorker in MetadataPanel."""
+    """Tests for the auto reverse-geocode + map-pick UX in MetadataPanel."""
 
-    def test_geocode_button_exists(self):
+    def test_map_pick_button_exists(self):
         from app.widgets.metadata_panel import MetadataPanel
         ctx = _make_ctx()
         w = MetadataPanel(ctx)
-        assert hasattr(w, "_geocode_btn")
-        assert w._geocode_btn is not None
+        assert hasattr(w, "_map_btn")
+        assert w._map_btn is not None
 
-    def test_geocode_requires_valid_float_coords(self):
-        """_on_reverse_geocode requires float coords - internal coord check."""
+    def test_auto_reverse_invalid_coords_inline_status(self):
+        """Invalid lon/lat sets an inline status, never opens a dialog."""
         from app.widgets.metadata_panel import MetadataPanel
+        import unittest.mock as _mock
         ctx = _make_ctx()
         w = MetadataPanel(ctx)
-        # With valid coords, no thread should have started yet (button is still enabled)
-        w._lon.setText("120.1")
+        w._lon.setText("abc")
         w._lat.setText("25.6")
-        # We don't call _on_reverse_geocode here (it would try to open dialogs)
-        # Just verify the button exists and is connected
-        assert w._geocode_btn is not None
-        assert w._geocode_btn.isEnabled()
+        with _mock.patch("app.utils.ui.warn") as warn_mock:
+            w._do_auto_reverse()
+            warn_mock.assert_not_called()
+        assert w._geo_status.text()  # inline status set
 
     def test_nominatim_to_zh_parses_display(self):
         """_nominatim_to_zh must extract place name from Nominatim response."""
@@ -1481,4 +1477,192 @@ class TestCollabPostPhotoIndex:
         w._current_uid = uid
         w._on_helicon_finished(uid)
         w._on_organize_finished(uid)
+        db.close()
+
+
+# ── Right-rail web-faithful structure (1:1 还原右侧栏) ─────────────────────────
+
+class TestRightRailWebFaithful:
+    """卡1 命名 / 卡2 分类 / 卡3 元数据 field ownership mirrors the web right rail.
+
+    Oracle: renderNamingCard (app.js:9147), renderTaxonNotesCard (9933),
+    renderMetaCard (10203).  日期/保存方式/拍照备注→卡1; 备注→卡2; 卡3 扁平且无
+    保存按钮(编辑即存).
+    """
+
+    def test_naming_card_has_photo_notes_and_no_extras(self):
+        from app.widgets.naming_panel import NamingPanel
+        n = NamingPanel(_make_ctx())
+        # 拍照备注 textarea added (was missing)
+        assert hasattr(n, "_photo_notes")
+        # 保存方式说明灰字 row present
+        assert hasattr(n, "_pres_detail")
+        # storage free-text proxy is hidden (no 自定义编码 field in web)
+        assert n._storage.isHidden()
+        # 成果编号(含序号) preview is not shown in the web naming card
+        assert n._result_preview.isHidden()
+
+    def test_metadata_card_stripped_to_web_fields(self):
+        from app.widgets.metadata_panel import MetadataPanel
+        m = MetadataPanel(_make_ctx())
+        # dates / storage / notes / photo_notes / score ring moved out of 卡3
+        for gone in ("_collection_date", "_photo_date", "_storage",
+                     "_notes", "_photo_notes", "_save_btn", "_score_ring"):
+            assert not hasattr(m, gone), f"metadata panel must not own {gone}"
+        # keeps its core web fields
+        for kept in ("_collector", "_photographer", "_identifier",
+                     "_lon", "_lat", "_geo_area"):
+            assert hasattr(m, kept)
+
+    def test_metadata_autosave_emits_change_no_save_button(self, qtbot):
+        from app.widgets.metadata_panel import MetadataPanel
+        m = MetadataPanel(_make_ctx())
+        qtbot.addWidget(m)
+        m._uid = "FJ-XM-B2-DLC001-T95E-20260601"
+        seen = []
+        m.metadata_changed.connect(lambda u, f, v: seen.append((f, v)))
+        m._collector.setText("X")  # programmatic
+        m._on_field_edited("collector", "X")
+        assert ("collector", "X") in seen
+
+    def test_taxon_card_owns_notes(self):
+        from app.widgets.taxon_card_panel import TaxonCardPanel
+        t = TaxonCardPanel(_make_ctx())
+        assert hasattr(t, "_notes")
+        t._notes.setPlainText("野外备注")
+        assert t.field_values().get("notes") == "野外备注"
+
+    def test_rail_autosave_persists_across_three_cards(self, tmp_path):
+        from app.views.workbench_view import WorkbenchView
+        project_dir = str(tmp_path)
+        db = _make_db(str(tmp_path / "project.db"))
+        uid = "FJ-XM-B2-DLC001-T95E-20260601"
+        db.execute(
+            "INSERT INTO specimens (uid, id, owner_project_dir) VALUES (?,?,?)",
+            (uid, "DLC001", project_dir),
+        )
+        db.commit()
+        ctx = _make_ctx(project_dir=project_dir, db=db)
+        w = WorkbenchView(ctx)
+        w._load_specimen(uid)
+        w._naming._photo_notes.setPlainText("PN")
+        w._naming._collection_date.setText("20260101")
+        w._metadata._collector.setText("COLL")
+        w._taxon_card._notes.setPlainText("NOTE")
+        w._taxon_card._cn["family_cn"].setText("芋螺科")
+        w._flush_rail_save()
+        row = db.execute(
+            "SELECT collector, collection_date, photo_notes, notes, family_cn "
+            "FROM specimens WHERE uid=?", (uid,)
+        ).fetchone()
+        assert row["collector"] == "COLL"
+        assert row["collection_date"] == "20260101"
+        assert row["photo_notes"] == "PN"
+        assert row["notes"] == "NOTE"
+        assert row["family_cn"] == "芋螺科"
+        db.close()
+
+
+
+# ── 补处理 (supplementary archival) integration ───────────────────────────────
+
+class TestSupplementaryArchival:
+    """End-to-end glue for 补处理: validate → archive → move to results/.
+
+    Core requirement: works with NO active specimen (no tasks row).
+    ui.warn / ui.info are patched away — they pop modal boxes that would hang
+    the offscreen test runner.
+    """
+
+    def _project_with_specimen(self, tmp_path):
+        proj = str(tmp_path / "proj")
+        os.makedirs(os.path.join(proj, "incoming-jpg"), exist_ok=True)
+        db = _make_db(os.path.join(proj, "project.db"))
+        # Specimen exists; NO tasks row → nothing activated.
+        db.execute("INSERT INTO specimens (uid) VALUES (?)",
+                   ("FJ-XM-B2-DLC001-T95E-20260601",))
+        db.commit()
+        return proj, db
+
+    def test_invalid_selection_no_worker(self, qt_app, tmp_path):
+        from unittest.mock import patch
+        from app.views.workbench_view import WorkbenchView
+        proj, db = self._project_with_specimen(tmp_path)
+        ctx = _make_ctx(proj, db)
+        ctx.settings.delete_jpg_after_archive = False
+        w = WorkbenchView(ctx)
+        jpg = os.path.join(proj, "incoming-jpg", "a.jpg")
+        Path(jpg).write_bytes(b"x")
+        # A lone JPG (no TIFF) is invalid → SuppGroupError → no worker spawned.
+        with patch("app.utils.ui.warn"), patch("app.utils.ui.info"):
+            w._run_supplementary([jpg])
+        assert getattr(w, "_supp_worker", None) is None
+        db.close()
+
+    def test_no_active_specimen_spawns_worker(self, qt_app, tmp_path):
+        """Valid JPG+TIFF, specimen exists, NOTHING activated → worker starts."""
+        from unittest.mock import patch, MagicMock
+        from app.views.workbench_view import WorkbenchView
+        proj, db = self._project_with_specimen(tmp_path)
+        ctx = _make_ctx(proj, db)
+        ctx.settings.delete_jpg_after_archive = False
+        w = WorkbenchView(ctx)
+        incoming = os.path.join(proj, "incoming-jpg")
+        jpg = os.path.join(incoming, "a.jpg")
+        tiff = os.path.join(incoming, "FJ-XM-B2-DLC001-1-T95E-20260601.tif")
+        Path(jpg).write_bytes(b"x")
+        Path(tiff).write_bytes(b"x")
+        assert db.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
+        # Stub the worker so nothing actually compresses; assert it was created.
+        with patch("app.workers.supp_compression_worker.SuppCompressionWorker") as MW, \
+                patch("app.utils.ui.warn"), patch("app.utils.ui.info"):
+            inst = MagicMock()
+            MW.return_value = inst
+            w._run_supplementary([jpg, tiff])
+        inst.start.assert_called_once()
+        assert w._supp_pending is not None
+        assert w._supp_pending.uid == "FJ-XM-B2-DLC001-T95E-20260601"
+        db.close()
+
+    def test_finished_moves_tiff_and_zip_to_results(self, qt_app, tmp_path):
+        """_on_supp_finished moves both the TIFF and ZIP into results/ (decision①)."""
+        from unittest.mock import patch, MagicMock
+        from app.views.workbench_view import WorkbenchView
+        from app.services.supplementary_service import SuppGroup
+
+        proj, db = self._project_with_specimen(tmp_path)
+        ctx = _make_ctx(proj, db)
+        w = WorkbenchView(ctx)
+
+        incoming = os.path.join(proj, "incoming-jpg")
+        tiff = os.path.join(incoming, "FJ-XM-B2-DLC001-1-T95E-20260601.tif")
+        zip_ = os.path.join(incoming, "FJ-XM-B2-DLC001-1-T95E-20260601.zip")
+        Path(tiff).write_bytes(b"tiffdata")
+        Path(zip_).write_bytes(b"zipdata-zipdata-zipdata-zipdata")
+
+        w._supp_pending = SuppGroup(
+            jpg_paths=[os.path.join(incoming, "a.jpg")],
+            tiff_path=tiff,
+            uid="FJ-XM-B2-DLC001-T95E-20260601",
+            specimen={"uid": "FJ-XM-B2-DLC001-T95E-20260601"},
+        )
+
+        result = MagicMock()
+        result.ok = True
+        result.zip_path = zip_
+        result.saved_percent = 42
+        result.delete_jpg = False
+        result.requested_delete_jpg = False
+        result.deletion_skipped_reason = ""
+
+        with patch("app.utils.ui.info"), patch("app.utils.ui.warn"):
+            w._on_supp_finished(result)
+
+        results_dir = os.path.join(proj, "results")
+        assert os.path.isfile(os.path.join(results_dir, os.path.basename(tiff))), \
+            "TIFF must be moved into results/"
+        assert os.path.isfile(os.path.join(results_dir, os.path.basename(zip_))), \
+            "ZIP must be moved into results/"
+        # Source TIFF moved (data preserved at dest, never destroyed).
+        assert not os.path.isfile(tiff)
         db.close()

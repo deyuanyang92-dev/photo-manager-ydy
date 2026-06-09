@@ -313,6 +313,46 @@ class _DraftGroupRow(QFrame):
 
 # ── Grouping panel ────────────────────────────────────────────────────────────
 
+class _SuppDropButton(QPushButton):
+    """Drop-aware button for 补处理 (拖入所选 JPG + TIFF 补处理).
+
+    Click → caller consumes the monitor selection. OS drag-drop of files →
+    ``files_dropped`` carries the dropped local paths directly. Always enabled
+    once a project is open — independent of the active-specimen gate.
+    """
+
+    files_dropped = pyqtSignal(list)  # list[str] of local file paths
+
+    def __init__(self, text: str, parent: Optional[QWidget] = None) -> None:
+        super().__init__(text, parent)
+        self.setAcceptDrops(True)
+
+    def dragEnterEvent(self, event) -> None:  # noqa: N802 (Qt override)
+        md = event.mimeData()
+        if md is not None and md.hasUrls():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event) -> None:  # noqa: N802 (Qt override)
+        md = event.mimeData()
+        if md is not None and md.hasUrls():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event) -> None:  # noqa: N802 (Qt override)
+        md = event.mimeData()
+        if md is None or not md.hasUrls():
+            event.ignore()
+            return
+        paths = [u.toLocalFile() for u in md.urls() if u.isLocalFile()]
+        paths = [p for p in paths if p]
+        event.acceptProposedAction()
+        if paths:
+            self.files_dropped.emit(paths)
+
+
 class GroupingPanel(QWidget):
     """Full grouping editor: draft groups above, composed rows below.
 
@@ -336,6 +376,9 @@ class GroupingPanel(QWidget):
     free_compose_requested = pyqtSignal()
     retroactive_requested = pyqtSignal()
     import_tiff_requested = pyqtSignal(str, int)  # uid, group_index  #cursor groupingImportTiff
+    # 补处理 (supplementary archival) — independent of the active-specimen gate.
+    supp_process_requested = pyqtSignal()       # click → consume monitor selection
+    supp_files_dropped = pyqtSignal(list)       # OS drop → list[str] of local paths
 
     def __init__(self, ctx: "AppContext", parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -360,7 +403,9 @@ class GroupingPanel(QWidget):
         root.setSpacing(12)
 
         # ── capture-main-actions row (web parity: ⚡合成/合成+整理/🗜整理/⋯更多) ──
-        main_actions = QHBoxLayout()
+        # Hidden when no specimen active (mirrors app.js:7374-7378 early return)
+        self._toolbar_widget = QWidget()
+        main_actions = QHBoxLayout(self._toolbar_widget)
         main_actions.setContentsMargins(0, 0, 0, 0)
         main_actions.setSpacing(8)
         compose_btn = QPushButton("⚡ 合成")
@@ -401,7 +446,8 @@ class GroupingPanel(QWidget):
         self._target_label.setObjectName("Mono")
         self._target_label.setToolTip("当前目标标本编号")
         main_actions.addWidget(self._target_label)
-        root.addLayout(main_actions)
+        root.addWidget(self._toolbar_widget)
+        self._toolbar_widget.hide()
 
         # ── ▸ 分组工具 collapsible header ──
         group_toggle_row = QHBoxLayout()
@@ -414,21 +460,30 @@ class GroupingPanel(QWidget):
         self._group_toggle_btn.setChecked(True)
         self._group_toggle_btn.clicked.connect(self._on_group_toggle)
         group_toggle_row.addWidget(self._group_toggle_btn)
-        hint_drag = QLabel("拖入所选 JPG + TIFF 补处理")
-        hint_drag.setObjectName("MutedSmall")
-        group_toggle_row.addWidget(hint_drag)
+        self._supp_btn = _SuppDropButton("拖入所选 JPG + TIFF 补处理")
+        self._supp_btn.setObjectName("Ghost")
+        self._supp_btn.setFixedHeight(26)
+        self._supp_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._supp_btn.setToolTip(
+            "在监控区勾选 JPG 原片 + TIFF 成片后点击，或直接把文件拖到此处。\n"
+            "无需激活标本——标本身份从 TIFF 文件名识别。"
+        )
+        self._supp_btn.clicked.connect(self.supp_process_requested.emit)
+        self._supp_btn.files_dropped.connect(self.supp_files_dropped.emit)
+        group_toggle_row.addWidget(self._supp_btn)
         group_toggle_row.addStretch()
 
-        self._uid_label = QLabel("无激活标本")
+        self._uid_label = QLabel("未选择标本")
         self._uid_label.setObjectName("Mono")
         group_toggle_row.addWidget(self._uid_label)
 
-        add_btn = QPushButton("新组")
-        add_btn.setObjectName("Outline")
-        add_btn.setFixedHeight(28)
-        icons.set_button_icon(add_btn, "mdi6.plus", color=icons.TONE_ACCENT, size=14)
-        add_btn.clicked.connect(self._add_group)
-        group_toggle_row.addWidget(add_btn)
+        self._add_btn = QPushButton("新组")
+        self._add_btn.setObjectName("Outline")
+        self._add_btn.setFixedHeight(28)
+        icons.set_button_icon(self._add_btn, "mdi6.plus", color=icons.TONE_ACCENT, size=14)
+        self._add_btn.clicked.connect(self._add_group)
+        self._add_btn.hide()
+        group_toggle_row.addWidget(self._add_btn)
         root.addLayout(group_toggle_row)
 
         line = QFrame()
@@ -454,7 +509,7 @@ class GroupingPanel(QWidget):
         body_lay.addWidget(scroll, stretch=1)
 
         # Empty state
-        self._empty_lbl = QLabel("激活一个标本后查看或编辑分组")
+        self._empty_lbl = QLabel("在左侧选择一个标本后查看或编辑分组（无需激活，激活仅为建议）")
         self._empty_lbl.setObjectName("Muted")
         self._empty_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         body_lay.addWidget(self._empty_lbl)
@@ -470,13 +525,17 @@ class GroupingPanel(QWidget):
         short = uid[:30] + ("…" if len(uid) > 30 else "")
         self._uid_label.setText(short)
         self._target_label.setText(short)
+        self._toolbar_widget.show()
+        self._add_btn.show()
         self._rebuild()
 
     def clear(self) -> None:
         self._uid = None
         self._grouping = None
-        self._uid_label.setText("— 无激活标本 —")
+        self._uid_label.setText("— 未选择标本 —")
         self._target_label.setText("—")
+        self._toolbar_widget.hide()
+        self._add_btn.hide()
         self._clear_content()
         self._empty_lbl.show()
 

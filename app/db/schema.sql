@@ -46,3 +46,39 @@ CREATE TABLE IF NOT EXISTS _import_manifest (
   source_file TEXT PRIMARY KEY,  -- 如 user_specimens.json
   sha256 TEXT, row_count INTEGER, imported_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS project_settings (
+  setting_key TEXT PRIMARY KEY,
+  value_json  TEXT NOT NULL DEFAULT '{}'
+);
+
+-- 采集记录簿（野外采集记录 / field collection log）
+-- 每条记录由 (province, site, station, collection_date) 唯一确定，对齐 UID 地点段。
+-- 拍照时按 4 键 lookup → 自动填充工作台能用上的字段子集；其余字段（生境/潮水等）
+-- 只存于此，导出时按 4 键 join。raw_json 兜底，零字段丢失 + 扩展字段。
+CREATE TABLE IF NOT EXISTS collection_records (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  province        TEXT,
+  site            TEXT,
+  station         TEXT,
+  collection_date TEXT,
+  station_label   TEXT,            -- 站位中文说明
+  lon             REAL,
+  lat             REAL,
+  geo_area        TEXT,            -- 采集地理区
+  habitat         TEXT,            -- 生境 / 底质（泥滩/沙滩/岩相…）
+  tide            TEXT,            -- 潮位 / 潮时
+  salinity        TEXT,            -- 盐度（选填）
+  water_temp      TEXT,            -- 水温（选填）
+  weather         TEXT,            -- 天气（选填）
+  collector       TEXT,
+  photographer    TEXT,
+  identifier      TEXT,
+  collection_time TEXT,            -- 采集时刻（选填）
+  photo_date      TEXT,
+  photo_location  TEXT,            -- 拍摄地点
+  method          TEXT,            -- 采集方法
+  remark          TEXT,
+  raw_json        TEXT,            -- 兜底：零字段丢失 + 扩展字段
+  UNIQUE(province, site, station, collection_date)
+);

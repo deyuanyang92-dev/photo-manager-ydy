@@ -285,6 +285,7 @@ class MonitorPanel(QWidget):
     unassign_requested = pyqtSignal(str)
     refresh_requested = pyqtSignal()
     add_jpg_requested = pyqtSignal()   # emitted when user clicks "添加照片"
+    grouping_requested = pyqtSignal()  # emitted when user clicks "分组工具" (opens popup)
 
     def __init__(self, ctx: "AppContext", parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -305,8 +306,8 @@ class MonitorPanel(QWidget):
         section = QFrame()
         section.setObjectName("WorkbenchSection")
         sec = QVBoxLayout(section)
-        sec.setContentsMargins(20, 16, 20, 16)
-        sec.setSpacing(12)
+        sec.setContentsMargins(18, 16, 18, 16)
+        sec.setSpacing(11)
         root.addWidget(section)
         from app.config.effects import apply_card_shadow
         apply_card_shadow(section)
@@ -386,10 +387,11 @@ class MonitorPanel(QWidget):
         controls = QHBoxLayout()
         controls.setContentsMargins(0, 0, 0, 0)
         controls.setSpacing(8)
-        settings_btn = QPushButton("⚙ 项目设置")
+        settings_btn = QPushButton("项目设置")
         settings_btn.setObjectName("Ghost")
         settings_btn.setFixedHeight(26)
         settings_btn.setToolTip("打开项目设置")
+        icons.set_button_icon(settings_btn, "mdi6.cog-outline", color=icons.TONE_MUTED, size=15)
         controls.addWidget(settings_btn)
         self._auto_toggle = QPushButton("新 TIFF 自动压缩")
         self._auto_toggle.setObjectName("Outline")
@@ -398,22 +400,33 @@ class MonitorPanel(QWidget):
                               color=icons.TONE_MUTED, size=15)
         self._auto_toggle.toggled.connect(self._on_auto_toggled)
         controls.addWidget(self._auto_toggle)
-        refresh_btn = QPushButton("↻ 刷新目录")
+        refresh_btn = QPushButton("刷新目录")
         refresh_btn.setObjectName("Outline")
         icons.set_button_icon(refresh_btn, "mdi6.refresh", color=icons.TONE_MUTED, size=15)
         refresh_btn.clicked.connect(self._on_refresh)
         controls.addWidget(refresh_btn)
-        add_btn = QPushButton("+ 添加照片")
+        add_btn = QPushButton("添加照片")
         add_btn.setObjectName("Outline")
         icons.set_button_icon(add_btn, "mdi6.image-plus-outline", color=icons.TONE_MUTED, size=15)
         add_btn.setToolTip("把已有照片添加进来（导入 incoming-jpg/）")
         add_btn.clicked.connect(self.add_jpg_requested.emit)
         controls.addWidget(add_btn)
-        dir_btn = QPushButton("📁 选目录")
+        dir_btn = QPushButton("选目录")
         dir_btn.setObjectName("Ghost")
         dir_btn.setFixedHeight(26)
         dir_btn.setToolTip("选择工作目录")
+        icons.set_button_icon(dir_btn, "mdi6.folder-outline", color=icons.TONE_MUTED, size=15)
         controls.addWidget(dir_btn)
+        # 分组工具 — opens the grouping/compose popup on demand (oracle keeps this
+        # panel collapsed by default, app.js:568/8595).  Keeps the main column clean.
+        self._grouping_btn = QPushButton("分组工具")
+        self._grouping_btn.setObjectName("Outline")
+        self._grouping_btn.setFixedHeight(26)
+        icons.set_button_icon(self._grouping_btn, "mdi6.layers-triple-outline",
+                              color=icons.TONE_MUTED, size=15)
+        self._grouping_btn.setToolTip("打开分组 / 合成工具")
+        self._grouping_btn.clicked.connect(self.grouping_requested.emit)
+        controls.addWidget(self._grouping_btn)
         self._raw_count = QLabel("本组原片 0 张")
         self._raw_count.setObjectName("MutedSmall")
         controls.addWidget(self._raw_count)
@@ -449,7 +462,7 @@ class MonitorPanel(QWidget):
         sel_none_btn.setFixedHeight(22)
         sel_none_btn.clicked.connect(self._on_select_none)
         sh.addWidget(sel_none_btn)
-        self._del_btn = QPushButton("🗑 删除")
+        self._del_btn = QPushButton("删除")
         self._del_btn.setObjectName("Danger")
         self._del_btn.setFixedHeight(24)
         self._del_btn.setEnabled(False)
@@ -458,10 +471,11 @@ class MonitorPanel(QWidget):
         self._del_btn.clicked.connect(self._on_delete_clicked)
         sh.addWidget(self._del_btn)
         # Also add ↩ 撤销归属 from spec
-        undo_attr_btn = QPushButton("↩ 撤销归属")
+        undo_attr_btn = QPushButton("撤销归属")
         undo_attr_btn.setObjectName("Tiny")
         undo_attr_btn.setFixedHeight(22)
         undo_attr_btn.setToolTip("撤销选中 JPG 的归属")
+        icons.set_button_icon(undo_attr_btn, "mdi6.undo", color=icons.TONE_MUTED, size=14)
         sh.addWidget(undo_attr_btn)
         sec.addLayout(sh)
 
@@ -653,6 +667,22 @@ class MonitorPanel(QWidget):
             c._entry.path
             for c in self._selected_cards()
             if getattr(c._entry, "kind", "") == "jpg" and getattr(c._entry, "path", "")
+        ]
+
+    def selected_tiff_paths(self) -> list[str]:
+        """Return absolute paths of all currently selected TIFF cards."""
+        return [
+            c._entry.path
+            for c in self._selected_cards()
+            if getattr(c._entry, "kind", "") == "tiff" and getattr(c._entry, "path", "")
+        ]
+
+    def selected_all_paths(self) -> list[str]:
+        """Return absolute paths of every currently selected card (any kind)."""
+        return [
+            c._entry.path
+            for c in self._selected_cards()
+            if getattr(c._entry, "path", "")
         ]
 
     def _on_delete_clicked(self) -> None:

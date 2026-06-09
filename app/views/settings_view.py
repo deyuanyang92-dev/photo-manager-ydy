@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QKeySequence
 from PyQt6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
@@ -101,6 +102,8 @@ _K_UI_ICON_FOLDER = "ui/icon_folder"       # default "📁"
 _K_UI_ICON_SEARCH = "ui/icon_search"       # default "🔍"
 _K_DEBUG_USE_REAL_COMPRESSION = "debug/use_real_compression"  # default False
 
+_THEME_CHOICES = ("classic_light", "lab_light", "graphite_focus")
+
 # ── Keyboard shortcuts (mirrors ensureShortcutsSettings) ─────────────────────
 
 _K_SHORTCUT_MONITOR_ACTIVATE = "shortcuts/monitor_activate"
@@ -110,8 +113,14 @@ _K_SHORTCUT_LABELS_NEXT = "shortcuts/labels_next"
 
 _RECENT_MAX = 10
 
-# ── Theme colours (mirrors CSS :root tokens) ──────────────────────────────────
-
+# ── Theme colours — resolved from the LIVE active theme ───────────────────────
+# Previously these were hardcoded deep-teal constants, which force-painted the
+# whole 配置 page dark regardless of the chosen theme → under a light theme the
+# group titles / form labels (which use the theme's dark text colour) went
+# invisible.  Now they are refreshed from the active theme tokens by
+# _refresh_palette(), called at the top of _setup_ui() (the theme is applied
+# before any view is built), so every `{_C_TEXT}` f-string picks up the live
+# palette.
 _C_BG = "#08161b"
 _C_PANEL = "#10242a"
 _C_TEXT = "#eef3ef"
@@ -123,29 +132,51 @@ _C_DANGER = "#e66e63"
 _C_BORDER = "rgba(145, 182, 181, 0.18)"
 
 
+def _refresh_palette() -> None:
+    """Rebind the module `_C_*` colours to the current theme tokens."""
+    global _C_BG, _C_PANEL, _C_TEXT, _C_MUTED, _C_ACCENT
+    global _C_SUCCESS, _C_WARN, _C_DANGER, _C_BORDER
+    from app.config.theme import TOKENS
+    g = TOKENS.get
+    _C_BG = g("bg", _C_BG)
+    _C_PANEL = g("panel", _C_PANEL)
+    _C_TEXT = g("text", _C_TEXT)
+    _C_MUTED = g("muted", _C_MUTED)
+    _C_ACCENT = g("accent", _C_ACCENT)
+    _C_SUCCESS = g("success", _C_SUCCESS)
+    _C_WARN = g("warn", _C_WARN)
+    _C_DANGER = g("danger", _C_DANGER)
+    _C_BORDER = g("border", _C_BORDER)
+
+
 def _btn_style(variant: str = "outline") -> str:
-    """Return inline QSS for small action buttons."""
+    """Return inline QSS for small action buttons (live theme tokens)."""
+    from app.config.theme import TOKENS
+    accent = TOKENS.get("accent", _C_ACCENT)
+    accent_hi = TOKENS.get("accent_hover", accent)
+    accent_lo = TOKENS.get("accent_pressed", accent)
+    on_accent = TOKENS.get("accent_fg", TOKENS.get("bg", "#ffffff"))
+    border = TOKENS.get("border", _C_BORDER)
     if variant == "primary":
         return (
             "QPushButton {"
-            "  background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-            "    stop:0 #33c8ba, stop:1 #23a99c);"
-            "  color: #08161b; border: none; border-radius: 4px;"
+            f"  background: {accent};"
+            f"  color: {on_accent}; border: none; border-radius: 4px;"
             "  padding: 3px 10px; font-weight: 600; font-size: 12px;"
             "}"
-            "QPushButton:hover { background: #31d4c4; }"
-            "QPushButton:pressed { background: #1f9288; }"
+            f"QPushButton:hover {{ background: {accent_hi}; }}"
+            f"QPushButton:pressed {{ background: {accent_lo}; }}"
         )
     return (
         "QPushButton {"
         "  background: transparent;"
-        "  color: #29b9ab;"
-        "  border: 1px solid rgba(145,182,181,0.34);"
+        f"  color: {accent};"
+        f"  border: 1px solid {border};"
         "  border-radius: 4px;"
         "  padding: 3px 10px; font-size: 12px;"
         "}"
-        "QPushButton:hover { background: rgba(41,185,171,0.10); }"
-        "QPushButton:pressed { background: rgba(41,185,171,0.18); }"
+        f"QPushButton:hover {{ background: rgba(0,0,0,0.06); }}"
+        f"QPushButton:pressed {{ background: rgba(0,0,0,0.12); }}"
     )
 
 
@@ -171,6 +202,7 @@ class SettingsView(BaseView):
 
     def _setup_ui(self) -> None:
         """Build the full widget tree."""
+        _refresh_palette()  # bind _C_* to the active theme before building
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
@@ -180,24 +212,24 @@ class SettingsView(BaseView):
         self._tabs.setObjectName("SettingsTabs")
         self._tabs.setStyleSheet(
             "QTabWidget::pane {"
-            "  background: #10242a;"
-            "  border: 1px solid rgba(145,182,181,0.18);"
+            f"  background: {_C_BG};"
+            f"  border: 1px solid {_C_BORDER};"
             "  border-top: none;"
             "}"
             "QTabBar::tab {"
-            "  background: #0c2027;"
-            "  color: #87a2a1;"
-            "  border: 1px solid rgba(145,182,181,0.14);"
+            f"  background: {_C_PANEL};"
+            f"  color: {_C_MUTED};"
+            f"  border: 1px solid {_C_BORDER};"
             "  border-bottom: none;"
             "  padding: 6px 16px;"
             "  min-width: 60px;"
             "}"
             "QTabBar::tab:selected {"
-            "  background: #10242a;"
-            "  color: #eef3ef;"
-            "  border-bottom: 2px solid #29b9ab;"
+            f"  background: {_C_BG};"
+            f"  color: {_C_TEXT};"
+            f"  border-bottom: 2px solid {_C_ACCENT};"
             "}"
-            "QTabBar::tab:hover:!selected { background: #0e2b34; color: #cfe0db; }"
+            f"QTabBar::tab:hover:!selected {{ background: {_C_PANEL}; color: {_C_TEXT}; }}"
         )
         root.addWidget(self._tabs, stretch=1)
 
@@ -206,6 +238,7 @@ class SettingsView(BaseView):
         self._build_tab_archive()
         self._build_tab_workbench()
         self._build_tab_user()
+        self._build_tab_collab()
         self._build_tab_ui()
         self._build_tab_about()
 
@@ -330,7 +363,7 @@ class SettingsView(BaseView):
         )
         self._helicon_exe_edit.setStyleSheet(
             "QLineEdit#ConfigPathInput {"
-            f"  background: #0a1e24;"
+            f"  background: {_C_PANEL};"
             f"  color: {_C_TEXT};"
             f"  border: 1px solid {_C_BORDER};"
             "  border-radius: 4px;"
@@ -648,6 +681,16 @@ class SettingsView(BaseView):
         self._results_edit.editingFinished.connect(self._save_project)
         form.addRow("成果子目录名", self._results_edit)
 
+        # 高德 Web 服务 key — empty falls back to OpenStreetMap/Nominatim
+        self._amap_key_edit = QLineEdit()
+        self._amap_key_edit.setPlaceholderText("留空 = 用 OpenStreetMap 地名搜索")
+        self._amap_key_edit.setToolTip(
+            "高德开放平台「Web 服务」类型 key（非 JS API key）。\n"
+            "填入后坐标工具地名搜索改用高德，中国 POI 质量更好。"
+        )
+        self._amap_key_edit.editingFinished.connect(self._save_project)
+        form.addRow("高德 Web 服务 Key", self._amap_key_edit)
+
         tab.body.addLayout(form)
         tab.body.addSpacing(16)
 
@@ -770,6 +813,117 @@ class SettingsView(BaseView):
         tab.body.addStretch()
         self._tabs.addTab(tab, "操作人")
 
+    def _build_tab_collab(self) -> None:
+        """协作 tab — LAN collaboration: enable, group code, peers, share addr.
+
+        Group-scoped sync: machines sharing the same non-empty 协作组码 claim
+        UIDs across the LAN so teammates can't reuse a number.  Empty code = no
+        group = no sync.  Mirrors the workbench sidebar 协作管理 dialog, but
+        adds the persistent settings (enable + code) the dialog cannot.
+        """
+        tab = _ScrollTab()
+        form = QFormLayout()
+        form.setHorizontalSpacing(16)
+        form.setVerticalSpacing(10)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        self._collab_enabled_chk = QCheckBox("启用局域网协作（重启或切换后生效）")
+        self._collab_enabled_chk.toggled.connect(self._on_collab_enabled_toggled)
+        form.addRow("协作", self._collab_enabled_chk)
+
+        # Health traffic-light + one-click doctor / LAN search.
+        self._collab_health_light = QLabel("●")
+        self._collab_health_text = QLabel("—")
+        self._collab_diagnose_btn = QPushButton("协作诊断")
+        self._collab_diagnose_btn.clicked.connect(self._on_collab_diagnose)
+        self._collab_scan_btn = QPushButton("搜索局域网队友")
+        self._collab_scan_btn.clicked.connect(self._on_collab_scan)
+        health_row = QHBoxLayout()
+        health_row.addWidget(self._collab_health_light)
+        health_row.addWidget(self._collab_health_text, stretch=1)
+        health_row.addWidget(self._collab_diagnose_btn)
+        health_row.addWidget(self._collab_scan_btn)
+        health_wrap = QWidget()
+        health_wrap.setLayout(health_row)
+        form.addRow("状态", health_wrap)
+
+        self._collab_team_code_edit = QLineEdit()
+        self._collab_team_code_edit.setPlaceholderText("例如 SMW-2026（留空 = 不同步）")
+        self._collab_team_code_edit.setMaxLength(64)
+        self._collab_team_code_edit.editingFinished.connect(self._save_collab)
+        form.addRow("协作组码", self._collab_team_code_edit)
+
+        self._collab_addr_edit = QLineEdit()
+        self._collab_addr_edit.setReadOnly(True)
+        self._collab_addr_edit.setPlaceholderText("—")
+        addr_row = QHBoxLayout()
+        addr_row.addWidget(self._collab_addr_edit, stretch=1)
+        copy_btn = QPushButton("复制")
+        copy_btn.clicked.connect(self._copy_collab_addr)
+        addr_row.addWidget(copy_btn)
+        addr_wrap = QWidget()
+        addr_wrap.setLayout(addr_row)
+        form.addRow("本机地址", addr_wrap)
+
+        # Manual peer (mDNS fallback across VLANs / strict firewalls)
+        self._collab_peer_ip_edit = QLineEdit()
+        self._collab_peer_ip_edit.setPlaceholderText("对方 IP")
+        self._collab_peer_port_edit = QLineEdit()
+        self._collab_peer_port_edit.setPlaceholderText("端口")
+        self._collab_peer_port_edit.setFixedWidth(80)
+        peer_row = QHBoxLayout()
+        peer_row.addWidget(self._collab_peer_ip_edit, stretch=1)
+        peer_row.addWidget(self._collab_peer_port_edit)
+        add_peer_btn = QPushButton("连接")
+        add_peer_btn.clicked.connect(self._on_add_manual_peer)
+        peer_row.addWidget(add_peer_btn)
+        peer_wrap = QWidget()
+        peer_wrap.setLayout(peer_row)
+        form.addRow("手动连接", peer_wrap)
+
+        self._collab_members_list = QListWidget()
+        self._collab_members_list.setMaximumHeight(140)
+        form.addRow("在线成员", self._collab_members_list)
+
+        # Pairing code — connect without knowing IPs (mDNS-failure fallback).
+        self._collab_pairing_show_btn = QPushButton("显示我的配对码")
+        self._collab_pairing_show_btn.clicked.connect(self._on_collab_show_pairing)
+        form.addRow("配对码", self._collab_pairing_show_btn)
+
+        self._collab_pairing_input = QLineEdit()
+        self._collab_pairing_input.setPlaceholderText("粘贴队友的配对码")
+        pair_join_btn = QPushButton("加入")
+        pair_join_btn.clicked.connect(self._on_collab_join_pairing)
+        pair_row = QHBoxLayout()
+        pair_row.addWidget(self._collab_pairing_input, stretch=1)
+        pair_row.addWidget(pair_join_btn)
+        pair_wrap = QWidget()
+        pair_wrap.setLayout(pair_row)
+        form.addRow("输入配对码", pair_wrap)
+
+        note = QLabel(
+            "同一协作组码的设备会自动同步标本编号占用情况，避免重复编号。\n"
+            "撤销占用（在「协作管理」中作废）会释放编号，供任何人重新使用。"
+        )
+        note.setObjectName("Muted")
+        note.setWordWrap(True)
+        form.addRow("", note)
+
+        tab.body.addLayout(form)
+        tab.body.addStretch()
+        self._tabs.addTab(tab, "协作")
+
+        # Live updates from the running service, if present.
+        svc = getattr(self.ctx, "collab_service", None)
+        if svc is not None:
+            try:
+                svc.peers_changed.connect(self._refresh_collab_members)
+                svc.peers_changed.connect(self._refresh_collab_health)
+                svc.server_ready.connect(lambda _p: self._refresh_collab_addr())
+                svc.diagnostics_changed.connect(self._refresh_collab_health)
+            except Exception:  # noqa: BLE001
+                pass
+
     def _build_tab_ui(self) -> None:
         """界面 tab — mirrors renderGlobalSettings():
         fontScale slider, icon emoji fields, useRealCompression debug switch,
@@ -777,6 +931,28 @@ class SettingsView(BaseView):
         of web's ensureShortcutsSettings / renderShortcutScope).
         """
         tab = _ScrollTab()
+
+        # ── 界面风格 ──────────────────────────────────────────────────────────
+        theme_box = QGroupBox("界面风格")
+        theme_form = QFormLayout(theme_box)
+        theme_form.setHorizontalSpacing(16)
+        theme_form.setVerticalSpacing(8)
+
+        self._theme_combo = QComboBox()
+        from app.config.theme import THEME_NAMES
+        for key in _THEME_CHOICES:
+            self._theme_combo.addItem(THEME_NAMES.get(key, key), key)
+        self._theme_combo.setToolTip("切换后立即生效，并在下次启动时保持")
+        self._theme_combo.currentIndexChanged.connect(self._on_theme_changed)
+        theme_form.addRow("风格", self._theme_combo)
+
+        theme_note = QLabel("保留当前风格，同时提供两套新设计用于对比整体观感。")
+        theme_note.setObjectName("MutedSmall")
+        theme_note.setWordWrap(True)
+        theme_form.addRow("", theme_note)
+
+        tab.body.addWidget(theme_box)
+        tab.body.addSpacing(12)
 
         # ── 字体缩放 ──────────────────────────────────────────────────────────
         font_box = QGroupBox("字体缩放")
@@ -964,6 +1140,8 @@ class SettingsView(BaseView):
         # Helicon tab — exe path + preset params
         exe_val = qs.value(_K_HELICON_EXE, "")
         self._helicon_exe_edit.setText(exe_val)
+        if exe_val:
+            os.environ["HELICON_FOCUS_PATH"] = exe_val
         method_idx = int(qs.value(_K_HELICON_METHOD, 0))
         self._method_combo.setCurrentIndex(
             method_idx if 0 <= method_idx < self._method_combo.count() else 0
@@ -1005,10 +1183,18 @@ class SettingsView(BaseView):
         self._project_dir_edit.setText(proj_dir)
         self._incoming_edit.setText(qs.value(_K_INCOMING_SUBDIR, "incoming-jpg"))
         self._results_edit.setText(qs.value(_K_RESULTS_SUBDIR, "results"))
+        self._amap_key_edit.setText(self.ctx.settings.amap_web_key)
         self._load_recent_projects()
 
         # User tab
         self._current_user_edit.setText(qs.value(_K_CURRENT_USER, ""))
+
+        # Collaboration tab
+        self._collab_enabled_chk.setChecked(self.ctx.settings.collab_enabled)
+        self._collab_team_code_edit.setText(self.ctx.settings.team_code)
+        self._refresh_collab_addr()
+        self._refresh_collab_members()
+        self._refresh_collab_health()
 
         # Workbench tab
         self._auto_watch_chk.setChecked(
@@ -1028,6 +1214,14 @@ class SettingsView(BaseView):
         self._file_view_mode_combo.setCurrentIndex(fv_map.get(fv_val, 0))
 
         # UI / 界面 tab
+        current_theme = self.ctx.settings.current_theme
+        theme_idx = self._theme_combo.findData(current_theme)
+        if theme_idx < 0:
+            theme_idx = self._theme_combo.findData("classic_light")
+        self._theme_combo.blockSignals(True)
+        self._theme_combo.setCurrentIndex(max(0, theme_idx))
+        self._theme_combo.blockSignals(False)
+
         try:
             font_scale = float(qs.value(_K_UI_FONT_SCALE, 1.0))
         except (TypeError, ValueError):
@@ -1056,6 +1250,17 @@ class SettingsView(BaseView):
 
         # Preset list widget
         self._refresh_preset_list_widget()
+
+    def _on_theme_changed(self) -> None:
+        key = self._theme_combo.currentData() or "classic_light"
+        self.ctx.settings.current_theme = str(key)
+        self.ctx.settings.sync()
+
+        from app.config.theme import apply_theme
+        app = QApplication.instance()
+        if app is not None:
+            app.setStyleSheet(apply_theme(str(key)))
+        _refresh_palette()
 
     def _refresh_helicon_display(self) -> None:
         """Update auto-detected and effective path labels from stored/detected state."""
@@ -1092,6 +1297,7 @@ class SettingsView(BaseView):
         results = self._results_edit.text().strip() or "results"
         qs.setValue(_K_INCOMING_SUBDIR, incoming)
         qs.setValue(_K_RESULTS_SUBDIR, results)
+        self.ctx.settings.amap_web_key = self._amap_key_edit.text()
         self.ctx.settings.sync()
 
     def _save_helicon(self) -> None:
@@ -1167,6 +1373,167 @@ class SettingsView(BaseView):
         name = self._current_user_edit.text().strip()
         qs.setValue(_K_CURRENT_USER, name)
         self.ctx.settings.sync()
+
+    # ── Collaboration ─────────────────────────────────────────────────────
+
+    def _save_collab(self) -> None:
+        """Persist collab enable + team code, and push code to a live service."""
+        self.ctx.settings.collab_enabled = self._collab_enabled_chk.isChecked()
+        code = self._collab_team_code_edit.text().strip()
+        self.ctx.settings.team_code = code
+        self.ctx.settings.sync()
+        svc = getattr(self.ctx, "collab_service", None)
+        if svc is not None:
+            try:
+                svc.set_group_code(code)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _on_collab_enabled_toggled(self, on: bool) -> None:
+        """Persist the flag and start/stop the live service immediately."""
+        self._save_collab()
+        svc = getattr(self.ctx, "collab_service", None)
+        if svc is None:
+            return
+        try:
+            if on and not svc.is_running():
+                svc.start(
+                    project_name=self.ctx.current_project_dir or "",
+                    group_code=self._collab_team_code_edit.text().strip(),
+                )
+            elif not on and svc.is_running():
+                svc.stop()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _copy_collab_addr(self) -> None:
+        from PyQt6.QtWidgets import QApplication
+        text = self._collab_addr_edit.text().strip()
+        if text and text != "—":
+            QApplication.clipboard().setText(text)
+
+    def _on_add_manual_peer(self) -> None:
+        svc = getattr(self.ctx, "collab_service", None)
+        if svc is None:
+            return
+        ip = self._collab_peer_ip_edit.text().strip()
+        port_raw = self._collab_peer_port_edit.text().strip()
+        if not ip or not port_raw.isdigit():
+            return
+        try:
+            svc.add_manual_peer(ip, int(port_raw))
+            self._collab_peer_ip_edit.clear()
+            self._collab_peer_port_edit.clear()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _refresh_collab_addr(self) -> None:
+        svc = getattr(self.ctx, "collab_service", None)
+        if svc is not None:
+            try:
+                self._collab_addr_edit.setText(svc.local_address())
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _refresh_collab_members(self) -> None:
+        svc = getattr(self.ctx, "collab_service", None)
+        self._collab_members_list.clear()
+        if svc is None:
+            return
+        try:
+            for peer in svc.peers():
+                name = peer.hostname or peer.ip
+                self._collab_members_list.addItem(f"{name}  ({peer.ip}:{peer.port})")
+        except Exception:  # noqa: BLE001
+            pass
+
+    _HEALTH_COLOR = {"green": "#2e7d32", "yellow": "#f9a825", "red": "#c62828"}
+    _HEALTH_LABEL = {"green": "正常", "yellow": "有注意事项", "red": "有阻断问题"}
+
+    def _refresh_collab_health(self) -> None:
+        svc = getattr(self.ctx, "collab_service", None)
+        if svc is None:
+            self._collab_health_light.setStyleSheet("color: #999;")
+            self._collab_health_text.setText("未启用")
+            return
+        try:
+            svc.run_diagnostics()
+            health = svc.overall_health()
+        except Exception:  # noqa: BLE001
+            health = "red"
+        self._collab_health_light.setStyleSheet(
+            f"color: {self._HEALTH_COLOR.get(health, '#999')};")
+        self._collab_health_text.setText(self._HEALTH_LABEL.get(health, "—"))
+
+    def _on_collab_diagnose(self) -> None:
+        from app.widgets.collab_diagnostics_dialog import CollabDiagnosticsDialog
+        svc = getattr(self.ctx, "collab_service", None)
+        dlg = CollabDiagnosticsDialog(svc, parent=self)
+        # Persist a group code adopted via a one-click fix.
+        dlg.group_adopted.connect(self._on_group_adopted)
+        dlg.exec()
+        self._refresh_collab_health()
+
+    def _on_group_adopted(self, code: str) -> None:
+        self._collab_team_code_edit.setText(code)
+        self._save_collab()
+
+    def _on_collab_scan(self) -> None:
+        svc = getattr(self.ctx, "collab_service", None)
+        if svc is None:
+            from app.utils.ui import info as _info
+            _info(self, "搜索局域网", "请先启用协作。")
+            return
+        try:
+            found = svc.scan_lan()
+        except Exception:  # noqa: BLE001
+            found = []
+        from app.utils.ui import info as _info
+        _info(self, "搜索完成", f"发现 {len(found)} 台设备。")
+        self._refresh_collab_members()
+        self._refresh_collab_health()
+
+    def _on_collab_show_pairing(self) -> None:
+        from app.utils.ui import info as _info
+        from app.widgets.collab_pairing import encode_pairing
+        svc = getattr(self.ctx, "collab_service", None)
+        if svc is None:
+            _info(self, "配对码", "请先启用协作。")
+            return
+        addr = svc.local_address()
+        try:
+            ip, port = addr.split(":")
+            code = encode_pairing(ip, int(port), svc.group_code)
+        except Exception:  # noqa: BLE001
+            _info(self, "配对码", "暂时无法生成配对码。")
+            return
+        _info(self, "我的配对码",
+              f"把这串配对码发给队友,他们粘贴即可连接:\n\n{code}")
+
+    def _on_collab_join_pairing(self) -> None:
+        from app.utils.ui import info as _info, warn as _warn
+        from app.widgets.collab_pairing import decode_pairing
+        svc = getattr(self.ctx, "collab_service", None)
+        if svc is None:
+            _info(self, "配对码", "请先启用协作。")
+            return
+        raw = self._collab_pairing_input.text().strip()
+        try:
+            pi = decode_pairing(raw)
+        except ValueError as exc:
+            _warn(self, "配对码无效", str(exc))
+            return
+        if pi.group_code:
+            self._collab_team_code_edit.setText(pi.group_code)
+            self._save_collab()
+        try:
+            svc.add_manual_peer(pi.ip, pi.port)
+        except Exception:  # noqa: BLE001
+            pass
+        self._collab_pairing_input.clear()
+        _info(self, "已加入", f"已连接 {pi.ip}:{pi.port}。")
+        self._refresh_collab_members()
+        self._refresh_collab_health()
 
     def _on_font_scale_changed(self, value: float) -> None:
         """Realtime: update percentage label and persist (mirrors web fontSlider input)."""

@@ -128,3 +128,87 @@ def test_tiff_card_double_click_opens_lightbox(qtbot, tmp_path, monkeypatch):
     paths, idx = opened[0]
     assert paths[idx] == p2
     assert len(paths) == 2
+
+
+# ── Paired rows (同编号关联显示) ───────────────────────────────────────────────
+
+def test_pairing_by_seq(qtbot):
+    """A TIFF and its ZIP sharing the same seq render in ONE paired row."""
+    from app.widgets.results_column import (
+        ResultsColumn, _ResultRow, _TiffCard, _ArchiveCard,
+    )
+    col = ResultsColumn()
+    qtbot.addWidget(col)
+    col.load_uid(
+        "UID",
+        [{"path": "/fake/a.tif", "name": "a.tif", "seq": 1}],
+        [{"path": "/fake/a.zip", "name": "a.zip", "size": 99, "seq": 1}],
+    )
+    rows = col.findChildren(_ResultRow)
+    assert len(rows) == 1
+    assert len(rows[0].findChildren(_TiffCard)) == 1
+    assert len(rows[0].findChildren(_ArchiveCard)) == 1
+
+
+def test_pairing_by_stem_when_no_seq(qtbot):
+    """No seq → TIFF and ZIP with matching filename stem pair into one row."""
+    from app.widgets.results_column import ResultsColumn, _ResultRow
+    col = ResultsColumn()
+    qtbot.addWidget(col)
+    col.load_uid(
+        "UID",
+        [{"path": "/fake/result.tif", "name": "result.tif"}],
+        [{"path": "/fake/result.zip", "name": "result.zip", "size": 1}],
+    )
+    rows = col.findChildren(_ResultRow)
+    assert len(rows) == 1
+
+
+def test_two_unpaired_tiffs_keep_input_order(qtbot):
+    """Two TIFFs, no zips → two rows, _TiffCard order == input order."""
+    from app.widgets.results_column import ResultsColumn, _TiffCard, _ResultRow
+    col = ResultsColumn()
+    qtbot.addWidget(col)
+    col.load_uid(
+        "UID",
+        [{"path": "/fake/a.tif", "name": "a.tif"},
+         {"path": "/fake/b.tif", "name": "b.tif"}],
+        [],
+    )
+    assert len(col.findChildren(_ResultRow)) == 2
+    cards = col.findChildren(_TiffCard)
+    assert [c._info["name"] for c in cards] == ["a.tif", "b.tif"]
+
+
+def test_collapse_toggle_hides_body(qtbot):
+    """The whole results area collapses via a single toggle."""
+    from app.widgets.results_column import ResultsColumn
+    col = ResultsColumn()
+    qtbot.addWidget(col)
+    col.show()
+    assert not col._body.isHidden()
+    col._set_collapsed(True)
+    assert col._body.isHidden()
+    col._set_collapsed(False)
+    assert not col._body.isHidden()
+
+
+def test_zoom_changes_thumb_size(qtbot):
+    """The zoom control resizes the result display boxes."""
+    from app.widgets.results_column import ResultsColumn, _TiffCard
+    col = ResultsColumn()
+    qtbot.addWidget(col)
+    col.load_uid("UID", [{"path": "/fake/a.tif", "name": "a.tif"}], [])
+    col._set_zoom(220)
+    assert col._thumb_size == 220
+    card = col.findChildren(_TiffCard)[0]
+    assert card._thumb_size == 220
+
+
+def test_thumb_guard_on_fake_path(qtbot):
+    """A non-existent path must not raise and falls back to an icon card."""
+    from app.widgets.results_column import ResultsColumn, _TiffCard
+    col = ResultsColumn()
+    qtbot.addWidget(col)
+    col.load_uid("UID", [{"path": "/fake/missing.tif", "name": "missing.tif"}], [])
+    assert len(col.findChildren(_TiffCard)) == 1

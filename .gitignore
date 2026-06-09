@@ -10,3 +10,10 @@ dist/
 build/
 *.spec
 .DS_Store
+# EPS 栅格化缓存（basemap_registry rasterize_eps）
+*.r[0-9]*.png
+
+# 本地工具/会话配置（勿上传）
+.claude/
+.playwright-mcp/
+.codegraph/

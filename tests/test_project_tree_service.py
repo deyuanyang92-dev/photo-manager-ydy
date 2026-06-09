@@ -46,6 +46,19 @@ def test_has_data_flag_marks_adopted_workspaces(tmp_path):
     assert is_workspace(str(leaf)) is True
 
 
+def test_default_depth_reaches_six_levels(tmp_path):
+    # Real field directories nest deeper than the old default of 4
+    # (航次/区域/岛/断面/站位/…). Default must reach a 6-level-deep leaf.
+    root = tmp_path / "r"
+    deep = root / "L1" / "L2" / "L3" / "L4" / "L5" / "L6"
+    deep.mkdir(parents=True)
+    tree = scan_tree(str(root))  # default max_depth
+    node = tree
+    for lvl in ("L1", "L2", "L3", "L4", "L5", "L6"):
+        node = next((c for c in node["children"] if c["name"] == lvl), None)
+        assert node is not None, f"default scan did not reach {lvl}"
+
+
 def test_max_depth_limits_recursion(tmp_path):
     root = tmp_path / "r"
     (root / "a" / "b" / "c" / "d").mkdir(parents=True)

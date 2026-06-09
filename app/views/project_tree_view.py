@@ -14,10 +14,12 @@ from typing import TYPE_CHECKING, Optional
 
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
+    QDialog,
     QFrame,
     QHBoxLayout,
     QInputDialog,
     QLabel,
+    QMessageBox,
     QPushButton,
     QSplitter,
     QTreeWidget,
@@ -73,10 +75,14 @@ class ProjectTreeView(BaseView):
         self._root_lbl = QLabel("（未选根目录）")
         self._root_lbl.setObjectName("Muted")
         bar.addWidget(self._root_lbl, 1)
+        self._btn_newregion = QPushButton("新建调查区域…")
+        self._btn_newregion.setObjectName("Primary")
+        self._btn_newregion.clicked.connect(self._new_region)
+        bar.addWidget(self._btn_newregion)
         self._btn_pick = QPushButton("选择根目录…")
         self._btn_pick.clicked.connect(self._pick_root)
         bar.addWidget(self._btn_pick)
-        self._btn_newsub = QPushButton("新建子文件夹")
+        self._btn_newsub = QPushButton("新建断面/子节点")
         self._btn_newsub.clicked.connect(self._new_subfolder)
         bar.addWidget(self._btn_newsub)
         root.addLayout(bar)
@@ -165,8 +171,14 @@ class ProjectTreeView(BaseView):
         root_item.setExpanded(True)
 
     def _build_item(self, node: dict) -> QTreeWidgetItem:
-        tag = "  ·  已有数据" if node["has_data"] else ""
-        item = QTreeWidgetItem([f"📁 {node['name']}{tag}"])
+        # Two-level semantics: a node with its own project.db is a 工作区 (where
+        # you actually shoot); everything else is a 区域/文件夹 (an inheritance
+        # anchor or just a container) — never call them all "项目".
+        if node["has_data"]:
+            label = f"📷 {node['name']}  ·  工作区"
+        else:
+            label = f"📁 {node['name']}"
+        item = QTreeWidgetItem([label])
         item.setData(0, _PATH_ROLE, node["path"])
         for child in node["children"]:
             item.addChild(self._build_item(child))
@@ -231,6 +243,46 @@ class ProjectTreeView(BaseView):
         self.ctx.settings.project_tree_root = self._root
         self._reload()
 
+    def _new_region(self) -> None:
+        """Scaffold a 调查区域 root: create the folder, seed region-level
+        settings (地区/负责人) as the inheritance anchor, then make it the tree
+        root so 断面 created under it auto-inherit (set once, never re-type)."""
+        from app.views.project_dialog import ProjectDialog
+        dlg = ProjectDialog(mode="new", existing_projects=[], parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        proj = dlg.result_project()
+        if not proj:
+            return
+        directory = proj.get("directory") or proj.get("dir") or ""
+        if not directory:
+            return
+        try:
+            from app.services.project_service import seed_region_settings
+            seed_region_settings(
+                directory,
+                collector=proj.get("collector", ""),
+                meta={
+                    "name": proj.get("name", ""),
+                    "location": proj.get("location", ""),
+                    "year": proj.get("year", ""),
+                    "date_range": proj.get("dateRange", ""),
+                    "project_code": proj.get("projectCode", ""),
+                },
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            ui.warn(self, "新建调查区域", f"创建失败：{exc}")
+            return
+        self._root = str(Path(directory).resolve())
+        self.ctx.settings.project_tree_root = self._root
+        self._reload()
+        ui.info(
+            self,
+            "新建调查区域",
+            "区域已建。地区/负责人已设在区域层，下面新建的断面会自动继承——"
+            "在断面里设省份/样地可覆盖。",
+        )
+
     def _new_subfolder(self) -> None:
         parent = self._selected_path() or self._root
         if not parent:
@@ -254,15 +306,36 @@ class ProjectTreeView(BaseView):
         path = self._selected_path()
         if not path:
             return
-        # Lazily ensure the standard workspace layout, then enter it.
-        try:
-            from app.services.project_service import open_project
-            open_project(path)
-        except Exception:
-            pass
-        self.ctx.current_project_dir = path
-        # Remember the tree root so settings inheritance walks up to it.
-        self.ctx.current_project_root = self._root
+        # 区域≠工作区: a node with subfolders that isn't yet a workspace is most
+        # likely a 调查区域 (inheritance anchor), not where you shoot. Don't
+        # forbid — just confirm, so a region doesn't accidentally become a
+        # photo workspace.
+        items = self._tree.selectedItems()
+        item = items[0] if items else None
+        if item is not None and item.childCount() > 0 and not pts.is_workspace(path):
+            resp = QMessageBox.question(
+                self,
+                "进入工作区",
+                f"「{Path(path).name}」下面还有子文件夹，看起来是调查区域。"
+                "通常在下层断面里拍照。仍要把这一层当作工作区进入吗？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if resp != QMessageBox.StandardButton.Yes:
+                return
+        # Single unified entry path: ensures dirs, sets dir + root (bounding the
+        # settings-inheritance walk to this survey's tree), and records the node
+        # into the recent list so it also shows up in 项目总览.
+        from app.services.project_service import (
+            default_user_projects_json_path,
+            enter_workspace,
+        )
+        enter_workspace(
+            self.ctx,
+            path,
+            root=self._root,
+            projects_json_path=default_user_projects_json_path(),
+        )
         self.enter_workspace_requested.emit(path)
         main_win = self.window()
         if hasattr(main_win, "refresh_context_bar"):

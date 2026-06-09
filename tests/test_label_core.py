@@ -47,6 +47,7 @@ from app.utils.label_core import (
     create_print_job,
     label_data_text,
     apply_field_visibility,
+    plan_label_pages,
 )
 from app.services.label_service import LabelService, BUILTIN_TEMPLATES
 
@@ -619,6 +620,76 @@ class TestCalculateGrid:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# plan_label_pages — pure page/slot geometry (no Qt); must mirror the painter
+# loop in labels_view._paint_labels exactly (incl. blank-item placeholders).
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestPlanLabelPages:
+    def _items(self, n, blanks=()):
+        out = []
+        for i in range(n):
+            data = {} if i in blanks else {"uniqueId": f"X{i}"}
+            out.append({"idx": i, "data": data})
+        return out
+
+    def test_label_paper_one_per_page(self):
+        items = self._items(3)
+        plan = plan_label_pages(items, {"w": 50, "h": 30}, "label", None, None)
+        assert [p["page"] for p in plan] == [0, 1, 2]
+        assert all(p["x_mm"] == 0 and p["y_mm"] == 0 for p in plan)
+        assert [p["data"] for p in plan] == [it["data"] for it in items]
+
+    def test_label_paper_blank_still_consumes_page(self):
+        # mirrors _paint_labels: label paper advances one page per item even
+        # when the item is blank (newPage fires before the blank-skip).
+        items = self._items(3, blanks=(1,))
+        plan = plan_label_pages(items, {"w": 50, "h": 30}, "label", None, None)
+        assert len(plan) == 3
+        assert [p["page"] for p in plan] == [0, 1, 2]
+        assert plan[1]["data"] == {}
+
+    def test_a4_grid_offsets_match_calculate_grid(self):
+        dims = {"w": 50, "h": 30}
+        paper = {"w": 210, "h": 297}
+        g = calculate_grid(50, 30, 210, 297)
+        cols, per_page = g["cols"], g["perPage"]
+        margin, gap = g["margin"], g["gap"]
+        items = self._items(per_page + 2)
+        plan = plan_label_pages(items, dims, "a4", paper, None)
+        for i, p in enumerate(plan):
+            slot = i % per_page
+            col, row = slot % cols, slot // cols
+            assert p["page"] == i // per_page
+            assert p["x_mm"] == margin + col * (50 + gap)
+            assert p["y_mm"] == margin + row * (30 + gap)
+
+    def test_grid_blank_item_keeps_slot(self):
+        # blank items occupy a slot (skip at paint) — length & slots preserved.
+        dims = {"w": 50, "h": 30}
+        paper = {"w": 210, "h": 297}
+        items = self._items(4, blanks=(0, 2))
+        plan = plan_label_pages(items, dims, "a4", paper, None)
+        assert len(plan) == 4
+        assert plan[0]["data"] == {} and plan[2]["data"] == {}
+
+    def test_grid_opts_force_cols_respected(self):
+        dims = {"w": 50, "h": 30}
+        paper = {"w": 210, "h": 297}
+        items = self._items(4)
+        plan = plan_label_pages(items, dims, "a4", paper, {"forceCols": 2})
+        # forceCols=2 → row 0: cols 0,1 ; row 1: cols 0,1
+        gap = calculate_grid(50, 30, 210, 297, opts={"forceCols": 2})["gap"]
+        margin = calculate_grid(50, 30, 210, 297, opts={"forceCols": 2})["margin"]
+        assert plan[2]["x_mm"] == margin                       # wraps to col 0
+        assert plan[2]["y_mm"] == margin + 1 * (30 + gap)       # second row
+
+    def test_a4_default_paper_when_none(self):
+        # a4/a5 with paper=None falls back to a sane default, no crash.
+        plan = plan_label_pages(self._items(1), {"w": 50, "h": 30}, "a4", None, None)
+        assert len(plan) == 1 and plan[0]["page"] == 0
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # estimate_text_scale
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -946,6 +1017,46 @@ class TestLabelService:
             dims={"w": 60, "h": 40},
         )
         assert len(job["items"]) == 1
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# quick_print_jobs_for_specimen — workbench one-click (sample + tissue if RNA)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestQuickPrintJobs:
+    _PAPERS = {"sample": "label", "tissue": "label"}
+
+    def test_non_rna_yields_one_sample_job(self):
+        specs = [_sp()]
+        jobs = LabelService.quick_print_jobs_for_specimen(
+            specs, unique_id(specs[0]), copies=1, paper_types=self._PAPERS)
+        assert [j["bucket"] for j in jobs] == ["sample"]
+        assert len(jobs[0]["items"]) == 1
+
+    def test_rna_yields_sample_and_tissue(self):
+        specs = [_rna_sp()]
+        jobs = LabelService.quick_print_jobs_for_specimen(
+            specs, unique_id(specs[0]), copies=1, paper_types=self._PAPERS)
+        assert [j["bucket"] for j in jobs] == ["sample", "tissue"]
+
+    def test_unknown_uid_returns_empty(self):
+        assert LabelService.quick_print_jobs_for_specimen(
+            [_sp()], "NO-SUCH-UID", copies=1, paper_types=self._PAPERS) == []
+
+    def test_copies_propagate_to_job(self):
+        specs = [_sp()]
+        jobs = LabelService.quick_print_jobs_for_specimen(
+            specs, unique_id(specs[0]), copies=3, paper_types=self._PAPERS)
+        assert jobs[0]["copies"] == 3
+        assert len(jobs[0]["labels"]) == 3   # copies multiply the single item
+
+    def test_picks_correct_specimen_among_many(self):
+        specs = [_sp(id="A1"), _rna_sp(id="R2"), _sp(id="A3")]
+        jobs = LabelService.quick_print_jobs_for_specimen(
+            specs, unique_id(specs[1]), copies=1, paper_types=self._PAPERS)
+        # the R2 specimen → sample + tissue, and only that specimen's data.
+        assert [j["bucket"] for j in jobs] == ["sample", "tissue"]
+        assert jobs[0]["items"][0]["data"]["speciesId"] == "R2"
 
 
 # ══════════════════════════════════════════════════════════════════════════════

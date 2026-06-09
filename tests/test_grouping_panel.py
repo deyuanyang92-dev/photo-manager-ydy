@@ -47,6 +47,42 @@ def test_grouping_panel_constructs(qtbot):
     assert panel is not None
 
 
+def test_toolbar_hidden_when_no_specimen(qtbot):
+    """Toolbar + 新组 button must be hidden when no specimen active (app.js:7374-7378)."""
+    from app.widgets.grouping_panel import GroupingPanel
+    ctx = _make_app_context()
+    panel = GroupingPanel(ctx)
+    qtbot.addWidget(panel)
+    assert panel._toolbar_widget.isHidden()
+    assert panel._add_btn.isHidden()
+
+
+def test_toolbar_hidden_after_clear(qtbot):
+    """Toolbar must hide again after clear()."""
+    from app.widgets.grouping_panel import GroupingPanel
+    ctx = _make_app_context()
+    panel = GroupingPanel(ctx)
+    qtbot.addWidget(panel)
+    grouping = _make_grouping([{"index": 0, "label": "top"}])
+    panel.load_grouping("test-uid", grouping)
+    assert not panel._toolbar_widget.isHidden()
+    panel.clear()
+    assert panel._toolbar_widget.isHidden()
+    assert panel._add_btn.isHidden()
+
+
+def test_toolbar_visible_after_load(qtbot):
+    """Toolbar + 新组 button must appear after load_grouping()."""
+    from app.widgets.grouping_panel import GroupingPanel
+    ctx = _make_app_context()
+    panel = GroupingPanel(ctx)
+    qtbot.addWidget(panel)
+    grouping = _make_grouping([{"index": 0, "label": "top"}])
+    panel.load_grouping("test-uid", grouping)
+    assert not panel._toolbar_widget.isHidden()
+    assert not panel._add_btn.isHidden()
+
+
 # ---------------------------------------------------------------------------
 # _DraftGroupRow: QListWidget drag-drop mode
 # ---------------------------------------------------------------------------

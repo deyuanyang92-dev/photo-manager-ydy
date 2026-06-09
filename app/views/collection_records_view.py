@@ -213,9 +213,14 @@ class CollectionRecordsView(BaseView):
         btn_export.clicked.connect(self._grid_export_template)
         bar.addWidget(btn_export)
         btn_import = QPushButton("⬆ 导入Excel")
-        btn_import.setToolTip("从 Excel/CSV 批量导入采集记录")
+        btn_import.setToolTip("按模板（固定列）导入；配合「导出模板」往返")
         btn_import.clicked.connect(self._grid_import)
         bar.addWidget(btn_import)
+        btn_import2 = QPushButton("⬆ 导入(自定义)")
+        btn_import2.setToolTip("任意 Excel/CSV/TXT：自定义列映射 + 任意经纬度格式 + 坐标系纠偏，"
+                               "用于采集计划批量录入断面/站位")
+        btn_import2.clicked.connect(self._grid_import_mapped)
+        bar.addWidget(btn_import2)
         v.addLayout(bar)
 
         # 非模态状态行（不用会阻塞的 QMessageBox，offscreen 测试也安全）。
@@ -445,7 +450,7 @@ class CollectionRecordsView(BaseView):
         try:
             from app.services import project_settings_service as pss
             pf = pss.effective_new_specimen_prefill(
-                project_dir, root=getattr(self.ctx, "current_project_root", None)
+                project_dir, root=self.ctx.current_project_root
             )
             return (pf.get("province", ""), pf.get("site", ""))
         except Exception:
@@ -566,6 +571,7 @@ class CollectionRecordsView(BaseView):
             self._grid_status_lbl.setText(f"导出失败：{exc}")
 
     def _grid_import(self) -> None:
+        """固定列模板导入（配合「导出模板」往返）。"""
         from app.utils import ui
         db = self.ctx.get_db()
         if db is None:
@@ -589,3 +595,16 @@ class CollectionRecordsView(BaseView):
         if rep.errors:
             msg += f"  {len(rep.errors)} 行出错。"
         self._grid_status_lbl.setText(msg)
+
+    def _grid_import_mapped(self) -> None:
+        """自定义列映射 + 任意格式经纬度导入（采集计划：断面/站位 + 经纬度，日期可空）。"""
+        db = self.ctx.get_db()
+        if db is None:
+            self._grid_status_lbl.setText("当前没有打开的项目，无法导入。请先建/选项目。")
+            return
+        from app.widgets.coord_import_dialog import CoordImportDialog
+        dlg = CoordImportDialog(db, parent=self)
+        if dlg.exec():
+            self._reload()
+            self._grid_load()
+            self._grid_status_lbl.setText("导入完成（自定义映射）。")

@@ -161,7 +161,9 @@ _DEFAULT_KEYS = [
     "compCount", "compStatus", "taxoOk", "rna", "meta",
 ]
 
-# Colour constants (deep-teal dark theme — mirrors web)
+# Colour constants — refreshed from the LIVE active theme by _refresh_palette()
+# (called at the top of each view's _setup_ui).  Previously hardcoded deep-teal,
+# which force-painted the whole page dark regardless of the chosen theme.
 _C_BG           = "#0a1e24"
 _C_BG2          = "#0e2329"
 _C_BORDER       = "#21424a"
@@ -174,6 +176,26 @@ _C_HDR_BG       = "#2c5f8a"
 _C_HDR_FG       = "#ffffff"
 _C_ALT_ROW      = "#0f2830"
 _C_INACTIVE_TXT = "#5a7a72"
+
+
+def _refresh_palette() -> None:
+    """Rebind the module `_C_*` colours to the current theme tokens."""
+    global _C_BG, _C_BG2, _C_BORDER, _C_TEXT, _C_MUTED, _C_ACCENT, _C_WARN
+    global _C_ERR, _C_HDR_BG, _C_HDR_FG, _C_ALT_ROW, _C_INACTIVE_TXT
+    from app.config.theme import TOKENS
+    g = TOKENS.get
+    _C_BG           = g("bg", _C_BG)
+    _C_BG2          = g("panel_2", _C_BG2)
+    _C_BORDER       = g("border", _C_BORDER)
+    _C_TEXT         = g("text", _C_TEXT)
+    _C_MUTED        = g("muted", _C_MUTED)
+    _C_ACCENT       = g("accent", _C_ACCENT)
+    _C_WARN         = g("warn", _C_WARN)
+    _C_ERR          = g("danger", _C_ERR)
+    _C_HDR_BG       = g("accent", _C_HDR_BG)
+    _C_HDR_FG       = g("accent_fg", "#ffffff")
+    _C_ALT_ROW      = g("panel_2", _C_ALT_ROW)
+    _C_INACTIVE_TXT = g("muted_dim", _C_INACTIVE_TXT)
 
 
 # ── Field-picker sub-widget ───────────────────────────────────────────────────
@@ -310,14 +332,15 @@ class SummaryView(BaseView):
     # ── BaseView ──────────────────────────────────────────────────────────────
 
     def _setup_ui(self) -> None:
+        _refresh_palette()  # bind _C_* to the active theme before building
         self.setStyleSheet(
             f"SummaryView{{background:{_C_BG};}}"
             f"QLabel{{color:{_C_TEXT};background:transparent;}}"
             f"QPushButton{{background:{_C_BG2};color:{_C_TEXT};"
             f"border:1px solid {_C_BORDER};border-radius:5px;padding:5px 12px;font-size:13px;}}"
             f"QPushButton:hover{{background:{_C_BORDER};}}"
-            f"QPushButton#Primary{{background:#1b4f72;border:1px solid #2471a3;}}"
-            f"QPushButton#Primary:hover{{background:#2471a3;}}"
+            f"QPushButton#Primary{{background:{_C_ACCENT};color:{_C_HDR_FG};border:1px solid {_C_ACCENT};}}"
+            f"QPushButton#Primary:hover{{background:{_C_ACCENT};}}"
             f"QComboBox{{background:{_C_BG2};color:{_C_TEXT};border:1px solid {_C_BORDER};"
             f"border-radius:5px;padding:4px 8px;font-size:13px;}}"
             f"QComboBox::drop-down{{border:none;}}"
@@ -327,7 +350,7 @@ class SummaryView(BaseView):
             f"border-radius:5px;padding:4px 8px;font-size:13px;}}"
             f"QTableView{{background:{_C_BG};color:{_C_TEXT};"
             f"gridline-color:{_C_BORDER};border:1px solid {_C_BORDER};border-radius:6px;"
-            f"alternate-background-color:{_C_ALT_ROW};selection-background-color:#143038;}}"
+            f"alternate-background-color:{_C_ALT_ROW};selection-background-color:{_C_ACCENT};}}"
             f"QHeaderView::section{{background:{_C_HDR_BG};color:{_C_HDR_FG};"
             f"font-weight:600;padding:5px 8px;border:none;border-right:1px solid {_C_BORDER};}}"
             # Transparent scrollarea background so controls region blends in
@@ -353,7 +376,7 @@ class SummaryView(BaseView):
 
         title = QLabel("项目汇总")
         title.setStyleSheet(
-            f"font-size:16px;color:#e6eee8;font-weight:600;"
+            f"font-size:16px;color:{_C_TEXT};font-weight:600;"
         )
         bar.addWidget(title)
 
@@ -449,12 +472,31 @@ class SummaryView(BaseView):
         # ── Table (takes all remaining space) ─────────────────────────────────
         self._table = QTableView()
         self._table.setAlternatingRowColors(True)
-        self._table.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
+        self._table.setSelectionBehavior(QTableView.SelectionBehavior.SelectItems)
+        self._table.keyPressEvent = self._table_key_press
         self._table.setEditTriggers(QTableView.EditTrigger.NoEditTriggers)
         self._table.setSortingEnabled(True)
         self._table.verticalHeader().setVisible(False)
         self._table.horizontalHeader().setStretchLastSection(False)
         root.addWidget(self._table, stretch=1)
+
+    def _table_key_press(self, event) -> None:
+        from PyQt6.QtGui import QKeySequence
+        from PyQt6.QtWidgets import QApplication, QTableView
+        if event.matches(QKeySequence.StandardKey.Copy):
+            indexes = self._table.selectionModel().selectedIndexes()
+            if indexes:
+                indexes = sorted(indexes, key=lambda i: (i.row(), i.column()))
+                rows: dict = {}
+                for idx in indexes:
+                    rows.setdefault(idx.row(), []).append(idx)
+                lines = []
+                for row_idxs in rows.values():
+                    parts = [str(self._table.model().data(i) or "") for i in sorted(row_idxs, key=lambda x: x.column())]
+                    lines.append("\t".join(parts))
+                QApplication.clipboard().setText("\n".join(lines))
+            return
+        QTableView.keyPressEvent(self._table, event)
 
     def on_activate(self) -> None:
         """Called every time user navigates to this view."""

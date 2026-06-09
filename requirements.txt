@@ -6,7 +6,10 @@ qtawesome>=1.3               # 矢量图标（Material Design Icons / Feather）
 
 # 图像 / 二维码 / 导出
 Pillow>=10.3.0
+matplotlib>=3.8              # 采集地图出版底图渲染 + 导出（PNG/PDF/SVG/EPS）
+pyproj>=3.6                  # 采集地图生成底图（Nature/R 风）投影变换；自带 PROJ wheel
 qrcode[pil]>=7.4              # 标签二维码，纠错级 Q
+python-barcode>=0.15          # 标签 1D 条码 (Code128)，可选：缺失时降级为占位框
 openpyxl>=3.1                 # Excel 导出（34 列）
 
 # 外部服务

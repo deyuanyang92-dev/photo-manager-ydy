@@ -100,16 +100,22 @@ class ProjectDialog(QDialog):
         mode: str = "new",
         existing_projects: Optional[list[dict]] = None,
         parent: Optional[QWidget] = None,
+        light: bool = False,
     ) -> None:
         super().__init__(parent)
         self._mode = mode
+        # light=True（仅 mode="new"）：采集地图/规划场景的轻量新建——除名称+目录外
+        # 全部选填，按钮文案不再误导“进入照片工作区”。不影响主拍照流程（默认 light=False）。
+        self._light = light and mode == "new"
         self._existing = existing_projects or []
         self._project: Optional[dict] = None  # populated on accept
 
-        if mode == "new":
-            self.setWindowTitle("新建拍摄项目")
-        else:
+        if mode != "new":
             self.setWindowTitle("打开工作区")
+        elif self._light:
+            self.setWindowTitle("新建项目")
+        else:
+            self.setWindowTitle("新建拍摄项目")
 
         self.setMinimumWidth(520)
         self._build_ui()
@@ -123,14 +129,17 @@ class ProjectDialog(QDialog):
         root.setSpacing(14)
 
         # Title + intro
-        title_lbl = QLabel(
-            "新建拍摄项目" if self._mode == "new" else "打开工作区"
-        )
+        title_lbl = QLabel(self.windowTitle())
         title_lbl.setObjectName("Title")
         title_lbl.setStyleSheet("font-size: 18px; font-weight: 600;")
         root.addWidget(title_lbl)
 
-        if self._mode == "new":
+        if self._light:
+            intro = (
+                "为采集地图/采集方案新建一个项目：只需 项目名称 + 目录，其余可留空后续再补。"
+                "建好后留在采集地图，直接导入站位经纬度。"
+            )
+        elif self._mode == "new":
             intro = (
                 "项目目录由相机软件、Helicon 和本照片工作区共同使用；"
                 "新照片会出现在监控区，确认最终成片后才创建标本唯一编号和成果编号。"
@@ -187,21 +196,24 @@ class ProjectDialog(QDialog):
         form.addRow("目录 *：", dir_widget)
 
         if self._mode == "new":
-            # Location (required)
+            # Location（light 模式选填）
+            star = "" if self._light else " *"
+            opt = "（可选）" if self._light else ""
             self._location_edit = QLineEdit()
             self._location_edit.setPlaceholderText("例如：福建 · 厦门 · 一国两制")
-            form.addRow("采集地点 *：", self._location_edit)
+            form.addRow(f"采集地点{star}{opt}：", self._location_edit)
 
-            # Collector (required)
+            # Collector（light 模式选填）
             self._collector_edit = QLineEdit()
             self._collector_edit.setPlaceholderText("例如：杨德援")
-            form.addRow("负责人 *：", self._collector_edit)
+            form.addRow(f"负责人{star}{opt}：", self._collector_edit)
 
-            # Start date (required, default today)
+            # Start date（light 模式选填；非 light 默认今天）
             self._start_date_edit = QLineEdit()
             self._start_date_edit.setPlaceholderText("如 20260101")
-            self._start_date_edit.setText(_today_compact())
-            form.addRow("开始日期 *：", self._start_date_edit)
+            if not self._light:
+                self._start_date_edit.setText(_today_compact())
+            form.addRow(f"开始日期{star}{opt}：", self._start_date_edit)
 
             # End date (optional)
             self._end_date_edit = QLineEdit()
@@ -211,7 +223,9 @@ class ProjectDialog(QDialog):
         root.addLayout(form)
 
         # Buttons
-        if self._mode == "new":
+        if self._light:
+            accept_label = "创建项目（留在采集地图）"
+        elif self._mode == "new":
             accept_label = "创建并进入照片工作区"
         else:
             accept_label = "打开工作区"
@@ -248,18 +262,19 @@ class ProjectDialog(QDialog):
             if not name:
                 warn(self, "新建项目", "请填写项目名称。")
                 return
-            location = self._location_edit.text().strip()
-            if not location:
-                warn(self, "新建项目", "请填写采集地点。")
-                return
-            collector = self._collector_edit.text().strip()
-            if not collector:
-                warn(self, "新建项目", "请填写负责人。")
-                return
-            start_raw = self._start_date_edit.text().strip()
-            if not start_raw:
-                warn(self, "新建项目", "请填写开始日期。")
-                return
+            if not self._light:
+                location = self._location_edit.text().strip()
+                if not location:
+                    warn(self, "新建项目", "请填写采集地点。")
+                    return
+                collector = self._collector_edit.text().strip()
+                if not collector:
+                    warn(self, "新建项目", "请填写负责人。")
+                    return
+                start_raw = self._start_date_edit.text().strip()
+                if not start_raw:
+                    warn(self, "新建项目", "请填写开始日期。")
+                    return
         else:
             name = self._name_edit.text().strip() or Path(directory).name
 
@@ -276,6 +291,10 @@ class ProjectDialog(QDialog):
             return
 
         if self._mode == "new":
+            # light 模式这些可为空；直接从控件读，避免引用未定义校验变量
+            location = self._location_edit.text().strip()
+            collector = self._collector_edit.text().strip()
+            start_raw = self._start_date_edit.text().strip()
             start_digits = _strip_non_digits(start_raw)[:8] or _today_compact()
             end_raw = self._end_date_edit.text().strip()
             end_digits = _strip_non_digits(end_raw)[:8] if end_raw else ""

@@ -286,7 +286,7 @@ class TestRegistry:
         from app.views.registry import ALL_VIEWS
         titles = [v.nav_title for v in ALL_VIEWS]
         assert titles == [
-            "照片工作区", "项目总览", "项目树", "标签打印",
+            "照片工作区", "最近工作区", "项目树", "标签打印",
             "WoRMS 分类库", "内置分类库", "坐标工具",
             "项目汇总", "采集记录", "采集地图", "配置",
         ]

@@ -305,3 +305,119 @@ class TestMapPickDialog:
             from app.widgets import map_pick_dialog  # noqa: F401
         finally:
             builtins.__import__ = real_import
+
+
+# ── 多点层（采集地图）─────────────────────────────────────────────────────────
+
+def _pts(*lonlat):
+    return [{"lon": lo, "lat": la, "label": f"P{i}", "count": i + 1}
+            for i, (lo, la) in enumerate(lonlat)]
+
+
+class TestMultiPointLayer:
+    def test_points_initially_empty(self):
+        TileMapWidget = _import_widget()
+        w = TileMapWidget()
+        assert w._points == []
+
+    def test_has_point_clicked_signal(self):
+        TileMapWidget = _import_widget()
+        w = TileMapWidget()
+        assert hasattr(w, "point_clicked")
+
+    def test_interactive_marker_default_true(self):
+        TileMapWidget = _import_widget()
+        w = TileMapWidget()
+        assert w.interactive_marker is True
+
+    def test_set_points_stores_and_fits(self):
+        TileMapWidget = _import_widget()
+        w = TileMapWidget()
+        w.resize(800, 600)
+        w.set_points(_pts((121.0, 29.0), (123.0, 31.0)))
+        assert len(w._points) == 2
+        # 自动 fit：中心落在两点之间
+        assert 121.0 <= w._center_lon <= 123.0
+        assert 29.0 <= w._center_lat <= 31.0
+
+    def test_clear_points(self):
+        TileMapWidget = _import_widget()
+        w = TileMapWidget()
+        w.set_points(_pts((121.0, 29.0)))
+        w.clear_points()
+        assert w._points == []
+
+    def test_set_points_empty_does_not_crash(self):
+        TileMapWidget = _import_widget()
+        w = TileMapWidget()
+        w.resize(400, 300)
+        w.set_points([])
+        assert w._points == []
+
+    def test_paint_with_points_no_crash(self):
+        from PyQt6.QtGui import QPixmap, QPainter
+        TileMapWidget = _import_widget()
+        w = TileMapWidget()
+        w.resize(400, 300)
+        w.set_points(_pts((121.0, 29.0), (122.0, 30.0)))
+        pm = QPixmap(400, 300)
+        p = QPainter(pm)
+        w.render(pm)   # exercises paintEvent → _draw_points
+        p.end()
+
+    def test_click_on_point_emits_index(self):
+        from PyQt6.QtCore import QPoint, Qt
+        from PyQt6.QtGui import QMouseEvent
+        from PyQt6.QtWidgets import QApplication
+        TileMapWidget = _import_widget()
+        w = TileMapWidget()
+        w.interactive_marker = False
+        w.resize(800, 600)
+        w.set_center(121.0, 29.0, 12)
+        w.set_points(_pts((121.0, 29.0)))
+        # 点 P0 应投影到屏幕中心附近
+        from app.widgets.tile_map_widget import lon_lat_to_pixel
+        px, py = lon_lat_to_pixel(121.0, 29.0, w._center_lon, w._center_lat, w._zoom, 800, 600)
+        received = []
+        w.point_clicked.connect(received.append)
+        pos = QPoint(px, py)
+        for ev_t in ("press", "release"):
+            typ = (QMouseEvent.Type.MouseButtonPress if ev_t == "press"
+                   else QMouseEvent.Type.MouseButtonRelease)
+            from PyQt6.QtCore import QPointF
+            ev = QMouseEvent(typ, QPointF(pos), Qt.MouseButton.LeftButton,
+                             Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+            (w.mousePressEvent if ev_t == "press" else w.mouseReleaseEvent)(ev)
+        QApplication.processEvents()
+        assert received == [0]
+
+    def test_click_with_interactive_marker_off_does_not_place_marker(self):
+        from PyQt6.QtCore import QPoint, QPointF, Qt
+        from PyQt6.QtGui import QMouseEvent
+        TileMapWidget = _import_widget()
+        w = TileMapWidget()
+        w.interactive_marker = False
+        w.resize(800, 600)
+        # 空白处点击（无点）→ 不放置 marker
+        pos = QPointF(QPoint(10, 10))
+        for typ in (QMouseEvent.Type.MouseButtonPress, QMouseEvent.Type.MouseButtonRelease):
+            ev = QMouseEvent(typ, pos, Qt.MouseButton.LeftButton,
+                             Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+            (w.mousePressEvent if typ == QMouseEvent.Type.MouseButtonPress
+             else w.mouseReleaseEvent)(ev)
+        assert w.marker_lon is None   # 未放置
+
+    def test_click_default_still_places_marker(self):
+        """interactive_marker 默认 True：无点时点击仍放置 marker（CoordsView 不回归）。"""
+        from PyQt6.QtCore import QPoint, QPointF, Qt
+        from PyQt6.QtGui import QMouseEvent
+        TileMapWidget = _import_widget()
+        w = TileMapWidget()
+        w.resize(800, 600)
+        pos = QPointF(QPoint(400, 300))
+        for typ in (QMouseEvent.Type.MouseButtonPress, QMouseEvent.Type.MouseButtonRelease):
+            ev = QMouseEvent(typ, pos, Qt.MouseButton.LeftButton,
+                             Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+            (w.mousePressEvent if typ == QMouseEvent.Type.MouseButtonPress
+             else w.mouseReleaseEvent)(ev)
+        assert w.marker_lon is not None   # 放置成功

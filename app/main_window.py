@@ -106,9 +106,9 @@ class MainWindow(QMainWindow):
     def _build_topbar(self) -> QFrame:
         bar = QFrame()
         bar.setObjectName("TopBar")
-        bar.setFixedHeight(58)
+        bar.setFixedHeight(54)
         lay = QHBoxLayout(bar)
-        lay.setContentsMargins(22, 0, 14, 0)
+        lay.setContentsMargins(20, 0, 18, 0)
         lay.setSpacing(0)
 
         # Brand: vector microscope mark + serif wordmark
@@ -123,12 +123,14 @@ class MainWindow(QMainWindow):
         brand.setObjectName("BrandWord")
         lay.addWidget(brand)
 
-        lay.addSpacing(16)
+        lay.addSpacing(18)
 
         # Project switcher in topbar (left side)
         self._project_switcher = QPushButton("（未选）")
         self._project_switcher.setObjectName("ProjectSwitcher")
         self._project_switcher.setToolTip("切换当前工作区项目")
+        self._project_switcher.setMinimumWidth(160)
+        self._project_switcher.setMaximumWidth(240)
         icons.set_button_icon(self._project_switcher, "mdi6.folder-outline",
                               color=icons.TONE_MUTED, size=15)
         self._project_switcher.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
@@ -136,38 +138,42 @@ class MainWindow(QMainWindow):
         self._project_switcher.setCursor(Qt.CursorShape.PointingHandCursor)
         lay.addWidget(self._project_switcher)
 
-        lay.addSpacing(20)
+        lay.addSpacing(16)
 
         # Segmented nav row (buttons added by register_view)
         self._nav_row = QHBoxLayout()
         self._nav_row.setContentsMargins(0, 0, 0, 0)
-        self._nav_row.setSpacing(1)
+        self._nav_row.setSpacing(2)
         nav_wrap = QWidget()
         nav_wrap.setLayout(self._nav_row)
         lay.addWidget(nav_wrap)
 
         lay.addStretch()
 
-        # Right side: + 新建项目 | + 打开工作区 | 智能压缩 | ⚙ | 🎬 Helicon
-        self._btn_new_project = QPushButton("+ 新建项目")
+        # Right side: compact global actions.
+        self._btn_new_project = QPushButton("新建")
         self._btn_new_project.setObjectName("Outline")
         self._btn_new_project.setToolTip("新建一个项目工作区目录")
+        icons.set_button_icon(self._btn_new_project, "mdi6.plus",
+                              color=icons.TONE_MUTED, size=15)
         self._btn_new_project.clicked.connect(self._on_new_project)
         self._btn_new_project.setCursor(Qt.CursorShape.PointingHandCursor)
         lay.addWidget(self._btn_new_project)
 
         lay.addSpacing(6)
 
-        self._btn_open_ws = QPushButton("+ 打开工作区")
+        self._btn_open_ws = QPushButton("打开")
         self._btn_open_ws.setObjectName("Outline")
         self._btn_open_ws.setToolTip("打开已有项目工作区目录")
+        icons.set_button_icon(self._btn_open_ws, "mdi6.folder-open-outline",
+                              color=icons.TONE_MUTED, size=15)
         self._btn_open_ws.clicked.connect(self._on_open_workspace)
         self._btn_open_ws.setCursor(Qt.CursorShape.PointingHandCursor)
         lay.addWidget(self._btn_open_ws)
 
         lay.addSpacing(6)
 
-        self._btn_compress = QPushButton("智能压缩")
+        self._btn_compress = QPushButton("归档")
         self._btn_compress.setObjectName("Outline")
         self._btn_compress.setToolTip("智能压缩归档（JPG→JXL→ZIP）")
         icons.set_button_icon(self._btn_compress, "mdi6.archive-outline",
@@ -181,7 +187,7 @@ class MainWindow(QMainWindow):
         self._settings_btn = QPushButton()
         self._settings_btn.setObjectName("IconGhost")
         self._settings_btn.setToolTip("配置")
-        self._settings_btn.setFixedSize(34, 34)
+        self._settings_btn.setFixedSize(30, 30)
         self._settings_btn.setIcon(
             icons.icon("mdi6.cog-outline", color=icons.TONE_MUTED,
                        color_active=icons.TONE_ACCENT_HOVER)
@@ -193,22 +199,30 @@ class MainWindow(QMainWindow):
 
         lay.addSpacing(6)
 
-        self._btn_helicon = QPushButton("🎬 Helicon")
+        self._btn_helicon = QPushButton("Helicon")
         self._btn_helicon.setObjectName("Primary")
         self._btn_helicon.setToolTip("Helicon Focus 景深合成")
-        self._btn_helicon.clicked.connect(lambda: self.navigate_to("workbench"))
+        icons.set_button_icon(self._btn_helicon, "mdi6.image-filter-center-focus",
+                              color=icons.TONE_ON_ACCENT, size=15)
+        self._btn_helicon.clicked.connect(self._open_helicon_config)
         self._btn_helicon.setCursor(Qt.CursorShape.PointingHandCursor)
         lay.addWidget(self._btn_helicon)
 
         return bar
 
     def _build_context_bar(self) -> QFrame:
-        """Slim active-specimen context strip below the topbar."""
+        """Hidden compatibility bar for active-specimen state.
+
+        The old visible strip duplicated information already shown in the
+        status bar and workbench header.  Keep its widgets alive because
+        refresh_context_bar(), tests, and quick-new wiring still reference them.
+        """
         bar = QFrame()
         bar.setObjectName("ContextBar")
-        bar.setFixedHeight(42)
+        bar.setFixedHeight(0)
+        bar.hide()
         lay = QHBoxLayout(bar)
-        lay.setContentsMargins(22, 0, 22, 0)
+        lay.setContentsMargins(20, 0, 20, 0)
         lay.setSpacing(10)
 
         active_label = QLabel("激活标本")
@@ -222,7 +236,7 @@ class MainWindow(QMainWindow):
         lay.addStretch()
 
         # Quick new-specimen shortcut (wired in _quick_new_specimen)
-        self._btn_new = QPushButton("+ 新增标本唯一编号")
+        self._btn_new = QPushButton("新增编号")
         self._btn_new.setObjectName("Outline")
         self._btn_new.setToolTip("开始填写新标本唯一编号")
         icons.set_button_icon(self._btn_new, "mdi6.dna", color=icons.TONE_ACCENT, size=15)
@@ -312,6 +326,19 @@ class MainWindow(QMainWindow):
             tone = icons.TONE_ACCENT_HOVER if i == active_idx else icons.TONE_MUTED
             b.setIcon(icons.icon(glyph, color=tone,
                                  color_active=icons.TONE_ACCENT_HOVER))
+
+    def _open_helicon_config(self) -> None:
+        """Open the standalone Helicon Focus config dialog (web 顶栏 Helicon)."""
+        dlg = getattr(self, "_helicon_config_dlg", None)
+        if dlg is None:
+            from app.widgets.helicon_config_dialog import HeliconConfigDialog
+            dlg = HeliconConfigDialog(self.ctx, parent=self)
+            self._helicon_config_dlg = dlg
+        else:
+            dlg._detect_and_refresh()
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
 
     def navigate_to(self, view_id: str) -> None:
         """Programmatically switch to the view with the given view_id."""
@@ -502,6 +529,7 @@ _NAV_GLYPHS: dict[str, str] = {
     "worms":     "mdi6.waves",
     "taxonomy":  "mdi6.dna",
     "coords":    "mdi6.map-marker-outline",
+    "collection_map": "mdi6.map-marker-multiple",
     "collab":    "mdi6.chart-bar-stacked",
     "settings":  "mdi6.cog-outline",
 }

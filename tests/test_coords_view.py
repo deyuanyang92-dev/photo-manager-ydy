@@ -114,15 +114,18 @@ class TestBadge:
         QApplication.processEvents()
         assert v._badge.isVisible()
         assert "lat" in v._badge.text().lower() or "29" in v._badge.text()
-        # Green badge has accent color style
-        assert "rgba(41,185,171" in v._badge.styleSheet()
+        # Valid badge uses the active theme's accent colour (theme-following).
+        from app.config.theme import TOKENS
+        assert TOKENS["accent"] in v._badge.styleSheet()
 
     def test_invalid_input_shows_red_badge(self):
         v = _view()
         v._input_edit.setText("not a coord at all !!")
         QApplication.processEvents()
         assert v._badge.isVisible()
-        assert "rgba(230,110,99" in v._badge.styleSheet()
+        # Invalid badge uses the active theme's danger colour (theme-following).
+        from app.config.theme import TOKENS
+        assert TOKENS["danger"] in v._badge.styleSheet()
 
     def test_clear_hides_badge(self):
         v = _view()
@@ -144,7 +147,8 @@ class TestBadge:
         v._input_edit.setText("+29.11492+121.76421/")
         QApplication.processEvents()
         assert v._badge.isVisible()
-        assert "rgba(41,185,171" in v._badge.styleSheet()
+        from app.config.theme import TOKENS
+        assert TOKENS["accent"] in v._badge.styleSheet()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -252,6 +256,40 @@ class TestStructuredDms:
         assert abs(v._parsed["lat"] - 29.114917) < 0.001
         assert abs(v._parsed["lon"] - 121.764222) < 0.001
 
+    def test_apply_place_populates_struct_fields_when_open(self):
+        # 搜索地名「填入」→ when the DMS panel is open, the lat/lon must appear in
+        # the structured 度分秒 fields (regression: they used to stay empty).
+        v = _view()
+        v._on_struct_toggle()  # open DMS panel
+        QApplication.processEvents()
+        v._apply_place(29.05122, 121.74451)
+        QApplication.processEvents()
+        assert v._struct_lat_d.text() == "29"
+        assert v._struct_lon_d.text() == "121"
+        assert v._struct_lat_dir.currentText() == "N"
+        assert v._struct_lon_dir.currentText() == "E"
+
+    def test_apply_place_shows_coord_below_search_box(self):
+        # 填入 echoes the chosen lat/lon below the 地名搜索 box (visible without
+        # scrolling up to the badge or opening the DMS panel).
+        v = _view()
+        assert not v._place_applied_lbl.isVisible()
+        v._apply_place(29.05122, 121.74451)
+        QApplication.processEvents()
+        assert v._place_applied_lbl.isVisible()
+        assert "29.05122" in v._place_applied_lbl.text()
+        assert "121.74451" in v._place_applied_lbl.text()
+
+    def test_apply_place_no_echo_loop_corrupts_input(self):
+        # Populating the struct fields must not echo back and corrupt the value.
+        v = _view()
+        v._on_struct_toggle()
+        v._apply_place(29.05122, 121.74451)
+        QApplication.processEvents()
+        assert v._parsed is not None
+        assert abs(v._parsed["lat"] - 29.05122) < 0.001
+        assert abs(v._parsed["lon"] - 121.74451) < 0.001
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Batch conversion
@@ -302,6 +340,38 @@ class TestBatch:
         v._on_batch_parse()
         assert v._batch_table.rowCount() == 2
 
+    def test_batch_header_layout(self):
+        # Bug fix: 东经 (lon) header must sit above its data column, not float
+        # far right. Caused by setStretchLastSection(True) over-widening the last
+        # column. Fix: all columns content-width + user-draggable (Interactive),
+        # no stretch. See plan rippling-foraging-meadow.
+        from PyQt6.QtWidgets import QHeaderView
+
+        v = _view()
+        v._batch_textarea.setPlainText(self._VALID_INPUT)
+        v._on_batch_parse()
+        QApplication.processEvents()
+        hdr = v._batch_table.horizontalHeader()
+        # Header label still present (regression guard — never blank it out).
+        assert v._batch_table.horizontalHeaderItem(3).text() == "东经"
+        # No column absorbs all extra width (东经 would clip otherwise).
+        assert hdr.stretchLastSection() is False
+        # Every column is drag-resizable (Interactive), per user request.
+        for c in range(4):
+            assert hdr.sectionResizeMode(c) == QHeaderView.ResizeMode.Interactive
+
+    def test_batch_col_width_survives_refresh(self):
+        # User-dragged column widths must persist across format/CS toggles
+        # (refresh re-runs but must not reset widths after the first sizing).
+        v = _view()
+        v._batch_textarea.setPlainText(self._VALID_INPUT)
+        v._on_batch_parse()
+        QApplication.processEvents()
+        v._batch_table.setColumnWidth(1, 400)  # simulate a user drag
+        v._on_batch_fmt("dms")                  # triggers _refresh_batch_table
+        QApplication.processEvents()
+        assert v._batch_table.columnWidth(1) == 400
+
     def test_batch_fmt_dd(self):
         v = _view()
         v._batch_textarea.setPlainText("29.11492N 121.76421E")
@@ -319,7 +389,8 @@ class TestBatch:
         v._on_batch_fmt("dms")
         QApplication.processEvents()
         lat_text = v._batch_table.item(0, 2).text()
-        assert "°" in lat_text and "'" in lat_text
+        # Web batchFormatCoord (app.js:13596) uses ′ U+2032 and ″ U+2033, not ASCII
+        assert "°" in lat_text and "′" in lat_text and "″" in lat_text
 
     def test_batch_fmt_ddm(self):
         v = _view()
@@ -328,8 +399,9 @@ class TestBatch:
         v._on_batch_fmt("ddm")
         QApplication.processEvents()
         lat_text = v._batch_table.item(0, 2).text()
-        assert "°" in lat_text and "'" in lat_text
-        assert '"' not in lat_text  # DDM has no seconds
+        # Web batchFormatCoord DDM: d°m′ (U+2032 prime), no seconds
+        assert "°" in lat_text and "′" in lat_text
+        assert "″" not in lat_text  # DDM has no seconds
 
     def test_batch_cs_gcj02_shifts_china_coords(self):
         """GCJ-02 conversion must shift coords inside mainland China."""

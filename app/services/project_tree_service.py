@@ -23,7 +23,7 @@ def is_workspace(dir_path: str) -> bool:
     return (Path(dir_path) / "_data" / "project.db").exists()
 
 
-def scan_tree(root: str, max_depth: int = 4) -> dict:
+def scan_tree(root: str, max_depth: int = 6) -> dict:
     """Return a nested node dict for the folder tree under *root*.
 
     Node shape::

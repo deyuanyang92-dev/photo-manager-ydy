@@ -9,7 +9,6 @@ from __future__ import annotations
 import collections
 import json
 import math
-import urllib.parse
 import urllib.request
 from typing import Optional
 
@@ -104,34 +103,24 @@ class _TileCache:
         self._store[key] = pixmap
 
 
-# ── Nominatim search worker ───────────────────────────────────────────────────
+# ── IP geolocation worker ─────────────────────────────────────────────────────
 
-class _NominatimWorker(QObject):
-    done = pyqtSignal(float, float)
+class _IpGeoWorker(QObject):
+    done = pyqtSignal(float, float)   # lon, lat
     failed = pyqtSignal()
 
     _UA = "photo-platform-gui/1.0 (specimen-workbench)"
 
-    def __init__(self, query: str) -> None:
-        super().__init__()
-        self._q = query
-
     def run(self) -> None:
         try:
-            url = (
-                "https://nominatim.openstreetmap.org/search?"
-                + urllib.parse.urlencode({
-                    "q": self._q,
-                    "format": "json",
-                    "limit": 1,
-                    "accept-language": "zh",
-                })
+            req = urllib.request.Request(
+                "http://ip-api.com/json",
+                headers={"User-Agent": self._UA},
             )
-            req = urllib.request.Request(url, headers={"User-Agent": self._UA})
             with urllib.request.urlopen(req, timeout=8) as resp:
                 data = json.loads(resp.read().decode())
-            if data:
-                self.done.emit(float(data[0]["lon"]), float(data[0]["lat"]))
+            if data.get("status") == "success":
+                self.done.emit(float(data["lon"]), float(data["lat"]))
             else:
                 self.failed.emit()
         except Exception:
@@ -144,11 +133,14 @@ class TileMapWidget(QWidget):
     """Native Qt slippy-map widget. Emits marker_moved(lon, lat) in WGS-84."""
 
     marker_moved = pyqtSignal(float, float)
+    location_failed = pyqtSignal()
+    point_clicked = pyqtSignal(int)   # index into the multi-point layer
 
     _TILE_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
     _UA = "photo-platform-gui/1.0 (specimen-workbench)"
     _MARKER_COLOR = QColor(41, 185, 171)
     _MARKER_HIT_R = 14  # pixels, hit-test radius
+    _POINT_R = 11       # base bubble radius for multi-point layer
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -157,6 +149,12 @@ class TileMapWidget(QWidget):
         self._center_lat: float = 29.11
         self._marker_lon: Optional[float] = None
         self._marker_lat: Optional[float] = None
+
+        # multi-point layer (采集地图): list of {lon, lat, label, count, ...}
+        self._points: list[dict] = []
+        self._point_pix: list[tuple[int, int]] = []  # per-frame screen coords for hit-test
+        self._point_style: dict = {}                  # 站位样式（空 = v1 默认外观）
+        self.interactive_marker: bool = True          # False → click never places a marker
 
         self._drag_start: Optional[QPoint] = None
         self._drag_center_start: Optional[tuple[float, float]] = None
@@ -167,6 +165,11 @@ class TileMapWidget(QWidget):
         self._nam = QNetworkAccessManager(self)
         self._pending: dict[tuple, QNetworkReply] = {}
         self._search_thread: Optional[QThread] = None
+        self._search_worker = None
+        self._loc_thread: Optional[QThread] = None
+        # geocode backend for the in-map search box (injected by the host view)
+        self._geo_backend: str = "nominatim"
+        self._geo_amap_key: str = ""
 
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setMinimumSize(300, 200)
@@ -216,6 +219,52 @@ class TileMapWidget(QWidget):
         self._marker_lat = None
         self.update()
 
+    # ── multi-point layer (采集地图) ───────────────────────────────────────────
+
+    def set_points(self, points: list[dict]) -> None:
+        """Replace the multi-point layer and auto-fit the view to its bounds.
+
+        Each point is a dict with at least ``lon``/``lat``; ``label``/``count``
+        are used when drawing. Does not touch the single marker.
+        """
+        self._points = list(points or [])
+        self._fit_points()
+        self.update()
+
+    def clear_points(self) -> None:
+        self._points = []
+        self._point_pix = []
+        self.update()
+
+    def set_point_style(self, style: dict) -> None:
+        """设置多点层样式（fill/edge/size/show_label/label_source）。空 = 默认外观。"""
+        self._point_style = dict(style or {})
+        self.update()
+
+    def _fit_points(self) -> None:
+        """Centre on the points' centroid; pick a zoom that spans their bbox."""
+        if not self._points:
+            return
+        lons = [p["lon"] for p in self._points]
+        lats = [p["lat"] for p in self._points]
+        self._center_lon = sum(lons) / len(lons)
+        self._center_lat = sum(lats) / len(lats)
+        span_lon = max(lons) - min(lons)
+        span_lat = max(lats) - min(lats)
+        span = max(span_lon, span_lat)
+        if span <= 0:
+            z = 12                       # single point / coincident → city zoom
+        else:
+            # 360° spans the whole world at z0; halve span per zoom step. Leave
+            # ~1.4× margin so edge points aren't clipped.
+            z = int(math.floor(math.log2(360.0 / (span * 1.4)))) if span > 0 else 12
+        self._zoom = clamp_zoom(z)
+
+    def set_geocode_backend(self, backend: str, amap_key: str = "") -> None:
+        """Inject the geocode backend/key used by the in-map search box."""
+        self._geo_backend = backend or "nominatim"
+        self._geo_amap_key = amap_key or ""
+
     def search_place(self, query: str) -> None:
         if not query.strip():
             return
@@ -224,20 +273,49 @@ class TileMapWidget(QWidget):
             self._search_thread.quit()
             self._search_thread.wait(500)
 
+        from app.services.geocode_service import GeocodeWorker
+
         thread = QThread()   # no parent — managed via finished signal
-        worker = _NominatimWorker(query.strip())
+        worker = GeocodeWorker(
+            query.strip(), backend=self._geo_backend, amap_key=self._geo_amap_key
+        )
         worker.moveToThread(thread)
-
-        def _on_done(lon: float, lat: float) -> None:
-            self.set_marker(lon, lat)
-            thread.quit()
-
-        worker.done.connect(_on_done)
+        # Connect to a *method of self* (main-thread affinity) → queued connection.
+        worker.done.connect(self._on_search_results)
+        worker.done.connect(thread.quit)
         worker.failed.connect(thread.quit)
         thread.started.connect(worker.run)
         thread.finished.connect(thread.deleteLater)
         self._search_thread = thread
+        self._search_worker = worker  # keep alive until thread finishes
         thread.start()
+
+    def _on_search_results(self, results: list) -> None:
+        if results:
+            wgs = results[0]["wgs"]
+            self.set_marker(wgs["lon"], wgs["lat"])
+
+    def locate_current(self) -> None:
+        """IP 定位当前位置；成功后 set_center + set_marker → marker_moved。"""
+        if self._loc_thread is not None and self._loc_thread.isRunning():
+            return
+        worker = _IpGeoWorker()
+        thread = QThread()
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.done.connect(self._on_loc_done)
+        worker.failed.connect(self.location_failed)
+        worker.done.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(thread.deleteLater)
+        self._loc_thread = thread
+        # keep worker alive until thread finishes
+        self._loc_worker = worker
+        thread.start()
+
+    def _on_loc_done(self, lon: float, lat: float) -> None:
+        self.set_center(lon, lat, zoom=10)
+        self.set_marker(lon, lat)
 
     @property
     def marker_lon(self) -> Optional[float]:
@@ -253,6 +331,8 @@ class TileMapWidget(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         self._draw_tiles(painter)
+        if self._points:
+            self._draw_points(painter)
         if self._marker_lon is not None and self._marker_lat is not None:
             self._draw_marker(painter)
         painter.end()
@@ -287,6 +367,63 @@ class TileMapWidget(QWidget):
                 else:
                     painter.fillRect(px, py, _TILE_SIZE, _TILE_SIZE, QColor("#d8e4e4"))
                     self._request_tile(z, tx_w, ty_i)
+
+    def _point_radius(self, count: int) -> int:
+        """Bubble radius grows slowly with the aggregated record count."""
+        extra = int(min(10, math.log2(count + 1) * 3)) if count > 0 else 0
+        return self._POINT_R + extra
+
+    def _draw_points(self, painter: QPainter) -> None:
+        w, h = self.width(), self.height()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self._point_pix = []
+        style = self._point_style or {}
+        fill = QColor(style["fill"]) if style.get("fill") else self._MARKER_COLOR
+        edge = QColor(style["edge"]) if style.get("edge") else QColor(255, 255, 255)
+        size_scale = (style.get("size", 80) / 80.0) if style.get("size") else 1.0
+        show_label = style.get("show_label", True)   # 默认显示计数 = v1 外观
+        for p in self._points:
+            px, py = lon_lat_to_pixel(
+                p["lon"], p["lat"], self._center_lon, self._center_lat,
+                self._zoom, w, h,
+            )
+            self._point_pix.append((px, py))
+            r = int(self._point_radius(int(p.get("count", 1))) * size_scale)
+            painter.setBrush(fill)
+            painter.setPen(QPen(edge, 2))
+            painter.drawEllipse(px - r, py - r, 2 * r, 2 * r)
+            if not show_label:
+                continue
+            src = style.get("label_source", "count")  # 无样式时默认 count = v1 外观
+            if src == "none":
+                continue
+            txt = str(p.get("label") or "") if src == "label" else str(p.get("count") or "")
+            if txt:
+                painter.setPen(QPen(edge))
+                from PyQt6.QtCore import QRect
+                painter.drawText(
+                    QRect(px - r, py - r, 2 * r, 2 * r),
+                    Qt.AlignmentFlag.AlignCenter,
+                    txt,
+                )
+
+    def _point_at(self, pos: QPoint) -> Optional[int]:
+        """Return the index of the multi-point bubble under *pos*, or None.
+
+        Projects points live (independent of the last paint) so hit-testing
+        works even before the first repaint.
+        """
+        w, h = self.width(), self.height()
+        for idx in range(len(self._points) - 1, -1, -1):  # topmost first
+            p = self._points[idx]
+            px, py = lon_lat_to_pixel(
+                p["lon"], p["lat"], self._center_lon, self._center_lat,
+                self._zoom, w, h,
+            )
+            r = self._point_radius(int(p.get("count", 1)))
+            if math.hypot(pos.x() - px, pos.y() - py) <= r:
+                return idx
+        return None
 
     def _draw_marker(self, painter: QPainter) -> None:
         w, h = self.width(), self.height()
@@ -408,7 +545,12 @@ class TileMapWidget(QWidget):
         if not was_marker_drag and self._press_pos is not None:
             delta = event.pos() - self._press_pos
             if math.hypot(delta.x(), delta.y()) < 4:
-                self._place_marker_at(event.pos())
+                # multi-point layer takes priority: a click on a bubble selects it
+                idx = self._point_at(event.pos()) if self._points else None
+                if idx is not None:
+                    self.point_clicked.emit(idx)
+                elif self.interactive_marker:
+                    self._place_marker_at(event.pos())
 
         self._drag_start = None
         self._drag_center_start = None

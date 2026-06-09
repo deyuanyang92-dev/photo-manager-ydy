@@ -143,3 +143,27 @@ def test_grid_edit_existing_record_updates_in_place(qapp, ctx):
     rec = crs.lookup_record(db, "FJ", "XM", "B2", "20260518")
     assert rec["habitat"] == "岩相"
     assert len(crs.list_records(db)) == 1  # updated in place, not duplicated
+
+
+def test_grid_import_mapped_opens_wizard(qapp, ctx, monkeypatch):
+    """自定义映射导入入口：构造向导、自动导入、刷新（不弹真实文件框）。"""
+    from app.views.collection_records_view import CollectionRecordsView
+    from app.services import collection_record_service as crs
+    db = ctx.get_db()
+    view = CollectionRecordsView(ctx)
+    view.on_activate()
+
+    import app.widgets.coord_import_dialog as cidmod
+
+    class _FakeDlg:
+        def __init__(self, _db, parent=None):
+            self._db = _db
+        def exec(self):
+            crs.upsert_record(self._db, {"province": "ZJ", "site": "SMW", "station": "B2",
+                                         "collection_date": "", "lon": 121.0, "lat": 29.0})
+            return 1
+
+    monkeypatch.setattr(cidmod, "CoordImportDialog", _FakeDlg)
+    view._grid_import_mapped()
+    assert crs.lookup_record(db, "ZJ", "SMW", "B2", "") is not None
+    assert "自定义映射" in view._grid_status_lbl.text()

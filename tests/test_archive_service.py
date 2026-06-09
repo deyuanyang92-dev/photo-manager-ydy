@@ -293,3 +293,30 @@ class TestArchiveGroup:
         with zipfile.ZipFile(result.zip_path, "r") as zf:
             bad = zf.testzip()
             assert bad is None, f"ZIP corruption detected: {bad}"
+
+
+# ── Red-line #4 contract: cjxl flags are EXACTLY --distance 0 -e <effort> ──────
+
+class TestCjxlFlagsContract:
+    """Lossless bit-exact requires `--distance 0 -e <effort>` and nothing else.
+
+    Forbidden: --quality / --modular / -j (oracle compress.js:32-39).
+    """
+
+    def test_cjxl_flags_exact(self):
+        captured = {}
+
+        def fake_run(cmd, *a, **kw):
+            captured["cmd"] = cmd
+            return MagicMock(returncode=0)
+
+        with patch("app.services.archive_service.has_cjxl", return_value=True):
+            with patch("app.services.archive_service.subprocess.run", side_effect=fake_run):
+                compress_to_jxl("/in.jpg", "/out.jxl", effort=7)
+
+        cmd = captured["cmd"]
+        assert cmd == ["cjxl", "/in.jpg", "/out.jxl", "--distance", "0", "-e", "7"]
+        joined = " ".join(cmd)
+        assert "--quality" not in joined
+        assert "--modular" not in joined
+        assert "-j" not in cmd  # the lossless-jpeg flag must never appear

@@ -115,6 +115,46 @@ class TestProjectDialogConstruction:
         assert "PRJ" in dlg._code_edit.placeholderText()
 
 
+# ── Light mode（采集地图轻量新建）─────────────────────────────────────────────
+
+class TestProjectDialogLight:
+    def test_title_and_button_label(self, qapp):
+        from app.views.project_dialog import ProjectDialog
+        from PyQt6.QtWidgets import QPushButton
+        dlg = ProjectDialog(mode="new", light=True)
+        assert dlg.windowTitle() == "新建项目"
+        labels = {b.text() for b in dlg.findChildren(QPushButton)}
+        assert "创建项目（留在采集地图）" in labels
+        assert "创建并进入照片工作区" not in labels
+
+    def test_accepts_with_only_name_and_dir(self, qapp, tmp_path):
+        """light 模式：采集地点/负责人/开始日期 留空也能创建。"""
+        from app.views.project_dialog import ProjectDialog
+        dlg = ProjectDialog(mode="new", light=True)
+        dlg._name_edit.setText("规划项目")
+        dlg._dir_edit.setText(str(tmp_path))
+        with mock.patch("app.views.project_dialog.warn") as m_warn:
+            dlg._on_accept()
+        m_warn.assert_not_called()
+        proj = dlg.result_project()
+        assert proj is not None
+        assert proj["name"] == "规划项目"
+        assert proj["location"] == ""        # 选填留空
+        assert proj["collector"] == ""
+
+    def test_full_mode_still_requires_collector(self, qapp, tmp_path):
+        """非 light（默认）仍强制必填，不被回归破坏。"""
+        from app.views.project_dialog import ProjectDialog
+        dlg = ProjectDialog(mode="new")          # light=False
+        dlg._name_edit.setText("拍摄项目")
+        dlg._dir_edit.setText(str(tmp_path))
+        dlg._location_edit.setText("福建·厦门")
+        with mock.patch("app.views.project_dialog.warn") as m_warn:
+            dlg._on_accept()                     # 负责人空 → 警告
+        m_warn.assert_called_once()
+        assert dlg.result_project() is None
+
+
 # ── Validation ────────────────────────────────────────────────────────────────
 
 class TestProjectDialogValidation:

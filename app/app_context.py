@@ -39,6 +39,8 @@ class AppContext:
     def __init__(self) -> None:
         self.settings = AppSettings()
         self._project_dir: Optional[str] = None
+        self._project_root: Optional[str] = None
+        self.last_db_error: Optional[Exception] = None
         self.collab_service: Optional["CollabService"] = None
 
     # ── Project dir ───────────────────────────────────────────────────
@@ -53,6 +55,22 @@ class AppContext:
         if path:
             self.settings.last_project_dir = path
 
+    # ── Project root (folder-tree inheritance anchor) ─────────────────
+    # The survey-root folder that bounds the settings-inheritance walk
+    # (project_settings_service.get_effective). Distinct from
+    # current_project_dir: a workspace may be its own root. Every
+    # workspace-entry path MUST set this so inheritance is bounded and
+    # behaves identically regardless of how the workspace was opened.
+
+    @property
+    def current_project_root(self) -> Optional[str]:
+        return self._project_root
+
+    @current_project_root.setter
+    def current_project_root(self, path: Optional[str]) -> None:
+        self._project_root = path
+        self.settings.project_tree_root = path
+
     # ── Database access ───────────────────────────────────────────────
 
     def get_db(self, project_dir: Optional[str] = None) -> Optional[sqlite3.Connection]:
@@ -64,7 +82,16 @@ class AppContext:
         target = project_dir or self._project_dir
         if not target:
             return None
-        return open_project_db(target)
+        try:
+            db = open_project_db(target)
+        except (OSError, sqlite3.Error) as exc:
+            self.last_db_error = exc
+            if target == self._project_dir:
+                self._project_dir = None
+                self.settings.last_project_dir = None
+            return None
+        self.last_db_error = None
+        return db
 
     # ── Convenience ───────────────────────────────────────────────────
 

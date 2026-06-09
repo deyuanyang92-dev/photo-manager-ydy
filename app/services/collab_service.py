@@ -150,13 +150,37 @@ class PeerInfo:
     port: int
     hostname: str = ""
     project_name: str = ""
+    group_code: str = ""          # collaboration-group code; only matching peers sync
     last_seen: float = field(default_factory=time.time)
     latency_ms: Optional[float] = None
+    clock_skew_ms: Optional[float] = None   # local_time - peer serverTime (ms)
+    reachable: Optional[bool] = None        # can I reach this peer?
+    reachback_ok: Optional[bool] = None     # can this peer reach me back?
     manual: bool = False          # True = added via manual IP, not mDNS
 
     @property
     def base_url(self) -> str:
         return f"http://{self.ip}:{self.port}"
+
+
+# ── Self-diagnostics ──────────────────────────────────────────────────────────
+
+@dataclass
+class Diagnostic:
+    """One collaboration health finding, novice-readable (Chinese)."""
+    code: str                       # machine key, e.g. "deps_missing"
+    level: str                      # "ok" | "warn" | "error"
+    title: str                      # short Chinese title
+    detail: str = ""                # what / why
+    fix: str = ""                   # how to fix (plain Chinese)
+    action: Optional[str] = None    # optional one-click action key
+
+
+def _missing_deps() -> list[str]:
+    """Return the collaboration packages that are not importable."""
+    import importlib.util
+    need = ["fastapi", "uvicorn", "zeroconf", "httpx"]
+    return [n for n in need if importlib.util.find_spec(n) is None]
 
 
 # ── In-memory task store (single project scope) ───────────────────────────────
@@ -239,6 +263,11 @@ class TaskStore:
                     changed += 1
         return changed
 
+    def delete(self, uid: str) -> None:
+        """Remove a task entirely so its UID becomes reclaimable.  Idempotent."""
+        with self._lock:
+            self._tasks.pop(uid, None)
+
     def replace_all(self, tasks: list[TaskRecord]) -> None:
         """Overwrite store (used in tests or full-sync scenarios)."""
         with self._lock:
@@ -252,7 +281,15 @@ class TaskStore:
 # ── FastAPI application ───────────────────────────────────────────────────────
 
 def _build_fastapi_app(store: TaskStore, node_info_fn: Callable[[], dict]) -> Any:
-    """Build and return the FastAPI app.  Imported lazily to avoid startup cost."""
+    """Build and return the FastAPI app.  Imported lazily to avoid startup cost.
+
+    The fastapi names are bound into module globals (``global`` below) so that
+    the nested endpoint functions' ``request: Request`` annotations resolve via
+    ``typing.get_type_hints`` (which reads the function's ``__globals__``).
+    A purely function-local import leaves them unresolvable and FastAPI then
+    mis-reads ``request`` as a query parameter → every POST 422s.
+    """
+    global FastAPI, HTTPException, Request, JSONResponse
     try:
         from fastapi import FastAPI, HTTPException, Request
         from fastapi.responses import JSONResponse
@@ -279,6 +316,11 @@ def _build_fastapi_app(store: TaskStore, node_info_fn: Callable[[], dict]) -> An
         uid = body.get("uid")
         if not uid:
             raise HTTPException(status_code=400, detail="uid required")
+        # Group guard: only accept claims from our own collaboration group.
+        # Empty local group = not participating → reject everyone.
+        local_group = node_info_fn().get("groupCode", "")
+        if not local_group or body.get("groupCode", "") != local_group:
+            raise HTTPException(status_code=403, detail="collaboration group mismatch")
         try:
             task = store.create(
                 uid=uid,
@@ -304,6 +346,41 @@ def _build_fastapi_app(store: TaskStore, node_info_fn: Callable[[], dict]) -> An
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return task.to_dict()
+
+    @app.post("/api/node/reachback")
+    async def reachback(request: Request) -> dict:
+        """Test whether the *caller* is reachable from this node's side.
+
+        The caller passes its own {ip, port}; we try to GET its /api/node/health
+        and report back.  Lets a peer detect a one-way firewall block (it can
+        reach us, but we cannot reach it).
+        """
+        body = await request.json()
+        ip = body.get("ip")
+        port = body.get("port")
+        if not ip or not port:
+            raise HTTPException(status_code=400, detail="ip and port required")
+        reachable = False
+        try:
+            import httpx
+            r = httpx.get(f"http://{ip}:{port}/api/node/health", timeout=3.0)
+            reachable = r.status_code == 200
+        except Exception:  # noqa: BLE001
+            reachable = False
+        return {"reachable": reachable}
+
+    @app.post("/api/collab/tasks/release")
+    async def release_task(request: Request) -> dict:
+        """Release (delete) a UID claim so it becomes reclaimable by anyone."""
+        body = await request.json()
+        uid = body.get("uid")
+        if not uid:
+            raise HTTPException(status_code=400, detail="uid required")
+        local_group = node_info_fn().get("groupCode", "")
+        if not local_group or body.get("groupCode", "") != local_group:
+            raise HTTPException(status_code=403, detail="collaboration group mismatch")
+        store.delete(uid)
+        return {"ok": True, "uid": uid}
 
     @app.post("/api/collab/photo-index")
     async def receive_photo_index(request: Request) -> dict:
@@ -446,6 +523,7 @@ class CollabDiscoveryThread(QThread):
 
     peer_found = pyqtSignal(str, int, str)    # ip, port, hostname
     peer_lost  = pyqtSignal(str, int)         # ip, port
+    discovery_error = pyqtSignal(str)         # mDNS unavailable / register failed
 
     def __init__(self, hostname: str, port: int) -> None:
         super().__init__()
@@ -461,6 +539,7 @@ class CollabDiscoveryThread(QThread):
             import ipaddress
         except ImportError:
             logger.warning("zeroconf not installed — mDNS discovery disabled")
+            self.discovery_error.emit("未安装 zeroconf")
             return
 
         local_ip = _get_local_ip()
@@ -485,6 +564,7 @@ class CollabDiscoveryThread(QThread):
             self._zc.register_service(self._info)
         except Exception as exc:  # noqa: BLE001
             logger.warning("collab: mDNS register failed: %s", exc)
+            self.discovery_error.emit(f"注册失败:{exc}")
 
         handler = _BrowserHandler(
             local_ip=local_ip,
@@ -624,6 +704,7 @@ class CollabService(QObject):
     sync_error       = pyqtSignal(str)
     server_ready     = pyqtSignal(int)         # port
     offline_drafts_changed = pyqtSignal()      # draft queue added/cleared
+    diagnostics_changed = pyqtSignal()         # self-diagnostics list updated
 
     def __init__(self, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
@@ -633,6 +714,10 @@ class CollabService(QObject):
         self._hostname = socket.gethostname()
         self._port: Optional[int] = None
         self._project_name: str = ""
+        self._group_code: str = ""
+        self._running: bool = False
+        self._diagnostics: list[Diagnostic] = []
+        self._discovery_error: str = ""
 
         # Offline draft queue (mirrors loadCollabOfflineDrafts / saveCollabOfflineDrafts)
         self._offline_drafts: list[OfflineDraft] = []
@@ -650,9 +735,18 @@ class CollabService(QObject):
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
 
-    def start(self, project_name: str = "", preferred_port: int = 5050) -> None:
-        """Start server, mDNS, and sync timer.  Safe to call from main thread."""
+    def start(self, project_name: str = "", preferred_port: int = 5050,
+              group_code: str = "") -> None:
+        """Start server, mDNS, and sync timer.  Safe to call from main thread.
+
+        Idempotent: a second call while already running is a no-op.
+        """
+        if self._running:
+            return
         self._project_name = project_name
+        if group_code:
+            self._group_code = group_code.strip()
+        self._running = True
 
         self._server_thread = CollabServerThread(
             store=self.store,
@@ -675,20 +769,255 @@ class CollabService(QObject):
         )
         self._discovery_thread.peer_found.connect(self._on_peer_found)
         self._discovery_thread.peer_lost.connect(self._on_peer_lost)
+        self._discovery_thread.discovery_error.connect(self._on_discovery_error)
         self._discovery_thread.start()
         self._sync_timer.start()
         self._retry_timer.start()
+        self.run_diagnostics()
 
     def stop(self) -> None:
-        """Gracefully shut down all background threads."""
+        """Gracefully shut down all background threads.  Idempotent."""
+        self._running = False
         self._sync_timer.stop()
         self._retry_timer.stop()
         if self._discovery_thread:
             self._discovery_thread.stop()
+            self._discovery_thread = None
         if self._server_thread:
             self._server_thread.stop()
+            self._server_thread = None
+
+    def is_running(self) -> bool:
+        """True between start() and stop()."""
+        return self._running
+
+    # ── Collaboration group ───────────────────────────────────────────────
+
+    @property
+    def group_code(self) -> str:
+        return self._group_code
+
+    def set_group_code(self, code: str) -> None:
+        """Set the collaboration-group code at runtime (e.g. from settings)."""
+        self._group_code = (code or "").strip()
+
+    def _group_matches(self, peer: PeerInfo) -> bool:
+        """A peer syncs with us only when both sides share a non-empty code."""
+        return bool(self._group_code) and peer.group_code == self._group_code
+
+    # ── Self-diagnostics ──────────────────────────────────────────────────
+
+    CLOCK_SKEW_THRESHOLD_MS = 5_000
+
+    def diagnostics(self) -> list[Diagnostic]:
+        """Return the last computed diagnostics list."""
+        return list(self._diagnostics)
+
+    def run_diagnostics(self) -> list[Diagnostic]:
+        """Run the synchronous health checks and store/emit the result.
+
+        Network probes (reachability, clock skew measurement) run separately in
+        a background worker and call this again once peer attributes are updated.
+        """
+        diags: list[Diagnostic] = []
+        diags += self._diag_deps()
+        diags += self._diag_config()
+        diags += self._diag_mdns()
+        diags += self._diag_group_mismatch()
+        diags += self._diag_clock_skew()
+        diags += self._diag_reachability()
+        if not diags:
+            diags = [Diagnostic("ok", "ok", "协作正常", "未发现配置问题。")]
+        self._diagnostics = diags
+        self.diagnostics_changed.emit()
+        return diags
+
+    def overall_health(self) -> str:
+        """Roll up to a traffic-light colour: red > yellow > green."""
+        if any(d.level == "error" for d in self._diagnostics):
+            return "red"
+        if any(d.level == "warn" for d in self._diagnostics):
+            return "yellow"
+        return "green"
+
+    def _diag_deps(self) -> list[Diagnostic]:
+        missing = _missing_deps()
+        if missing:
+            return [Diagnostic(
+                "deps_missing", "error", "缺少协作组件",
+                f"未安装:{', '.join(missing)}。协作功能无法运行。",
+                f"运行 pip install {' '.join(missing)}")]
+        return []
+
+    def _diag_config(self) -> list[Diagnostic]:
+        if not self._group_code:
+            return [Diagnostic(
+                "config_no_group", "warn", "未设置协作组码",
+                "未填写协作组码,不会与任何设备同步标本编号。",
+                "在「设置 → 协作」里给同组每台设备填写相同的协作组码。")]
+        return []
+
+    def _diag_group_mismatch(self) -> list[Diagnostic]:
+        if not self._group_code:
+            return []
+        others = sorted({
+            p.group_code for p in self.peers()
+            if p.group_code and p.group_code != self._group_code
+        })
+        if others:
+            return [Diagnostic(
+                "group_mismatch", "warn", "发现组码不同的设备",
+                f"同网段设备的组码为:{', '.join(others)};你的组码是 {self._group_code}。"
+                "组码不同的设备不会互相同步,可能各自占用了相同编号。",
+                "若你们应在同一组,请核对并统一组码。",
+                action="adopt_group")]
+        return []
+
+    def _diag_clock_skew(self) -> list[Diagnostic]:
+        bad = [p for p in self.peers()
+               if p.clock_skew_ms is not None
+               and abs(p.clock_skew_ms) > self.CLOCK_SKEW_THRESHOLD_MS]
+        if bad:
+            worst = max(abs(p.clock_skew_ms) for p in bad)  # type: ignore[arg-type]
+            return [Diagnostic(
+                "clock_skew", "warn", "设备时间不一致",
+                f"与队友的系统时间相差约 {round(worst / 1000)} 秒。"
+                "同步按修改时间先后合并,时间不准会导致较新的修改被覆盖。",
+                "请校准各设备的系统时间(建议开启「自动设置时间」)。")]
+        return []
+
+    def _diag_mdns(self) -> list[Diagnostic]:
+        if self._discovery_error:
+            return [Diagnostic(
+                "mdns_unavailable", "warn", "局域网自动发现不可用",
+                f"无法启动自动发现({self._discovery_error})。",
+                "改用「搜索局域网」或「配对码」连接队友。")]
+        return []
+
+    def _diag_reachability(self) -> list[Diagnostic]:
+        blocked = [p for p in self.peers()
+                   if p.reachable is True and p.reachback_ok is False]
+        if blocked:
+            port = self._port or 5050
+            return [Diagnostic(
+                "firewall_blocked", "error", "队友连不到你",
+                f"你能看到队友,但他们无法连回你(端口 {port})。"
+                "很可能是本机防火墙挡住了入站连接。",
+                f"放行端口 {port} 的入站连接。",
+                action="open_firewall")]
+        return []
+
+    # ── Network probes (run off the main thread) ──────────────────────────
+
+    def _on_discovery_error(self, msg: str) -> None:
+        """Record an mDNS discovery failure and refresh diagnostics."""
+        self._discovery_error = msg
+        self.run_diagnostics()
+
+    def _probe_peer(self, peer: PeerInfo) -> None:
+        """Measure reachability, clock skew and reachback for one peer."""
+        try:
+            import httpx
+            r = httpx.get(f"{peer.base_url}/api/node/info", timeout=3.0)
+            if r.status_code == 200:
+                peer.reachable = True
+                data = r.json()
+                st = data.get("serverTime")
+                if isinstance(st, (int, float)):
+                    peer.clock_skew_ms = (time.time() - float(st)) * 1000.0
+                if not peer.group_code:
+                    peer.group_code = data.get("groupCode", "")
+                try:
+                    rb = httpx.post(
+                        f"{peer.base_url}/api/node/reachback",
+                        json={"ip": _get_local_ip(), "port": self._port},
+                        timeout=3.0,
+                    )
+                    if rb.status_code == 200:
+                        peer.reachback_ok = bool(rb.json().get("reachable"))
+                except Exception:  # noqa: BLE001
+                    peer.reachback_ok = None
+            else:
+                peer.reachable = False
+        except Exception:  # noqa: BLE001
+            peer.reachable = False
+
+    def run_probes(self) -> None:
+        """Probe every known peer (background) then refresh diagnostics."""
+        for peer in self.peers():
+            self._probe_peer(peer)
+        self.run_diagnostics()
+
+    # ── Subnet scan (mDNS-failure fallback) ───────────────────────────────
+
+    SCAN_PORTS = tuple(range(5050, 5070))
+
+    def _local_subnet_hosts(self) -> list[str]:
+        """All host IPs in the local /24, excluding our own address."""
+        ip = _get_local_ip()
+        parts = ip.split(".")
+        if len(parts) != 4:
+            return []
+        base = ".".join(parts[:3])
+        return [f"{base}.{i}" for i in range(1, 255) if f"{base}.{i}" != ip]
+
+    def scan_lan(self, hosts: Optional[list[str]] = None,
+                 ports: Optional[list[int]] = None,
+                 timeout: float = 0.3) -> list[PeerInfo]:
+        """Ping-sweep the LAN for collab nodes and add reachable ones as peers.
+
+        Novice fallback when mDNS fails — no IP knowledge required.  Runs the
+        probes concurrently; pass small host/port lists in tests.
+        """
+        hosts = hosts if hosts is not None else self._local_subnet_hosts()
+        ports = ports if ports is not None else list(self.SCAN_PORTS)
+        try:
+            import httpx
+        except ImportError:
+            return []
+
+        local_ip = _get_local_ip()
+        targets = [(h, p) for h in hosts for p in ports
+                   if not (h == local_ip and p == self._port)]
+
+        def _probe(target: tuple[str, int]) -> Optional[PeerInfo]:
+            host, port = target
+            try:
+                r = httpx.get(f"http://{host}:{port}/api/node/info", timeout=timeout)
+                if r.status_code != 200:
+                    return None
+                data = r.json()
+                return PeerInfo(
+                    ip=host, port=port,
+                    hostname=data.get("hostname", ""),
+                    group_code=data.get("groupCode", ""),
+                    project_name=data.get("projectName", ""),
+                    manual=True,
+                )
+            except Exception:  # noqa: BLE001
+                return None
+
+        found: list[PeerInfo] = []
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=64) as pool:
+            for peer in pool.map(_probe, targets):
+                if peer is not None:
+                    with self._peers_lock:
+                        self._peers[f"{peer.ip}:{peer.port}"] = peer
+                    found.append(peer)
+
+        if found:
+            self.peers_changed.emit()
+        return found
 
     # ── Peer management ───────────────────────────────────────────────────
+
+    def _spawn(self, fn: Callable[[], None]) -> None:
+        """Run *fn* on a short-lived daemon thread (non-blocking).
+
+        Overridden in tests to run synchronously.
+        """
+        threading.Thread(target=fn, daemon=True).start()
 
     def _on_peer_found(self, ip: str, port: int, hostname: str) -> None:
         key = f"{ip}:{port}"
@@ -696,6 +1025,10 @@ class CollabService(QObject):
             self._peers[key] = PeerInfo(ip=ip, port=port, hostname=hostname)
         logger.info("collab: peer found %s (%s:%d)", hostname, ip, port)
         self.peers_changed.emit()
+        # Enrich with group_code / project_name from /api/node/info so the peer
+        # can pass the group filter.  HTTP → do it off the main thread.
+        peer = self._peers[key]
+        self._spawn(lambda: (self._fetch_peer_info(peer), self.peers_changed.emit()))
 
     def _on_peer_lost(self, ip: str, port: int) -> None:
         key = f"{ip}:{port}"
@@ -733,6 +1066,7 @@ class CollabService(QObject):
                 data = resp.json()
                 peer.hostname = data.get("hostname", peer.hostname)
                 peer.project_name = data.get("projectName", "")
+                peer.group_code = data.get("groupCode", "")
                 peer.last_seen = time.time()
         except Exception:  # noqa: BLE001
             pass
@@ -757,6 +1091,8 @@ class CollabService(QObject):
 
     def _sync_peer(self, peer: PeerInfo) -> int:
         """Pull /api/collab/tasks from one peer and merge.  Returns changed count."""
+        if not self._group_matches(peer):
+            return 0  # different (or no) collaboration group → never sync
         try:
             import httpx
             t0 = time.monotonic()
@@ -787,10 +1123,10 @@ class CollabService(QObject):
             self.conflict_detected.emit(uid)
             return False, msg
 
-        # 2. Remote check — broadcast POST, abort on first 409
+        # 2. Remote check — broadcast POST to same-group peers, abort on first 409
         peers_snapshot: list[PeerInfo]
         with self._peers_lock:
-            peers_snapshot = list(self._peers.values())
+            peers_snapshot = [p for p in self._peers.values() if self._group_matches(p)]
 
         for peer in peers_snapshot:
             ok, conflict_msg = self._remote_create(peer, uid, assignee, device_id)
@@ -823,6 +1159,7 @@ class CollabService(QObject):
                     "assignee": assignee,
                     "deviceId": device_id,
                     "projectName": self._project_name,
+                    "groupCode": self._group_code,
                 },
                 timeout=4.0,
             )
@@ -977,6 +1314,8 @@ class CollabService(QObject):
         return {
             "hostname":    self._hostname,
             "projectName": self._project_name,
+            "groupCode":   self._group_code,
+            "serverTime":  time.time(),
             "lanIp":       _get_local_ip(),
             "port":        self._port,
         }
@@ -1001,16 +1340,43 @@ class CollabService(QObject):
         except ValueError as exc:
             logger.warning("assign_task failed uid=%s: %s", uid, exc)
 
-    def void_task(self, uid: str) -> None:
-        """Void task *uid* (transition → VOID).
+    def release_task(self, uid: str) -> None:
+        """Revoke a UID claim = *release* it for reuse.
 
-        Logs a warning when the transition is invalid.
+        Deletes the task locally and broadcasts a delete to every same-group
+        peer so the UID becomes claimable again by anyone.  This deliberately
+        bypasses the VOID terminal-state rule — a release is a delete, not a
+        status transition.
         """
-        try:
-            self.store.update_status(uid, TaskStatus.VOID)
-            self.tasks_changed.emit()
-        except ValueError as exc:
-            logger.warning("void_task failed uid=%s: %s", uid, exc)
+        self.store.delete(uid)
+
+        with self._peers_lock:
+            peers_snapshot = [p for p in self._peers.values() if self._group_matches(p)]
+
+        if peers_snapshot:
+            try:
+                import httpx
+                for peer in peers_snapshot:
+                    try:
+                        httpx.post(
+                            f"{peer.base_url}/api/collab/tasks/release",
+                            json={"uid": uid, "groupCode": self._group_code},
+                            timeout=4.0,
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+            except ImportError:
+                pass
+
+        self.tasks_changed.emit()
+
+    def void_task(self, uid: str) -> None:
+        """Revoke a UID claim.  Alias for :meth:`release_task` (release = reuse).
+
+        Kept for backward-compatible callers; semantics are now *release*, not
+        a VOID status flip, per the confirmed UX (revoke frees the UID).
+        """
+        self.release_task(uid)
 
     def resolve_conflict(self, uid: str) -> None:
         """Resolve a conflicted task by resetting it to CREATED.

@@ -155,6 +155,151 @@ def list_projects(user_projects_json_path: str) -> list:
         return []
 
 
+def default_user_projects_json_path() -> str:
+    """Return the app-local ``data/user_projects.json`` path (the writable
+    recent-workspaces list shared by 项目树 and 项目总览)."""
+    repo_root = Path(__file__).resolve().parents[2]
+    return str(repo_root / "data" / "user_projects.json")
+
+
+def _workspace_display_name(resolved: str, root: Optional[str]) -> str:
+    """Human-readable name for a workspace in the recent list.
+
+    With a survey root, show the path relative to that root prefixed by the
+    root's own name (``雷州岛 / 断面a``) so identically-named 断面a folders in
+    different regions never collide. Without a root, fall back to the folder
+    name.
+    """
+    if not root:
+        return Path(resolved).name
+    rootp = Path(root).resolve()
+    try:
+        rel = Path(resolved).relative_to(rootp)
+    except ValueError:
+        return Path(resolved).name
+    return " / ".join([rootp.name, *rel.parts])
+
+
+def record_recent_workspace(
+    user_projects_json_path: str, path: str, root: Optional[str] = None
+) -> list:
+    """Append *path* to the recent-workspaces list (``user_projects.json``).
+
+    De-dupes by resolved directory so a workspace entered repeatedly — whether
+    from the folder tree or the flat overview — appears exactly once. Existing
+    entries are preserved. This is what makes 项目树 and 项目总览 share a single
+    source of truth: entering any tree node surfaces it in the overview table.
+
+    Returns the full project list after the update.
+    """
+    resolved = str(Path(path).resolve())
+    projects = list_projects(user_projects_json_path)
+    if not any((p.get("directory") or p.get("dir")) == resolved for p in projects):
+        entry = {
+            "id": str(uuid.uuid4()),
+            "name": _workspace_display_name(resolved, root),
+            "directory": resolved,
+            "dir": resolved,
+        }
+        if root:
+            entry["root"] = str(Path(root).resolve())
+        projects.append(entry)
+        out = Path(user_projects_json_path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(
+            json.dumps({"version": 1, "projects": projects}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    return projects
+
+
+def enter_workspace(
+    ctx,
+    path: str,
+    root: Optional[str] = None,
+    *,
+    projects_json_path: Optional[str] = None,
+) -> str:
+    """Single, unified workspace-entry path used by EVERY caller.
+
+    Guarantees a consistent post-condition regardless of where the user entered
+    from (folder tree, flat overview, recent list):
+
+      1. Standard subdir layout exists (``open_project``).
+      2. ``ctx.current_project_dir`` = the workspace.
+      3. ``ctx.current_project_root`` = *root* (or the workspace itself when no
+         root is given) — so settings inheritance is ALWAYS bounded and never
+         silently walks to the filesystem root.
+
+    When *projects_json_path* is supplied, the workspace is also recorded into
+    the recent list (see :func:`record_recent_workspace`).
+
+    Returns the resolved workspace path.
+    """
+    resolved = str(Path(path).resolve())
+    try:
+        open_project(resolved)
+    except Exception:
+        pass
+    ctx.current_project_dir = resolved
+    ctx.current_project_root = str(Path(root).resolve()) if root else resolved
+    if projects_json_path:
+        try:
+            record_recent_workspace(projects_json_path, resolved, root)
+        except Exception:
+            pass
+    return resolved
+
+
+def seed_region_settings(
+    region_dir: str,
+    *,
+    province: str = "",
+    site: str = "",
+    collector: str = "",
+    photographer: str = "",
+    identifier: str = "",
+    meta: Optional[dict] = None,
+) -> str:
+    """Scaffold a 调查区域 root: create its anchor ``_data/project.db`` and store
+    region-level settings (地区/样地/人员) once, so every 断面 workspace beneath
+    it inherits them via ``project_settings_service.get_effective``.
+
+    This is the "set it once at the region, never re-type per 断面" path. Only
+    non-empty values are written, so calling it again to amend is safe.
+    Returns the resolved region directory.
+    """
+    from app.db.db_manager import open_project_db
+    from app.services import project_settings_service as pss
+
+    resolved = str(Path(region_dir).resolve())
+    ensure_project_dirs(resolved)
+    db = open_project_db(resolved)
+
+    code_labels = pss.load_setting(db, "code_labels", pss.DEFAULT_CODE_LABELS)
+    if province:
+        code_labels["province"] = province
+    if site:
+        code_labels["site"] = site
+    pss.save_setting(db, "code_labels", code_labels)
+
+    personnel = pss.load_setting(db, "personnel", pss.DEFAULT_PERSONNEL)
+    if collector:
+        personnel["collector"] = collector
+    if photographer:
+        personnel["photographer"] = photographer
+    if identifier:
+        personnel["identifier"] = identifier
+    pss.save_setting(db, "personnel", personnel)
+
+    if meta:
+        pm = pss.load_setting(db, "project_meta", pss.DEFAULT_PROJECT_META)
+        pm.update({k: v for k, v in meta.items() if v})
+        pss.save_setting(db, "project_meta", pm)
+
+    return resolved
+
+
 def get_project_summary(project_dir: str) -> dict:
     """Return live statistics for *project_dir*: specimen count, result TIFF count,
     pending JPG count.

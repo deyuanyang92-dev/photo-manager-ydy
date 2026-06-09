@@ -730,7 +730,7 @@ class OverviewView(BaseView):
     """
 
     view_id = "overview"
-    nav_title = "项目总览"
+    nav_title = "最近工作区"
     nav_icon = "📊"
 
     # Emitted when user clicks 「进入工作区」; carries the project directory.
@@ -772,8 +772,9 @@ class OverviewView(BaseView):
         header_row.setSpacing(12)
         header_row.setContentsMargins(0, 0, 0, 20)
 
-        self._title_lbl = QLabel("项目总览")
+        self._title_lbl = QLabel("最近工作区")
         self._title_lbl.setObjectName("Title")
+        self._title_lbl.setToolTip("最近进过的拍照工作区（如 雷州岛 / 断面a），不是大项目列表。在「项目树」里浏览整次调查。")
         # serif font + 28px — mirrors .overview-header h2
         self._title_lbl.setStyleSheet(
             'font-family: "Noto Serif SC","Source Han Serif SC",SimSun,Georgia,serif;'
@@ -853,7 +854,8 @@ class OverviewView(BaseView):
             ["项目名称", "磁盘目录", "时间", "地点", "负责人", "操作"]
         )
         self._table.setAlternatingRowColors(True)
-        self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectItems)
+        self._table.keyPressEvent = self._table_key_press
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.verticalHeader().setVisible(False)
         hdr = self._table.horizontalHeader()
@@ -1107,8 +1109,12 @@ class OverviewView(BaseView):
                 self, "进入工作区", "该项目没有关联磁盘目录，请先打开或新建一个有目录的项目。"
             )
             return
-        # Set active project in context
-        self.ctx.current_project_dir = directory
+        # Single unified entry path. A flat overview project has no survey tree,
+        # so its root defaults to itself → inheritance stays bounded to this
+        # workspace and never walks to an unrelated parent folder.
+        from app.services.project_service import enter_workspace
+        root = proj.get("root") or None
+        enter_workspace(self.ctx, directory, root=root)
         # Emit signal — MainWindow wires this to navigate_to("workbench")
         self.enter_workspace_requested.emit(directory)
         # Refresh the context bar through MainWindow if possible
@@ -1180,6 +1186,24 @@ class OverviewView(BaseView):
             QMessageBox.critical(self, "打开工作区失败", str(exc))
 
     # ── Font helpers ───────────────────────────────────────────────────────────
+
+    def _table_key_press(self, event) -> None:
+        from PyQt6.QtGui import QKeySequence
+        from PyQt6.QtWidgets import QApplication, QTableWidget
+        if event.matches(QKeySequence.StandardKey.Copy):
+            indexes = self._table.selectionModel().selectedIndexes()
+            if indexes:
+                indexes = sorted(indexes, key=lambda i: (i.row(), i.column()))
+                rows: dict = {}
+                for idx in indexes:
+                    rows.setdefault(idx.row(), []).append(idx)
+                lines = []
+                for row_idxs in rows.values():
+                    parts = [str(self._table.model().data(i) or "") for i in sorted(row_idxs, key=lambda x: x.column())]
+                    lines.append("\t".join(parts))
+                QApplication.clipboard().setText("\n".join(lines))
+            return
+        QTableWidget.keyPressEvent(self._table, event)
 
     @staticmethod
     def _bold_font():

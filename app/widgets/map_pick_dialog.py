@@ -54,13 +54,18 @@ class MapPickDialog(QDialog):
         self._search_btn.setObjectName("Outline")
         self._search_btn.clicked.connect(self._do_search)
         self._search_edit.returnPressed.connect(self._do_search)
+        self._locate_btn = QPushButton("📍当前位置")
+        self._locate_btn.setObjectName("Outline")
+        self._locate_btn.clicked.connect(self._do_locate)
         search_row.addWidget(self._search_edit, 1)
         search_row.addWidget(self._search_btn)
+        search_row.addWidget(self._locate_btn)
         lay.addLayout(search_row)
 
         # tile map
         self._tile_map = TileMapWidget()
         self._tile_map.marker_moved.connect(self._on_marker_moved)
+        self._tile_map.location_failed.connect(self._on_locate_failed)
         lay.addWidget(self._tile_map, 1)
 
         # status label
@@ -97,10 +102,20 @@ class MapPickDialog(QDialog):
         if q:
             self._tile_map.search_place(q)
 
+    def _do_locate(self) -> None:
+        self._coord_lbl.setText("定位中…")
+        self._locate_btn.setEnabled(False)
+        self._tile_map.locate_current()
+
+    def _on_locate_failed(self) -> None:
+        self._coord_lbl.setText("定位失败，请手动选点或搜索")
+        self._locate_btn.setEnabled(True)
+
     def _on_marker_moved(self, lon: float, lat: float) -> None:
         self._sel = {"lon": lon, "lat": lat}
         self._coord_lbl.setText(f"已选：WGS-84 {lat:.6f}, {lon:.6f}")
         self._ok.setEnabled(True)
+        self._locate_btn.setEnabled(True)
 
     def _confirm(self) -> None:
         if self._sel:

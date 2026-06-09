@@ -541,7 +541,7 @@ class WorkbenchView(BaseView):
 
         # ── No-project banner ───────────────────────────────────────────────
         self._no_project_banner = QLabel(
-            "未选择项目 — 请先在「项目总览」创建或打开一个项目"
+            "未选择工作区 — 请先在「项目树」进入一个断面，或在「最近工作区」打开"
         )
         self._no_project_banner.setObjectName("Muted")
         self._no_project_banner.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -741,14 +741,26 @@ class WorkbenchView(BaseView):
         try:
             from app.services import project_settings_service as pss
             return pss.effective_new_specimen_prefill(
-                project_dir, root=getattr(self.ctx, "current_project_root", None)
+                project_dir, root=self.ctx.current_project_root
             )
         except Exception:
             return empty
 
     def _on_print_labels(self, uid: str) -> None:
-        """Open the labels page with exactly *uid* selected."""
+        """Print this specimen's labels.
+
+        Fast path (一键直接打印): when a default printer exists and the persisted
+        label template yields something to print, send straight to that printer
+        — no studio detour, no preview, no dialog. R-prefix specimens print the
+        样品瓶 + RNAlater 组织管 labels together.
+
+        Fallback: open the label studio pre-selected with *uid*, so the user can
+        still tune fields / 留白 / 纸张 when there is no default printer or the
+        template needs adjusting.
+        """
         if not uid:
+            return
+        if self._quick_print_labels(uid):
             return
         self.ctx.pending_label_uid = uid
         win = self.window()
@@ -759,6 +771,46 @@ class WorkbenchView(BaseView):
             selector = getattr(labels_view, "select_uid", None)
             if callable(selector):
                 selector(uid)
+
+    def _quick_print_labels(self, uid: str) -> bool:
+        """Send *uid*'s labels straight to the default printer (no dialog).
+
+        Returns ``False`` (caller falls back to the studio) when there is no
+        default printer, no specimen/template to print, or any error.
+        """
+        try:
+            from PyQt6.QtPrintSupport import QPrinterInfo
+            from app.services.label_service import (
+                LabelService,
+                load_specimen_dicts,
+            )
+            from app.utils.label_print import build_printer, paint_jobs
+
+            printer_name = QPrinterInfo.defaultPrinterName()
+            if not printer_name:
+                return False
+            specimens = load_specimen_dicts(self.ctx.get_db())
+            jobs = LabelService.quick_print_jobs_for_specimen(specimens, uid)
+            if not jobs:
+                return False
+            printer = build_printer(jobs[0])
+            printer.setPrinterName(printer_name)
+            if not paint_jobs(printer, jobs):
+                return False
+            n = sum(len(j.get("labels") or []) for j in jobs)
+            self._status_message(f"已发送到打印机：{printer_name} · 共 {n} 张标签")
+            return True
+        except Exception:
+            return False
+
+    def _status_message(self, text: str, msec: int = 4000) -> None:
+        try:
+            win = self.window()
+            bar = win.statusBar() if hasattr(win, "statusBar") else None
+            if bar is not None:
+                bar.showMessage(text, msec)
+        except Exception:
+            pass
 
     def _on_uid_corrected(self, old_uid: str, new_uid: str) -> None:
         """Handle UID change after storage correction in NamingPanel.

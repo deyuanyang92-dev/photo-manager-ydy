@@ -1,26 +1,27 @@
 """results_column.py — ② 成果内容 column widget.
 
-Mirrors the web prototype's ``results-column`` area (workspace-body--three-col
-column 2), which displays:
+Mirrors the web prototype's ``results-column`` area, redesigned per the user's
+request into **paired rows**: each result sequence is one row showing its
+composed TIFF (left) and its lossless ZIP archive (right) side-by-side, so the
+two products of the same 编号 read as associated.  Each card carries a real,
+zoomable preview display-box; the whole area collapses via a single toggle.
 
-  ┌ 成果内容 ──────────────────────────────────────┐
-  │                                                 │
-  │  ▸ Helicon 输出成片（合成后结果）   N 项        │
-  │    [ result-gallery: TIFF 卡片 ]               │
-  │                                                 │
-  │  ▸ 无损压缩归档（压缩后结果）      N 项        │
-  │    [ result-gallery: ZIP 卡片 ]                │
-  │                                                 │
-  └─────────────────────────────────────────────────┘
+  ┌ 成果内容          N 项        缩放 [────]   ▾ ┐
+  │  成果 1                                       │
+  │    [ TIFF 展示框 ]   |   [ ZIP 展示框 ]       │
+  │  成果 2                                       │
+  │    [ TIFF 展示框 ]   |   [ 尚未压缩 ]         │
+  └───────────────────────────────────────────────┘
 
 Public API
 ----------
 load_uid(uid, composed_tiffs, archive_zips)
-    Populate both galleries for the given specimen UID.
-    ``composed_tiffs``: list of dicts with keys ``path``, ``name``.
-    ``archive_zips``:   list of dicts with keys ``path``, ``name``, ``size``.
+    Populate the paired rows for the given specimen UID.
+    ``composed_tiffs``: list of dicts with keys ``path``, ``name``, optional ``seq``.
+    ``archive_zips``:   list of dicts with keys ``path``, ``name``, ``size``, optional ``seq``.
+    Items are paired by ``seq`` (falling back to matching filename stem).
 clear()
-    Reset to empty state (暂无结果 placeholders).
+    Reset to empty state (暂无成果 placeholder).
 """
 from __future__ import annotations
 
@@ -38,6 +39,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSlider,
     QVBoxLayout,
     QWidget,
 )
@@ -151,53 +153,140 @@ class _TiffLightboxDialog(QDialog):
             super().keyPressEvent(e)
 
 
+# ── Thumbnail decode (cached at ResultsColumn level) ───────────────────────────
+
+_MIN_THUMB = 72
+_MAX_THUMB = 280
+_DEFAULT_THUMB = 112
+_BASE_THUMB = 280  # base decode size; zoom scales DOWN from this cached pixmap
+
+
+def _decode_thumb(path: str, max_size: int = _BASE_THUMB) -> Optional[QPixmap]:
+    """Decode *path* to a QPixmap downscaled to ``max_size`` (KeepAspectRatio).
+
+    Returns None for empty / missing / undecodable paths — callers fall back to
+    an icon placeholder.  TIFF that Qt can't read natively goes through a
+    PIL → temp-PNG path (same as the lightbox).  Never raises.
+    """
+    if not path:
+        return None
+    try:
+        if not os.path.exists(path):
+            return None
+    except Exception:
+        return None
+    pm = QPixmap(path)
+    if pm.isNull():
+        try:
+            from PIL import Image
+            import tempfile
+            img = Image.open(path)
+            img.thumbnail((max_size, max_size))
+            tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+            img.save(tmp.name)
+            pm = QPixmap(tmp.name)
+            os.unlink(tmp.name)
+        except Exception:
+            return None
+    if pm.isNull():
+        return None
+    return pm.scaled(
+        max_size, max_size,
+        Qt.AspectRatioMode.KeepAspectRatio,
+        Qt.TransformationMode.SmoothTransformation,
+    )
+
+
 # ── Individual result cards ────────────────────────────────────────────────────
 
-class _TiffCard(QFrame):
-    """A single composed-TIFF result card."""
+class _ResultCardBase(QFrame):
+    """Shared base: a square preview display-box (zoomable) + a body column."""
 
-    def __init__(self, info: dict, open_fn=None, lightbox_fn=None,
+    _FALLBACK_ICON = "mdi6.file-image-outline"
+    _TILE_BG = (
+        "background: qradialgradient(cx:0.46, cy:0.42, radius:0.62,"
+        " fx:0.46, fy:0.42, stop:0 rgba(66,212,160,0.40),"
+        " stop:0.4 rgba(54,201,143,0.10), stop:1 #091b20);"
+    )
+
+    def __init__(self, info: dict, thumb_provider=None,
+                 thumb_size: int = _DEFAULT_THUMB,
                  parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setObjectName("Card")
         self._info = info
-        self._open_fn = open_fn
-        self._lightbox_fn = lightbox_fn
+        self._thumb_size = thumb_size
+        self._thumb_provider = thumb_provider
+        self._base_pm: Optional[QPixmap] = None
         self._setup_ui()
 
     def _setup_ui(self) -> None:
-        self.setFixedHeight(64)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         lay = QHBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
 
-        # Preview tile
-        preview = QWidget()
-        preview.setFixedWidth(56)
-        preview.setStyleSheet(
-            "border:none;"
-            "border-top-left-radius:12px; border-bottom-left-radius:12px;"
-            "background: qradialgradient(cx:0.46, cy:0.42, radius:0.62,"
-            " fx:0.46, fy:0.42, stop:0 rgba(66,212,160,0.48),"
-            " stop:0.4 rgba(54,201,143,0.10), stop:1 #091b20);"
-        )
-        pv_lay = QVBoxLayout(preview)
-        pv_lay.setContentsMargins(4, 4, 4, 4)
-        pv_lay.setSpacing(0)
-        chip = QLabel("TIFF")
-        chip.setObjectName("ChipTiff")
-        chip.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        pv_lay.addWidget(chip, alignment=Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
-        pv_lay.addStretch()
-        glyph = QLabel()
-        glyph.setPixmap(icons.icon("mdi6.file-image-outline", color="#1f4148").pixmap(18, 18))
-        glyph.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        pv_lay.addWidget(glyph, alignment=Qt.AlignmentFlag.AlignHCenter)
-        pv_lay.addStretch()
-        lay.addWidget(preview)
+        self._preview = QLabel()
+        self._preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(self._preview)
 
-        # Body
+        body = self._build_body()
+        lay.addWidget(body, stretch=1)
+
+        from app.config.effects import apply_card_shadow
+        apply_card_shadow(self, blur=14, y=2, alpha=45)
+
+        path = self._info.get("path", "")
+        if self._thumb_provider and path:
+            self._base_pm = self._thumb_provider(path)
+        self._apply_thumb()
+
+    def _build_body(self) -> QWidget:  # override
+        return QWidget()
+
+    def _apply_thumb(self) -> None:
+        s = self._thumb_size
+        self._preview.setFixedSize(s, s)
+        if self._base_pm is not None and not self._base_pm.isNull():
+            self._preview.setStyleSheet(
+                "border:none; border-top-left-radius:12px;"
+                " border-bottom-left-radius:12px; background:#06141a;"
+            )
+            self._preview.setPixmap(self._base_pm.scaled(
+                s, s,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            ))
+        else:
+            self._preview.setStyleSheet(
+                "border:none; border-top-left-radius:12px;"
+                " border-bottom-left-radius:12px;" + self._TILE_BG
+            )
+            g = min(28, max(14, s // 2))
+            self._preview.setPixmap(
+                icons.icon(self._FALLBACK_ICON, color="#1f4148").pixmap(g, g)
+            )
+        self.setMinimumHeight(s)
+
+    def set_thumb_size(self, size: int) -> None:
+        self._thumb_size = size
+        self._apply_thumb()
+
+
+class _TiffCard(_ResultCardBase):
+    """A single composed-TIFF result card with a real, zoomable preview box."""
+
+    _FALLBACK_ICON = "mdi6.file-image-outline"
+
+    def __init__(self, info: dict, open_fn=None, lightbox_fn=None,
+                 thumb_provider=None, thumb_size: int = _DEFAULT_THUMB,
+                 parent: Optional[QWidget] = None) -> None:
+        self._open_fn = open_fn
+        self._lightbox_fn = lightbox_fn
+        super().__init__(info, thumb_provider=thumb_provider,
+                         thumb_size=thumb_size, parent=parent)
+
+    def _build_body(self) -> QWidget:
         body = QWidget()
         body_lay = QVBoxLayout(body)
         body_lay.setContentsMargins(10, 8, 8, 8)
@@ -206,16 +295,18 @@ class _TiffCard(QFrame):
         name = self._info.get("name") or Path(self._info.get("path", "")).name
         name_lbl = QLabel(name)
         name_lbl.setObjectName("Mono")
+        name_lbl.setWordWrap(True)
         name_lbl.setToolTip(self._info.get("path", name))
         body_lay.addWidget(name_lbl)
 
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
         state_chip = QLabel("已合成")
         state_chip.setObjectName("ChipComposed")
         state_chip.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        body_lay.addWidget(state_chip)
-        lay.addWidget(body, stretch=1)
-
-        # Open-in-explorer button
+        row.addWidget(state_chip)
+        row.addStretch()
         if self._open_fn:
             open_btn = QPushButton("📂")
             open_btn.setObjectName("Ghost")
@@ -223,10 +314,10 @@ class _TiffCard(QFrame):
             open_btn.setToolTip("在文件夹中显示")
             p = self._info.get("path", "")
             open_btn.clicked.connect(lambda _, _p=p: self._open_fn(_p))
-            lay.addWidget(open_btn)
-
-        from app.config.effects import apply_card_shadow
-        apply_card_shadow(self, blur=14, y=2, alpha=45)
+            row.addWidget(open_btn)
+        body_lay.addLayout(row)
+        body_lay.addStretch()
+        return body
 
     def mouseDoubleClickEvent(self, event) -> None:
         if self._lightbox_fn:
@@ -236,48 +327,24 @@ class _TiffCard(QFrame):
         super().mouseDoubleClickEvent(event)
 
 
-class _ArchiveCard(QFrame):
-    """A single ZIP archive result card."""
+class _ArchiveCard(_ResultCardBase):
+    """A single ZIP-archive result card (no decodable image → glyph tile)."""
 
-    def __init__(self, info: dict, parent: Optional[QWidget] = None) -> None:
-        super().__init__(parent)
-        self.setObjectName("Card")
-        self._info = info
-        self._setup_ui()
+    _FALLBACK_ICON = "mdi6.folder-zip-outline"
+    _TILE_BG = (
+        "background: qradialgradient(cx:0.46, cy:0.42, radius:0.62,"
+        " fx:0.46, fy:0.42, stop:0 rgba(74,144,217,0.42),"
+        " stop:0.4 rgba(74,144,217,0.10), stop:1 #091b20);"
+    )
 
-    def _setup_ui(self) -> None:
-        self.setFixedHeight(64)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(0)
+    def __init__(self, info: dict, open_fn=None,
+                 thumb_size: int = _DEFAULT_THUMB,
+                 parent: Optional[QWidget] = None) -> None:
+        self._open_fn = open_fn
+        super().__init__(info, thumb_provider=None,
+                         thumb_size=thumb_size, parent=parent)
 
-        # Preview tile (amber gradient for archive)
-        preview = QWidget()
-        preview.setFixedWidth(56)
-        preview.setStyleSheet(
-            "border:none;"
-            "border-top-left-radius:12px; border-bottom-left-radius:12px;"
-            "background: qradialgradient(cx:0.46, cy:0.42, radius:0.62,"
-            " fx:0.46, fy:0.42, stop:0 rgba(74,144,217,0.45),"
-            " stop:0.4 rgba(74,144,217,0.10), stop:1 #091b20);"
-        )
-        pv_lay = QVBoxLayout(preview)
-        pv_lay.setContentsMargins(4, 4, 4, 4)
-        pv_lay.setSpacing(0)
-        chip = QLabel("ZIP")
-        chip.setObjectName("ChipArchived")
-        chip.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        pv_lay.addWidget(chip, alignment=Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
-        pv_lay.addStretch()
-        glyph = QLabel()
-        glyph.setPixmap(icons.icon("mdi6.folder-zip-outline", color="#1a3040").pixmap(18, 18))
-        glyph.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        pv_lay.addWidget(glyph, alignment=Qt.AlignmentFlag.AlignHCenter)
-        pv_lay.addStretch()
-        lay.addWidget(preview)
-
-        # Body
+    def _build_body(self) -> QWidget:
         body = QWidget()
         body_lay = QVBoxLayout(body)
         body_lay.setContentsMargins(10, 8, 8, 8)
@@ -286,120 +353,118 @@ class _ArchiveCard(QFrame):
         name = self._info.get("name") or Path(self._info.get("path", "")).name
         name_lbl = QLabel(name)
         name_lbl.setObjectName("Mono")
+        name_lbl.setWordWrap(True)
         name_lbl.setToolTip(self._info.get("path", name))
         body_lay.addWidget(name_lbl)
 
         size_bytes = self._info.get("size", 0)
         size_str = _fmt_size(size_bytes) if size_bytes else "已归档"
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
         state_lbl = QLabel(size_str)
         state_lbl.setObjectName("MutedSmall")
-        body_lay.addWidget(state_lbl)
-        lay.addWidget(body, stretch=1)
+        row.addWidget(state_lbl)
+        row.addStretch()
+        if self._open_fn:
+            open_btn = QPushButton("📂")
+            open_btn.setObjectName("Ghost")
+            open_btn.setFixedSize(26, 26)
+            open_btn.setToolTip("在文件夹中显示")
+            p = self._info.get("path", "")
+            open_btn.clicked.connect(lambda _, _p=p: self._open_fn(_p))
+            row.addWidget(open_btn)
+        body_lay.addLayout(row)
+        body_lay.addStretch()
+        return body
 
-        from app.config.effects import apply_card_shadow
-        apply_card_shadow(self, blur=14, y=2, alpha=45)
+
+def _placeholder(text: str) -> QWidget:
+    """Muted box shown when a row is missing its TIFF or its ZIP side."""
+    f = QFrame()
+    f.setObjectName("Card")
+    lay = QVBoxLayout(f)
+    lay.setContentsMargins(10, 10, 10, 10)
+    lbl = QLabel(text)
+    lbl.setObjectName("Muted")
+    lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    lbl.setWordWrap(True)
+    lay.addWidget(lbl)
+    return f
 
 
-# ── Gallery section ────────────────────────────────────────────────────────────
+class _ResultRow(QFrame):
+    """One result sequence: header label + [TIFF | ZIP] paired side-by-side."""
 
-class _Gallery(QWidget):
-    """A collapsible gallery section: header + count badge + card list."""
-
-    def __init__(self, title: str, empty_text: str,
+    def __init__(self, seq_label: str, tiff_card: Optional[QWidget],
+                 zip_card: Optional[QWidget],
                  parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
-        self._title = title
-        self._empty_text = empty_text
-        self._cards: list[QWidget] = []
-        self._setup_ui()
+        self.setObjectName("ResultRow")
+        v = QVBoxLayout(self)
+        v.setContentsMargins(0, 0, 0, 6)
+        v.setSpacing(6)
 
-    def _setup_ui(self) -> None:
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(8)
+        hdr = QLabel(seq_label)
+        hdr.setObjectName("MutedSmall")
+        v.addWidget(hdr)
 
-        # ── Section header ──
-        hdr = QHBoxLayout()
-        hdr.setContentsMargins(0, 0, 0, 0)
-        hdr.setSpacing(8)
+        pair = QHBoxLayout()
+        pair.setContentsMargins(0, 0, 0, 0)
+        pair.setSpacing(12)
+        pair.addWidget(tiff_card if tiff_card is not None else _placeholder("无对应成片"), 1)
+        pair.addWidget(zip_card if zip_card is not None else _placeholder("尚未压缩"), 1)
+        v.addLayout(pair)
 
-        title_lbl = QLabel(self._title)
-        title_lbl.setObjectName("CardTitle")
-        hdr.addWidget(title_lbl)
 
-        self._count_badge = QLabel("0 项")
-        self._count_badge.setObjectName("MutedSmall")
-        hdr.addWidget(self._count_badge)
-        hdr.addStretch()
-        lay.addLayout(hdr)
+def _pair_results(composed_tiffs: list, archive_zips: list) -> list:
+    """Pair TIFF/ZIP infos by ``seq`` (fallback: filename stem), preserving the
+    TIFF input order.  Returns a list of ``(seq_label, tiff_or_None, zip_or_None)``.
+    """
+    def keyfor(info: dict, fallback):
+        s = info.get("seq")
+        if s is not None:
+            return ("seq", s)
+        stem = Path(info.get("path") or info.get("name") or "").stem
+        if stem:
+            return ("stem", stem)
+        return fallback
 
-        # ── Divider ──
-        divider = QFrame()
-        divider.setObjectName("Divider")
-        divider.setFixedHeight(1)
-        lay.addWidget(divider)
+    key_order: list = []
+    tiff_by: dict = {}
+    zip_by: dict = {}
 
-        # ── Card list (scrollable) ──
-        self._scroll = QScrollArea()
-        self._scroll.setWidgetResizable(True)
-        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._scroll.setFixedHeight(200)
+    for i, t in enumerate(composed_tiffs):
+        k = keyfor(t, ("t", i))
+        if k not in tiff_by:
+            tiff_by[k] = t
+            if k not in key_order:
+                key_order.append(k)
+    for i, z in enumerate(archive_zips):
+        k = keyfor(z, ("z", i))
+        if k not in zip_by:
+            zip_by[k] = z
+        if k not in key_order:
+            key_order.append(k)
 
-        self._card_container = QWidget()
-        self._card_layout = QVBoxLayout(self._card_container)
-        self._card_layout.setContentsMargins(0, 2, 0, 2)
-        self._card_layout.setSpacing(6)
-        self._card_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        self._scroll.setWidget(self._card_container)
-        lay.addWidget(self._scroll)
-
-        # ── Empty state ──
-        self._empty_lbl = QLabel(self._empty_text)
-        self._empty_lbl.setObjectName("Muted")
-        self._empty_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._empty_lbl.setWordWrap(True)
-        self._empty_lbl.hide()
-        lay.addWidget(self._empty_lbl)
-
-        self._show_empty()
-
-    def set_cards(self, cards: list[QWidget]) -> None:
-        """Replace all cards in the gallery."""
-        # Clear existing
-        while self._card_layout.count():
-            item = self._card_layout.takeAt(0)
-            if item and item.widget():
-                item.widget().deleteLater()
-        self._cards = cards
-        self._count_badge.setText(f"{len(cards)} 项")
-        if cards:
-            self._scroll.show()
-            self._empty_lbl.hide()
-            for c in cards:
-                self._card_layout.addWidget(c)
-        else:
-            self._show_empty()
-
-    def clear(self) -> None:
-        self.set_cards([])
-
-    def _show_empty(self) -> None:
-        self._scroll.hide()
-        self._empty_lbl.show()
-        self._count_badge.setText("0 项")
+    out = []
+    for k in key_order:
+        label = f"成果 {k[1]}" if k[0] == "seq" else "成果"
+        out.append((label, tiff_by.get(k), zip_by.get(k)))
+    return out
 
 
 # ── ResultsColumn ──────────────────────────────────────────────────────────────
 
 class ResultsColumn(QWidget):
-    """② 成果内容 column: Helicon 输出成片 + 无损压缩归档 两组 gallery。
-
-    This is the centre-right column of the three-column workbench body,
-    placed between the capture-workbench panel and the right-panel.
-    """
+    """② 成果内容 column: collapsible, zoomable, paired TIFF↔ZIP rows."""
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
+        self._thumb_size = _DEFAULT_THUMB
+        self._thumb_cache: dict = {}
+        self._cards: list = []
+        self._collapsed = False
         self._setup_ui()
 
     # ── UI ────────────────────────────────────────────────────────────────────
@@ -417,77 +482,145 @@ class ResultsColumn(QWidget):
 
         root = QVBoxLayout(card)
         root.setContentsMargins(20, 16, 20, 16)
-        root.setSpacing(16)
+        root.setSpacing(12)
 
-        # Column title
-        col_title = QLabel("成果内容")
-        col_title.setObjectName("WorkspaceTitle")
-        root.addWidget(col_title)
+        # ── Header row: collapse + title + count + zoom ──
+        hdr = QHBoxLayout()
+        hdr.setContentsMargins(0, 0, 0, 0)
+        hdr.setSpacing(10)
+
+        self._collapse_btn = QPushButton("▾")
+        self._collapse_btn.setObjectName("Ghost")
+        self._collapse_btn.setFixedSize(24, 24)
+        self._collapse_btn.setCheckable(True)
+        self._collapse_btn.setToolTip("收起 / 展开成果区")
+        self._collapse_btn.clicked.connect(
+            lambda: self._set_collapsed(not self._collapsed)
+        )
+        hdr.addWidget(self._collapse_btn)
+
+        title = QLabel("成果内容")
+        title.setObjectName("WorkspaceTitle")
+        hdr.addWidget(title)
+
+        self._count = QLabel("0 项")
+        self._count.setObjectName("MutedSmall")
+        hdr.addWidget(self._count)
+        hdr.addStretch()
+
+        zoom_lbl = QLabel("缩放")
+        zoom_lbl.setObjectName("MutedSmall")
+        hdr.addWidget(zoom_lbl)
+        self._zoom = QSlider(Qt.Orientation.Horizontal)
+        self._zoom.setMinimum(_MIN_THUMB)
+        self._zoom.setMaximum(_MAX_THUMB)
+        self._zoom.setValue(self._thumb_size)
+        self._zoom.setFixedWidth(120)
+        self._zoom.setToolTip("调整结果展示框大小")
+        self._zoom.valueChanged.connect(self._set_zoom)
+        hdr.addWidget(self._zoom)
+        root.addLayout(hdr)
 
         divider = QFrame()
         divider.setObjectName("Divider")
         divider.setFixedHeight(1)
         root.addWidget(divider)
 
-        # Scrollable container for both galleries
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        inner = QWidget()
-        inner_lay = QVBoxLayout(inner)
-        inner_lay.setContentsMargins(0, 0, 0, 0)
-        inner_lay.setSpacing(20)
+        # ── Body: scrollable paired rows ──
+        self._body = QScrollArea()
+        self._body.setWidgetResizable(True)
+        self._body.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._rows_container = QWidget()
+        self._rows_lay = QVBoxLayout(self._rows_container)
+        self._rows_lay.setContentsMargins(0, 2, 0, 2)
+        self._rows_lay.setSpacing(10)
+        self._rows_lay.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self._body.setWidget(self._rows_container)
+        root.addWidget(self._body, stretch=1)
 
-        # ── Gallery 1: Helicon 输出成片（合成后结果） ──
-        self._tiff_gallery = _Gallery(
-            title="Helicon 输出成片",
-            empty_text="暂无合成结果",
-        )
-        inner_lay.addWidget(self._tiff_gallery)
-
-        # ── Gallery 2: 无损压缩归档（压缩后结果） ──
-        self._zip_gallery = _Gallery(
-            title="无损压缩归档",
-            empty_text="暂无归档结果",
-        )
-        inner_lay.addWidget(self._zip_gallery)
-        inner_lay.addStretch()
-
-        scroll.setWidget(inner)
-        root.addWidget(scroll, stretch=1)
+        self._show_empty()
 
     # ── Public API ────────────────────────────────────────────────────────────
 
     def load_uid(self, uid: str,
-                 composed_tiffs: list[dict],
-                 archive_zips: list[dict]) -> None:
-        """Populate both galleries for the given specimen UID.
+                 composed_tiffs: list,
+                 archive_zips: list) -> None:
+        """Populate the paired rows for the given specimen UID."""
+        self._clear_rows()
 
-        Parameters
-        ----------
-        uid:
-            The specimen UID (currently unused by the widget but kept for
-            future slot-wiring).
-        composed_tiffs:
-            List of dicts with at least ``path`` and optionally ``name``.
-        archive_zips:
-            List of dicts with at least ``path`` and optionally ``name``, ``size``.
-        """
-        all_tiff_paths = [Path(info["path"]) for info in composed_tiffs if info.get("path")]
-        tiff_cards = [
-            _TiffCard(info, open_fn=self._open_in_explorer,
-                      lightbox_fn=lambda p, _paths=all_tiff_paths: self._open_tiff_lightbox(p, _paths))
-            for info in composed_tiffs
-        ]
-        self._tiff_gallery.set_cards(tiff_cards)
+        all_tiff_paths = [Path(i["path"]) for i in composed_tiffs if i.get("path")]
+        rows = _pair_results(composed_tiffs, archive_zips)
+        for seq_label, tinfo, zinfo in rows:
+            tcard = None
+            if tinfo is not None:
+                tcard = _TiffCard(
+                    tinfo,
+                    open_fn=self._open_in_explorer,
+                    lightbox_fn=lambda p, _paths=all_tiff_paths: self._open_tiff_lightbox(p, _paths),
+                    thumb_provider=self._thumb_provider,
+                    thumb_size=self._thumb_size,
+                )
+                self._cards.append(tcard)
+            zcard = None
+            if zinfo is not None:
+                zcard = _ArchiveCard(
+                    zinfo, open_fn=self._open_in_explorer,
+                    thumb_size=self._thumb_size,
+                )
+                self._cards.append(zcard)
+            self._rows_lay.addWidget(_ResultRow(seq_label, tcard, zcard))
 
-        zip_cards = [_ArchiveCard(info) for info in archive_zips]
-        self._zip_gallery.set_cards(zip_cards)
+        n = len(rows)
+        self._count.setText(f"{n} 项")
+        if not n:
+            self._show_empty()
 
     def clear(self) -> None:
-        """Reset to empty (暂无结果) state."""
-        self._tiff_gallery.clear()
-        self._zip_gallery.clear()
+        """Reset to empty (暂无成果) state."""
+        self._clear_rows()
+        self._show_empty()
+
+    # ── Internals ───────────────────────────────────────────────────────────────
+
+    def _thumb_provider(self, path: str) -> Optional[QPixmap]:
+        """Return a cached base pixmap for *path* (None if undecodable)."""
+        if path in self._thumb_cache:
+            return self._thumb_cache[path]
+        pm = _decode_thumb(path, _BASE_THUMB)
+        self._thumb_cache[path] = pm
+        return pm
+
+    def _clear_rows(self) -> None:
+        while self._rows_lay.count():
+            it = self._rows_lay.takeAt(0)
+            if it and it.widget():
+                it.widget().deleteLater()
+        self._cards = []
+
+    def _show_empty(self) -> None:
+        self._count.setText("0 项")
+        empty = QLabel("暂无成果")
+        empty.setObjectName("Muted")
+        empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        empty.setWordWrap(True)
+        self._rows_lay.addWidget(empty)
+
+    def _set_zoom(self, size: int) -> None:
+        """Resize every result display-box (the 缩放 control)."""
+        self._thumb_size = size
+        if self._zoom.value() != size:
+            self._zoom.blockSignals(True)
+            self._zoom.setValue(size)
+            self._zoom.blockSignals(False)
+        for c in self._cards:
+            c.set_thumb_size(size)
+
+    def _set_collapsed(self, collapsed: bool) -> None:
+        """Collapse / expand the whole results area (single toggle)."""
+        self._collapsed = collapsed
+        self._body.setVisible(not collapsed)
+        self._collapse_btn.setText("▸" if collapsed else "▾")
+        self._collapse_btn.setChecked(collapsed)
 
     def _open_tiff_lightbox(self, clicked_path: Path, all_paths: list) -> None:
         """Open the TIFF lightbox dialog starting at *clicked_path*."""

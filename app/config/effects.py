@@ -16,9 +16,9 @@ from PyQt6.QtWidgets import QGraphicsDropShadowEffect, QWidget
 def apply_card_shadow(
     widget: QWidget,
     *,
-    blur: int = 26,
-    y: int = 6,
-    alpha: int = 90,
+    blur: int = 18,
+    y: int = 4,
+    alpha: int = 36,
 ) -> QGraphicsDropShadowEffect:
     """Attach a soft, downward drop shadow to *widget* and return it.
 

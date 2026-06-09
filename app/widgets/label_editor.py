@@ -1,3 +1,9 @@
+# ============================================================================
+# 已退役 (2026-06-07): QGraphicsScene 版标签编辑器。App 已不再引用本模块
+# (标签打印统一用 LabelDesignerDialog)。文件保留以便回退 + 既有测试直接 import；
+# 确认无需回退后可整文件删除。注意 _generate_qr_pixmap 已迁至
+# app/utils/label_render.py，此处仅 re-export。
+# ============================================================================
 """label_editor.py — WYSIWYG label editor widget.
 
 QGraphicsScene-based editor where:
@@ -491,45 +497,10 @@ class ConstrainedFieldItem(QGraphicsTextItem):
 
 # ── QR generation helper ──────────────────────────────────────────────────────
 
-def _generate_qr_pixmap(text: str, size_px: int, ecc: str = "Q") -> Optional[QPixmap]:
-    """Generate a QR code QPixmap.
-
-    Uses the ``qrcode`` library with error-correction level Q (25 % recovery).
-    Returns None on import error (soft degradation when qrcode not installed).
-    """
-    try:
-        import qrcode  # type: ignore
-        from qrcode.constants import (  # type: ignore
-            ERROR_CORRECT_L,
-            ERROR_CORRECT_M,
-            ERROR_CORRECT_Q,
-            ERROR_CORRECT_H,
-        )
-        ecc_map = {
-            "L": ERROR_CORRECT_L,
-            "M": ERROR_CORRECT_M,
-            "Q": ERROR_CORRECT_Q,
-            "H": ERROR_CORRECT_H,
-        }
-        qr = qrcode.QRCode(
-            error_correction=ecc_map.get(ecc.upper(), ERROR_CORRECT_Q),
-            box_size=max(1, size_px // 21),
-            border=0,
-        )
-        qr.add_data(text or "")
-        qr.make(fit=True)
-        img = qr.make_image(fill_color="black", back_color="white")
-        buf = io.BytesIO()
-        img.save(buf, format="PNG")
-        buf.seek(0)
-        qimage = QImage.fromData(buf.read())
-        if qimage.isNull():
-            return None
-        pixmap = QPixmap.fromImage(qimage)
-        return pixmap.scaled(size_px, size_px, Qt.AspectRatioMode.KeepAspectRatio,
-                             Qt.TransformationMode.SmoothTransformation)
-    except Exception:
-        return None
+# QR generation moved to app.utils.label_render (removes the old non-UI →
+# widget cross-layer import).  Re-exported here for backward compatibility so
+# existing callers / tests importing it from this module keep working.
+from app.utils.label_render import _generate_qr_pixmap  # noqa: E402,F401
 
 
 # ── Scene ─────────────────────────────────────────────────────────────────────
@@ -785,7 +756,7 @@ class LabelEditorWidget(QWidget):
         layout.addWidget(self._view)
 
         # Fit scene in view
-        self._view.fitInView(self._scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+        self._apply_fit()
 
         # Connect undo stack state
         self._undo_stack.canUndoChanged.connect(self._undo_btn.setEnabled)
@@ -985,7 +956,7 @@ class LabelEditorWidget(QWidget):
         self._template["rows"] = rows
         self._row_editor.set_rows(rows)
         self._scene.rebuild(self._template, self._dims, self._label_data)
-        self._view.fitInView(self._scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+        self._apply_fit()
         self.template_changed.emit(copy.deepcopy(self._template))
 
     # ── Preview right-click context menu ──────────────────────────────────
@@ -1038,7 +1009,7 @@ class LabelEditorWidget(QWidget):
         qr_cfg["position"] = order[(order.index(cur) + 1) % len(order)]
         self._template = tmpl
         self._scene.rebuild(self._template, self._dims, self._label_data)
-        self._view.fitInView(self._scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+        self._apply_fit()
         self.template_changed.emit(copy.deepcopy(self._template))
 
     # ── QR position / size controls ────────────────────────────────────────
@@ -1050,7 +1021,7 @@ class LabelEditorWidget(QWidget):
         self._template = tmpl
         self._sync_qr_controls()
         self._scene.rebuild(self._template, self._dims, self._label_data)
-        self._view.fitInView(self._scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+        self._apply_fit()
         self.template_changed.emit(copy.deepcopy(self._template))
 
     def _on_qr_size_changed(self, value: int) -> None:
@@ -1061,7 +1032,7 @@ class LabelEditorWidget(QWidget):
         qr["sizePct"] = pct
         self._template = tmpl
         self._scene.rebuild(self._template, self._dims, self._label_data)
-        self._view.fitInView(self._scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+        self._apply_fit()
         self.template_changed.emit(copy.deepcopy(self._template))
 
     def _sync_qr_controls(self) -> None:
@@ -1085,7 +1056,7 @@ class LabelEditorWidget(QWidget):
         self._template = tmpl
         self._sync_lh_controls()
         self._scene.rebuild(self._template, self._dims, self._label_data)
-        self._view.fitInView(self._scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+        self._apply_fit()
         self.template_changed.emit(copy.deepcopy(self._template))
 
     def _on_lh_changed(self, value: int) -> None:
@@ -1097,7 +1068,7 @@ class LabelEditorWidget(QWidget):
             row.pop("lineHeight", None)
         self._template = tmpl
         self._scene.rebuild(self._template, self._dims, self._label_data)
-        self._view.fitInView(self._scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+        self._apply_fit()
         self.template_changed.emit(copy.deepcopy(self._template))
 
     def _sync_lh_controls(self) -> None:
@@ -1128,7 +1099,7 @@ class LabelEditorWidget(QWidget):
         self._row_editor.set_rows(list(self._template.get("rows") or []))
         self._sync_qr_controls()
         self._sync_lh_controls()
-        self._view.fitInView(self._scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+        self._apply_fit()
 
     @property
     def undo_stack(self) -> QUndoStack:
@@ -1143,9 +1114,25 @@ class LabelEditorWidget(QWidget):
         """The structural row editor panel."""
         return self._row_editor
 
+    # Cap the on-screen zoom: fitInView fills whatever space the view is given,
+    # so embedding the editor in a tall column would magnify one 50×30 mm label
+    # to fill hundreds of px — giant, overflowing, unreadable.  Clamp to a sane
+    # max and centre the label, letting the dark backdrop pad the rest.
+    _MAX_VIEW_SCALE: float = 2.4   # ≈ 3.5 px/mm * 2.4 ≈ 8.4 px/mm on screen
+
+    def _apply_fit(self) -> None:
+        if not getattr(self, "_view", None) or not self._scene:
+            return
+        rect = self._scene.sceneRect()
+        if rect.isEmpty():
+            return
+        self._view.fitInView(rect, Qt.AspectRatioMode.KeepAspectRatio)
+        if self._view.transform().m11() > self._MAX_VIEW_SCALE:
+            self._view.resetTransform()
+            self._view.scale(self._MAX_VIEW_SCALE, self._MAX_VIEW_SCALE)
+        self._view.centerOn(rect.center())
+
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
         if hasattr(self, "_view") and self._scene:
-            self._view.fitInView(
-                self._scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio
-            )
+            self._apply_fit()

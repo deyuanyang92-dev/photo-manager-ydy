@@ -361,3 +361,37 @@ def _visible_card_names(panel: MonitorPanel) -> set:
             if entry_name:
                 names.add(entry_name)
     return names
+
+
+# ── 补处理: selection accessors ───────────────────────────────────────────────
+
+def _tiff_entry(name="FJ-XM-B2-DLC001-1-T95E-20260601.tif",
+                path="/tmp/FJ-XM-B2-DLC001-1-T95E-20260601.tif"):
+    return FileEntry(name=name, path=path, kind="tiff", size=2000,
+                     mtime="2026-01-01T00:00:00+00:00")
+
+
+class TestSelectionAccessors:
+    def test_selected_tiff_paths_returns_only_tiffs(self, panel):
+        panel.load_scan(_scan(
+            [_jpg_entry(path="/tmp/a.jpg")],
+            [_tiff_entry(path="/tmp/t.tif")],
+        ))
+        for card in panel._cards:
+            card.set_selected(True)
+        assert panel.selected_tiff_paths() == ["/tmp/t.tif"]
+        assert panel.selected_jpg_paths() == ["/tmp/a.jpg"]
+
+    def test_selected_all_paths_mixed(self, panel):
+        panel.load_scan(_scan(
+            [_jpg_entry(path="/tmp/a.jpg"), _jpg_entry(name="b.jpg", path="/tmp/b.jpg")],
+            [_tiff_entry(path="/tmp/t.tif")],
+        ))
+        for card in panel._cards:
+            card.set_selected(True)
+        assert sorted(panel.selected_all_paths()) == ["/tmp/a.jpg", "/tmp/b.jpg", "/tmp/t.tif"]
+
+    def test_accessors_empty_when_nothing_selected(self, panel):
+        panel.load_scan(_scan([_jpg_entry(path="/tmp/a.jpg")], [_tiff_entry()]))
+        assert panel.selected_all_paths() == []
+        assert panel.selected_tiff_paths() == []

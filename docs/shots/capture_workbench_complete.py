@@ -113,7 +113,8 @@ def _seed_project(project_dir: Path) -> None:
 def main() -> int:
     app = QApplication.instance() or QApplication(sys.argv)
     load_fonts(app)
-    qss = build_theme_qss_file()
+    theme_name = os.environ.get("APP_THEME", "classic_light")
+    qss = build_theme_qss_file(theme_name)
     app.setStyleSheet(qss.read_text(encoding="utf-8"))
 
     tmp = Path(tempfile.mkdtemp(prefix="wb-complete-"))
@@ -134,7 +135,8 @@ def main() -> int:
     for _ in range(12):
         app.processEvents()
 
-    out = Path(__file__).resolve().parent / "workbench_complete.png"
+    suffix = "" if theme_name == "classic_light" else f"_{theme_name}"
+    out = Path(__file__).resolve().parent / f"workbench_complete{suffix}.png"
     pix = win.grab()
     pix.save(str(out))
     size = out.stat().st_size if out.exists() else 0

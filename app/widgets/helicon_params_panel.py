@@ -38,6 +38,7 @@ class HeliconParamsPanel(QWidget):
         self._method: int = 0
         self._radius: float = 4.0
         self._smoothing: int = 4
+        self._collapsed: bool = False
         self._setup_ui()
 
     # ── UI ────────────────────────────────────────────────────────────────────
@@ -53,9 +54,25 @@ class HeliconParamsPanel(QWidget):
         sec_lay.setContentsMargins(12, 8, 12, 10)
         sec_lay.setSpacing(8)
 
+        hdr = QHBoxLayout()
+        hdr.setContentsMargins(0, 0, 0, 0)
         title = QLabel("Helicon 参数")
         title.setObjectName("Section")
-        sec_lay.addWidget(title)
+        hdr.addWidget(title)
+        hdr.addStretch()
+        self._collapse_btn = QPushButton("▼")
+        self._collapse_btn.setObjectName("Ghost")
+        self._collapse_btn.setFixedSize(24, 20)
+        self._collapse_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._collapse_btn.clicked.connect(self._toggle_collapsed)
+        hdr.addWidget(self._collapse_btn)
+        sec_lay.addLayout(hdr)
+
+        # Collapsible body
+        self._body = QWidget()
+        body_lay = QVBoxLayout(self._body)
+        body_lay.setContentsMargins(0, 0, 0, 0)
+        body_lay.setSpacing(8)
 
         # Method A/B/C toggle buttons
         meth_row = QHBoxLayout()
@@ -78,20 +95,21 @@ class HeliconParamsPanel(QWidget):
             meth_row.addWidget(btn)
         meth_row.addStretch()
         self._btn_group.idClicked.connect(self._on_method_changed)
-        sec_lay.addLayout(meth_row)
+        body_lay.addLayout(meth_row)
 
         # Radius slider (stored as x10 integer for int slider, 1.0–30.0 range)
         self._radius_slider, self._radius_lbl = self._make_slider(
-            "半径", 10, 300, int(self._radius * 10), sec_lay, is_radius=True
+            "半径", 10, 300, int(self._radius * 10), body_lay, is_radius=True
         )
         self._radius_slider.valueChanged.connect(self._on_radius_changed)
 
         # Smoothing slider (1–10)
         self._smooth_slider, self._smooth_lbl = self._make_slider(
-            "平滑", 1, 10, self._smoothing, sec_lay, is_radius=False
+            "平滑", 1, 10, self._smoothing, body_lay, is_radius=False
         )
         self._smooth_slider.valueChanged.connect(self._on_smooth_changed)
 
+        sec_lay.addWidget(self._body)
         root.addWidget(sec)
         root.addStretch()
 
@@ -99,24 +117,37 @@ class HeliconParamsPanel(QWidget):
         self, label: str, min_val: int, max_val: int, init: int,
         parent_lay, *, is_radius: bool
     ) -> tuple[QSlider, QLabel]:
-        row = QHBoxLayout()
+        # Web oracle layout: label-left + value-right on top row, full-width slider below
+        wrap = QVBoxLayout()
+        wrap.setContentsMargins(0, 0, 0, 0)
+        wrap.setSpacing(4)
+
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
         lbl_text = QLabel(label)
         lbl_text.setObjectName("MutedSmall")
-        lbl_text.setFixedWidth(36)
         display = f"{init / 10:.1f}" if is_radius else str(init)
         val_lbl = QLabel(display)
-        val_lbl.setObjectName("Mono")
-        val_lbl.setFixedWidth(32)
+        val_lbl.setObjectName("MutedSmall")
+        header.addWidget(lbl_text)
+        header.addStretch()
+        header.addWidget(val_lbl)
+
         slider = QSlider(Qt.Orientation.Horizontal)
         slider.setRange(min_val, max_val)
         slider.setValue(init)
-        row.addWidget(lbl_text)
-        row.addWidget(slider, stretch=1)
-        row.addWidget(val_lbl)
-        parent_lay.addLayout(row)
+
+        wrap.addLayout(header)
+        wrap.addWidget(slider)
+        parent_lay.addLayout(wrap)
         return slider, val_lbl
 
     # ── Slots ─────────────────────────────────────────────────────────────────
+
+    def _toggle_collapsed(self) -> None:
+        self._collapsed = not self._collapsed
+        self._body.setVisible(not self._collapsed)
+        self._collapse_btn.setText("▶" if self._collapsed else "▼")
 
     def _on_method_changed(self, method_id: int) -> None:
         self._method = method_id

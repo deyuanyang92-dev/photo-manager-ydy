@@ -40,6 +40,7 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QFrame,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QPlainTextEdit,
@@ -245,6 +246,10 @@ class CoordsView(BaseView):
         self._map_selected_wgs: Optional[dict] = None
         self._tile_map = None   # lazy TileMapWidget
 
+        # place-search worker (kept alive across the async geocode)
+        self._geo_thread = None
+        self._geo_worker = None
+
         super().__init__(ctx)
 
     # ── BaseView ─────────────────────────────────────────────────────────────
@@ -422,6 +427,20 @@ class CoordsView(BaseView):
         self._place_input.returnPressed.connect(self._on_place_search)
         place_row.addWidget(self._place_btn)
         lay.addLayout(place_row)
+
+        # Applied-coordinate readout (coord-place-applied): after 填入, echo the
+        # chosen lat/lon directly below the search box so it is visible without
+        # scrolling up to the badge or opening the structured DMS panel.
+        self._place_applied_lbl = QLabel()
+        self._place_applied_lbl.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self._place_applied_lbl.setStyleSheet(
+            f"font-family: monospace; font-size: 12px; color: {_C['accent']};"
+            f" background: transparent; padding: 4px 0;"
+        )
+        self._place_applied_lbl.setVisible(False)
+        lay.addWidget(self._place_applied_lbl)
 
         # Place loading label
         self._place_loading_lbl = QLabel("搜索中...")
@@ -654,7 +673,13 @@ class CoordsView(BaseView):
         self._batch_table.verticalHeader().setVisible(False)
         self._batch_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectItems)
         self._batch_table.keyPressEvent = self._batch_table_key_press
-        self._batch_table.horizontalHeader().setStretchLastSection(True)
+        # 列宽：全部 Interactive（用户可拖拽列边调宽），不拉伸任何列。首次填数据时按
+        # 内容定一遍初始宽(见 _refresh_batch_table)，之后保留用户的拖动结果。
+        # 不用 stretchLastSection —— 会把东经列撑超宽、表头与数据错位、且该列不可拖。
+        _hdr = self._batch_table.horizontalHeader()
+        _hdr.setStretchLastSection(False)
+        _hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self._batch_cols_sized = False
         self._batch_table.setMinimumHeight(160)
         self._batch_table.setMaximumHeight(320)
         self._batch_table.setVisible(False)
@@ -688,6 +713,10 @@ class CoordsView(BaseView):
             self._parsed = None
         self._update_badge()
         self._update_cs_section()
+        # Keep the structured DMS fields in sync when the panel is open, so a
+        # 搜索地名「填入」(or any input change) immediately shows the lat/lon as 度分秒.
+        if self._show_structured:
+            self._populate_struct_fields()
         # Propagate to map if open
         if self._map_open and self._parsed and self._tile_map:
             self._tile_map.set_marker(self._parsed["lon"], self._parsed["lat"])
@@ -859,72 +888,48 @@ class CoordsView(BaseView):
         self._place_loading = True
         self._place_results = []
         self._refresh_place_ui()
-        # Try via AMap if map is open / web view available; otherwise use
-        # Nominatim HTTP (no API key required) as fallback.
-        if self._map_open and self._tile_map:
-            self._tile_map.search_place(q)
-            from PyQt6.QtCore import QTimer
-            QTimer.singleShot(4000, lambda: self._set_place_loading(False))
-        else:
-            # Nominatim geocoder (lightweight, no key)
-            from PyQt6.QtCore import QThread, pyqtSignal, QObject
 
-            class _Geocoder(QObject):
-                done = pyqtSignal(list)
+        # Unified geocoding via GeocodeService (Nominatim, or 高德 when a Web-服务
+        # key is configured).  CRITICAL: connect signals to *methods of self*
+        # (main-thread affinity) → Qt uses a queued connection → result handling
+        # runs on the main thread.  Connecting to a bare local closure makes Qt
+        # run it on the worker thread, corrupting widget updates — that was the
+        # original「搜索中...」hang.
+        from PyQt6.QtCore import QThread
+        from app.services.geocode_service import GeocodeWorker, resolve_backend
 
-                def __init__(self, query: str):
-                    super().__init__()
-                    self._q = query
+        # Cancel a previous in-flight search if still running.
+        if self._geo_thread is not None and self._geo_thread.isRunning():
+            self._geo_thread.quit()
+            self._geo_thread.wait(500)
 
-                def run(self) -> None:
-                    import urllib.request
-                    import urllib.parse
-                    try:
-                        url = (
-                            "https://nominatim.openstreetmap.org/search?"
-                            + urllib.parse.urlencode({
-                                "q": self._q,
-                                "format": "json",
-                                "limit": 5,
-                                "accept-language": "zh",
-                            })
-                        )
-                        req = urllib.request.Request(url, headers={"User-Agent": "photo-platform-gui/1.0"})
-                        with urllib.request.urlopen(req, timeout=5) as resp:
-                            data = json.loads(resp.read().decode())
-                    except Exception:
-                        data = []
-                    results = []
-                    for item in data:
-                        try:
-                            lat = float(item["lat"])
-                            lon = float(item["lon"])
-                            # Use nominatim_to_zh for province/city/county/road
-                            # formatting (mirrors nominatimToZh in app.js:13645)
-                            name = nominatim_to_zh(item) or item.get("display_name", "?")[:60]
-                            results.append({"name": name[:80], "wgs": {"lat": lat, "lon": lon}})
-                        except Exception:
-                            pass
-                    self.done.emit(results)
+        backend, amap_key = resolve_backend(self.ctx.settings)
+        thread = QThread(self)
+        worker = GeocodeWorker(q, backend=backend, amap_key=amap_key)
+        worker.moveToThread(thread)
+        worker.done.connect(self._on_geo_done)
+        worker.failed.connect(self._on_geo_failed)
+        worker.done.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.started.connect(worker.run)
+        thread.finished.connect(thread.deleteLater)
+        # Keep refs alive until the thread finishes (overwritten next search).
+        self._geo_thread = thread
+        self._geo_worker = worker
+        thread.start()
 
-            # Use a thread to avoid blocking UI
-            thread = QThread(self)
-            geo = _Geocoder(q)
-            geo.moveToThread(thread)
+    def _on_geo_done(self, results: list) -> None:
+        self._place_loading = False
+        self._place_results = results
+        self._refresh_place_ui()
+        # If the map is open, drop a marker on the top hit (WGS-84 direct).
+        if self._map_open and self._tile_map and results:
+            wgs = results[0]["wgs"]
+            self._tile_map.set_marker(wgs["lon"], wgs["lat"])
 
-            def _on_done(results: list) -> None:
-                self._place_loading = False
-                self._place_results = results
-                self._refresh_place_ui()
-                thread.quit()
-                thread.wait()
-
-            geo.done.connect(_on_done)
-            thread.started.connect(geo.run)
-            thread.start()
-
-    def _set_place_loading(self, loading: bool) -> None:
-        self._place_loading = loading
+    def _on_geo_failed(self, _msg: str) -> None:
+        self._place_loading = False
+        self._place_results = []
         self._refresh_place_ui()
 
     def _refresh_place_ui(self) -> None:
@@ -985,6 +990,8 @@ class CoordsView(BaseView):
 
     def _apply_place(self, lat: float, lon: float) -> None:
         self._input_edit.setText(f"{lat:.6f}, {lon:.6f}")
+        self._place_applied_lbl.setText(f"已选坐标：{lat:.6f}, {lon:.6f}")
+        self._place_applied_lbl.setVisible(True)
 
     # ── Structured DMS ────────────────────────────────────────────────────────
 
@@ -1004,14 +1011,27 @@ class CoordsView(BaseView):
         dms = p.get("dms", {})
         ld = dms.get("lat", {})
         lo = dms.get("lon", {})
-        self._struct_lat_d.setText(str(ld.get("d", "")))
-        self._struct_lat_m.setText(str(ld.get("m", "")))
-        self._struct_lat_s.setText(str(ld.get("s", "")))
-        self._struct_lat_dir.setCurrentText(p.get("lat_direction", "N"))
-        self._struct_lon_d.setText(str(lo.get("d", "")))
-        self._struct_lon_m.setText(str(lo.get("m", "")))
-        self._struct_lon_s.setText(str(lo.get("s", "")))
-        self._struct_lon_dir.setCurrentText(p.get("lon_direction", "E"))
+        # Block field signals: setText here would otherwise fire _on_struct_changed,
+        # which writes back to the main input — an echo loop when this is called
+        # from _on_input_changed.
+        fields = (
+            self._struct_lat_d, self._struct_lat_m, self._struct_lat_s, self._struct_lat_dir,
+            self._struct_lon_d, self._struct_lon_m, self._struct_lon_s, self._struct_lon_dir,
+        )
+        for f in fields:
+            f.blockSignals(True)
+        try:
+            self._struct_lat_d.setText(str(ld.get("d", "")))
+            self._struct_lat_m.setText(str(ld.get("m", "")))
+            self._struct_lat_s.setText(str(ld.get("s", "")))
+            self._struct_lat_dir.setCurrentText(p.get("lat_direction", "N"))
+            self._struct_lon_d.setText(str(lo.get("d", "")))
+            self._struct_lon_m.setText(str(lo.get("m", "")))
+            self._struct_lon_s.setText(str(lo.get("s", "")))
+            self._struct_lon_dir.setCurrentText(p.get("lon_direction", "E"))
+        finally:
+            for f in fields:
+                f.blockSignals(False)
 
     def _on_struct_changed(self) -> None:
         """Sync structured DMS fields → main input."""
@@ -1151,8 +1171,11 @@ class CoordsView(BaseView):
                 self._batch_table.setItem(i, 2, QTableWidgetItem(self._format_val(clat, True)))
                 self._batch_table.setItem(i, 3, QTableWidgetItem(self._format_val(clon, False)))
 
-        self._batch_table.resizeColumnsToContents()
-        self._batch_table.setColumnWidth(0, 32)
+        # 仅首次按内容定初始列宽；之后不再重置，保留用户拖拽的列宽（格式/坐标系切换刷新时）。
+        if not self._batch_cols_sized:
+            self._batch_table.resizeColumnsToContents()
+            self._batch_table.setColumnWidth(0, 32)
+            self._batch_cols_sized = True
 
     def _batch_convert_row_full(self, row: dict) -> str:
         """Return full Chinese-formatted converted string (mirrors batchConvertRow in JS).
@@ -1435,6 +1458,9 @@ class CoordsView(BaseView):
 
         tm = TileMapWidget()
         tm.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        from app.services.geocode_service import resolve_backend
+        _backend, _amap_key = resolve_backend(self.ctx.settings)
+        tm.set_geocode_backend(_backend, _amap_key)
 
         def _on_moved(lon: float, lat: float) -> None:
             self._map_selected_wgs = {"lat": lat, "lon": lon}

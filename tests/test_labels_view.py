@@ -154,8 +154,107 @@ class TestStep2Templates:
 
     def test_header_action_buttons_exist(self, qt_app):
         w = self._w(qt_app, [_sp()])
-        # 模板管理 + 导入 JSON header actions present per bucket
-        assert w._header_actions.get("sample")
+        # 新建自定义 + 模板管理 + 导入 JSON header actions present per bucket
+        actions = w._header_actions.get("sample")
+        assert actions
+        assert set(actions) >= {"new", "import", "manage"}
+
+    # ── 自由创建 + 模板管理（web oracle app.js:14961 / 15767） ──────────────────
+    def test_new_custom_card_creates_record(self, qt_app):
+        from app.services.label_service import key_from_id
+        w = self._w(qt_app, [_sp()])
+        w._open_designer = lambda *a, **k: None  # 不弹模态设计器
+        lib = w._libs["sample"]
+        before = len(lib.records())
+        w._new_custom("sample")
+        recs = lib.records()
+        assert len(recs) == before + 1
+        assert lib.selected_key() == key_from_id(recs[-1]["id"])
+        tmpl = recs[-1]["template"]
+        keys = {
+            f.get("key")
+            for row in tmpl.get("rows", [])
+            for f in row.get("fields", [])
+        }
+        assert {"headerId", "storage", "shortDate", "speciesName",
+                "latin", "family", "region", "lon", "lat",
+                "collectorLabel"} <= keys
+        assert tmpl["qr"]["content"] == "uniqueId"
+
+    def test_new_tissue_custom_template_is_rna_focused(self, qt_app):
+        from app.services.label_service import key_from_id
+        w = self._w(qt_app, [_sp(), _rna_sp()])
+        w._open_designer = lambda *a, **k: None
+        lib = w._libs["tissue"]
+        w._new_custom("tissue")
+        rec = lib.records()[-1]
+        assert lib.selected_key() == key_from_id(rec["id"])
+        tmpl = rec["template"]
+        keys = {
+            f.get("key")
+            for row in tmpl.get("rows", [])
+            for f in row.get("fields", [])
+        }
+        assert tmpl.get("flavor") == "tissue"
+        assert {"headerId", "storage", "shortDate", "rnaPreservative"} <= keys
+        assert tmpl["qr"]["content"] == "uniqueId"
+
+    def test_add_card_present_in_grid(self, qt_app):
+        # 卡片网格末尾应有一张「新建自定义」add-card
+        w = self._w(qt_app, [_sp()])
+        from PyQt6.QtWidgets import QFrame
+        add_cards = w.findChildren(QFrame, "TmplAddCard")
+        assert add_cards  # 至少一张（sample 桶）
+
+    def test_manage_menu_non_empty_without_customs(self, qt_app):
+        w = self._w(qt_app, [_sp()])
+        menu = w._build_manage_menu("sample")
+        actions = [a for a in menu.actions() if not a.isSeparator()]
+        assert len(actions) > 1
+        labels = [a.text() for a in actions]
+        assert any("复制为自定义" in t for t in labels)
+        dup = next(a for a in actions if "复制为自定义" in a.text())
+        assert dup.isEnabled()  # 无自定义时仍可用 → 菜单不再「没有任何用」
+
+    def test_manage_menu_custom_actions_enabled_when_selected(self, qt_app):
+        from app.services.label_service import BUILTIN_TEMPLATES, key_from_id
+        w = self._w(qt_app, [_sp()])
+        lib = w._libs["sample"]
+        rec = lib.clone_from_builtin(BUILTIN_TEMPLATES["standard"], "x")
+        lib.set_selected_key(key_from_id(rec["id"]))
+        menu = w._build_manage_menu("sample")
+        by_text = {a.text(): a for a in menu.actions() if not a.isSeparator()}
+        for label in ("重命名自定义", "复制一份", "导出当前模板 JSON", "删除自定义"):
+            assert any(label in t for t in by_text), label
+            act = next(a for t, a in by_text.items() if label in t)
+            assert act.isEnabled(), label
+
+    def test_export_json_writes_template_file(self, qt_app, tmp_path, monkeypatch):
+        import json as _json
+        from app.services.label_service import BUILTIN_TEMPLATES
+        w = self._w(qt_app, [_sp()])
+        rec = w._libs["sample"].clone_from_builtin(BUILTIN_TEMPLATES["standard"], "x")
+        out = tmp_path / "t.json"
+        monkeypatch.setattr("app.utils.ui.get_save_file_name",
+                            lambda *a, **k: str(out))
+        w._export_json("sample", rec["id"])
+        data = _json.loads(out.read_text(encoding="utf-8"))
+        assert data["type"] == "label-template"
+        assert data["bucket"] == "sample"
+        assert data["template"]
+
+    def test_export_library_json_writes_file(self, qt_app, tmp_path, monkeypatch):
+        import json as _json
+        from app.services.label_service import BUILTIN_TEMPLATES
+        w = self._w(qt_app, [_sp()])
+        w._libs["sample"].clone_from_builtin(BUILTIN_TEMPLATES["standard"], "x")
+        out = tmp_path / "lib.json"
+        monkeypatch.setattr("app.utils.ui.get_save_file_name",
+                            lambda *a, **k: str(out))
+        w._export_json("sample", None)
+        data = _json.loads(out.read_text(encoding="utf-8"))
+        assert data["type"] == "label-template-library"
+        assert isinstance(data["library"]["templates"], list)
 
 
 # ── Step3: 纸张 / 尺寸 / 份数 ────────────────────────────────────────────────────
@@ -239,6 +338,32 @@ class TestLabelsViewIntegration:
         v = self._view(qt_app)
         assert v is not None
 
+    def test_no_duplicate_top_level_mode_buttons(self, qt_app):
+        from PyQt6.QtWidgets import QPushButton
+
+        v = self._view(qt_app)
+        button_texts = {b.text() for b in v.findChildren(QPushButton)}
+        assert not {"打印台", "排版", "极简"} & button_texts
+        assert "放大整页" in button_texts
+
+    def test_size_is_dropdown(self, qt_app):
+        from app.services.label_service import LABEL_SIZE_KEYS
+
+        v = self._view(qt_app)
+        # 标签尺寸 = 单个下拉，不再是按钮网格
+        assert hasattr(v, "_size_combo")
+        assert v._size_combo.count() == len(LABEL_SIZE_KEYS) + 1   # 预设 + 自定义
+        assert v._size_combo.findData("custom") >= 0
+
+    def test_size_dropdown_toggles_custom_row(self, qt_app):
+        v = self._view(qt_app)
+        # 选「自定义」→ 宽高行出现
+        v._size_combo.setCurrentIndex(v._size_combo.findData("custom"))
+        assert v._size_custom_row.isVisibleTo(v)
+        # 选某预设 → 宽高行隐藏
+        v._size_combo.setCurrentIndex(v._size_combo.findData("label_50x30"))
+        assert not v._size_custom_row.isVisibleTo(v)
+
 
 # ── Sheet preview rendering ────────────────────────────────────────────────
 
@@ -286,6 +411,32 @@ class TestSheetPreviewGrid:
             if img_e.pixel(x, y) != img_f.pixel(x, y)
         )
         assert diffs > 10, "Filled cells must have different color from empty cells"
+
+    def test_a4_blank_job_uses_demo_content_for_sheet_preview(self, qt_app):
+        from app.views.labels_view import LabelsView
+
+        class _Ctx:
+            def get_db(self):
+                return None
+
+        v = LabelsView(_Ctx())
+        v.resize(900, 700)
+        v._step3._on_paper("sample", "a4")
+        job = v._build_job("sample")
+        assert job.get("_previewDemoWhenBlank") is True
+
+        fixed = v._paint_sheet(job, 800, 1000, 1.0).toImage()
+        old_job = dict(job)
+        old_job.pop("_previewDemoWhenBlank", None)
+        old = v._paint_sheet(old_job, 800, 1000, 1.0).toImage()
+        # First A4 cell for the default 50x30 layout starts near x=66, y=19.
+        # Compare only the left text area so this is not just a QR-code change.
+        diffs = 0
+        for y in range(20, 95):
+            for x in range(65, 205):
+                if fixed.pixel(x, y) != old.pixel(x, y):
+                    diffs += 1
+        assert diffs > 500, "Blank sheet preview must show template content, not only dashes"
 
 
 # ── _PannablePreview drag-to-pan ──────────────────────────────────────────
@@ -403,6 +554,78 @@ def _studio(qt_app, specs, paper="a4", blank=0):
     return v
 
 
+class TestPrintBothButton:
+    """一键同时打印「样品瓶 + RNAlater 组织管」(保留两个分开按钮)。"""
+
+    def test_button_exists(self, qt_app):
+        v = _studio(qt_app, [_sp()])
+        assert hasattr(v, "_btn_print_both")
+
+    def test_disabled_without_rna(self, qt_app):
+        # no R-prefix specimen → tissue bucket empty → 一键打两张 disabled.
+        v = _studio(qt_app, [_sp()], paper="label")
+        v._refresh_print_studio()
+        assert v._btn_print_both.isEnabled() is False
+        # the two separate buttons remain (sample on, tissue off).
+        assert v._btn_print_sample.isEnabled() is True
+        assert v._btn_print_tissue.isEnabled() is False
+
+    def test_enabled_with_rna(self, qt_app):
+        v = _studio(qt_app, [_rna_sp()], paper="label")
+        v._refresh_print_studio()
+        assert v._btn_print_both.isEnabled() is True
+
+    def test_print_both_runs_two_jobs_one_dialog(self, qt_app, monkeypatch):
+        import app.views.labels_view as lv
+
+        captured = {}
+
+        def _fake_paint(printer, jobs, **kw):
+            captured["buckets"] = [j.get("bucket") for j in jobs]
+            captured["kw"] = kw
+            return True
+
+        _Code = lv.QPrintDialog.DialogCode
+
+        class _FakeDialog:
+            DialogCode = _Code
+
+            def __init__(self, *a, **k):
+                pass
+            def setOption(self, *a, **k):
+                pass
+            def exec(self):
+                return _Code.Accepted
+
+        monkeypatch.setattr(lv, "paint_jobs", _fake_paint)
+        monkeypatch.setattr(lv, "QPrintDialog", _FakeDialog)
+
+        v = _studio(qt_app, [_rna_sp()], paper="label")
+        v._print_both()
+        # one dialog → both buckets painted in a single session.
+        assert captured["buckets"] == ["sample", "tissue"]
+
+    def test_print_both_skips_empty_tissue(self, qt_app, monkeypatch):
+        import app.views.labels_view as lv
+        captured = {}
+        monkeypatch.setattr(lv, "paint_jobs",
+                            lambda p, jobs, **k: captured.setdefault(
+                                "buckets", [j.get("bucket") for j in jobs]))
+
+        _Code = lv.QPrintDialog.DialogCode
+
+        class _FakeDialog:
+            DialogCode = _Code
+            def __init__(self, *a, **k): pass
+            def setOption(self, *a, **k): pass
+            def exec(self): return _Code.Accepted
+        monkeypatch.setattr(lv, "QPrintDialog", _FakeDialog)
+
+        v = _studio(qt_app, [_sp()], paper="label")   # no RNA
+        v._print_both()
+        assert captured["buckets"] == ["sample"]
+
+
 class TestBlankHandwriteCells:
     """A4/A5 may append N blank (handwrite) labels; label paper never does."""
 
@@ -424,6 +647,35 @@ class TestBlankHandwriteCells:
     def test_label_paper_no_injection(self, qt_app):
         v = _studio(qt_app, [_sp()], paper="label", blank=3)
         assert len(v._build_job("sample")["items"]) == 1
+
+
+class TestStep3Persistence:
+    """份数 + 纸张类型跨会话持久化(供 workbench 一键打印复用用户习惯)。"""
+
+    def _w(self):
+        from app.widgets.label_step3_paper import LabelStep3Paper
+        return LabelStep3Paper(_libs())
+
+    def test_copies_persist_across_instances(self, qt_app):
+        w1 = self._w()
+        w1._copies.setValue(4)
+        assert self._w().copies() == 4
+
+    def test_paper_type_persist_per_bucket(self, qt_app):
+        w1 = self._w()
+        w1._on_paper("sample", "a4")
+        w1._on_paper("tissue", "a5")
+        w2 = self._w()
+        assert w2.paper_type("sample") == "a4"
+        assert w2.paper_type("tissue") == "a5"
+
+    def test_copies_default_is_one(self, qt_app):
+        assert self._w().copies() == 1
+
+    def test_paper_default_is_label(self, qt_app):
+        w = self._w()
+        assert w.paper_type("sample") == "label"
+        assert w.paper_type("tissue") == "label"
 
 
 class TestImposition:

@@ -115,13 +115,45 @@ class TestInstantiation:
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 
 class TestTabs:
-    def test_has_seven_tabs(self, view: SettingsView) -> None:
-        assert view._tabs.count() == 7
+    def test_has_eight_tabs(self, view: SettingsView) -> None:
+        assert view._tabs.count() == 8
 
     def test_tab_titles(self, view: SettingsView) -> None:
-        expected = ["项目", "Helicon", "归档", "工作台", "操作人", "界面", "关于"]
+        expected = ["项目", "Helicon", "归档", "工作台", "操作人", "协作", "界面", "关于"]
         actual = [view._tabs.tabText(i) for i in range(view._tabs.count())]
         assert actual == expected
+
+
+# ── Collaboration tab ─────────────────────────────────────────────────────────
+
+class TestCollabTab:
+    def test_enable_checkbox_default_off(self, view: SettingsView) -> None:
+        assert view._collab_enabled_chk.isChecked() is False
+
+    def test_team_code_edit_empty_by_default(self, view: SettingsView) -> None:
+        assert view._collab_team_code_edit.text() == ""
+
+    def test_toggling_enable_persists(self, view: SettingsView) -> None:
+        view._collab_enabled_chk.setChecked(True)
+        view._save_collab()
+        assert view.ctx.settings.collab_enabled is True
+        view.on_activate()
+        assert view._collab_enabled_chk.isChecked() is True
+
+    def test_team_code_persists(self, view: SettingsView) -> None:
+        view._collab_team_code_edit.setText("SMW-2026")
+        view._save_collab()
+        assert view.ctx.settings.team_code == "SMW-2026"
+        view.on_activate()
+        assert view._collab_team_code_edit.text() == "SMW-2026"
+
+    def test_doctor_and_helper_controls_exist(self, view: SettingsView) -> None:
+        # Novice self-debug surface: diagnose, scan, pairing controls.
+        assert view._collab_diagnose_btn is not None
+        assert view._collab_scan_btn is not None
+        assert view._collab_pairing_show_btn is not None
+        assert view._collab_pairing_input is not None
+        assert view._collab_health_light is not None
 
 
 # ── Hard rule: delete_jpg default = False ────────────────────────────────────

@@ -267,9 +267,10 @@ class TestCollabServiceOffline:
     def test_create_task_remote_409_via_mock(self):
         """Mock httpx to return 409 from a fake peer, confirm service rejects."""
         svc = self._make_service()
-        # Manually register a fake peer
+        svc.set_group_code("G")
+        # Manually register a fake peer in the same group
         from app.services.collab_service import PeerInfo
-        svc._peers["10.0.0.2:5050"] = PeerInfo(ip="10.0.0.2", port=5050)
+        svc._peers["10.0.0.2:5050"] = PeerInfo(ip="10.0.0.2", port=5050, group_code="G")
 
         mock_response = MagicMock()
         mock_response.status_code = 409
@@ -286,8 +287,9 @@ class TestCollabServiceOffline:
     def test_create_task_remote_network_error_not_conflict(self):
         """Network failure to a peer is not treated as a conflict."""
         svc = self._make_service()
+        svc.set_group_code("G")
         from app.services.collab_service import PeerInfo
-        svc._peers["10.0.0.99:5050"] = PeerInfo(ip="10.0.0.99", port=5050)
+        svc._peers["10.0.0.99:5050"] = PeerInfo(ip="10.0.0.99", port=5050, group_code="G")
 
         import httpx
         with patch("httpx.post", side_effect=httpx.ConnectError("refused")):
@@ -341,6 +343,176 @@ class TestCollabServiceOffline:
         svc = self._make_service()
         addr = svc.local_address()
         assert ":" in addr
+
+
+# ── Release-to-reuse (revoke a UID claim) ────────────────────────────────────
+
+class TestReleaseTask:
+    """Revoking a UID = releasing it: deleted locally + broadcast, reusable."""
+
+    def test_store_delete_removes_uid(self):
+        store = TaskStore()
+        store.create("U1")
+        store.delete("U1")
+        assert not store.exists("U1")
+
+    def test_store_delete_unknown_is_noop(self):
+        store = TaskStore()
+        store.delete("nope")  # must not raise
+        assert not store.exists("nope")
+
+    def test_release_deletes_locally_and_allows_reclaim(self):
+        svc = CollabService()
+        svc.set_group_code("G")
+        ok, _ = svc.create_task("REUSE-1")
+        assert ok
+        svc.release_task("REUSE-1")
+        assert not svc.store.exists("REUSE-1")
+        # The whole point: the UID can be claimed again afterwards.
+        ok2, _ = svc.create_task("REUSE-1")
+        assert ok2
+
+    def test_release_broadcasts_to_same_group_peer(self):
+        svc = CollabService()
+        svc.set_group_code("G")
+        from app.services.collab_service import PeerInfo
+        svc.store.create("R1")
+        with svc._peers_lock:
+            svc._peers["9.9.9.9:5050"] = PeerInfo(ip="9.9.9.9", port=5050, group_code="G")
+        with patch("httpx.post") as mock_post:
+            svc.release_task("R1")
+        urls = [c.args[0] if c.args else c.kwargs.get("url") for c in mock_post.call_args_list]
+        assert any("/api/collab/tasks/release" in (u or "") for u in urls)
+
+    def test_release_skips_foreign_group_peer(self):
+        svc = CollabService()
+        svc.set_group_code("G")
+        from app.services.collab_service import PeerInfo
+        svc.store.create("R2")
+        with svc._peers_lock:
+            svc._peers["8.8.8.8:5050"] = PeerInfo(ip="8.8.8.8", port=5050, group_code="OTHER")
+        with patch("httpx.post") as mock_post:
+            svc.release_task("R2")
+        mock_post.assert_not_called()
+
+    def test_release_emits_tasks_changed(self):
+        svc = CollabService()
+        svc.store.create("R3")
+        fired = []
+        svc.tasks_changed.connect(lambda: fired.append(1))
+        svc.release_task("R3")
+        assert fired
+
+
+# ── Subnet scan (mDNS-failure fallback, no IP knowledge needed) ───────────────
+
+class TestSubnetScan:
+    def _resp(self, group="G1"):
+        r = MagicMock(status_code=200)
+        r.json.return_value = {"hostname": "host-x", "groupCode": group,
+                               "projectName": "P", "serverTime": 0.0}
+        return r
+
+    def test_scan_adds_reachable_peer(self):
+        svc = CollabService()
+        svc.set_group_code("G1")
+        with patch("httpx.get", return_value=self._resp("G1")):
+            found = svc.scan_lan(hosts=["10.0.0.5"], ports=[5050])
+        assert len(found) == 1
+        assert "10.0.0.5:5050" in svc._peers
+        assert svc._peers["10.0.0.5:5050"].group_code == "G1"
+
+    def test_scan_skips_unreachable(self):
+        import httpx
+        svc = CollabService()
+        with patch("httpx.get", side_effect=httpx.ConnectError("no")):
+            found = svc.scan_lan(hosts=["10.0.0.6"], ports=[5050])
+        assert found == []
+
+    def test_scan_skips_self(self):
+        svc = CollabService()
+        svc._port = 5050
+        from app.services import collab_service as _cs
+        with patch.object(_cs, "_get_local_ip", return_value="10.0.0.9"), \
+             patch("httpx.get", return_value=self._resp()):
+            found = svc.scan_lan(hosts=["10.0.0.9"], ports=[5050])
+        assert found == []
+
+
+# ── mDNS peer enrichment (regression: group_code must be populated) ───────────
+
+class TestMdnsEnrich:
+    """mDNS-discovered peers must be enriched with group_code or they never sync."""
+
+    def test_on_peer_found_enriches_group_code(self):
+        svc = CollabService()
+        svc.set_group_code("G1")
+        svc._spawn = lambda fn: fn()  # run enrichment synchronously
+
+        def fake_fetch(peer):
+            peer.group_code = "G1"
+            peer.project_name = "P"
+
+        svc._fetch_peer_info = fake_fetch
+        svc._on_peer_found("1.2.3.4", 5050, "host-b")
+        peer = svc._peers["1.2.3.4:5050"]
+        assert peer.group_code == "G1"
+        # The whole point: an enriched same-group peer now passes the sync filter.
+        assert svc._group_matches(peer)
+
+    def test_on_peer_found_emits_peers_changed(self):
+        svc = CollabService()
+        svc._spawn = lambda fn: fn()
+        svc._fetch_peer_info = lambda peer: None
+        fired = []
+        svc.peers_changed.connect(lambda: fired.append(1))
+        svc._on_peer_found("5.6.7.8", 5050, "h")
+        assert fired
+
+
+# ── Collaboration-group code (group-scoped sync) ─────────────────────────────
+
+class TestGroupCode:
+    """group_code identifies a collaboration group; only matching peers sync."""
+
+    def test_default_group_code_empty(self):
+        assert CollabService().group_code == ""
+
+    def test_set_group_code(self):
+        svc = CollabService()
+        svc.set_group_code("SMW-2026")
+        assert svc.group_code == "SMW-2026"
+
+    def test_group_code_trimmed(self):
+        svc = CollabService()
+        svc.set_group_code("  SMW-2026  ")
+        assert svc.group_code == "SMW-2026"
+
+    def test_node_info_includes_group_code(self):
+        svc = CollabService()
+        svc.set_group_code("G1")
+        assert svc._node_info().get("groupCode") == "G1"
+
+    def test_peer_info_has_group_code_field(self):
+        from app.services.collab_service import PeerInfo
+        p = PeerInfo(ip="1.2.3.4", port=5050)
+        assert p.group_code == ""
+
+    def test_fetch_peer_info_parses_group_code(self):
+        svc = CollabService()
+        from app.services.collab_service import PeerInfo
+        peer = PeerInfo(ip="1.2.3.4", port=5050)
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "hostname": "host-b", "projectName": "P", "groupCode": "G9",
+        }
+        with patch("httpx.get", return_value=mock_response):
+            svc._fetch_peer_info(peer)
+        assert peer.group_code == "G9"
+
+    def test_is_running_false_before_start(self):
+        assert CollabService().is_running() is False
 
 
 # ── Qt application singleton for view smoke tests ────────────────────────────

@@ -457,3 +457,142 @@ class TestDefaultToRecentRealProject:
         json_path.write_text(json.dumps({"version": 1, "projects": projs}), encoding="utf-8")
         result = default_to_recent_real_project(str(json_path))
         assert result == "/tmp/hasdir"
+
+
+# ── enter_workspace (single unified entry point) ─────────────────────────────
+
+
+class _FakeCtx:
+    """Minimal stand-in for AppContext: plain attributes, no QSettings."""
+
+    def __init__(self):
+        self.current_project_dir = None
+        self.current_project_root = None
+
+
+class TestEnterWorkspace:
+    def test_sets_both_dir_and_root(self, tmp_path):
+        from app.services.project_service import enter_workspace
+        ctx = _FakeCtx()
+        leaf = tmp_path / "survey" / "断面a"
+        enter_workspace(ctx, str(leaf), root=str(tmp_path / "survey"))
+        assert ctx.current_project_dir == str(leaf)
+        assert ctx.current_project_root == str(tmp_path / "survey")
+
+    def test_root_defaults_to_path_when_absent(self, tmp_path):
+        # A flat project (entered from 项目总览) is its own root → bounded walk,
+        # never inherits from unrelated parent folders.
+        from app.services.project_service import enter_workspace
+        ctx = _FakeCtx()
+        proj = tmp_path / "flat-proj"
+        enter_workspace(ctx, str(proj))
+        assert ctx.current_project_dir == str(proj)
+        assert ctx.current_project_root == str(proj)
+
+    def test_creates_standard_dirs(self, tmp_path):
+        from app.services.project_service import enter_workspace
+        ctx = _FakeCtx()
+        proj = tmp_path / "proj"
+        enter_workspace(ctx, str(proj))
+        assert (proj / "incoming-jpg").exists()
+        assert (proj / "results").exists()
+        assert (proj / "_data").exists()
+
+
+# ── record_recent_workspace (feeds 项目总览's flat list) ─────────────────────
+
+
+class TestRecordRecentWorkspace:
+    def test_appends_new_workspace(self, tmp_path):
+        from app.services.project_service import record_recent_workspace
+        json_path = tmp_path / "user_projects.json"
+        leaf = tmp_path / "survey" / "断面a"
+        leaf.mkdir(parents=True)
+        projects = record_recent_workspace(str(json_path), str(leaf))
+        dirs = {p.get("directory") for p in projects}
+        assert str(leaf.resolve()) in dirs
+        # Persisted to disk too.
+        assert json_path.exists()
+
+    def test_dedupes_by_directory(self, tmp_path):
+        from app.services.project_service import record_recent_workspace
+        json_path = tmp_path / "user_projects.json"
+        leaf = tmp_path / "p"
+        leaf.mkdir()
+        record_recent_workspace(str(json_path), str(leaf))
+        projects = record_recent_workspace(str(json_path), str(leaf))
+        matches = [p for p in projects if p.get("directory") == str(leaf.resolve())]
+        assert len(matches) == 1
+
+    def test_preserves_existing_entries(self, tmp_path):
+        import json as _json
+        from app.services.project_service import record_recent_workspace
+        json_path = tmp_path / "user_projects.json"
+        json_path.write_text(
+            _json.dumps({"version": 1, "projects": [{"id": "x", "directory": "/tmp/old"}]}),
+            encoding="utf-8",
+        )
+        leaf = tmp_path / "new"
+        leaf.mkdir()
+        projects = record_recent_workspace(str(json_path), str(leaf))
+        dirs = {p.get("directory") for p in projects}
+        assert "/tmp/old" in dirs
+        assert str(leaf.resolve()) in dirs
+
+    def test_name_is_relative_path_when_root_given(self, tmp_path):
+        # Avoid 断面a/断面a collisions across regions: show "雷州岛 / 断面a".
+        from app.services.project_service import record_recent_workspace
+        json_path = tmp_path / "user_projects.json"
+        region = tmp_path / "南海采集2026" / "雷州岛"
+        leaf = region / "断面a"
+        leaf.mkdir(parents=True)
+        projects = record_recent_workspace(str(json_path), str(leaf), root=str(region))
+        entry = next(p for p in projects if p.get("directory") == str(leaf.resolve()))
+        assert entry["name"] == "雷州岛 / 断面a"
+
+    def test_name_is_folder_name_without_root(self, tmp_path):
+        from app.services.project_service import record_recent_workspace
+        json_path = tmp_path / "user_projects.json"
+        leaf = tmp_path / "断面a"
+        leaf.mkdir()
+        projects = record_recent_workspace(str(json_path), str(leaf))
+        entry = next(p for p in projects if p.get("directory") == str(leaf.resolve()))
+        assert entry["name"] == "断面a"
+
+
+# ── seed_region_settings (scaffold a 调查区域 root as inheritance anchor) ─────
+
+
+class TestSeedRegionSettings:
+    def test_creates_anchor_db_and_seeds(self, tmp_path):
+        from app.services.project_service import seed_region_settings
+        from app.db import db_manager
+        try:
+            region = tmp_path / "雷州岛"
+            seed_region_settings(
+                str(region), province="广东", site="雷州", collector="杨德援"
+            )
+            # Anchor db exists so descendants can inherit.
+            assert (region / "_data" / "project.db").exists()
+        finally:
+            db_manager.close_all()
+
+    def test_descendant_inherits_seeded_values(self, tmp_path):
+        from app.services.project_service import seed_region_settings
+        from app.services.project_settings_service import (
+            effective_new_specimen_prefill,
+        )
+        from app.db import db_manager
+        try:
+            region = tmp_path / "雷州岛"
+            leaf = region / "断面a"
+            leaf.mkdir(parents=True)
+            seed_region_settings(
+                str(region), province="广东", site="雷州", collector="杨德援"
+            )
+            pf = effective_new_specimen_prefill(str(leaf), root=str(region))
+            assert pf["province"] == "广东"
+            assert pf["site"] == "雷州"
+            assert pf["collector"] == "杨德援"
+        finally:
+            db_manager.close_all()

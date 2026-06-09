@@ -25,8 +25,7 @@ import math
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QColor, QPainter, QPen
+from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QFormLayout,
     QFrame,
@@ -35,7 +34,6 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QScrollArea,
-    QSizePolicy,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -45,85 +43,6 @@ if TYPE_CHECKING:
     from app.app_context import AppContext
     from app.models.specimen import Specimen
 
-
-class MetaScoreRing(QWidget):
-    """Circular progress ring showing metadata completeness (0-100 %).
-
-    Mirrors the web prototype's ``meta-score-ring`` element: a thin arc
-    that sweeps from the 12-o'clock position clockwise, coloured by score
-    (green ≥80, amber ≥50, red <50).
-
-    Usage:
-        ring = MetaScoreRing()
-        ring.set_score(75)   # 75 % completeness
-    """
-
-    _RING_DIAMETER = 56
-    _RING_WIDTH = 6   # pen width
-
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
-        super().__init__(parent)
-        self._score: int = 0
-        size = self._RING_DIAMETER + self._RING_WIDTH * 2
-        self.setFixedSize(size, size)
-        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-
-    def set_score(self, score: int) -> None:
-        """Set completeness percentage (0-100) and repaint."""
-        self._score = max(0, min(100, score))
-        self.update()
-
-    def score(self) -> int:
-        return self._score
-
-    def paintEvent(self, event) -> None:  # noqa: ARG002
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-        w = self._RING_WIDTH
-        d = self._RING_DIAMETER
-        # Leave room for pen width on all sides
-        rect_x = w
-        rect_y = w
-        rect_w = d
-        rect_h = d
-
-        # Track ring (muted background arc)
-        track_pen = QPen(QColor("#1e3a40"))
-        track_pen.setWidth(w)
-        track_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        painter.setPen(track_pen)
-        painter.drawArc(rect_x, rect_y, rect_w, rect_h, 0, 360 * 16)
-
-        # Score arc
-        if self._score > 0:
-            if self._score >= 80:
-                color = "#36c98f"   # green
-            elif self._score >= 50:
-                color = "#e8aa60"   # amber
-            else:
-                color = "#e05a5a"   # red
-
-            score_pen = QPen(QColor(color))
-            score_pen.setWidth(w)
-            score_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-            painter.setPen(score_pen)
-            # Qt arc: startAngle in 1/16th degrees; positive = counter-clockwise.
-            # Start at 12 o'clock (90°); sweep clockwise = negative angle.
-            start_angle = 90 * 16
-            span_angle = -int(round(self._score / 100.0 * 360 * 16))
-            painter.drawArc(rect_x, rect_y, rect_w, rect_h, start_angle, span_angle)
-
-        # Percentage text centred
-        painter.setPen(QPen(QColor("#b0ccd0")))
-        font = painter.font()
-        font.setPointSize(9)
-        font.setBold(True)
-        painter.setFont(font)
-        full_rect = self.rect()
-        painter.drawText(full_rect, Qt.AlignmentFlag.AlignCenter, f"{self._score}%")
-
-        painter.end()
 
 
 class MetadataPanel(QWidget):
@@ -159,190 +78,182 @@ class MetadataPanel(QWidget):
         root = QVBoxLayout(card)
         root.setContentsMargins(20, 16, 20, 16)
         root.setSpacing(12)
+        self._root = root
+        self._collapsed = False
 
-        # Header: title + score ring + UID badge
+        # Header: title + ☰ field menu + collapse
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
         header.setSpacing(10)
-        title = QLabel("标本与拍摄元数据")
+        title = QLabel("其它")
         title.setObjectName("CardTitle")
         header.addWidget(title)
         header.addStretch()
-        self._score_ring = MetaScoreRing()
-        self._score_ring.setToolTip("元数据完整度（5 项核心字段）")
-        header.addWidget(self._score_ring)
-        self._uid_badge = QLabel("—")
-        self._uid_badge.setObjectName("Mono")
-        header.addWidget(self._uid_badge)
+        self._fields_btn = QPushButton("☰")
+        self._fields_btn.setObjectName("Ghost")
+        self._fields_btn.setFixedSize(28, 26)
+        self._fields_btn.setToolTip("字段显示控制")
+        self._fields_btn.clicked.connect(self._open_fields_menu)
+        header.addWidget(self._fields_btn)
+        self._collapse_btn = QPushButton("▾")
+        self._collapse_btn.setObjectName("Ghost")
+        self._collapse_btn.setFixedSize(28, 26)
+        self._collapse_btn.setToolTip("收起")
+        self._collapse_btn.clicked.connect(
+            lambda: self.set_collapsed(not self._collapsed)
+        )
+        header.addWidget(self._collapse_btn)
         root.addLayout(header)
 
-        line = QFrame()
-        line.setObjectName("Divider")
-        line.setFixedHeight(1)
-        root.addWidget(line)
-
-        # Scrollable form
+        # Scrollable single-column form (label* | field | ?), mirrors the
+        # reference layout.  (web renderMetaCard — flat, no sections.)
+        from PyQt6.QtCore import QTimer
+        from app.widgets._form_row import form_row
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         form_container = QWidget()
-        form = QFormLayout(form_container)
-        form.setContentsMargins(12, 12, 12, 12)
-        form.setSpacing(8)
-        form.setLabelAlignment(
-            __import__("PyQt6.QtCore", fromlist=["Qt"]).Qt.AlignmentFlag.AlignRight
-        )
+        form = QVBoxLayout(form_container)
+        self._form = form
+        form.setContentsMargins(12, 8, 12, 12)
+        form.setSpacing(10)
+        _LW = 84
+        self._rows: dict[str, QWidget] = {}
 
-        def _field(label: str, placeholder: str = "", *, attr: str) -> QLineEdit:
-            lbl = QLabel(label)
-            lbl.setObjectName("Muted")
+        def _field(attr: str, label: str, placeholder: str = "", *,
+                   required: bool = False, help_text: str = "") -> QLineEdit:
             edit = QLineEdit()
             edit.setPlaceholderText(placeholder)
             edit.setFixedHeight(28)
             edit.textEdited.connect(lambda v, a=attr: self._on_field_edited(a, v))
-            form.addRow(lbl, edit)
+            row = form_row(label, edit, required=required,
+                           help_text=help_text or None, label_width=_LW)
+            self._rows[attr] = row
+            form.addWidget(row)
             return edit
 
-        # ── Acquisition fields ───────────────────────────────────────────────
-        form.addRow(_section_label("采集"))
-        self._collector = _field("采集人", "Collector", attr="collector")
-        self._collection_date = _field("采集日期", "YYYYMMDD", attr="collection_date")
-        self._photo_date = _field("拍摄日期", "YYYYMMDD", attr="photo_date")
-        self._photographer = _field("拍摄人", "Photographer", attr="photographer")
-        self._identifier = _field("鉴定人", "Identifier", attr="identifier")
+        # 采集人 / 拍摄人 / 鉴定人
+        self._collector = _field("collector", "采集人", "Collector",
+                                 help_text="采集人姓名")
+        self._photographer = _field("photographer", "拍摄人", "Photographer",
+                                    help_text="拍摄人姓名")
+        self._identifier = _field("identifier", "鉴定人", "Identifier",
+                                  help_text="物种鉴定人姓名")
 
-        # ── Location fields ──────────────────────────────────────────────────
-        form.addRow(_section_label("地点 & 坐标"))
-        self._geo_area = _field("地理区域", "geo_area", attr="geo_area")
-        self._lon = _field("经度 (DD)", "e.g. 120.1234", attr="lon")
-        self._lat = _field("纬度 (DD)", "e.g. 25.6789", attr="lat")
+        # 站位经度 — field + 📍 map button on the lon row (oracle app.js:10295)
+        self._lon = QLineEdit()
+        self._lon.setPlaceholderText("经度")
+        self._lon.setFixedHeight(28)
+        self._lon.textEdited.connect(lambda v: self._on_field_edited("lon", v))
+        lon_composite = QWidget()
+        lc = QHBoxLayout(lon_composite)
+        lc.setContentsMargins(0, 0, 0, 0)
+        lc.setSpacing(4)
+        lc.addWidget(self._lon, 1)
+        self._map_btn = QPushButton("📍")
+        self._map_btn.setObjectName("Ghost")
+        self._map_btn.setFixedSize(28, 28)
+        self._map_btn.setToolTip("地图选点")
+        self._map_btn.clicked.connect(self._on_map_pick)
+        lc.addWidget(self._map_btn)
+        self._lon.setToolTip("十进制度数，如 119.5；输入后自动反查地名")
+        lon_row = form_row("站位经度", lon_composite, label_width=_LW,
+                           help_text="十进制度数，如 119.5；输入后自动反查地名")
+        self._rows["lon"] = lon_row
+        form.addWidget(lon_row)
 
-        # Reverse-geocode button  #cursor metaReverseGeocode
-        _grw = QHBoxLayout()
-        self._geocode_btn = QPushButton("📍 经纬度 → 采集地名")
-        self._geocode_btn.setObjectName("Ghost")
-        self._geocode_btn.setFixedHeight(26)
-        self._geocode_btn.setToolTip("Nominatim 反查采集地名，填入「地理区域」字段")
-        self._geocode_btn.clicked.connect(self._on_reverse_geocode)
-        _grw.addWidget(self._geocode_btn)
-        _grw.addStretch()
-        form.addRow(_grw)
+        # 站位纬度 — no button (oracle app.js:10307)
+        self._lat = _field("lat", "站位纬度", "纬度",
+                           help_text="十进制度数，如 26.3；输入后自动反查地名")
 
-        # ── Storage ──────────────────────────────────────────────────────────
-        form.addRow(_section_label("保存"))
-        self._storage = _field("保存方式", "e.g. T95E / RD75E", attr="storage")
+        # 采集地理区 — field + 📡 GPS button (oracle app.js:10336)
+        self._geo_area = QLineEdit()
+        self._geo_area.setPlaceholderText("自动反解或手动输入")
+        self._geo_area.setFixedHeight(28)
+        self._geo_area.textEdited.connect(self._on_geo_edited)
+        geo_field = QWidget()
+        gf = QHBoxLayout(geo_field)
+        gf.setContentsMargins(0, 0, 0, 0)
+        gf.setSpacing(4)
+        gf.addWidget(self._geo_area, 1)
+        self._gps_btn = QPushButton("📡")
+        self._gps_btn.setObjectName("Ghost")
+        self._gps_btn.setFixedSize(28, 28)
+        self._gps_btn.setToolTip("获取当前位置")
+        self._gps_btn.clicked.connect(self._on_gps_click)
+        gf.addWidget(self._gps_btn)
+        self._geo_area.setToolTip("采集地理区域；可由经纬度自动反查，或手动填写")
+        geo_row = form_row("采集地理区", geo_field, label_width=_LW,
+                           help_text="采集地理区域；可由经纬度自动反查，或手动填写")
+        self._rows["geo_area"] = geo_row
+        form.addWidget(geo_row)
 
-        # ── Taxonomy (Latin — no auto-fill for Chinese) ──────────────────────
-        form.addRow(_section_label("分类（4 级自动补全）"))
+        # Inline geocode status (replaces the old blocking QMessageBox dialogs).
+        self._geo_status = QLabel("")
+        self._geo_status.setObjectName("MutedSmall")
+        self._geo_status.setWordWrap(True)
+        status_cell = QWidget()
+        sc = QHBoxLayout(status_cell)
+        sc.setContentsMargins(_LW + 8, 0, 0, 0)
+        sc.addWidget(self._geo_status, 1)
+        form.addWidget(status_cell)
+        form.addStretch(1)
 
-        # Build TaxonomyInputPanel with TaxonomyService
-        # Graceful fallback: if taxonomy data files are unavailable, keep
-        # plain QLineEdit stubs so the panel doesn't crash.
-        self._taxonomy_panel: Optional[QWidget] = None
-        try:
-            from app.services.taxonomy_service import TaxonomyService
-            from app.widgets.taxonomy_input import TaxonomyInputPanel
-
-            # Locate seed and user taxonomy files relative to this package
-            _here = Path(__file__).parent.parent.parent  # project root
-            seed_path = _here / "data" / "taxonomy_seed.json"
-            user_path = _here / "data" / "user_taxonomy.json"
-
-            svc = TaxonomyService(seed_path, user_path)
-            self._taxonomy_panel = TaxonomyInputPanel(svc, form_container)
-            self._taxonomy_panel.value_committed.connect(self._on_taxonomy_committed)
-            form.addRow(self._taxonomy_panel)
-        except Exception:
-            # Fallback: plain QLineEdits (service unavailable)
-            self._taxonomy_panel = None
-
-        # Proxy QLineEdit attributes expected by workbench_view._on_save_metadata
-        # and load_specimen.  When the taxonomy panel is active these properties
-        # wrap get_value() / set_value() on the panel.
-        if self._taxonomy_panel is None:
-            # Plain-linedit fallback (original stub behaviour)
-            self._taxon_group = _field("大类", "e.g. Mollusca", attr="taxon_group")
-            self._order_name = _field("目", "Order", attr="order_name")
-            self._family = _field("科", "Family", attr="family")
-            self._genus = _field("属", "Genus", attr="genus")
-            self._scientific_name = _field("种名", "e.g. Conus textile", attr="scientific_name")
-        else:
-            # Create invisible proxy QLineEdits so workbench_view can read .text()
-            # without knowing about the overlay.
-            self._taxon_group = _invisible_line_edit()
-            self._order_name = _invisible_line_edit()
-            self._family = _invisible_line_edit()
-            self._genus = _invisible_line_edit()
-            self._scientific_name = _invisible_line_edit()
-
-        # ── WoRMS quick-fill button (oracle: renderWormsPopupOverlay ~12685) ───
-        # Opens a lightweight search dialog; fills Latin fields only.
-        # Chinese *Cn fields are never touched (invariant enforced in callback).
-        worms_btn_row = QHBoxLayout()
-        worms_btn_row.setContentsMargins(0, 2, 0, 2)
-        self._worms_quick_btn = QPushButton("WoRMS 查")
-        self._worms_quick_btn.setObjectName("WormsFill")
-        self._worms_quick_btn.setToolTip("从 WoRMS 快捷查找物种，填充拉丁分类信息（不覆盖中文）")
-        self._worms_quick_btn.setFixedHeight(28)
-        self._worms_quick_btn.setStyleSheet(
-            "QPushButton#WormsFill { font-size:11px; padding:2px 10px; }"
-        )
-        self._worms_quick_btn.clicked.connect(self._on_worms_quick_fill)
-        worms_btn_row.addStretch()
-        worms_btn_row.addWidget(self._worms_quick_btn)
-        form.addRow(worms_btn_row)
-
-        # ── Notes ────────────────────────────────────────────────────────────
-        form.addRow(_section_label("备注"))
-        notes_lbl = QLabel("标本备注")
-        notes_lbl.setObjectName("Muted")
-        self._notes = QTextEdit()
-        self._notes.setPlaceholderText("标本备注")
-        self._notes.setFixedHeight(60)
-        self._notes.textChanged.connect(lambda: self._on_field_edited("notes", self._notes.toPlainText()))
-        form.addRow(notes_lbl, self._notes)
-
-        photo_notes_lbl = QLabel("拍摄备注")
-        photo_notes_lbl.setObjectName("Muted")
-        self._photo_notes = QTextEdit()
-        self._photo_notes.setPlaceholderText("拍摄角度/光照备注")
-        self._photo_notes.setFixedHeight(60)
-        self._photo_notes.textChanged.connect(lambda: self._on_field_edited("photo_notes", self._photo_notes.toPlainText()))
-        form.addRow(photo_notes_lbl, self._photo_notes)
+        # Auto reverse-geocode debounce (web 300ms, app.js:10290) — inline, no popup.
+        self._geo_autofilled = False
+        self._geo_timer = QTimer(self)
+        self._geo_timer.setSingleShot(True)
+        self._geo_timer.setInterval(400)
+        self._geo_timer.timeout.connect(self._do_auto_reverse)
+        self._lon.textEdited.connect(lambda *_: self._geo_timer.start())
+        self._lat.textEdited.connect(lambda *_: self._geo_timer.start())
 
         scroll.setWidget(form_container)
         root.addWidget(scroll)
 
-        # Save / reset buttons
-        btn_row = QHBoxLayout()
-        btn_row.setContentsMargins(8, 6, 8, 8)
-        self._save_btn = QPushButton("保存元数据")
-        self._save_btn.setObjectName("Primary")
-        self._save_btn.setFixedHeight(34)
-        from app.config import icons as _icons
-        _icons.set_button_icon(self._save_btn, "mdi6.content-save-outline",
-                               color=_icons.TONE_ON_ACCENT, size=15)
-        self._save_btn.clicked.connect(self._on_save)
-        self._save_btn.setEnabled(False)
-        btn_row.addWidget(self._save_btn)
-        root.addLayout(btn_row)
+    # ── Collapse + field-visibility ───────────────────────────────────────────
+
+    def set_collapsed(self, collapsed: bool) -> None:
+        from app.widgets._collapse import set_layout_children_visible
+        self._collapsed = collapsed
+        set_layout_children_visible(self._root, 1, not collapsed)
+        self._collapse_btn.setText("▸" if collapsed else "▾")
+        self._collapse_btn.setToolTip("展开" if collapsed else "收起")
+
+    def is_collapsed(self) -> bool:
+        return self._collapsed
+
+    def _open_fields_menu(self) -> None:
+        from PyQt6.QtWidgets import QMenu
+        menu = QMenu(self)
+        rows = [
+            ("采集人", ["collector"]),
+            ("拍摄人", ["photographer"]),
+            ("鉴定人", ["identifier"]),
+            ("站位经纬度", ["lon", "lat"]),
+            ("采集地理区", ["geo_area"]),
+        ]
+        for label, keys in rows:
+            act = menu.addAction(label)
+            act.setCheckable(True)
+            first = self._rows.get(keys[0])
+            act.setChecked(first.isVisible() if first else True)
+            act.toggled.connect(
+                lambda on, ks=keys: self._set_rows_visible(ks, on)
+            )
+        menu.exec(self._fields_btn.mapToGlobal(self._fields_btn.rect().bottomLeft()))
+
+    def _set_rows_visible(self, keys: list, visible: bool) -> None:
+        for k in keys:
+            row = self._rows.get(k)
+            if row is not None:
+                row.setVisible(visible)
 
     # ── Public API ────────────────────────────────────────────────────────────
-
-    @staticmethod
-    def _compute_score(specimen: "Specimen") -> int:
-        """Metadata completeness 0-100; mirrors server.js _spMetaScore (5 fields)."""
-        fields = [specimen.scientific_name, specimen.family,
-                  specimen.collector, specimen.lon, specimen.lat]
-        filled = sum(1 for f in fields if f is not None and str(f).strip() != "")
-        return round(filled / len(fields) * 100)
 
     def load_specimen(self, specimen: "Specimen") -> None:
         """Populate all fields from a Specimen dataclass instance."""
         self._uid = specimen.uid
         self._dirty = False
-        self._uid_badge.setText(specimen.uid[:25] + ("…" if len(specimen.uid) > 25 else ""))
-        self._save_btn.setEnabled(False)
-        self._score_ring.set_score(self._compute_score(specimen))
 
         def _set(edit: QLineEdit, val) -> None:
             edit.blockSignals(True)
@@ -350,217 +261,175 @@ class MetadataPanel(QWidget):
             edit.blockSignals(False)
 
         _set(self._collector, specimen.collector)
-        _set(self._collection_date, specimen.collection_date)
-        _set(self._photo_date, specimen.photo_date)
         _set(self._photographer, specimen.photographer)
         _set(self._identifier, specimen.identifier)
         _set(self._geo_area, specimen.geo_area)
         _set(self._lon, str(specimen.lon) if specimen.lon is not None else "")
         _set(self._lat, str(specimen.lat) if specimen.lat is not None else "")
-        _set(self._storage, specimen.storage)
-
-        # Populate taxonomy: either via TaxonomyInputPanel or plain QLineEdits
-        taxon_values = {
-            "taxonGroup":     str(specimen.taxon_group or ""),
-            "order":          str(specimen.order_name or ""),
-            "family":         str(specimen.family or ""),
-            "scientificName": str(specimen.scientific_name or ""),
-        }
-        if self._taxonomy_panel is not None:
-            try:
-                from app.widgets.taxonomy_input import TaxonomyInputPanel
-                if isinstance(self._taxonomy_panel, TaxonomyInputPanel):
-                    self._taxonomy_panel.set_context(taxon_values)
-                    self._taxonomy_panel.set_values(taxon_values)
-            except Exception:
-                pass
-        # Always keep proxy QLineEdits in sync so workbench_view can read them
-        _set(self._taxon_group, specimen.taxon_group)
-        _set(self._order_name, specimen.order_name)
-        _set(self._family, specimen.family)
-        _set(self._genus, specimen.genus)
-        _set(self._scientific_name, specimen.scientific_name)
-
-        self._notes.blockSignals(True)
-        self._notes.setPlainText(specimen.notes or "")
-        self._notes.blockSignals(False)
-
-        self._photo_notes.blockSignals(True)
-        self._photo_notes.setPlainText(specimen.photo_notes or "")
-        self._photo_notes.blockSignals(False)
 
     def clear(self) -> None:
         """Reset all fields; called when no specimen is selected."""
         self._uid = None
-        self._uid_badge.setText("—")
-        self._save_btn.setEnabled(False)
-        self._score_ring.set_score(0)
         for edit in self._all_edits():
             edit.blockSignals(True)
             edit.clear()
             edit.blockSignals(False)
-        for ta in (self._notes, self._photo_notes):
-            ta.blockSignals(True)
-            ta.clear()
-            ta.blockSignals(False)
-        if self._taxonomy_panel is not None:
-            try:
-                from app.widgets.taxonomy_input import TaxonomyInputPanel
-                if isinstance(self._taxonomy_panel, TaxonomyInputPanel):
-                    self._taxonomy_panel.clear_all()
-            except Exception:
-                pass
+
+    # ── Collection-record auto-fill ───────────────────────────────────────────
+
+    _AUTOFILL_MAP_ATTRS = (
+        "collector", "photographer", "identifier", "lon", "lat", "geo_area",
+    )
+
+    def current_values(self) -> dict:
+        """Return the current text of every auto-fillable field (for empty check)."""
+        edits = {
+            "collector": self._collector, "photographer": self._photographer,
+            "identifier": self._identifier, "lon": self._lon,
+            "lat": self._lat, "geo_area": self._geo_area,
+        }
+        return {k: e.text() for k, e in edits.items()}
+
+    def apply_autofill(self, values: dict) -> None:
+        """Fill fields from a collection record, never overwriting non-empty ones.
+
+        *values* is the subset returned by
+        ``collection_record_service.autofill_values`` (already filtered to empty
+        targets). Each filled field emits ``metadata_changed`` so the workbench
+        persists it through the normal autosave path.
+        """
+        edits = {
+            "collector": self._collector, "photographer": self._photographer,
+            "identifier": self._identifier, "lon": self._lon,
+            "lat": self._lat, "geo_area": self._geo_area,
+        }
+        for key in self._AUTOFILL_MAP_ATTRS:
+            if key not in values:
+                continue
+            edit = edits[key]
+            if edit.text().strip():
+                continue  # double-guard: never clobber a user value
+            val = values[key]
+            text = "" if val is None else str(val)
+            edit.blockSignals(True)
+            edit.setText(text)
+            edit.blockSignals(False)
+            self._on_field_edited(key, text)
 
     # ── Internal ──────────────────────────────────────────────────────────────
 
     def _all_edits(self) -> list:
         return [
-            self._collector, self._collection_date, self._photo_date,
-            self._photographer, self._identifier,
+            self._collector, self._photographer, self._identifier,
             self._geo_area, self._lon, self._lat,
-            self._storage,
-            self._taxon_group, self._order_name, self._family,
-            self._genus, self._scientific_name,
         ]
 
-    def _on_reverse_geocode(self) -> None:
-        """Reverse-geocode lon/lat via Nominatim and fill geo_area.
+    def _on_geo_edited(self, value: str) -> None:
+        """User manually edited 采集地理区 → stop auto-fill from overwriting it."""
+        self._geo_autofilled = False
+        self._on_field_edited("geo_area", value)
 
-        Mirrors web metaReverseGeocode() app.js:13655.  #cursor
+    def _do_auto_reverse(self) -> None:
+        """Auto reverse-geocode lon/lat → 采集地理区, inline (no dialogs).
+
+        Mirrors web metaReverseGeocode() app.js:13655 / debounce app.js:10290.
+        Skips overwriting a user-typed place name; reports status inline.
         """
         lon_str = self._lon.text().strip()
         lat_str = self._lat.text().strip()
+        if not lon_str or not lat_str:
+            self._geo_status.setText("")
+            return
         try:
             lon = float(lon_str)
             lat = float(lat_str)
         except ValueError:
-            from app.utils.ui import warn
-            warn(self, "反查地名", "请先填写有效的经纬度（十进制度数）。")
+            self._geo_status.setText("经纬度格式无效（应为十进制度数）")
             return
-        existing = self._geo_area.text().strip()
-        if existing:
-            from app.utils.ui import question
-            from PyQt6.QtWidgets import QMessageBox
-            reply = question(self, "地名已有", "地理区域字段已有内容，是否覆盖？")
-            if reply != QMessageBox.StandardButton.Yes:
-                return
-        self._geocode_btn.setEnabled(False)
-        self._geocode_btn.setText("查询中…")
+        # Don't clobber a manually-typed place name.
+        if self._geo_area.text().strip() and not self._geo_autofilled:
+            self._geo_status.setText("")
+            return
+        self._geo_status.setText("查询中…")
         self._geocode_worker = _NominatimWorker(lat, lon)
         self._geocode_worker.result_ready.connect(self._on_geocode_result)
         self._geocode_worker.error_occurred.connect(self._on_geocode_error)
         self._geocode_worker.start()
 
     def _on_geocode_result(self, name: str) -> None:
-        self._geocode_btn.setEnabled(True)
-        self._geocode_btn.setText("📍 经纬度 → 采集地名")
         if name:
+            self._geo_area.blockSignals(True)
             self._geo_area.setText(name)
+            self._geo_area.blockSignals(False)
+            self._geo_autofilled = True
+            self._geo_status.setText(f"已自动填入：{name}")
             self._on_field_edited("geo_area", name)
+        else:
+            self._geo_status.setText("未找到地名，可手填")
 
     def _on_geocode_error(self, msg: str) -> None:
-        self._geocode_btn.setEnabled(True)
-        self._geocode_btn.setText("📍 经纬度 → 采集地名")
-        from app.utils.ui import warn
-        warn(self, "反查地名失败", f"Nominatim 查询失败：{msg}")
+        # Inline status only — never a blocking popup.
+        self._geo_status.setText("反查失败，可手填")
 
-    def _on_field_edited(self, field: str, value: str) -> None:
-        self._dirty = True
-        self._save_btn.setEnabled(True)
-        if self._uid:
-            self.metadata_changed.emit(self._uid, field, value)
-
-    def _on_taxonomy_committed(self, changed: dict) -> None:
-        """Called when TaxonomyInputPanel commits a selection.
-
-        Updates proxy QLineEdits so workbench_view._on_save_metadata can read
-        .text() as usual.  Emits metadata_changed for each updated field.
-
-        Hard rule: Chinese fields (*Cn) are NEVER auto-filled here.
-        Mapping: taxonGroup → taxon_group, order → order_name,
-                 family → family, scientificName → scientific_name.
-        """
-        _sp_to_db: dict[str, tuple[str, QLineEdit]] = {
-            "taxonGroup":     ("taxon_group",     self._taxon_group),
-            "order":          ("order_name",      self._order_name),
-            "family":         ("family",          self._family),
-            "scientificName": ("scientific_name", self._scientific_name),
-        }
-        for sp_key, value in changed.items():
-            db_field, proxy_edit = _sp_to_db.get(sp_key, (None, None))
-            if db_field and proxy_edit is not None:
-                proxy_edit.blockSignals(True)
-                proxy_edit.setText(value)
-                proxy_edit.blockSignals(False)
-                self._on_field_edited(db_field, value)
-
-    def _on_worms_quick_fill(self) -> None:
-        """Open WormsQuickFillDialog pre-filled with current taxon/scientific name.
-
-        On selection, fills Latin taxonomy fields into the specimen via ctx.
-        Chinese fields (*Cn) are never overwritten — enforced by ctx.worms_fill_specimen.
-
-        Oracle: renderWormsPopupOverlay / doWormsPopupSearch in app.js ~12685.
-        """
-        from pathlib import Path as _Path
-        from app.services.worms_service import WormsService
-        from app.views.worms_view import WormsQuickFillDialog
-
-        # Build a WormsService for this widget (uses project data dir if available)
-        try:
-            project_dir = getattr(self.ctx, "current_project_dir", None)
-            _data = (_Path(project_dir) / "_data") if project_dir else \
-                    (_Path.home() / ".photo_workbench" / "data")
-            _data.mkdir(parents=True, exist_ok=True)
-            svc = WormsService(
-                cache_path=str(_data / "worms_cache.json"),
-                jobs_path=str(_data / "worms_jobs.json"),
-            )
-        except Exception:
-            return
-
-        # Pre-fill from current scientific name or taxon group
-        initial = (
-            self._scientific_name.text().strip()
-            or self._taxon_group.text().strip()
+    def _on_map_pick(self) -> None:
+        """Open the map picker (or manual input if WebEngine absent); fill lon/lat."""
+        from app.widgets.map_pick_dialog import MapPickDialog
+        dlg = MapPickDialog(
+            self, lon=self._lon.text().strip(), lat=self._lat.text().strip()
         )
 
-        # Callback: delegate to ctx.worms_fill_specimen then refresh proxy edits
-        def _fill(rec: dict) -> None:
-            fill_fn = getattr(self.ctx, "worms_fill_specimen", None)
-            if callable(fill_fn):
-                fill_fn(rec)
-            # Also update proxy edits directly so the panel reflects the change
-            # without a full reload.  Mirrors wormsFillToSpecimen field mapping:
-            #   class  → taxon_group, order → order_name, family → family,
-            #   Species → scientific_name.  Chinese fields: never touched.
-            mapping = {
-                "class":  ("taxon_group",     self._taxon_group),
-                "order":  ("order_name",      self._order_name),
-                "family": ("family",          self._family),
-                "genus":  ("genus",           self._genus),
-            }
-            for worms_key, (db_field, proxy) in mapping.items():
-                val = rec.get(worms_key, "")
-                if val:
-                    proxy.blockSignals(True)
-                    proxy.setText(val)
-                    proxy.blockSignals(False)
-                    self._on_field_edited(db_field, val)
-            if rec.get("rank") == "Species" and rec.get("scientificname"):
-                self._scientific_name.blockSignals(True)
-                self._scientific_name.setText(rec["scientificname"])
-                self._scientific_name.blockSignals(False)
-                self._on_field_edited("scientific_name", rec["scientificname"])
+        def _picked(lon: float, lat: float) -> None:
+            self._lon.blockSignals(True)
+            self._lon.setText(f"{lon:.6f}")
+            self._lon.blockSignals(False)
+            self._lat.blockSignals(True)
+            self._lat.setText(f"{lat:.6f}")
+            self._lat.blockSignals(False)
+            self._on_field_edited("lon", f"{lon:.6f}")
+            self._on_field_edited("lat", f"{lat:.6f}")
+            self._geo_autofilled = True
+            self._do_auto_reverse()
 
-        dlg = WormsQuickFillDialog(svc, _fill, initial_query=initial, parent=self)
+        dlg.picked.connect(_picked)
         dlg.exec()
 
-    def _on_save(self) -> None:
+    def _on_gps_click(self) -> None:
+        """Get device/IP location → fill lon/lat + auto-reverse (oracle app.js:10339)."""
+        self._gps_btn.setText("⏳")
+        self._gps_btn.setEnabled(False)
+        self._gps_worker = _GpsWorker()
+        self._gps_worker.result_ready.connect(self._on_gps_result)
+        self._gps_worker.error_occurred.connect(self._on_gps_error)
+        self._gps_worker.start()
+
+    def _on_gps_result(self, lat: float, lon: float) -> None:
+        self._gps_btn.setText("📡")
+        self._gps_btn.setEnabled(True)
+        self._lon.blockSignals(True)
+        self._lon.setText(f"{lon:.6f}")
+        self._lon.blockSignals(False)
+        self._lat.blockSignals(True)
+        self._lat.setText(f"{lat:.6f}")
+        self._lat.blockSignals(False)
+        self._on_field_edited("lon", f"{lon:.6f}")
+        self._on_field_edited("lat", f"{lat:.6f}")
+        self._geo_autofilled = True
+        self._do_auto_reverse()
+
+    def _on_gps_error(self, _msg: str) -> None:
+        self._gps_btn.setText("❌")
+        self._geo_status.setText("定位失败，请手填经纬度")
+        QTimer.singleShot(2000, lambda: (
+            self._gps_btn.setText("📡"),
+            self._gps_btn.setEnabled(True),
+        ))
+
+    def _on_field_edited(self, field: str, value: str) -> None:
+        # No save button: edits autosave via the metadata_changed signal
+        # (web scheduleRightPanelPersist, app.js:9098).
+        self._dirty = True
         if self._uid:
-            self._dirty = False
-            self._save_btn.setEnabled(False)
-            self.save_requested.emit(self._uid)
+            self.metadata_changed.emit(self._uid, field, value)
 
 
 # ── Nominatim reverse-geocode worker  #cursor metaReverseGeocode ─────────────
@@ -600,6 +469,35 @@ class _NominatimWorker(QThread):
                 self.result_ready.emit(name)
             else:
                 self.error_occurred.emit("Nominatim 未返回有效地名")
+        except Exception as exc:
+            self.error_occurred.emit(str(exc))
+
+
+class _GpsWorker(QThread):
+    """IP-based geolocation worker — desktop fallback for navigator.geolocation.
+
+    Oracle: app.js:10339 navigator.geolocation.getCurrentPosition.
+    Uses ip-api.com (free, no key) since Qt desktop has no browser geolocation.
+    """
+
+    result_ready = pyqtSignal(float, float)   # lat, lon
+    error_occurred = pyqtSignal(str)
+
+    def run(self) -> None:
+        try:
+            import httpx
+            r = httpx.get(
+                "https://ipapi.co/json/",
+                timeout=8.0,
+                headers={"User-Agent": "photo-workbench-qt/1.0 (research use)"},
+            )
+            d = r.json()
+            lat = d.get("latitude")
+            lon = d.get("longitude")
+            if lat is not None and lon is not None:
+                self.result_ready.emit(float(lat), float(lon))
+            else:
+                self.error_occurred.emit("定位失败")
         except Exception as exc:
             self.error_occurred.emit(str(exc))
 
