@@ -488,20 +488,6 @@ class SettingsView(BaseView):
         self._helicon_param_panel.params_changed.connect(self._save_helicon)
         preset_v.addWidget(self._helicon_param_panel)
 
-        # JPEG 质量（本软件扩展项，仅 JPG 输出时有效；桌面端 Rendering 页无此项）
-        preset_form = QFormLayout()
-        preset_form.setHorizontalSpacing(16)
-        preset_form.setVerticalSpacing(8)
-
-        self._quality_spin = QSpinBox()
-        self._quality_spin.setRange(70, 100)
-        self._quality_spin.setValue(95)
-        self._quality_spin.setToolTip("-j: JPEG 质量，仅当输出格式为 JPEG 时有效")
-        self._quality_spin.valueChanged.connect(self._save_helicon)
-        preset_form.addRow("JPEG 质量 (-j)", self._quality_spin)
-
-        preset_v.addLayout(preset_form)
-
         # Preset name input + action buttons
         preset_name_row = QHBoxLayout()
         preset_name_row.setContentsMargins(0, 0, 0, 0)
@@ -557,6 +543,15 @@ class SettingsView(BaseView):
         self._output_format_combo.setToolTip("输出格式：tif 或 jpg")
         self._output_format_combo.currentIndexChanged.connect(self._save_helicon_advanced)
         adv_form.addRow("输出格式", self._output_format_combo)
+
+        # JPEG 质量 (-j) — 输出选项，仅输出格式为 JPG 时有效（默认输出 TIF）。
+        # 桌面端 Rendering 页无此项，故归入输出选项，不放渲染参数区。
+        self._quality_spin = QSpinBox()
+        self._quality_spin.setRange(70, 100)
+        self._quality_spin.setValue(95)
+        self._quality_spin.setToolTip("-j: JPEG 质量，仅当输出格式为 JPG 时有效")
+        self._quality_spin.valueChanged.connect(self._save_helicon)
+        adv_form.addRow("JPEG 质量 (-j)", self._quality_spin)
 
         # tiffCompression: u | lzw | zip
         self._tiff_compression_combo = QComboBox()

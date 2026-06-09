@@ -1026,6 +1026,20 @@ class TestHeliconParamsPanel:
         assert w.get_params()["radius"] == 8   # _DEFAULT_RADIUS
         assert w.get_params()["smoothing"] == 4  # _DEFAULT_SMOOTHING
 
+    def test_reset_button_restores_defaults(self):
+        # Helicon desktop panel has a bottom "Reset" button.
+        from app.widgets.helicon_params_panel import HeliconParamsPanel
+        w = HeliconParamsPanel()
+        w.set_params({"method": 0, "radius": 25, "smoothing": 9})
+        fired = []
+        w.params_changed.connect(lambda: fired.append(1))
+        w._reset_btn.click()
+        p = w.get_params()
+        assert p["method"] == 1    # B (default)
+        assert p["radius"] == 8
+        assert p["smoothing"] == 4
+        assert fired               # params_changed emitted → settings auto-save
+
     def test_workbench_view_has_helicon_params(self):
         """WorkbenchView must expose _helicon_params (HeliconParamsPanel)."""
         from app.views.workbench_view import WorkbenchView

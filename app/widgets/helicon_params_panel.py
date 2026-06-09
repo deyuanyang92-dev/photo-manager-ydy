@@ -24,7 +24,9 @@ from PyQt6.QtCore import QEvent, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QButtonGroup,
     QGridLayout,
+    QHBoxLayout,
     QLabel,
+    QPushButton,
     QRadioButton,
     QSlider,
     QSpinBox,
@@ -127,6 +129,19 @@ class HeliconParamsPanel(QWidget):
 
         grid.setColumnStretch(1, 1)
         root.addLayout(grid)
+
+        # Reset 按钮 —— 复刻 Helicon 桌面端面板底部 Reset:
+        # 一键复位 渲染方法 / Radius / Smoothing 到出厂默认。
+        reset_row = QHBoxLayout()
+        reset_row.setContentsMargins(0, 4, 0, 0)
+        self._reset_btn = QPushButton("Reset")
+        self._reset_btn.setObjectName("Outline")
+        self._reset_btn.setToolTip("复位 渲染方法 / Radius / Smoothing 到默认 (B / 8 / 4)")
+        self._reset_btn.clicked.connect(self.reset_to_defaults)
+        reset_row.addWidget(self._reset_btn)
+        reset_row.addStretch()
+        root.addLayout(reset_row)
+
         root.addStretch()
 
     def _make_slider_spin(
@@ -197,6 +212,19 @@ class HeliconParamsPanel(QWidget):
                 w.blockSignals(False)
 
     # ── Public API ────────────────────────────────────────────────────────────
+
+    def reset_to_defaults(self) -> None:
+        """Reset method/radius/smoothing to Helicon factory defaults (B / 8 / 4).
+
+        Mirrors the Helicon desktop panel's bottom "Reset" button. Emits
+        ``params_changed`` so listeners (settings auto-save) persist the reset.
+        """
+        self.set_params({
+            "method": _DEFAULT_METHOD,
+            "radius": _DEFAULT_RADIUS,
+            "smoothing": _DEFAULT_SMOOTHING,
+        })
+        self.params_changed.emit()
 
     def get_params(self) -> dict:
         """Return current params: {method: int, radius: int, smoothing: int}."""
