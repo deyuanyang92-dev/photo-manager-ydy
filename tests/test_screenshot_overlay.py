@@ -106,3 +106,60 @@ def test_start_keeps_native_root_grab():
     assert overlay._frozen.cacheKey() == native.cacheKey()
     overlay.close()
     main.close()
+
+
+# ── focus-return regression (WSLg "界面假死" after capture) ───────────────────
+# On close the frameless/app-modal/fullscreen overlay must re-activate the
+# launching window; WSLg/XWayland does not auto-refocus it, leaving the app
+# OS-inactive (clicks ignored, looks frozen).
+
+def test_close_reactivates_anchor_window(monkeypatch):
+    from app.widgets import screenshot_overlay as mod
+
+    main = QWidget()
+    main.show()
+    _APP.processEvents()
+
+    calls = {"raise_": 0, "activate": 0}
+    monkeypatch.setattr(type(main), "raise_", lambda self: calls.__setitem__("raise_", calls["raise_"] + 1))
+    monkeypatch.setattr(type(main), "activateWindow", lambda self: calls.__setitem__("activate", calls["activate"] + 1))
+
+    overlay = mod.ScreenshotOverlay(main)
+    overlay.start(None, screen=main.screen())
+    overlay.close()
+
+    assert calls["raise_"] >= 1 and calls["activate"] >= 1
+    main.close()
+
+
+# ── cross-monitor redirect (WSLg Alt+A from the empty screen) ────────────────
+# A region capture targeting a screen that holds NO app window would composite
+# a blank grey frame. The overlay must redirect to the app's own screen.
+
+def test_redirects_to_app_screen_when_target_has_no_app_window(monkeypatch):
+    from app.widgets import screenshot_overlay as mod
+
+    main = QWidget()
+    main.setStyleSheet("background:#ffffff;")
+    main.resize(240, 160)
+    main.show()
+    _APP.processEvents()
+
+    captured = {}
+
+    def fake_composite(screen, exclude):
+        captured["screen"] = screen
+        return _solid(320, 240, QColor(200, 200, 200))
+
+    # Pretend the requested screen holds no app window — forces the redirect.
+    monkeypatch.setattr(mod, "_screen_has_app_window", lambda screen, exclude: False)
+    monkeypatch.setattr(mod, "_composite_top_levels", fake_composite)
+
+    overlay = mod.ScreenshotOverlay(main)
+    overlay._grab_root = lambda screen: _solid(640, 480, QColor(0, 0, 0))
+    overlay.start(None, screen=main.screen())
+
+    # Redirect target is the anchor's screen; composite must be asked for it.
+    assert captured["screen"] is overlay._app_screen()
+    overlay.close()
+    main.close()

@@ -86,6 +86,22 @@ def _composite_top_levels(screen, exclude: QWidget | None) -> QPixmap:
     return canvas
 
 
+def _screen_has_app_window(screen, exclude: QWidget | None) -> bool:
+    """True if any visible top-level app window intersects *screen*.
+
+    Used only on the WSLg blank-grab path: when the screen we are about to
+    composite holds no app window, the result would be an empty grey frame.
+    """
+    geo = screen.geometry()
+    for w in QApplication.topLevelWidgets():
+        if w is exclude or not w.isVisible() or w.width() <= 0 or w.height() <= 0:
+            continue
+        rect = QRect(w.mapToGlobal(QPoint(0, 0)), w.size())
+        if rect.intersects(geo):
+            return True
+    return False
+
+
 class ScreenshotOverlay(QWidget):
     actionCopy = pyqtSignal(QPixmap)
     actionSave = pyqtSignal(QPixmap)
@@ -145,7 +161,15 @@ class ScreenshotOverlay(QWidget):
             return
         self._frozen = self._grab_root(screen)
         if _pixmap_is_blank(self._frozen):
-            # WSLg/XWayland: root grab is black — composite app windows instead.
+            # WSLg/XWayland: root grab is black — we can only grab app windows.
+            # If the chosen screen (e.g. cursor monitor on an Alt+A global
+            # hotkey) holds NO app window, capturing it yields a blank grey
+            # frame. Redirect to the screen where the app actually lives so the
+            # shot shows the app instead of nothing.
+            if not _screen_has_app_window(screen, exclude=self):
+                app_screen = self._app_screen()
+                if app_screen is not None:
+                    screen = app_screen
             self._frozen = _composite_top_levels(screen, exclude=self)
         self.setGeometry(screen.geometry())
         self._preset = preset_rect
@@ -160,6 +184,13 @@ class ScreenshotOverlay(QWidget):
         """Native full-desktop grab — overridable seam (tested by faking a
         blank result to exercise the WSLg composite fallback)."""
         return screen.grabWindow(0)
+
+    def _app_screen(self):
+        """Screen the launching app window lives on (WSLg redirect target)."""
+        anchor = self._anchor
+        if anchor is None:
+            return None
+        return anchor.window().screen()
 
     def closeEvent(self, e) -> None:
         """Return OS focus to the launching window on close.
