@@ -135,6 +135,7 @@ class TileMapWidget(QWidget):
     marker_moved = pyqtSignal(float, float)
     location_failed = pyqtSignal()
     point_clicked = pyqtSignal(int)   # index into the multi-point layer
+    zoom_changed = pyqtSignal(int)    # new zoom level
 
     _TILE_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
     _UA = "photo-platform-gui/1.0 (specimen-workbench)"
@@ -236,6 +237,45 @@ class TileMapWidget(QWidget):
         self._point_pix = []
         self.update()
 
+    def zoom_in(self) -> None:
+        """Zoom one step in (towards widget center)."""
+        new_zoom = clamp_zoom(self._zoom + 1)
+        if new_zoom != self._zoom:
+            self._zoom = new_zoom
+            self._abort_stale_pending()
+            self.zoom_changed.emit(self._zoom)
+            self.update()
+
+    def zoom_out(self) -> None:
+        """Zoom one step out (towards widget center)."""
+        new_zoom = clamp_zoom(self._zoom - 1)
+        if new_zoom != self._zoom:
+            self._zoom = new_zoom
+            self._abort_stale_pending()
+            self.zoom_changed.emit(self._zoom)
+            self.update()
+
+    def zoom_to_fit(self) -> None:
+        """Re-fit the view to the current point layer's bounding box."""
+        if self._points:
+            self._fit_points()
+        self._abort_stale_pending()
+        self.zoom_changed.emit(self._zoom)
+        self.update()
+
+    def current_zoom(self) -> int:
+        """Return current integer zoom level."""
+        return self._zoom
+
+    def set_zoom(self, value: int) -> None:
+        """Set zoom level directly (clamped to [2, 18])."""
+        new_zoom = clamp_zoom(value)
+        if new_zoom != self._zoom:
+            self._zoom = new_zoom
+            self._abort_stale_pending()
+            self.zoom_changed.emit(self._zoom)
+            self.update()
+
     def set_point_style(self, style: dict) -> None:
         """设置多点层样式（fill/edge/size/show_label/label_source）。空 = 默认外观。"""
         self._point_style = dict(style or {})
@@ -245,8 +285,12 @@ class TileMapWidget(QWidget):
         """Centre on the points' centroid; pick a zoom that spans their bbox."""
         if not self._points:
             return
-        lons = [p["lon"] for p in self._points]
-        lats = [p["lat"] for p in self._points]
+        valid = [p for p in self._points
+                 if p.get("lon") is not None and p.get("lat") is not None]
+        if not valid:
+            return
+        lons = [p["lon"] for p in valid]
+        lats = [p["lat"] for p in valid]
         self._center_lon = sum(lons) / len(lons)
         self._center_lat = sum(lats) / len(lats)
         span_lon = max(lons) - min(lons)
@@ -383,6 +427,9 @@ class TileMapWidget(QWidget):
         size_scale = (style.get("size", 80) / 80.0) if style.get("size") else 1.0
         show_label = style.get("show_label", True)   # 默认显示计数 = v1 外观
         for p in self._points:
+            if p.get("lon") is None or p.get("lat") is None:
+                self._point_pix.append((0, 0))
+                continue
             px, py = lon_lat_to_pixel(
                 p["lon"], p["lat"], self._center_lon, self._center_lat,
                 self._zoom, w, h,
@@ -591,4 +638,6 @@ class TileMapWidget(QWidget):
             cy += (py - my) / _TILE_SIZE
             self._center_lon, self._center_lat = tile_xy_to_lon_lat(cx, cy, self._zoom)
             self._abort_stale_pending()
+            self.zoom_changed.emit(self._zoom)
             self.update()
+        event.accept()  # prevent QScrollArea from consuming the wheel event

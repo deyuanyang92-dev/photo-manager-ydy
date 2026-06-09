@@ -44,6 +44,7 @@ class MarkerStylePanel(QWidget):
 
     def __init__(self, initial: Optional[dict] = None, parent=None) -> None:
         super().__init__(parent)
+        self.setObjectName("MarkerStylePanel")
         self._style = {**_DEFAULT, **(initial or {})}
         self._build()
         self._load_into_controls()
@@ -55,18 +56,21 @@ class MarkerStylePanel(QWidget):
 
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
-        v.setSpacing(6)
+        v.setSpacing(8)
 
-        _LW = 52  # 右对齐定宽标签（窄卡内对齐，足够「描边宽/不透明」三字）
+        _LW = 56  # 右对齐定宽标签（窄卡内对齐，足够「描边宽/不透明」三字）
 
         def section(text):
+            # 段标题前留出气口，与上一段拉开，读起来不挤（首段无上间距）。
+            if v.count():
+                v.addSpacing(4)
             lbl = QLabel(text)
             lbl.setObjectName("StyleSection")
             v.addWidget(lbl)
 
         def row(label, w, help_text=None):
             if isinstance(w, (QSpinBox, QDoubleSpinBox, QComboBox, QPushButton)):
-                w.setFixedHeight(28)
+                w.setFixedHeight(30)
             fr = form_row(label, w, help_text=help_text, label_width=_LW)
             v.addWidget(fr)
             return fr

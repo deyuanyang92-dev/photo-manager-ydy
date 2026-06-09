@@ -132,6 +132,7 @@ _K_SHORTCUT_MONITOR_ACTIVATE = "shortcuts/monitor_activate"
 _K_SHORTCUT_MONITOR_DEACTIVATE = "shortcuts/monitor_deactivate"
 _K_SHORTCUT_LABELS_PRINT = "shortcuts/labels_print"
 _K_SHORTCUT_LABELS_NEXT = "shortcuts/labels_next"
+_K_SHORTCUT_SCREENSHOT = "shortcuts/screenshot_region"   # 默认 Alt+A，系统级全局
 
 _RECENT_MAX = 10
 
@@ -1076,6 +1077,24 @@ class SettingsView(BaseView):
         shortcut_form.setHorizontalSpacing(16)
         shortcut_form.setVerticalSpacing(8)
 
+        # 截图（系统级全局，默认 Alt+A）
+        self._sc_screenshot = QKeySequenceEdit()
+        self._sc_screenshot.setToolTip(
+            "区域截图快捷键，默认 Alt+A；改动立即生效，系统级全局（后台也可触发）"
+        )
+        self._sc_screenshot.editingFinished.connect(self._on_screenshot_shortcut_changed)
+        shortcut_form.addRow("区域截图（全局）", self._sc_screenshot)
+
+        from app.utils.global_hotkey import available as _gh_available
+        if not _gh_available():
+            gh_note = QLabel(
+                "提示：未安装 pynput，截图快捷键仅在本软件窗口前台时可用；"
+                "安装 pynput 后支持系统级全局触发（pip install pynput）。"
+            )
+            gh_note.setObjectName("MutedSmall")
+            gh_note.setWordWrap(True)
+            shortcut_form.addRow("", gh_note)
+
         # monitor scope
         self._sc_monitor_activate = QKeySequenceEdit()
         self._sc_monitor_activate.setToolTip("工作台：激活标本（monitor/activate）")
@@ -1302,6 +1321,10 @@ class SettingsView(BaseView):
         self._sc_labels_print.setKeySequence(QKeySequence(str(sc_lp)))
         sc_ln = qs.value(_K_SHORTCUT_LABELS_NEXT, "")
         self._sc_labels_next.setKeySequence(QKeySequence(str(sc_ln)))
+        sc_shot = qs.value(_K_SHORTCUT_SCREENSHOT, "") or "Alt+A"
+        self._sc_screenshot.blockSignals(True)
+        self._sc_screenshot.setKeySequence(QKeySequence(str(sc_shot)))
+        self._sc_screenshot.blockSignals(False)
 
         # Preset list widget
         self._refresh_preset_list_widget()
@@ -1607,6 +1630,16 @@ class SettingsView(BaseView):
         self._save_ui()
         self._apply_typography_live()
 
+    def _on_screenshot_shortcut_changed(self) -> None:
+        """截图快捷键录制完成 → 持久化 + 立即重绑（窗口内 + 系统全局）。"""
+        self._save_ui()
+        seq = self._sc_screenshot.keySequence().toString() or "Alt+A"
+        from app.main_window import MainWindow
+        for w in QApplication.instance().topLevelWidgets():
+            if isinstance(w, MainWindow):
+                w.rebind_screenshot_shortcut(seq)
+                break
+
     def _apply_typography_live(self) -> None:
         """Push current 字体 / 字体大小 into the live theme + default font."""
         from app.config.theme import set_typography, apply_theme, apply_default_font
@@ -1647,6 +1680,10 @@ class SettingsView(BaseView):
         qs.setValue(
             _K_SHORTCUT_LABELS_NEXT,
             self._sc_labels_next.keySequence().toString(),
+        )
+        qs.setValue(
+            _K_SHORTCUT_SCREENSHOT,
+            self._sc_screenshot.keySequence().toString(),
         )
         self.ctx.settings.sync()
 

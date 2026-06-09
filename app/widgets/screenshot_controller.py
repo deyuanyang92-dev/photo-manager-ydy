@@ -54,22 +54,27 @@ class ScreenshotController(QObject):
 
     # ── public capture modes ───────────────────────────────────────────────
     def capture_region(self) -> None:
-        self._open(None)
+        # screen=None → overlay grabs the monitor under the cursor (works with
+        # any number of windows / monitors, regardless of which has focus).
+        self._open(None, None)
 
     def capture_fullscreen(self) -> None:
-        screen = self._win.screen()
+        screen = self._active_screen()
         full = QRect(QPoint(0, 0), screen.geometry().size()) if screen else None
-        self._open(full)
+        self._open(full, screen)
 
     def capture_window(self) -> None:
-        self._open(self._screen_local_rect(self._win.window()))
+        win = self._active_window()
+        scr = win.screen() if win else None
+        self._open(self._screen_local_rect(win, scr), scr)
 
     def capture_view(self) -> None:
         widget = self._view_provider() if self._view_provider else None
-        self._open(self._screen_local_rect(widget) if widget else None)
+        scr = widget.screen() if widget else None
+        self._open(self._screen_local_rect(widget, scr) if widget else None, scr)
 
     # ── core ────────────────────────────────────────────────────────────────
-    def _open(self, preset: Optional[QRect]) -> None:
+    def _open(self, preset: Optional[QRect], screen=None) -> None:
         if self._overlay is not None and self._overlay.isVisible():
             return  # one overlay at a time; ignore re-entry while shown
         overlay = ScreenshotOverlay(self._win)
@@ -79,13 +84,29 @@ class ScreenshotController(QObject):
         overlay.actionPin.connect(self._on_pin)
         overlay.cancelled.connect(self._on_cancel)
         self._overlay = overlay  # keep alive while shown
-        overlay.start(preset)
+        overlay.start(preset, screen)
 
-    def _screen_local_rect(self, widget: Optional[QWidget]) -> Optional[QRect]:
-        """Map *widget*'s on-screen rect into overlay-local logical coords."""
+    def _active_window(self) -> QWidget:
+        """The window the user is actually on — active window, else main."""
+        return QApplication.activeWindow() or self._win.window()
+
+    def _active_screen(self):
+        """Screen under the cursor, falling back to the active window's screen."""
+        from PyQt6.QtGui import QCursor, QGuiApplication
+        return (QGuiApplication.screenAt(QCursor.pos())
+                or self._active_window().screen())
+
+    def _screen_local_rect(self, widget: Optional[QWidget], screen=None) -> Optional[QRect]:
+        """Map *widget*'s on-screen rect into overlay-local logical coords.
+
+        *screen* must be the same screen the overlay will cover (the widget's
+        own screen) — using the main window's screen mis-placed the preset on
+        multi-monitor setups.
+        """
         if widget is None:
             return None
-        screen = self._win.screen()
+        if screen is None:
+            screen = widget.screen()
         if screen is None:
             return None
         origin = screen.geometry().topLeft()

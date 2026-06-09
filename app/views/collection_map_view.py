@@ -18,16 +18,20 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QButtonGroup,
     QComboBox,
     QFrame,
+    QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
     QListWidget,
     QListWidgetItem,
     QMenu,
     QPushButton,
+    QScrollArea,
+    QSlider,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -90,22 +94,38 @@ class CollectionMapView(BaseView):
 
     def _setup_ui(self) -> None:
         self._apply_style()
-        root = QHBoxLayout(self)
-        root.setContentsMargins(14, 12, 14, 12)
-        root.setSpacing(12)
-        root.addWidget(self._build_left_pane(), 0)
-        root.addWidget(self._build_right_pane(), 1)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        self._page_scroll = QScrollArea()
+        self._page_scroll.setObjectName("MapPageScroll")
+        self._page_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._page_scroll.setWidgetResizable(True)
+        self._page_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._page_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        content = QWidget()
+        content.setObjectName("MapPageContent")
+        content.setMinimumWidth(1010)
+        lay = QHBoxLayout(content)
+        lay.setContentsMargins(14, 12, 14, 12)
+        lay.setSpacing(12)
+        lay.addWidget(self._build_left_pane(), 0)
+        lay.addWidget(self._build_right_pane(), 1)
+
+        self._page_scroll.setWidget(content)
+        root.addWidget(self._page_scroll, 1)
 
     def _build_left_pane(self) -> QWidget:
         pane = QWidget()
         pane.setObjectName("LeftPane")
-        pane.setFixedWidth(248)
+        pane.setFixedWidth(272)
         v = QVBoxLayout(pane)
         v.setContentsMargins(0, 0, 0, 0)
-        v.setSpacing(12)
-        v.addWidget(self._build_project_card())
-        v.addWidget(self._build_style_card())
-        v.addStretch(1)
+        v.setSpacing(14)
+        v.addWidget(self._build_project_card(), 0)
+        v.addWidget(self._build_style_card(), 1)
         return pane
 
     def _card(self, title: str, icon_name: str = "") -> tuple[QFrame, QVBoxLayout, QHBoxLayout]:
@@ -166,9 +186,11 @@ class CollectionMapView(BaseView):
         self._proj_list.setObjectName("ProjList")
         self._proj_list.setFrameShape(QFrame.Shape.NoFrame)
         self._proj_list.setSpacing(2)
-        self._proj_list.setMinimumHeight(158)
-        self._proj_list.setMaximumHeight(232)
+        self._proj_list.setMinimumHeight(142)
+        self._proj_list.setMaximumHeight(210)
         self._proj_list.itemSelectionChanged.connect(self._on_project_changed)
+        self._proj_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._proj_list.customContextMenuRequested.connect(self._on_proj_context_menu)
         lay.addWidget(self._proj_list)
         return card
 
@@ -176,15 +198,27 @@ class CollectionMapView(BaseView):
         card, lay, _hr = self._card("站位标识", "mdi6.map-marker-outline")
         # 实时预览色块
         prev_row = QHBoxLayout()
+        prev_row.setContentsMargins(0, 0, 0, 0)
+        prev_row.setSpacing(8)
         prev_row.addWidget(QLabel("预览"))
         self._marker_preview = QLabel()
         self._marker_preview.setFixedSize(54, 30)
+        self._marker_preview.setObjectName("MarkerPreview")
         prev_row.addWidget(self._marker_preview)
         prev_row.addStretch()
         lay.addLayout(prev_row)
+
+        scroll = QScrollArea()
+        scroll.setObjectName("StyleScroll")
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setMinimumHeight(160)
         self._style_panel = MarkerStylePanel()
         self._style_panel.style_changed.connect(self._on_style_changed)
-        lay.addWidget(self._style_panel)
+        scroll.setWidget(self._style_panel)
+        lay.addWidget(scroll, 1)
         return card
 
     # ── 项目行（名称 + 站位数徽章）──────────────────────────────────────────────
@@ -240,12 +274,17 @@ class CollectionMapView(BaseView):
 
     def _build_right_pane(self) -> QWidget:
         pane = QWidget()
+        pane.setObjectName("RightPane")
+        pane.setMinimumWidth(690)
         v = QVBoxLayout(pane)
         v.setContentsMargins(0, 0, 0, 0)
-        v.setSpacing(8)
+        v.setSpacing(10)
 
         # 工具条 1：粒度 + 计数
-        bar = QHBoxLayout()
+        header = QFrame()
+        header.setObjectName("MapHeader")
+        bar = QHBoxLayout(header)
+        bar.setContentsMargins(0, 0, 0, 0)
         bar.setSpacing(8)
         title = QLabel("采集地图")
         title.setObjectName("PaneTitle")
@@ -273,14 +312,26 @@ class CollectionMapView(BaseView):
         self._count_lbl = QLabel("")
         self._count_lbl.setObjectName("CountLbl")
         bar.addWidget(self._count_lbl)
-        v.addLayout(bar)
+        v.addWidget(header)
 
         # 工具条 2：底图 + 校准 + 导出
-        bar2 = QHBoxLayout()
+        tools = QFrame()
+        tools.setObjectName("MapToolStrip")
+        bar2 = QHBoxLayout(tools)
+        bar2.setContentsMargins(10, 8, 10, 8)
         bar2.setSpacing(8)
-        bar2.addWidget(QLabel("底图"))
+        tool_label = QLabel("底图")
+        tool_label.setObjectName("ToolLabel")
+        bar2.addWidget(tool_label)
         self._basemap_combo = QComboBox()
-        self._basemap_combo.setMinimumWidth(200)
+        # Cap width — without this the combo grows to the longest item name
+        # ("世界 · Winkel Tripel（NatGeo 标准）"), making the box oversized; the
+        # closed field elides, the popup still shows full names.
+        self._basemap_combo.setMinimumWidth(170)
+        self._basemap_combo.setMaximumWidth(230)
+        self._basemap_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
         self._basemap_combo.currentIndexChanged.connect(self._on_basemap_changed)
         bar2.addWidget(self._basemap_combo)
         self._calibrate_btn = QPushButton("校准")
@@ -302,14 +353,19 @@ class CollectionMapView(BaseView):
                         color=_theme()("accent_fg", "#ffffff"), size=15)
         self._export_btn.clicked.connect(self._on_export)
         bar2.addWidget(self._export_btn)
-        v.addLayout(bar2)
+        v.addWidget(tools)
 
         # 地图堆叠
         self._stack = QStackedWidget()
+        self._stack.setObjectName("MapStack")
         self._tile_map = TileMapWidget()
         self._tile_map.interactive_marker = False
         self._tile_map.point_clicked.connect(self._on_point_clicked)
+        self._tile_map.zoom_changed.connect(
+            lambda _z: self._sync_zoom_slider())
         self._pub_map = PublicationMapWidget()
+        self._pub_map.zoom_changed.connect(
+            lambda _z: self._sync_zoom_slider())
         self._stack.addWidget(self._tile_map)
         self._stack.addWidget(self._pub_map)
         self._stack.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -318,6 +374,9 @@ class CollectionMapView(BaseView):
 
         self._info_card = self._build_info_card()
         self._info_card.hide()
+        self._zoom_panel = self._build_zoom_controls()
+        self._tile_map.installEventFilter(self)
+        self._pub_map.installEventFilter(self)
         self._populate_basemaps()
         return pane
 
@@ -352,6 +411,114 @@ class CollectionMapView(BaseView):
         card.adjustSize()
         return card
 
+    def _build_zoom_controls(self) -> QWidget:
+        """地图右下角浮动缩放控件：+/- 按钮 + 滑杆 + 适应全部。"""
+        panel = QFrame(self._tile_map)
+        panel.setObjectName("ZoomPanel")
+        v = QVBoxLayout(panel)
+        v.setContentsMargins(6, 8, 6, 8)
+        v.setSpacing(4)
+
+        self._btn_zoom_in = QPushButton()
+        self._btn_zoom_in.setObjectName("ZoomBtn")
+        self._btn_zoom_in.setFixedSize(30, 30)
+        self._btn_zoom_in.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_zoom_in.setToolTip("放大 (+)")
+        set_button_icon(self._btn_zoom_in, "mdi6.plus", color=TONE_MUTED, size=16)
+        self._btn_zoom_in.clicked.connect(self._on_zoom_in)
+        v.addWidget(self._btn_zoom_in, 0, Qt.AlignmentFlag.AlignHCenter)
+
+        self._zoom_slider = QSlider(Qt.Orientation.Vertical)
+        self._zoom_slider.setObjectName("ZoomSlider")
+        self._zoom_slider.setFixedHeight(120)
+        self._zoom_slider.setMinimum(2)
+        self._zoom_slider.setMaximum(18)
+        self._zoom_slider.setValue(12)
+        self._zoom_slider.setInvertedAppearance(True)
+        self._zoom_slider.setPageStep(1)
+        self._zoom_slider.setToolTip("缩放级别")
+        self._zoom_slider.valueChanged.connect(self._on_slider_zoom)
+        v.addWidget(self._zoom_slider, 0, Qt.AlignmentFlag.AlignHCenter)
+
+        self._btn_zoom_out = QPushButton()
+        self._btn_zoom_out.setObjectName("ZoomBtn")
+        self._btn_zoom_out.setFixedSize(30, 30)
+        self._btn_zoom_out.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_zoom_out.setToolTip("缩小 (-)")
+        set_button_icon(self._btn_zoom_out, "mdi6.minus", color=TONE_MUTED, size=16)
+        self._btn_zoom_out.clicked.connect(self._on_zoom_out)
+        v.addWidget(self._btn_zoom_out, 0, Qt.AlignmentFlag.AlignHCenter)
+
+        sep = QFrame()
+        sep.setObjectName("ZoomSep")
+        sep.setFixedHeight(1)
+        v.addWidget(sep)
+
+        self._btn_zoom_fit = QPushButton()
+        self._btn_zoom_fit.setObjectName("ZoomBtn")
+        self._btn_zoom_fit.setFixedSize(30, 30)
+        self._btn_zoom_fit.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_zoom_fit.setToolTip("适应全部点位")
+        set_button_icon(self._btn_zoom_fit, "mdi6.fit-to-screen-outline", color=TONE_MUTED, size=16)
+        self._btn_zoom_fit.clicked.connect(self._on_zoom_fit)
+        v.addWidget(self._btn_zoom_fit, 0, Qt.AlignmentFlag.AlignHCenter)
+
+        # 浮动阴影
+        shadow = QGraphicsDropShadowEffect(panel)
+        shadow.setBlurRadius(18)
+        shadow.setOffset(0, 2)
+        shadow.setColor(QColor(0, 0, 0, 120))
+        panel.setGraphicsEffect(shadow)
+
+        panel.adjustSize()
+        return panel
+
+    def _position_zoom_panel(self) -> None:
+        """将缩放控件固定在当前活动地图右下角。"""
+        p = self._zoom_panel
+        host = self._pub_map if self._is_publication_mode() else self._tile_map
+        p.move(
+            host.width() - p.width() - 10,
+            host.height() - p.height() - (10 if self._is_publication_mode() else 28),
+        )
+
+    def _on_zoom_in(self) -> None:
+        if self._is_publication_mode():
+            self._pub_map.zoom_in()
+        else:
+            self._tile_map.zoom_in()
+        self._sync_zoom_slider()
+
+    def _on_zoom_out(self) -> None:
+        if self._is_publication_mode():
+            self._pub_map.zoom_out()
+        else:
+            self._tile_map.zoom_out()
+        self._sync_zoom_slider()
+
+    def _on_zoom_fit(self) -> None:
+        if self._is_publication_mode():
+            self._pub_map.zoom_to_fit()
+        else:
+            self._tile_map.zoom_to_fit()
+        self._sync_zoom_slider()
+
+    def _on_slider_zoom(self, value: int) -> None:
+        """滑杆驱动的缩放。"""
+        if self._is_publication_mode():
+            self._pub_map.set_zoom_factor(value / 10.0)
+        else:
+            self._tile_map.set_zoom(value)
+
+    def _sync_zoom_slider(self) -> None:
+        """从当前地图同步滑杆位置（避免信号反馈环）。"""
+        self._zoom_slider.blockSignals(True)
+        if self._is_publication_mode():
+            self._zoom_slider.setValue(round(self._pub_map.current_zoom() * 10))
+        else:
+            self._zoom_slider.setValue(self._tile_map.current_zoom())
+        self._zoom_slider.blockSignals(False)
+
     def _apply_style(self) -> None:
         g = _theme()
         bg, panel, border = g("bg", "#0a1e24"), g("panel_2", "#0e2329"), g("border", "#21424a")
@@ -359,12 +526,20 @@ class CollectionMapView(BaseView):
         accent_fg = g("accent_fg", "#ffffff")
         surface = g("modal_surface", panel)
         accent_soft = g("accent_soft", "rgba(79,209,184,0.14)")
+        accent_softer = g("accent_softer", accent_soft)
         inset = g("panel_inset", panel)
         hover = g("nav_segment_hover_bg", accent_soft)
+        input_bg = g("input_bg", panel)
+        input_border = g("input_border", border)
+        scroll_handle = g("scrollbar_handle", muted)
+        scroll_hover = g("scrollbar_handle_hover", accent)
         self.setStyleSheet(
             f"#{self.view_id}{{background:{bg};}}"
+            f"QScrollArea#MapPageScroll,QScrollArea#StyleScroll{{background:transparent;border:none;}}"
+            f"QWidget#MapPageContent,QWidget#RightPane{{background:transparent;}}"
+            f"QWidget#MarkerStylePanel{{background:transparent;}}"
             f"QWidget#LeftPane{{background:transparent;}}"
-            f"QFrame#Card{{background:{panel};border:1px solid {border};border-radius:10px;}}"
+            f"QFrame#Card{{background:{panel};border:1px solid {border};border-radius:8px;}}"
             f"QFrame#CardDiv{{background:{border};border:none;}}"
             f"QLabel{{color:{text};background:transparent;}}"
             f"QLabel#CardTitle{{color:{text};font-weight:600;font-size:14px;}}"
@@ -372,9 +547,13 @@ class CollectionMapView(BaseView):
             f"letter-spacing:1px;margin-top:2px;}}"
             f"QPushButton#CollapseBtn{{background:transparent;border:none;border-radius:9px;}}"
             f"QPushButton#CollapseBtn:hover{{background:{hover};}}"
+            f"QFrame#MapHeader{{background:transparent;border:none;}}"
+            f"QFrame#MapToolStrip{{background:{accent_softer};border:1px solid {border};border-radius:8px;}}"
+            f"QLabel#ToolLabel{{color:{muted};font-size:12px;font-weight:600;}}"
             f"QLabel#PaneTitle{{color:{text};font-weight:600;font-size:15px;}}"
             f"QLabel#SectionTitle{{color:{muted};font-weight:600;font-size:12px;}}"
             f"QLabel#CountLbl{{color:{muted};font-size:12px;}}"
+            f"QLabel#MarkerPreview{{background:{inset};border:1px solid {border};border-radius:6px;}}"
             # 新建项目「+」圆形 ghost 按钮
             f"QPushButton#AddProjBtn{{background:{accent_soft};border:none;border-radius:13px;}}"
             f"QPushButton#AddProjBtn:hover{{background:{hover};}}"
@@ -396,8 +575,11 @@ class CollectionMapView(BaseView):
             f'QLabel#ProjName[sel="1"]{{color:{accent};}}'
             f"QLabel#ProjSub{{color:{muted};font-size:11px;background:transparent;}}"
             f'QLabel#ProjSub[sel="1"]{{color:{accent};}}'
-            f"QComboBox{{background:{panel};color:{text};border:1px solid {border};"
-            f"border-radius:5px;padding:4px 8px;}}"
+            f"QComboBox,QSpinBox,QDoubleSpinBox{{background:{input_bg};color:{text};"
+            f"border:1px solid {input_border};border-radius:6px;padding:4px 8px;}}"
+            f"QComboBox:hover,QSpinBox:hover,QDoubleSpinBox:hover{{border-color:{border};background:{surface};}}"
+            f"QComboBox:focus,QSpinBox:focus,QDoubleSpinBox:focus{{border-color:{accent};}}"
+            f"QCheckBox{{color:{text};spacing:8px;}}"
             # 粒度分段控件（站位/断面/地区）
             f"QFrame#SegGroup{{background:{inset};border:1px solid {border};border-radius:9px;}}"
             f"QPushButton#LevelBtn{{background:transparent;color:{text};border:none;"
@@ -409,9 +591,32 @@ class CollectionMapView(BaseView):
             f"QPushButton:hover{{background:{hover};}}"
             f"QPushButton#Primary{{background:{accent};color:{accent_fg};border:1px solid {accent};}}"
             f"QPushButton#Primary:hover{{background:{g('accent_hover', accent)};}}"
+            f"QStackedWidget#MapStack{{background:{surface};border:1px solid {border};border-radius:8px;}}"
             f"QFrame#InfoCard{{background:{surface};border:1px solid {border};border-radius:8px;}}"
             f"QLabel#InfoTitle{{color:{text};font-weight:600;font-size:14px;}}"
             f"QPushButton#CloseBtn{{background:transparent;color:{muted};border:none;font-size:16px;}}"
+            # 缩放控件浮层 — 毛玻璃风格
+            f"QFrame#ZoomPanel{{background:rgba(12,30,36,0.82);border:1px solid rgba(255,255,255,0.08);border-radius:12px;}}"
+            f"QPushButton#ZoomBtn{{background:rgba(255,255,255,0.04);color:{muted};border:none;border-radius:8px;}}"
+            f"QPushButton#ZoomBtn:hover{{background:rgba(255,255,255,0.12);color:{text};}}"
+            f"QPushButton#ZoomBtn:pressed{{background:rgba(255,255,255,0.18);}}"
+            f"QSlider#ZoomSlider::groove:vertical{{width:4px;background:rgba(255,255,255,0.10);border-radius:2px;margin:2px 11px;}}"
+            f"QSlider#ZoomSlider::sub-page:vertical{{background:rgba(79,209,184,0.5);border-radius:2px;width:4px;}}"
+            f"QSlider#ZoomSlider::add-page:vertical{{background:transparent;}}"
+            f"QSlider#ZoomSlider::handle:vertical{{height:16px;width:16px;margin:-6px 0;border-radius:8px;background:{accent};border:2px solid rgba(255,255,255,0.25);}}"
+            f"QSlider#ZoomSlider::handle:vertical:hover{{background:{g('accent_hover', accent)};border:2px solid rgba(255,255,255,0.4);}}"
+            f"QSlider#ZoomSlider::handle:vertical:pressed{{background:{g('accent_pressed', accent)};}}"
+            f"QFrame#ZoomSep{{background:rgba(255,255,255,0.08);max-width:20px;}}"
+            f"QScrollBar:vertical{{background:transparent;width:10px;margin:3px 1px 3px 1px;}}"
+            f"QScrollBar::handle:vertical{{background:{scroll_handle};border-radius:4px;min-height:34px;}}"
+            f"QScrollBar::handle:vertical:hover{{background:{scroll_hover};}}"
+            f"QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{{height:0;border:none;background:transparent;}}"
+            f"QScrollBar::add-page:vertical,QScrollBar::sub-page:vertical{{background:transparent;}}"
+            f"QScrollBar:horizontal{{background:transparent;height:12px;margin:1px 8px 2px 8px;}}"
+            f"QScrollBar::handle:horizontal{{background:{scroll_handle};border-radius:5px;min-width:48px;}}"
+            f"QScrollBar::handle:horizontal:hover{{background:{scroll_hover};}}"
+            f"QScrollBar::add-line:horizontal,QScrollBar::sub-line:horizontal{{width:0;border:none;background:transparent;}}"
+            f"QScrollBar::add-page:horizontal,QScrollBar::sub-page:horizontal{{background:transparent;}}"
         )
 
     # ── BaseView ────────────────────────────────────────────────────────────
@@ -421,6 +626,15 @@ class CollectionMapView(BaseView):
         self._populate_projects()
         self._load_marker_style()
         self._reload()
+        self._sync_zoom_slider()
+        self._position_zoom_panel()
+        self._zoom_panel.raise_()
+
+    def eventFilter(self, obj, event) -> bool:
+        """监听地图 resize，重新定位缩放浮层。"""
+        if obj in (self._tile_map, self._pub_map) and event.type() == event.Type.Resize:
+            self._position_zoom_panel()
+        return super().eventFilter(obj, event)
 
     # ── 项目列表（跨项目）──────────────────────────────────────────────────────
 
@@ -552,6 +766,120 @@ class CollectionMapView(BaseView):
         act = menu.addAction(icon("mdi6.import"), "导入经纬度…")
         act.triggered.connect(self._on_import_coords)
         menu.exec(self._stack.mapToGlobal(pos))
+
+    # ── 项目列表右键菜单 ───────────────────────────────────────────────────────
+
+    def _proj_name_for(self, directory) -> str:
+        for name, d in self._known_projects():
+            if d == directory:
+                return name
+        return Path(directory).name
+
+    def _on_proj_context_menu(self, pos) -> None:
+        """项目列表右键菜单。"""
+        item = self._proj_list.itemAt(pos)
+        if item is None:
+            return
+        directory = item.data(Qt.ItemDataRole.UserRole)
+        is_all = directory is None
+
+        menu = QMenu(self)
+
+        # ── 通用：导入经纬度
+        act_import = menu.addAction(icon("mdi6.import"), "导入经纬度…")
+
+        if not is_all:
+            menu.addSeparator()
+            act_workspace = menu.addAction(icon("mdi6.folder-star-outline"), "打开工作区")
+            act_open_dir = menu.addAction(icon("mdi6.folder-open-outline"), "在文件管理器中打开")
+            act_copy_path = menu.addAction(icon("mdi6.content-copy"), "复制项目路径")
+            menu.addSeparator()
+            act_rename = menu.addAction(icon("mdi6.rename-box-outline"), "重命名…")
+            act_remove = menu.addAction(icon("mdi6.close-circle-outline"), "从列表移除")
+
+        chosen = menu.exec(self._proj_list.viewport().mapToGlobal(pos))
+        if chosen is None:
+            return
+
+        if chosen == act_import:
+            if is_all:
+                self._project_filter = None
+            else:
+                self._project_filter = directory
+            self._on_import_coords()
+        elif not is_all and chosen == act_workspace:
+            self._do_open_workspace(directory)
+        elif not is_all and chosen == act_open_dir:
+            self._do_open_in_file_manager(directory)
+        elif not is_all and chosen == act_copy_path:
+            self._do_copy_path(directory)
+        elif not is_all and chosen == act_rename:
+            self._do_rename(directory)
+        elif not is_all and chosen == act_remove:
+            self._do_remove(directory)
+
+    def _do_open_workspace(self, directory) -> None:
+        """切换到该项目的工作区（跳转工作台）。"""
+        self.ctx.current_project_dir = directory
+        self._project_filter = directory
+        self._populate_projects()
+        win = self.window()
+        nav = getattr(win, "navigate_to", None)
+        if callable(nav):
+            nav("workbench")
+
+    def _do_open_in_file_manager(self, directory) -> None:
+        """在系统文件管理器中打开项目目录。"""
+        from PyQt6.QtGui import QDesktopServices
+        from PyQt6.QtCore import QUrl
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(directory)))
+
+    def _do_copy_path(self, directory) -> None:
+        """复制项目路径到剪贴板。"""
+        from PyQt6.QtWidgets import QApplication
+        QApplication.clipboard().setText(str(directory))
+        from app.utils.ui import info
+        info(self, "已复制", f"项目路径已复制到剪贴板：\n{directory}")
+
+    def _do_rename(self, directory) -> None:
+        """重命名项目显示名称（仅改注册表，不改文件夹名）。"""
+        from PyQt6.QtWidgets import QInputDialog
+        old_name = self._proj_name_for(directory)
+        new_name, ok = QInputDialog.getText(self, "重命名项目", "新名称", text=old_name)
+        if not ok or not new_name.strip() or new_name.strip() == old_name:
+            return
+        from app.views.overview_view import _load_projects, _save_projects
+        try:
+            all_projects = _load_projects()
+            for p in all_projects:
+                if (p.get("directory") or p.get("dir")) == directory:
+                    p["name"] = new_name.strip()
+                    break
+            _save_projects(all_projects)
+            self._populate_projects()
+        except Exception as exc:
+            ui.warn(self, "重命名失败", str(exc))
+
+    def _do_remove(self, directory) -> None:
+        """从项目列表中移除（不删除磁盘文件）。"""
+        from PyQt6.QtWidgets import QMessageBox
+        name = self._proj_name_for(directory)
+        if ui.question(self, "移除项目",
+                       f"确定将「{name}」从列表中移除？\n（不会删除项目文件）") \
+                != QMessageBox.StandardButton.Yes:
+            return
+        from app.views.overview_view import _load_projects, _save_projects
+        try:
+            all_projects = _load_projects()
+            all_projects = [p for p in all_projects
+                            if (p.get("directory") or p.get("dir")) != directory]
+            _save_projects(all_projects)
+            if self._project_filter == directory:
+                self._project_filter = None
+            self._populate_projects()
+            self._reload()
+        except Exception as exc:
+            ui.warn(self, "移除失败", str(exc))
 
     def _on_import_coords(self) -> None:
         """右栏「导入经纬度」→ 选目标项目 → 复用 CoordImportDialog → 导入后刷新地图。
@@ -693,6 +1021,14 @@ class CollectionMapView(BaseView):
         if kind == "osm":
             self._stack.setCurrentWidget(self._tile_map)
             self._calibrate_btn.setEnabled(False)
+            self._zoom_panel.setParent(self._tile_map)
+            self._zoom_panel.show()
+            self._zoom_panel.raise_()
+            self._position_zoom_panel()
+            self._zoom_slider.blockSignals(True)
+            self._zoom_slider.setRange(2, 18)
+            self._zoom_slider.setValue(self._tile_map.current_zoom())
+            self._zoom_slider.blockSignals(False)
         else:
             calib = None
             calibrated = False
@@ -705,6 +1041,14 @@ class CollectionMapView(BaseView):
             self._info_card.hide()
             # generated 底图免校准；image 未校准才需校准
             self._calibrate_btn.setEnabled(kind == "image" and not calibrated)
+            self._zoom_panel.setParent(self._pub_map)
+            self._zoom_panel.show()
+            self._zoom_panel.raise_()
+            self._position_zoom_panel()
+            self._zoom_slider.blockSignals(True)
+            self._zoom_slider.setRange(5, 200)
+            self._zoom_slider.setValue(10)
+            self._zoom_slider.blockSignals(False)
         self._reload()
 
     def _on_calibrate(self) -> None:

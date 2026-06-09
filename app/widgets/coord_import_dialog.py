@@ -13,11 +13,14 @@ from __future__ import annotations
 import sqlite3
 from typing import Optional
 
+from PyQt6.QtCore import QTimer
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
+    QApplication,
     QComboBox,
     QDialog,
     QFormLayout,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -58,20 +61,46 @@ class CoordImportDialog(QDialog):
         self._file_lbl = QLabel("未选择文件")
         btn_file = QPushButton("选择文件 (Excel/CSV/TXT)…")
         btn_file.clicked.connect(self._pick_file)
+        self._btn_screenshot = QPushButton("截图")
+        self._btn_screenshot.setToolTip("打开截图工具，可截当前导入窗口或任意屏幕区域。")
+        self._btn_screenshot.clicked.connect(self._capture_screenshot)
+        self._btn_sample_preview = QPushButton("查看示例")
+        self._btn_sample_preview.setToolTip("直接查看示例表和经纬度解析结果。")
+        self._btn_sample_preview.clicked.connect(self._show_sample_preview)
         btn_sample = QPushButton("下载示例")
         btn_sample.setToolTip("导出一个示例站位表（CSV），按其列填好后再导入。")
         btn_sample.clicked.connect(self._save_sample)
         top.addWidget(btn_file)
+        top.addWidget(self._btn_screenshot)
+        top.addWidget(self._btn_sample_preview)
         top.addWidget(btn_sample)
         top.addWidget(self._file_lbl, 1)
         v.addLayout(top)
 
+        hint = QLabel(
+            "必填：经度 + 纬度（或经纬度合一列）；地区/断面/站位 至少填一项。"
+            "其余（站位说明、源坐标系、缺省采集日期）均可选。"
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#667085;")
+        v.addWidget(hint)
+
+        # 列映射每行标注必填/可选，便于用户对照表头。
+        _REQ = {
+            "province": "（地区/断面/站位 至少一项）",
+            "site": "（地区/断面/站位 至少一项）",
+            "station": "（地区/断面/站位 至少一项）",
+            "station_label": "（可选）",
+            "lon": "（必填，或用经纬合一列）",
+            "lat": "（必填，或用经纬合一列）",
+            "lonlat": "（可选，替代经度/纬度两列）",
+        }
         form = QFormLayout()
         for key in cis.TARGET_FIELDS:
             combo = QComboBox()
             combo.addItem(_NONE)
             self._field_combos[key] = combo
-            form.addRow(cis.TARGET_LABELS[key], combo)
+            form.addRow(cis.TARGET_LABELS[key] + _REQ.get(key, ""), combo)
         self._coord_sys = QComboBox()
         self._coord_sys.addItems(cis.COORD_SYSTEMS)
         form.addRow("源坐标系", self._coord_sys)
@@ -185,7 +214,83 @@ class CoordImportDialog(QDialog):
         if not path.lower().endswith(".csv"):
             path += ".csv"
         cis.write_sample_file(path)
-        ui.info(self, "示例已保存", f"示例站位表已保存到：\n{path}\n按其列填好后即可导入。")
+        ui.info(
+            self, "示例已保存",
+            f"示例站位表已保存到：\n{path}\n按其列填好后即可导入。\n\n"
+            "必填：经度、纬度（或经纬度合一列）；地区/断面/站位 至少填一项。"
+            "站位说明为可选列。",
+        )
+
+    def _build_sample_preview_dialog(self) -> QDialog:
+        dlg = QDialog(self)
+        dlg.setWindowTitle("示例站位表预览")
+        dlg.resize(760, 360)
+        v = QVBoxLayout(dlg)
+        v.setContentsMargins(14, 12, 14, 12)
+        v.setSpacing(10)
+
+        head = QLabel("示例站位表")
+        head.setStyleSheet("font-size:15px;font-weight:600;")
+        v.addWidget(head)
+
+        legend = QLabel(
+            "必填列：经度、纬度（或经纬度合一列）；地区/断面/站位 至少填一项。"
+            "站位说明为可选列。"
+        )
+        legend.setWordWrap(True)
+        legend.setStyleSheet("color:#667085;")
+        v.addWidget(legend)
+
+        table = QTableWidget(0, 8)
+        table.setObjectName("SamplePreviewTable")
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        table.setAlternatingRowColors(True)
+        table.setHorizontalHeaderLabels([
+            "地区", "断面", "站位", "说明",
+            "原始经度", "原始纬度", "解析经度", "解析纬度",
+        ])
+        _headers, rows = cis.sample_table()
+        parsed = cis.sample_preview_rows(coord_system="WGS84")
+        for raw, rec in zip(rows, parsed):
+            row = table.rowCount()
+            table.insertRow(row)
+            cells = [
+                raw.get("地区", ""), raw.get("断面", ""), raw.get("站位", ""),
+                raw.get("站位说明", ""), raw.get("经度", ""), raw.get("纬度", ""),
+                "" if rec.get("lon") is None else f"{rec['lon']:.5f}",
+                "" if rec.get("lat") is None else f"{rec['lat']:.5f}",
+            ]
+            for col, val in enumerate(cells):
+                item = QTableWidgetItem(str(val))
+                if not rec.get("ok"):
+                    item.setForeground(QColor("#b42318"))
+                table.setItem(row, col, item)
+        table.resizeColumnsToContents()
+        table.horizontalHeader().setStretchLastSection(True)
+        v.addWidget(table, 1)
+
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.HLine)
+        v.addWidget(line)
+
+        actions = QHBoxLayout()
+        save = QPushButton("保存 CSV")
+        save.clicked.connect(self._save_sample)
+        close = QPushButton("关闭")
+        close.clicked.connect(dlg.accept)
+        actions.addWidget(save)
+        actions.addStretch()
+        actions.addWidget(close)
+        v.addLayout(actions)
+
+        dlg._sample_table = table
+        return dlg
+
+    def _show_sample_preview(self) -> None:
+        dlg = self._build_sample_preview_dialog()
+        ui.center_on(dlg, self)
+        dlg.exec()
 
     def _pick_file(self) -> None:
         path = ui.get_open_file_name(
@@ -214,6 +319,27 @@ class CoordImportDialog(QDialog):
                 self._table.setItem(row, c, item)
             ok += 1 if r["ok"] else 0
         self._summary.setText(f"可导入 {ok} / 共 {len(recs)} 行")
+
+    def _find_screenshot_controller(self):
+        """Find MainWindow._shot_ctrl from inside this modal dialog."""
+        w: Optional[QWidget] = self
+        while w is not None:
+            ctrl = getattr(w, "_shot_ctrl", None)
+            if ctrl is not None:
+                return ctrl
+            w = w.parentWidget()
+        for top in QApplication.topLevelWidgets():
+            ctrl = getattr(top, "_shot_ctrl", None)
+            if ctrl is not None:
+                return ctrl
+        return None
+
+    def _capture_screenshot(self) -> None:
+        ctrl = self._find_screenshot_controller()
+        if ctrl is None or not hasattr(ctrl, "capture_region"):
+            ui.warn(self, "截图", "截图工具尚未初始化。")
+            return
+        QTimer.singleShot(0, ctrl.capture_region)
 
     def _on_import(self) -> None:
         if self._db is None:

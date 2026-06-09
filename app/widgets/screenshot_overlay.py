@@ -74,15 +74,27 @@ class ScreenshotOverlay(QWidget):
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
         )
+        # The overlay can be launched from modal dialogs such as 经纬度导入.
+        # Make it the active app-modal window so it can receive the drag input.
+        self.setWindowModality(Qt.WindowModality.ApplicationModal)
         self.setCursor(Qt.CursorShape.CrossCursor)
         self.setMouseTracking(True)
 
     # ── lifecycle ─────────────────────────────────────────────────────────
-    def start(self, preset_rect: QRect | None = None) -> None:
-        """Freeze the anchor's screen; show fullscreen. *preset_rect* is in
-        overlay-local logical coords (None → user selects a region)."""
-        screen = (self._anchor.screen() if self._anchor else None) or \
-            QGuiApplication.primaryScreen()
+    def start(self, preset_rect: QRect | None = None, screen=None) -> None:
+        """Freeze *screen*; show fullscreen over it. *preset_rect* is in
+        overlay-local logical coords (None → user selects a region).
+
+        When *screen* is None (region capture), the screen under the cursor is
+        used — so with multiple windows / monitors the overlay lands where the
+        user is looking, not on the main window's screen.
+        """
+        if screen is None:
+            from PyQt6.QtGui import QCursor
+            screen = QGuiApplication.screenAt(QCursor.pos())
+        if screen is None:
+            screen = (self._anchor.screen() if self._anchor else None) or \
+                QGuiApplication.primaryScreen()
         if screen is None:
             self.close()
             return

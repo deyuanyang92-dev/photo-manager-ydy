@@ -8,10 +8,11 @@ from __future__ import annotations
 import os
 import sqlite3
 from pathlib import Path
+from unittest.mock import MagicMock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QWidget
 
 from app.db.db_manager import ensure_schema
 from app.services import collection_record_service as crs
@@ -41,6 +42,27 @@ def _dlg(db):
 class TestImportDialog:
     def test_instantiates(self):
         assert _dlg(_db()) is not None
+
+    def test_sample_preview_dialog_shows_parsed_lon_lat(self):
+        d = _dlg(_db())
+        dlg = d._build_sample_preview_dialog()
+        table = dlg._sample_table
+        assert table.rowCount() >= 3
+        assert table.item(0, 6).text() == "121.65430"
+        assert table.item(0, 7).text() == "29.12340"
+
+    def test_screenshot_button_triggers_main_controller(self):
+        from app.widgets.coord_import_dialog import CoordImportDialog
+
+        parent = QWidget()
+        parent._shot_ctrl = MagicMock()
+        d = CoordImportDialog(_db(), parent=parent)
+
+        assert hasattr(d, "_btn_screenshot")
+        d._capture_screenshot()
+        QApplication.processEvents()
+
+        parent._shot_ctrl.capture_region.assert_called_once()
 
     def test_load_file_populates_headers(self, tmp_path):
         d = _dlg(_db())

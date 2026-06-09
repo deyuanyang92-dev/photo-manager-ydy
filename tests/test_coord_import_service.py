@@ -45,6 +45,20 @@ class TestReadTable:
         assert rows[0]["站位"] == "B2"
 
 
+class TestSampleTable:
+    def test_sample_table_is_previewable(self):
+        headers, rows = cis.sample_table()
+        assert headers == cis.SAMPLE_HEADERS
+        assert rows and rows[0]["经度"]
+
+    def test_sample_preview_rows_parse_lon_lat(self):
+        rows = cis.sample_preview_rows()
+        assert len(rows) == len(cis.SAMPLE_ROWS)
+        assert all(r["ok"] for r in rows)
+        assert rows[0]["lon"] == pytest.approx(121.6543)
+        assert rows[1]["lat"] == pytest.approx(29.1217, abs=1e-3)
+
+
 # ── 规范化 ─────────────────────────────────────────────────────────────────────
 
 class TestNormalize:

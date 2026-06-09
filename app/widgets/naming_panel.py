@@ -277,7 +277,10 @@ class NamingPanel(QWidget):
         self._seq_apply_btn.setEnabled(False)
         self._seq_apply_btn.clicked.connect(self._apply_sequence_suggestion)
         seq_lay.addWidget(self._seq_apply_btn)
-        identity_grid.addWidget(seq_cell, 1, 0)
+        # Span all three columns — pinned to col 0 alone the cell is only as wide
+        # as the 物种缩写 field, so the hint label collapsed to ~1 char and wrapped
+        # vertically (one CJK glyph per line) on narrow rails.
+        identity_grid.addWidget(seq_cell, 1, 0, 1, 3)
 
         self._seq = QSpinBox()
         self._seq.setMinimum(1)

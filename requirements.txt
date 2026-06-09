@@ -12,6 +12,9 @@ qrcode[pil]>=7.4              # 标签二维码，纠错级 Q
 python-barcode>=0.15          # 标签 1D 条码 (Code128)，可选：缺失时降级为占位框
 openpyxl>=3.1                 # Excel 导出（34 列）
 
+# 截图全局快捷键（可选：缺失时快捷键仅在窗口前台生效，不影响其它功能）
+pynput>=1.7                   # 系统级全局热键（X11/Windows/macOS；Wayland 受限）
+
 # 外部服务
 httpx>=0.27                   # WoRMS 代理
 
