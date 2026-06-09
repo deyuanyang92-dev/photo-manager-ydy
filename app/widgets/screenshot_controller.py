@@ -54,14 +54,32 @@ class ScreenshotController(QObject):
 
     # ── public capture modes ───────────────────────────────────────────────
     def capture_region(self) -> None:
+        # Under WSL the in-app overlay can't grab the Windows desktop (XWayland
+        # root is black) — hand off to the Windows-native snipper (Snipaste /
+        # screen-clip) so it behaves exactly like every other Windows app.
+        if self._delegate_to_windows():
+            return
         # screen=None → overlay grabs the monitor under the cursor (works with
         # any number of windows / monitors, regardless of which has focus).
         self._open(None, None)
 
     def capture_fullscreen(self) -> None:
+        if self._delegate_to_windows():
+            return
         screen = self._active_screen()
         full = QRect(QPoint(0, 0), screen.geometry().size()) if screen else None
         self._open(full, screen)
+
+    def _delegate_to_windows(self) -> bool:
+        """On WSL, launch the Windows-native snip and report it was handled."""
+        from app.utils.win_screenshot import is_wsl, launch_windows_snip
+
+        if not is_wsl():
+            return False
+        if launch_windows_snip():
+            self._status("已唤起 Windows 截图工具（Snipaste / 屏幕截图）")
+            return True
+        return False
 
     def capture_window(self) -> None:
         win = self._active_window()
