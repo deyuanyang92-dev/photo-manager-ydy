@@ -480,30 +480,18 @@ class SettingsView(BaseView):
         self._preset_list.itemDoubleClicked.connect(self._apply_selected_preset)
         preset_v.addWidget(self._preset_list)
 
-        # Parameter form (method / radius / smoothing / quality)
+        # 渲染参数编辑器 —— 复刻 Helicon Focus 桌面端 "Rendering" 面板:
+        # 渲染方法单选 (Method A weighted average / B depth map / C pyramid) +
+        # Radius / Smoothing 滑块+数字框 + 右键滑块复位默认, Method C 禁用 Radius。
+        from app.widgets.helicon_params_panel import HeliconParamsPanel
+        self._helicon_param_panel = HeliconParamsPanel()
+        self._helicon_param_panel.params_changed.connect(self._save_helicon)
+        preset_v.addWidget(self._helicon_param_panel)
+
+        # JPEG 质量（本软件扩展项，仅 JPG 输出时有效；桌面端 Rendering 页无此项）
         preset_form = QFormLayout()
         preset_form.setHorizontalSpacing(16)
         preset_form.setVerticalSpacing(8)
-
-        self._method_combo = QComboBox()
-        self._method_combo.addItems(["A — 加权平均 (1)", "B — 景深图 (2)", "C — 金字塔 (3)"])
-        self._method_combo.setToolTip("-mp: 参数，A=1 B=2 C=3")
-        self._method_combo.currentIndexChanged.connect(self._save_helicon)
-        preset_form.addRow("合成方式 (-mp)", self._method_combo)
-
-        self._radius_spin = QSpinBox()
-        self._radius_spin.setRange(1, 16)
-        self._radius_spin.setValue(4)
-        self._radius_spin.setToolTip("-rp: 参数，范围 1–16，推荐 4")
-        self._radius_spin.valueChanged.connect(self._save_helicon)
-        preset_form.addRow("半径 (-rp)", self._radius_spin)
-
-        self._smoothing_spin = QSpinBox()
-        self._smoothing_spin.setRange(0, 8)
-        self._smoothing_spin.setValue(4)
-        self._smoothing_spin.setToolTip("-sp: 参数，范围 0–8，推荐 4")
-        self._smoothing_spin.valueChanged.connect(self._save_helicon)
-        preset_form.addRow("平滑度 (-sp)", self._smoothing_spin)
 
         self._quality_spin = QSpinBox()
         self._quality_spin.setRange(70, 100)
@@ -1213,12 +1201,12 @@ class SettingsView(BaseView):
         self._helicon_exe_edit.setText(exe_val)
         if exe_val:
             os.environ["HELICON_FOCUS_PATH"] = exe_val
-        method_idx = int(qs.value(_K_HELICON_METHOD, 0))
-        self._method_combo.setCurrentIndex(
-            method_idx if 0 <= method_idx < self._method_combo.count() else 0
-        )
-        self._radius_spin.setValue(int(qs.value(_K_HELICON_RADIUS, 4)))
-        self._smoothing_spin.setValue(int(qs.value(_K_HELICON_SMOOTHING, 4)))
+        method_idx = int(qs.value(_K_HELICON_METHOD, 1))
+        self._helicon_param_panel.set_params({
+            "method": method_idx if 0 <= method_idx <= 2 else 1,
+            "radius": int(qs.value(_K_HELICON_RADIUS, 8)),
+            "smoothing": int(qs.value(_K_HELICON_SMOOTHING, 4)),
+        })
         self._quality_spin.setValue(int(qs.value(_K_HELICON_QUALITY, 95)))
         # Refresh detected / effective display
         self._refresh_helicon_display()
@@ -1396,9 +1384,10 @@ class SettingsView(BaseView):
     def _save_helicon(self) -> None:
         qs = self.ctx.settings._qs
         qs.setValue(_K_HELICON_EXE, self._helicon_exe_edit.text().strip())
-        qs.setValue(_K_HELICON_METHOD, self._method_combo.currentIndex())
-        qs.setValue(_K_HELICON_RADIUS, self._radius_spin.value())
-        qs.setValue(_K_HELICON_SMOOTHING, self._smoothing_spin.value())
+        _p = self._helicon_param_panel.get_params()
+        qs.setValue(_K_HELICON_METHOD, _p["method"])
+        qs.setValue(_K_HELICON_RADIUS, _p["radius"])
+        qs.setValue(_K_HELICON_SMOOTHING, _p["smoothing"])
         qs.setValue(_K_HELICON_QUALITY, self._quality_spin.value())
         self.ctx.settings.sync()
 
@@ -1731,9 +1720,9 @@ class SettingsView(BaseView):
             return  # 空名称：静默忽略
         from datetime import datetime, timezone
         params = {
-            "method": self._method_combo.currentIndex() + 1,
-            "radius": self._radius_spin.value(),
-            "smoothing": self._smoothing_spin.value(),
+            "method": self._helicon_param_panel.get_params()["method"] + 1,
+            "radius": self._helicon_param_panel.get_params()["radius"],
+            "smoothing": self._helicon_param_panel.get_params()["smoothing"],
             "quality": self._quality_spin.value(),
         }
         preset = {
@@ -1762,10 +1751,12 @@ class SettingsView(BaseView):
             return
         params = preset.get("params", {})
         method_idx = int(params.get("method", 1)) - 1  # 1-based → 0-based index
-        method_idx = max(0, min(method_idx, self._method_combo.count() - 1))
-        self._method_combo.setCurrentIndex(method_idx)
-        self._radius_spin.setValue(int(params.get("radius", 4)))
-        self._smoothing_spin.setValue(int(params.get("smoothing", 4)))
+        method_idx = max(0, min(method_idx, 2))
+        self._helicon_param_panel.set_params({
+            "method": method_idx,
+            "radius": int(params.get("radius", 8)),
+            "smoothing": int(params.get("smoothing", 4)),
+        })
         self._quality_spin.setValue(int(params.get("quality", 95)))
         self._save_helicon()
 
