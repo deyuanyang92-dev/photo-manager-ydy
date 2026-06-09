@@ -30,7 +30,7 @@ from PyQt6.QtGui import (
     QPainter,
     QPixmap,
 )
-from PyQt6.QtWidgets import QLineEdit, QWidget
+from PyQt6.QtWidgets import QApplication, QLineEdit, QWidget
 
 from app.widgets.screenshot_annotations import (
     DRAG_TOOLS,
@@ -39,6 +39,51 @@ from app.widgets.screenshot_annotations import (
     paint_annotation,
 )
 from app.widgets.screenshot_toolbar import ScreenshotToolbar
+
+
+def _pixmap_is_blank(pm: QPixmap) -> bool:
+    """True if *pm* is null or every sampled pixel is pure black.
+
+    ``QScreen.grabWindow(0)`` (root-window grab) returns an all-black pixmap
+    under WSLg / XWayland — the X11 root holds no desktop pixels there — so a
+    blank result signals that we must fall back to compositing app windows.
+    """
+    if pm.isNull():
+        return True
+    img = pm.toImage()
+    w, h = img.width(), img.height()
+    if w == 0 or h == 0:
+        return True
+    step_x = max(1, w // 32)
+    step_y = max(1, h // 32)
+    for x in range(0, w, step_x):
+        for y in range(0, h, step_y):
+            c = img.pixelColor(x, y)
+            if c.red() or c.green() or c.blue():
+                return False
+    return True
+
+
+def _composite_top_levels(screen, exclude: QWidget | None) -> QPixmap:
+    """Compose every visible top-level widget onto a screen-sized canvas via
+    ``QWidget.grab()`` — the capture path that works under WSLg/XWayland where
+    the root grab is black. Non-app desktop areas stay a neutral dark grey.
+    """
+    geo = screen.geometry()
+    dpr = screen.devicePixelRatio()
+    canvas = QPixmap(int(geo.width() * dpr), int(geo.height() * dpr))
+    canvas.setDevicePixelRatio(dpr)
+    canvas.fill(QColor(28, 28, 30))
+    p = QPainter(canvas)
+    for w in QApplication.topLevelWidgets():
+        if w is exclude or not w.isVisible() or w.width() <= 0 or w.height() <= 0:
+            continue
+        grab = w.grab()
+        if grab.isNull():
+            continue
+        p.drawPixmap(w.mapToGlobal(QPoint(0, 0)) - geo.topLeft(), grab)
+    p.end()
+    return canvas
 
 
 class ScreenshotOverlay(QWidget):
@@ -98,7 +143,10 @@ class ScreenshotOverlay(QWidget):
         if screen is None:
             self.close()
             return
-        self._frozen = screen.grabWindow(0)
+        self._frozen = self._grab_root(screen)
+        if _pixmap_is_blank(self._frozen):
+            # WSLg/XWayland: root grab is black — composite app windows instead.
+            self._frozen = _composite_top_levels(screen, exclude=self)
         self.setGeometry(screen.geometry())
         self._preset = preset_rect
         if preset_rect is not None:
@@ -107,6 +155,11 @@ class ScreenshotOverlay(QWidget):
         self.showFullScreen()
         self.raise_()
         self.activateWindow()
+
+    def _grab_root(self, screen) -> QPixmap:
+        """Native full-desktop grab — overridable seam (tested by faking a
+        blank result to exercise the WSLg composite fallback)."""
+        return screen.grabWindow(0)
 
     # ── painting ──────────────────────────────────────────────────────────
     def paintEvent(self, _e) -> None:
