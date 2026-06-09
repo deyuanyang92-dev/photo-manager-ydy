@@ -601,6 +601,17 @@ class CollabPanel(QWidget):
         if svc:
             svc.add_manual_peer(info.ip, info.port)
             if info.group_code:
+                current = svc.group_code
+                if current and current != info.group_code:
+                    reply = QMessageBox.question(
+                        self, "确认组码",
+                        f"配对码携带的协作组码为「{info.group_code}」\n"
+                        f"你当前的组码为「{current}」\n\n"
+                        f"是否将组码改为「{info.group_code}」？",
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    )
+                    if reply != QMessageBox.StandardButton.Yes:
+                        return
                 svc.set_group_code(info.group_code)
                 self.ctx.settings.setValue("collab/team_code", info.group_code)
 
