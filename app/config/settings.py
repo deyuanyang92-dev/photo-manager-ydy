@@ -101,6 +101,26 @@ class AppSettings:
     def performance_mode(self, val: bool) -> None:
         self._qs.setValue("appearance/performance_mode", bool(val))
 
+    # ── Typography (字体 / 字体大小, 设置→界面) ────────────────────────
+    @property
+    def ui_font_scale(self) -> float:
+        try:
+            return float(self._qs.value("ui/font_scale", 1.0))
+        except (TypeError, ValueError):
+            return 1.0
+
+    @ui_font_scale.setter
+    def ui_font_scale(self, val: float) -> None:
+        self._qs.setValue("ui/font_scale", float(val))
+
+    @property
+    def ui_font_family(self) -> str:
+        return self._qs.value("ui/font_family", "", type=str) or ""
+
+    @ui_font_family.setter
+    def ui_font_family(self, val: str) -> None:
+        self._qs.setValue("ui/font_family", val or "")
+
     # ── LAN collaboration ─────────────────────────────────────────────
 
     @property

@@ -61,7 +61,7 @@ from PyQt6.QtWidgets import QApplication
 
 from app.app_context import AppContext
 from app.config.settings import AppSettings
-from app.config.theme import apply_default_font, apply_theme, load_fonts
+from app.config.theme import apply_default_font, apply_theme, load_fonts, set_typography
 from app.main_window import MainWindow
 from app.views.registry import ALL_VIEWS
 
@@ -88,13 +88,16 @@ def main() -> int:
     # ── Fonts (bundled Noto Sans/Serif SC + JetBrains Mono if present;
     #    web-parity system fallback otherwise) ──────────────────────────
     load_fonts(app)
+    # Apply the user's saved 字体 / 字体大小 (设置→界面) before pinning the default
+    # font + building the theme QSS, so first paint already uses them.
+    _s = AppSettings()
+    set_typography(scale=_s.ui_font_scale, family=_s.ui_font_family)
     # Pin the default font to an installed CJK family BEFORE any widget is
     # built — otherwise first-paint layout uses Qt's CJK-less default ("Ubuntu"
     # on Linux), causing the startup text-overlap and garbled glyphs.
     apply_default_font(app)
 
     # ── Theme ─────────────────────────────────────────────────────────
-    _s = AppSettings()
     # Performance mode must be set before apply_theme (QSS drops gradients) and
     # before any card widget is built (apply_card_shadow becomes a no-op).
     from app.config import effects as _fx

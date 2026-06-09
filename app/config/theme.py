@@ -30,6 +30,38 @@ _TYPO: dict[str, str] = {
     "radius_pill": "999px",
 }
 
+# Base font sizes in px at scale 1.0.  _TYPO mirrors these as strings for
+# back-compat; the *active* sizes are recomputed from these by _scaled_typo()
+# and re-applied over the theme defaults whenever 字体大小 changes in 设置.
+_FONT_BASE: dict[str, int] = {
+    "font_xs": 11, "font_sm": 12, "font_body": 13,
+    "font_md": 15, "font_lg": 18, "font_title": 20,
+}
+_FONT_SCALE: float = 1.0          # 全局字体大小倍率，由 set_typography() 更新
+_FONT_FAMILY: str = ""            # 用户指定字体，空=用 CJK-first FONT_SANS 栈
+
+
+def set_typography(scale=None, family=None) -> None:
+    """Set the global font-size scale and/or family override used by build_qss().
+
+    Call before apply_theme() (or re-apply the theme afterwards).  ``scale`` is
+    clamped to 0.7–1.6; ``family=""`` clears the override (back to the CJK-first
+    FONT_SANS stack).  ``None`` for either arg leaves it unchanged.
+    """
+    global _FONT_SCALE, _FONT_FAMILY
+    if scale is not None:
+        try:
+            _FONT_SCALE = max(0.7, min(1.6, float(scale)))
+        except (TypeError, ValueError):
+            pass
+    if family is not None:
+        _FONT_FAMILY = str(family).strip()
+
+
+def _scaled_typo() -> dict[str, str]:
+    """Current font_* px tokens with _FONT_SCALE applied."""
+    return {k: f"{max(1, round(v * _FONT_SCALE))}px" for k, v in _FONT_BASE.items()}
+
 # ── Theme 1: 经典浅色 — Windows/Office conventional light ──────────────────
 
 THEME_CLASSIC_LIGHT: dict[str, str] = {
@@ -880,19 +912,38 @@ def apply_default_font(app) -> Optional[str]:
     except Exception:
         return None
     families = set(QFontDatabase.families())
-    for fam in FONT_SANS:
-        if fam == "sans-serif":
-            break
-        if fam in families:
-            app.setFont(QFont(fam))
-            return fam
-    return None
+    chosen = None
+    # User override wins when it's actually installed.
+    if _FONT_FAMILY and _FONT_FAMILY in families:
+        chosen = _FONT_FAMILY
+    else:
+        for fam in FONT_SANS:
+            if fam == "sans-serif":
+                break
+            if fam in families:
+                chosen = fam
+                break
+    if chosen is None:
+        return None
+    f = QFont(chosen)
+    # Scale the base point size so widgets WITHOUT an explicit QSS font-size
+    # (the inline-styled minority) track 字体大小 too. QSS font-size px still wins
+    # for styled widgets.
+    base_pt = f.pointSizeF()
+    if base_pt <= 0:
+        base_pt = 10.0
+    f.setPointSizeF(base_pt * _FONT_SCALE)
+    app.setFont(f)
+    return chosen
 
 
 def build_qss() -> str:
     """Generate the full Qt stylesheet from the active TOKENS dict."""
     t = TOKENS
-    sans = _font_family(FONT_SANS)
+    # User-chosen family (if any) leads the stack so it wins, with the CJK-first
+    # fallbacks still trailing for glyph coverage.
+    sans_stack = ((_FONT_FAMILY,) + FONT_SANS) if _FONT_FAMILY else FONT_SANS
+    sans = _font_family(sans_stack)
     serif = _font_family(FONT_SERIF)
     mono = _font_family(FONT_MONO)
 
@@ -1614,6 +1665,7 @@ def apply_theme(name: str) -> str:
     """
     tokens = THEMES.get(name, THEME_CLASSIC_LIGHT)
     TOKENS.update(tokens)
+    TOKENS.update(_scaled_typo())   # re-apply current 字体大小 over theme defaults
     return build_qss()
 
 
