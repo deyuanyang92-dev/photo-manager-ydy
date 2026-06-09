@@ -850,6 +850,15 @@ class SettingsView(BaseView):
         form.setVerticalSpacing(10)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
+        # Tip: point users to the new collab panel
+        tip = QLabel(
+            "💡 日常协作操作已移至工作台的「协作面板」"
+            "（点击侧边栏底部的「协作面板」按钮即可打开）。以下为高级设置。"
+        )
+        tip.setObjectName("MutedSmall")
+        tip.setWordWrap(True)
+        form.addRow(tip)
+
         self._collab_enabled_chk = QCheckBox("启用局域网协作（重启或切换后生效）")
         self._collab_enabled_chk.toggled.connect(self._on_collab_enabled_toggled)
         form.addRow("协作", self._collab_enabled_chk)
@@ -1773,28 +1782,43 @@ class SettingsView(BaseView):
 
     # ── Helicon button handlers (web: 检测 / 保存 / 清除自定义 / 重新探测) ───
 
+    def _show_status(self, msg: str, timeout_ms: int = 3000) -> None:
+        """Show a brief message on the main window status bar."""
+        win = self.window()
+        if hasattr(win, "statusBar"):
+            bar = win.statusBar()
+            if bar:
+                bar.showMessage(msg, timeout_ms)
+
     def _on_test_click(self) -> None:
-        """检测 — save path then auto-detect (mirrors web testBtn handler)."""
+        """检测 — validate custom path then auto-detect (mirrors web testBtn handler)."""
+        custom = self._helicon_exe_edit.text().strip()
+        if custom:
+            self._show_status("正在验证自定义路径…")
+        else:
+            self._show_status("正在自动探测 Helicon Focus…")
         self._save_helicon()
-        self._detect_helicon()
+        self._detect_helicon(custom_path=custom)
 
     def _on_save_click(self) -> None:
         """保存 — persist custom path."""
         self._save_helicon()
         self._refresh_helicon_display()
+        self._show_status("✓ Helicon 设置已保存")
 
     def _on_clear_click(self) -> None:
         """清除自定义 — wipe custom path and re-detect."""
         self._helicon_exe_edit.clear()
         self._save_helicon()
         self._detect_helicon()
+        self._show_status("已清除自定义路径，已重新探测")
 
-    def _detect_helicon(self) -> None:
+    def _detect_helicon(self, custom_path: str = "") -> None:
         """重新探测 / auto-detect — calls helicon_service.detect_helicon()."""
         try:
             from app.services.helicon_service import detect_helicon, reset_helicon_cache
             reset_helicon_cache()
-            found = detect_helicon()
+            found = detect_helicon(custom_path=custom_path)
         except Exception:
             found = None
 
@@ -1808,6 +1832,7 @@ class SettingsView(BaseView):
                 f"font-size: 12px; font-weight: 600; color: {_C_SUCCESS};"
                 "background: transparent;"
             )
+            self._show_status(f"✓ 检测成功: {found}", 5000)
         else:
             self._detected_path_label.setText("（未检测到）")
             self._effective_path_label.setText("—")
@@ -1816,6 +1841,10 @@ class SettingsView(BaseView):
                 f"font-size: 12px; font-weight: 600; color: {_C_WARN};"
                 "background: transparent;"
             )
+            if custom_path:
+                self._show_status("✗ 自定义路径无效，自动探测也未找到 Helicon Focus", 5000)
+            else:
+                self._show_status("✗ 未检测到 Helicon Focus（Windows 专有工具，Linux 下需通过 WSL 路径配置）", 5000)
 
     # ── Project directory ─────────────────────────────────────────────────
 

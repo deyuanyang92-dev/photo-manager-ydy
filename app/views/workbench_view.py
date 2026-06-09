@@ -382,11 +382,11 @@ class WorkbenchView(BaseView):
         self._sidebar.activate_requested.connect(self._on_sidebar_activate)
         self._sidebar.deactivate_requested.connect(self._on_sidebar_deactivate)
         self._sidebar.new_specimen_requested.connect(self._on_new_specimen)
-        self._sidebar.collab_manager_requested.connect(self._on_open_collab_manager)
+        self._sidebar.collab_manager_requested.connect(self._on_open_collab_panel)
         self._sidebar.print_labels_requested.connect(self._on_print_labels)
         outer.addWidget(self._sidebar)
 
-        # Wire collab service signals → sidebar strip refresh
+        # Wire collab service signals → sidebar strip refresh + collab card refresh
         svc = getattr(self.ctx, "collab_service", None)
         if svc is not None:
             svc.peers_changed.connect(
@@ -398,6 +398,8 @@ class WorkbenchView(BaseView):
             svc.server_ready.connect(
                 lambda _port: self._sidebar.update_collab_status(svc)
             )
+            # Refresh collab card when tasks change (if a specimen is selected)
+            svc.tasks_changed.connect(self._refresh_collab_card)
         self._sidebar.update_collab_status(svc)
 
         # ── Centre ①: vertical splitter (monitor top, grouping bottom) ───────
@@ -510,6 +512,11 @@ class WorkbenchView(BaseView):
         self._metadata.save_requested.connect(self._on_save_metadata)
         self._metadata.metadata_changed.connect(lambda *_: self._schedule_rail_save())
         right_lay.addWidget(self._metadata)
+
+        # 卡4 协作状态（默认折叠）
+        from app.widgets.collab_specimen_card import CollabSpecimenCard
+        self._collab_card = CollabSpecimenCard(self.ctx)
+        right_lay.addWidget(self._collab_card)
         right_lay.addStretch(1)
 
         right_scroll = QScrollArea()
@@ -553,6 +560,12 @@ class WorkbenchView(BaseView):
         self._settings_drawer = ProjectSettingsDrawer(self.ctx, parent=self)
         self._settings_drawer.setFixedWidth(380)
         self._settings_drawer.closed.connect(self._settings_scrim.hide)
+
+        # ── Collab panel drawer (overlay, hidden by default) ───────────────
+        from app.widgets.collab_panel import CollabPanel
+        self._collab_scrim = _DrawerScrim(self._close_collab_panel, parent=self)
+        self._collab_panel = CollabPanel(self.ctx, parent=self)
+        self._collab_panel.closed.connect(self._collab_scrim.hide)
 
         # ── No-project banner ───────────────────────────────────────────────
         self._no_project_banner = QLabel(
@@ -1024,6 +1037,7 @@ class WorkbenchView(BaseView):
                 self._naming.load_specimen(sp_dict)
                 self._metadata.load_specimen(sp)
                 self._taxon_card.load_specimen(sp)
+                self._collab_card.load_specimen(uid)
         except Exception:
             pass
 
@@ -2260,12 +2274,33 @@ class WorkbenchView(BaseView):
         except Exception:
             return None
 
-    def _on_open_collab_manager(self) -> None:
-        """Open the CollabManagerDialog from the sidebar 'collab_manager_requested' signal."""
-        from app.widgets.collab_manager_dialog import CollabManagerDialog
-        svc = getattr(self.ctx, "collab_service", None)
-        dlg = CollabManagerDialog(svc, parent=self)
-        dlg.exec()
+    def _on_open_collab_panel(self) -> None:
+        """Show collab panel drawer positioned at the right edge."""
+        self._collab_panel.refresh()
+        try:
+            win_rect = self.rect()
+            self._collab_scrim.setGeometry(win_rect)
+            self._collab_scrim.show()
+            self._collab_scrim.raise_()
+            p = self._collab_panel
+            p.setGeometry(
+                win_rect.right() - p.width(), 0,
+                p.width(), win_rect.height()
+            )
+            p.show()
+            p.raise_()
+        except Exception:
+            self._collab_panel.show()
+
+    def _close_collab_panel(self) -> None:
+        """Dismiss the collab panel and its backdrop scrim."""
+        self._collab_scrim.hide()
+        self._collab_panel._on_close()
+
+    def _refresh_collab_card(self) -> None:
+        """Refresh the right-rail collab card when tasks change."""
+        if self._current_uid:
+            self._collab_card.load_specimen(self._current_uid)
 
     def _on_open_settings(self) -> None:
         """Show project settings drawer positioned at the right edge."""
