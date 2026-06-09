@@ -45,6 +45,7 @@ from PyQt6.QtWidgets import (
 
 from app.models.specimen import Specimen
 from app.services.export_service import COLUMNS as EXPORT_COLUMNS, export_excel
+from app.config.theme import local_font_css
 from app.views.base_view import BaseView
 
 if True:  # TYPE_CHECKING guard
@@ -333,8 +334,9 @@ class SummaryView(BaseView):
 
     def _setup_ui(self) -> None:
         _refresh_palette()  # bind _C_* to the active theme before building
+        _ff = local_font_css()
         self.setStyleSheet(
-            f"SummaryView{{background:{_C_BG};}}"
+            f"SummaryView{{{_ff}background:{_C_BG};}}"
             f"QLabel{{color:{_C_TEXT};background:transparent;}}"
             f"QPushButton{{background:{_C_BG2};color:{_C_TEXT};"
             f"border:1px solid {_C_BORDER};border-radius:5px;padding:5px 12px;font-size:13px;}}"

@@ -46,6 +46,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from app.config.theme import local_font_css
 from app.views.base_view import BaseView
 from app.services.label_service import (
     BUILTIN_TEMPLATES,
@@ -789,8 +790,9 @@ class LabelsView(BaseView):
             },
         }
         p = palettes.get(variant, palettes["studio"])
+        _ff = local_font_css()
         self.setStyleSheet(f"""
-QWidget {{ background: {p['bg']}; color: {p['text']}; font-size: 12px; }}
+QWidget {{ {_ff}background: {p['bg']}; color: {p['text']}; font-size: 12px; }}
 QFrame#Pane, QFrame#PreviewPane {{
     background: {p['pane']}; border: 1px solid {p['line']}; border-radius: 8px;
 }}

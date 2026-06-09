@@ -858,6 +858,16 @@ def _font_family(fonts: tuple[str, ...]) -> str:
     return ", ".join(f'"{f}"' if " " in f else f for f in fonts)
 
 
+def local_font_css() -> str:
+    """Return ``font-family:...`` CSS for view/widget local stylesheets.
+
+    Ensures CJK-capable font is used even when a view applies its own
+    ``setStyleSheet()`` which may shadow the global ``QWidget`` rule.
+    """
+    sans_stack = ((_FONT_FAMILY,) + FONT_SANS) if _FONT_FAMILY else FONT_SANS
+    return f"font-family: {_font_family(sans_stack)};"
+
+
 def load_fonts(app) -> dict[str, bool]:
     """Register any TTF/OTF files in resources/fonts/ with the font DB.
 

@@ -38,6 +38,7 @@ from PyQt6.QtWidgets import (
 )
 
 from app.config.icons import TONE_ACCENT, TONE_MUTED, icon, set_button_icon
+from app.config.theme import local_font_css
 from app.services import basemap_registry as br
 from app.services import collection_record_service as crs
 from app.services import project_settings_service as pss
@@ -533,8 +534,9 @@ class CollectionMapView(BaseView):
         input_border = g("input_border", border)
         scroll_handle = g("scrollbar_handle", muted)
         scroll_hover = g("scrollbar_handle_hover", accent)
+        _ff = local_font_css()
         self.setStyleSheet(
-            f"#{self.view_id}{{background:{bg};}}"
+            f"#{self.view_id}{{background:{bg};{_ff}}}"
             f"QScrollArea#MapPageScroll,QScrollArea#StyleScroll{{background:transparent;border:none;}}"
             f"QWidget#MapPageContent,QWidget#RightPane{{background:transparent;}}"
             f"QWidget#MarkerStylePanel{{background:transparent;}}"
