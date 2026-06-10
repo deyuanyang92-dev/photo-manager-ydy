@@ -602,6 +602,7 @@ class MonitorPanel(QWidget):
             return (
                 e.name, e.mtime, e.size,
                 e.attributed_specimen_id, e.is_grouped, e.composed_tiff,
+                e.has_zip,
             )
 
         return (
@@ -638,7 +639,14 @@ class MonitorPanel(QWidget):
             return
 
         jpgs = list(self._scan_result.jpg_files)
-        tiffs = list(self._scan_result.tiff_files)
+        # Oracle app.js:3577 — results/ 里已完整归档(同名 ZIP 存在)的 TIFF
+        # 不进待处理 feed;incoming 目录里的 TIFF 照常显示。
+        tiffs = [
+            t for t in self._scan_result.tiff_files
+            if not (getattr(t, "has_zip", False)
+                    and getattr(t, "detail", "")
+                    and "incoming" not in t.detail)
+        ]
         all_files = jpgs + tiffs
 
         if not all_files:

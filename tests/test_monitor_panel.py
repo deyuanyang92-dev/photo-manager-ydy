@@ -366,9 +366,11 @@ def _visible_card_names(panel: MonitorPanel) -> set:
 # ── 补处理: selection accessors ───────────────────────────────────────────────
 
 def _tiff_entry(name="FJ-XM-B2-DLC001-1-T95E-20260601.tif",
-                path="/tmp/FJ-XM-B2-DLC001-1-T95E-20260601.tif"):
+                path="/tmp/FJ-XM-B2-DLC001-1-T95E-20260601.tif",
+                has_zip=False, detail="results/ · TIFF"):
     return FileEntry(name=name, path=path, kind="tiff", size=2000,
-                     mtime="2026-01-01T00:00:00+00:00")
+                     mtime="2026-01-01T00:00:00+00:00",
+                     has_zip=has_zip, detail=detail)
 
 
 class TestSelectionAccessors:
@@ -395,3 +397,44 @@ class TestSelectionAccessors:
         panel.load_scan(_scan([_jpg_entry(path="/tmp/a.jpg")], [_tiff_entry()]))
         assert panel.selected_all_paths() == []
         assert panel.selected_tiff_paths() == []
+
+
+# ── 已归档 TIFF 不进待处理 feed (oracle app.js:3574-3586) ─────────────────────
+
+class TestArchivedTiffFilter:
+    """results/ 里已有同名 ZIP 的 TIFF 属已归档成果,不应出现在待处理照片区。
+
+    Oracle app.js:3577: if (f.hasZip && f.detail && f.detail.indexOf("incoming") < 0) return;
+    """
+
+    def test_archived_tiff_hidden_from_pending(self, panel):
+        archived = _tiff_entry(name="a.tif", path="/tmp/results/a.tif", has_zip=True)
+        pending = _tiff_entry(name="b.tif", path="/tmp/results/b.tif", has_zip=False)
+        panel.load_scan(_scan([], [archived, pending]))
+        names = _visible_card_names(panel)
+        assert "b.tif" in names
+        assert "a.tif" not in names
+
+    def test_incoming_tiff_with_zip_still_shown(self, panel):
+        e = _tiff_entry(name="c.tif", path="/tmp/in/c.tif", has_zip=True,
+                        detail="incoming-jpg/ · TIFF")
+        panel.load_scan(_scan([], [e]))
+        assert "c.tif" in _visible_card_names(panel)
+
+    def test_untidy_count_excludes_archived_tiff(self, panel):
+        jpg = _jpg_entry()
+        archived = _tiff_entry(name="a.tif", path="/tmp/results/a.tif", has_zip=True)
+        pending = _tiff_entry(name="b.tif", path="/tmp/results/b.tif", has_zip=False)
+        panel.load_scan(_scan([jpg], [archived, pending]))
+        assert panel._stat_untidy.text() == "未整理 2"
+        assert panel._stat_recent.text() == "TIFF 1"
+
+    def test_tiff_disappears_when_zip_appears_mid_session(self, panel):
+        """归档动作只改变 has_zip — 扫描指纹必须包含它,否则卡片不消失。"""
+        before = _tiff_entry(name="a.tif", path="/tmp/results/a.tif", has_zip=False)
+        panel.load_scan(_scan([], [before]))
+        assert "a.tif" in _visible_card_names(panel)
+
+        after = _tiff_entry(name="a.tif", path="/tmp/results/a.tif", has_zip=True)
+        panel.load_scan(_scan([], [after]))
+        assert "a.tif" not in _visible_card_names(panel)
