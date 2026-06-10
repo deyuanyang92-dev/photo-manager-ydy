@@ -418,6 +418,11 @@ class SummaryView(BaseView):
         self._btn_dwc.clicked.connect(self._export_dwc)
         bar.addWidget(self._btn_dwc)
 
+        self._btn_cross = QPushButton("🧮 跨项目汇总…")
+        self._btn_cross.setToolTip("合并多个工作区导出标本/采集/质控汇总")
+        self._btn_cross.clicked.connect(self._open_cross_summary)
+        bar.addWidget(self._btn_cross)
+
         bar.addSpacing(8)
 
         # Save to directory
@@ -799,6 +804,14 @@ class SummaryView(BaseView):
             QMessageBox.information(self, "导出成功", f"Darwin Core CSV 已保存到：\n{out}")
         except Exception as exc:
             QMessageBox.critical(self, "导出失败", str(exc))
+
+    # ── Cross-workspace summary (append-only launcher) ─────────────────────────
+
+    def _open_cross_summary(self) -> None:
+        """Open the cross-workspace summary export dialog (Mode B default)."""
+        from app.widgets.summary_export_dialog import SummaryExportDialog
+        dlg = SummaryExportDialog(ctx=self.ctx, parent=self)
+        dlg.exec()
 
     # ── Save to directory ─────────────────────────────────────────────────────
 

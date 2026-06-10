@@ -62,3 +62,37 @@ def scan_tree(root: str, max_depth: int = 6) -> dict:
         }
 
     return _node(root_path, 0)
+
+
+def flatten_workspaces(node: dict) -> list[str]:
+    """Collect ``node["path"]`` for every node (root included) with ``has_data``.
+
+    Pre-order (root first, then children in their existing order). Pure over the
+    dict ``scan_tree`` returns — touches no filesystem.
+    """
+    out: list[str] = []
+    if node.get("has_data"):
+        out.append(node["path"])
+    for child in node.get("children", []):
+        out.extend(flatten_workspaces(child))
+    return out
+
+
+def discover_workspaces(root_dir: str, max_depth: int = 6) -> list[dict]:
+    """Scan *root_dir* and return one dict per adopted workspace.
+
+    Each entry::
+
+        {"path": <abs path str>, "rel": <relpath to root>, "name": <断面 label>}
+
+    ``rel`` is the workspace dir relative to the survey root (the 断面 label).
+    When the root itself is a workspace, ``relpath`` returns ``"."`` → ``name``
+    falls back to the basename. Order follows :func:`flatten_workspaces`.
+    """
+    tree = scan_tree(root_dir, max_depth)
+    out: list[dict] = []
+    for path in flatten_workspaces(tree):
+        rel = os.path.relpath(path, root_dir)
+        name = rel if rel != "." else os.path.basename(path)
+        out.append({"path": path, "rel": rel, "name": name})
+    return out

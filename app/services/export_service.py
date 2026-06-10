@@ -199,6 +199,7 @@ def export_excel(
     specimens: Sequence[Specimen],
     path: str | Path,
     columns: Optional[list[str]] = None,
+    extra_leading: Optional[list[tuple[str, callable]]] = None,
 ) -> Path:
     """Export specimens to an Excel file (.xlsx) at *path*.
 
@@ -211,6 +212,13 @@ def export_excel(
     columns:
         Optional list of column header strings to include.
         Defaults to all 34 columns.
+    extra_leading:
+        Optional list of ``(header, accessor)`` pairs prepended *before* the
+        resolved columns. Each accessor takes a Specimen and returns a scalar
+        (same contract as the master columns; a raising accessor yields "").
+        When None/empty the output is byte-for-byte identical to before — this
+        is a purely additive parameter and must never alter the default 34-col
+        layout (red line: oracle server.js:595-721).
 
     Returns
     -------
@@ -223,6 +231,8 @@ def export_excel(
     path.parent.mkdir(parents=True, exist_ok=True)
 
     active_cols = _resolve_columns(columns)
+    if extra_leading:
+        active_cols = list(extra_leading) + active_cols
     headers = [h for h, _ in active_cols]
     data_rows = _build_data_rows(specimens, active_cols)
 

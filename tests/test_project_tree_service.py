@@ -1,10 +1,17 @@
 """tests/test_project_tree_service.py — 文件夹树扫描."""
 from __future__ import annotations
 
+import os
 import sqlite3
 from pathlib import Path
 
-from app.services.project_tree_service import scan_tree, is_workspace, RESERVED_DIR_NAMES
+from app.services.project_tree_service import (
+    scan_tree,
+    is_workspace,
+    flatten_workspaces,
+    discover_workspaces,
+    RESERVED_DIR_NAMES,
+)
 
 
 def _make_workspace(dir_path: Path) -> None:
@@ -75,3 +82,89 @@ def test_does_not_create_anything(tmp_path):
     root.mkdir()
     scan_tree(str(root))
     assert list(root.iterdir()) == []  # scan must not create files/dirs
+
+
+def test_flatten_workspaces_preorder():
+    # Hand-built node dict; collect only has_data=True paths, root first.
+    node = {
+        "name": "root",
+        "path": "/r",
+        "has_data": True,
+        "children": [
+            {
+                "name": "A",
+                "path": "/r/A",
+                "has_data": True,
+                "children": [
+                    {"name": "sub", "path": "/r/A/sub", "has_data": True, "children": []},
+                ],
+            },
+            {
+                "name": "B",
+                "path": "/r/B",
+                "has_data": False,
+                "children": [
+                    {"name": "C", "path": "/r/B/C", "has_data": True, "children": []},
+                ],
+            },
+        ],
+    }
+    assert flatten_workspaces(node) == ["/r", "/r/A", "/r/A/sub", "/r/B/C"]
+
+
+def test_flatten_workspaces_none_when_no_data():
+    node = {"name": "root", "path": "/r", "has_data": False, "children": []}
+    assert flatten_workspaces(node) == []
+
+
+def test_discover_workspaces_relative_labels(tmp_path):
+    root = tmp_path / "survey"
+    a = root / "A"
+    sub = a / "sub"
+    b = root / "B"
+    a.mkdir(parents=True)
+    sub.mkdir(parents=True)
+    b.mkdir(parents=True)  # plain folder, no _data
+    _make_workspace(a)
+    _make_workspace(sub)
+
+    found = discover_workspaces(str(root))
+    rels = [w["rel"] for w in found]
+    assert rels == ["A", os.path.join("A", "sub")]  # pre-order, B excluded
+    by_rel = {w["rel"]: w for w in found}
+    assert by_rel["A"]["name"] == "A"
+    assert by_rel["A"]["path"] == str(a)
+    assert by_rel[os.path.join("A", "sub")]["name"] == os.path.join("A", "sub")
+
+
+def test_discover_workspaces_root_is_workspace(tmp_path):
+    root = tmp_path / "survey"
+    root.mkdir()
+    _make_workspace(root)
+
+    found = discover_workspaces(str(root))
+    assert len(found) == 1
+    assert found[0]["rel"] == "."
+    assert found[0]["name"] == os.path.basename(str(root))
+    assert found[0]["name"] == "survey"
+
+
+def test_discover_workspaces_empty_when_none(tmp_path):
+    root = tmp_path / "survey"
+    (root / "plain1").mkdir(parents=True)
+    (root / "plain2").mkdir()
+    assert discover_workspaces(str(root)) == []
+
+
+def test_discover_workspaces_never_returns_reserved_dirs(tmp_path):
+    root = tmp_path / "survey"
+    leaf = root / "断面a"
+    leaf.mkdir(parents=True)
+    _make_workspace(leaf)
+    # _make_workspace already created leaf/_data; add another reserved dir.
+    (root / "incoming-jpg").mkdir()
+    found = discover_workspaces(str(root))
+    names = {os.path.basename(w["path"]) for w in found}
+    assert "_data" not in names
+    assert "incoming-jpg" not in names
+    assert names == {"断面a"}

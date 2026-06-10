@@ -116,6 +116,14 @@ class ProjectTreeView(BaseView):
         self._btn_enter.clicked.connect(self._enter_selected)
         self._btn_enter.setEnabled(False)
         dl.addWidget(self._btn_enter)
+        self._btn_summary = QPushButton("汇总导出…")
+        self._btn_summary.setEnabled(False)
+        self._btn_summary.clicked.connect(self._open_summary_export)
+        dl.addWidget(self._btn_summary)
+        self._btn_station_import = QPushButton("导入站位总表…")
+        self._btn_station_import.setEnabled(False)
+        self._btn_station_import.clicked.connect(self._open_station_import)
+        dl.addWidget(self._btn_station_import)
         dl.addStretch()
         split.addWidget(detail)
         split.setSizes([340, 360])
@@ -163,6 +171,8 @@ class ProjectTreeView(BaseView):
     def _reload(self) -> None:
         self._tree.clear()
         self._btn_enter.setEnabled(False)
+        self._btn_summary.setEnabled(False)
+        self._btn_station_import.setEnabled(False)
         if not self._root or not Path(self._root).is_dir():
             self._root_lbl.setText("（未选根目录）")
             return
@@ -197,8 +207,12 @@ class ProjectTreeView(BaseView):
         path = self._selected_path()
         if not path:
             self._btn_enter.setEnabled(False)
+            self._btn_summary.setEnabled(False)
+            self._btn_station_import.setEnabled(False)
             return
         self._btn_enter.setEnabled(True)
+        self._btn_summary.setEnabled(True)
+        self._btn_station_import.setEnabled(True)
         self._detail_name.setText(Path(path).name)
         self._detail_path.setText(path)
         self._render_stats(path)
@@ -234,6 +248,29 @@ class ProjectTreeView(BaseView):
             cl.addWidget(v)
             cl.addWidget(t)
             self._stats_row.addWidget(card, 1)
+
+    # ── Cross-workspace tools (append-only launchers) ──────────────────────────
+    def _open_summary_export(self) -> None:
+        """Open the cross-workspace summary export, rooted at the selected node."""
+        path = self._selected_path()
+        if not path:
+            ui.info(self, "汇总导出", "请先选择一个文件夹。")
+            return
+        from app.widgets.summary_export_dialog import SummaryExportDialog
+        dlg = SummaryExportDialog(ctx=self.ctx, initial_root=path, parent=self)
+        dlg.exec()
+
+    def _open_station_import(self) -> None:
+        """Open the project station total-table import, rooted at the selected node."""
+        path = self._selected_path()
+        if not path:
+            ui.info(self, "导入站位总表", "请先选择一个文件夹。")
+            return
+        from app.widgets.project_station_import_dialog import (
+            ProjectStationImportDialog,
+        )
+        dlg = ProjectStationImportDialog(root_dir=path, parent=self)
+        dlg.exec()
 
     # ── Actions ────────────────────────────────────────────────────────────────
     def _pick_root(self) -> None:

@@ -233,6 +233,57 @@ class TestExportExcel:
         assert out.exists()
 
 
+# ── export_excel: extra_leading (additive, red-line stability) ──────────────────
+
+class TestExportExcelExtraLeading:
+    def test_export_excel_unchanged_without_extra_leading(self, specimens, tmp_dir):
+        """Red-line: omitting/None extra_leading must not change the 34-column output.
+
+        We read back with openpyxl and assert the "标本汇总" header row equals the
+        canonical COLUMN_HEADERS and max_column == 34. Chosen over raw byte
+        comparison because the "导出信息" sheet stamps date.today() into B1, so two
+        exports run on the same day are equal in content but the bytes are not a
+        contract we control (openpyxl zip metadata). The header/column-count
+        readback is the reliable, meaningful invariant for the red line.
+        """
+        p1 = tmp_dir / "default_a.xlsx"
+        p2 = tmp_dir / "default_b.xlsx"
+        out1 = export_excel(specimens, p1)
+        out2 = export_excel(specimens, p2)
+
+        for out in (out1, out2):
+            wb = openpyxl.load_workbook(str(out))
+            ws = wb["标本汇总"]
+            headers = [ws.cell(1, c).value for c in range(1, ws.max_column + 1)]
+            assert headers == COLUMN_HEADERS
+            assert ws.max_column == 34
+            assert ws.max_row == len(specimens) + 1
+
+    def test_export_excel_extra_leading_prepends_column(self, specimens, tmp_dir):
+        specs = [
+            _make_specimen(owner_project_dir="/projects/断面A"),
+            _make_specimen(
+                uid="FJ-XM-B2-DLC002-T95E-20260601",
+                id="DLC002",
+                owner_project_dir="/projects/断面B",
+            ),
+        ]
+        out = export_excel(
+            specs,
+            tmp_dir / "extra.xlsx",
+            extra_leading=[("断面", lambda s: s.owner_project_dir or "")],
+        )
+        wb = openpyxl.load_workbook(str(out))
+        ws = wb["标本汇总"]
+        # Leading column prepended before the 34-column master list.
+        assert ws.cell(1, 1).value == "断面"
+        assert ws.cell(1, 2).value == COLUMN_HEADERS[0]  # "标本唯一编号"
+        assert ws.max_column == 35
+        # A-column data cells carry owner_project_dir values.
+        a_vals = [ws.cell(r, 1).value for r in range(2, len(specs) + 2)]
+        assert a_vals == ["/projects/断面A", "/projects/断面B"]
+
+
 # ── export_csv ─────────────────────────────────────────────────────────────────
 
 class TestExportCsv:
