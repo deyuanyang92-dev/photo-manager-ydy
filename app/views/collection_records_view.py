@@ -599,6 +599,7 @@ class CollectionRecordsView(BaseView):
         if not rep.ok:
             self._grid_status_lbl.setText("导入失败：" + "；".join(rep.errors[:3]))
             return
+        self._snapshot_current()
         msg = f"已导入 {rep.imported} 条。"
         if rep.skipped:
             msg += f"  跳过 {rep.skipped} 行（缺地区/样地/站位/采集日期）。"
@@ -615,6 +616,14 @@ class CollectionRecordsView(BaseView):
         from app.widgets.coord_import_dialog import CoordImportDialog
         dlg = CoordImportDialog(db, parent=self)
         if dlg.exec():
+            self._snapshot_current()
             self._reload()
             self._grid_load()
             self._grid_status_lbl.setText("导入完成（自定义映射）。")
+
+    def _snapshot_current(self) -> None:
+        """批量导入后静默快照当前项目元数据库（本地安全网）。"""
+        cur = getattr(self.ctx, "current_project_dir", None)
+        if cur:
+            from app.services.backup_service import snapshot_project
+            snapshot_project(cur)

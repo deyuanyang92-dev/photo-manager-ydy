@@ -294,8 +294,9 @@ class TestExportCsv:
 class TestExportDarwinCore:
     def _make_db(self, tmp_path) -> sqlite3.Connection:
         """Create a minimal project db with one specimen."""
-        proj_dir = str(tmp_path / "proj")
-        conn = db_manager.open_project_db(proj_dir)
+        proj_dir = tmp_path / "proj"
+        proj_dir.mkdir()
+        conn = db_manager.open_project_db(str(proj_dir), create=True)
         conn.execute("""
             INSERT INTO specimens (uid, scientific_name, family, genus, order_name,
                 lon, lat, collection_date, collector, identifier,
@@ -351,8 +352,9 @@ class TestExportDarwinCore:
 
     def test_dwc_empty_db(self, tmp_path):
         """Empty specimens table should yield only a header row."""
-        proj_dir = str(tmp_path / "empty_proj")
-        db = db_manager.open_project_db(proj_dir)
+        proj_dir = tmp_path / "empty_proj"
+        proj_dir.mkdir()
+        db = db_manager.open_project_db(str(proj_dir), create=True)
         out = export_darwin_core(db, tmp_path / "empty_dwc.csv")
         with open(str(out), encoding="utf-8-sig", newline="") as fh:
             rows = list(csv.reader(fh))

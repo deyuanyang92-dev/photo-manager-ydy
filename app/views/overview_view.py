@@ -1122,8 +1122,17 @@ class OverviewView(BaseView):
         # so its root defaults to itself → inheritance stays bounded to this
         # workspace and never walks to an unrelated parent folder.
         from app.services.project_service import enter_workspace
+        from app.services.project_paths import ProjectUnavailableError
         root = proj.get("root") or None
-        enter_workspace(self.ctx, directory, root=root)
+        try:
+            enter_workspace(self.ctx, directory, root=root)
+        except ProjectUnavailableError:
+            QMessageBox.warning(
+                self, "盘未连接",
+                f"该项目所在磁盘未挂载或路径不可用：\n{directory}\n\n"
+                "请接回数据盘后再进入。数据仍在盘上，没有丢失。",
+            )
+            return
         # Emit signal — MainWindow wires this to navigate_to("workbench")
         self.enter_workspace_requested.emit(directory)
         # Refresh the context bar through MainWindow if possible

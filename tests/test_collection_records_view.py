@@ -35,6 +35,8 @@ def ctx(tmp_path):
     db_manager.close_all()
     c = AppContext()
     c.current_project_dir = str(tmp_path)
+    # New strict-open semantics: establishing the workspace db is explicit.
+    db_manager.open_project_db(str(tmp_path), create=True)
     yield c
     db_manager.close_all()
 

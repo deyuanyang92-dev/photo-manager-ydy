@@ -332,12 +332,19 @@ class ProjectTreeView(BaseView):
             default_user_projects_json_path,
             enter_workspace,
         )
-        enter_workspace(
-            self.ctx,
-            path,
-            root=self._root,
-            projects_json_path=default_user_projects_json_path(),
-        )
+        from app.services.project_paths import ProjectUnavailableError
+        try:
+            enter_workspace(
+                self.ctx,
+                path,
+                root=self._root,
+                projects_json_path=default_user_projects_json_path(),
+            )
+        except ProjectUnavailableError:
+            ui.warn(self, "盘未连接",
+                    f"该目录所在磁盘未挂载或路径不可用：\n{path}\n\n"
+                    "请接回数据盘后再进入。数据仍在盘上，没有丢失。")
+            return
         self.enter_workspace_requested.emit(path)
         main_win = self.window()
         if hasattr(main_win, "refresh_context_bar"):

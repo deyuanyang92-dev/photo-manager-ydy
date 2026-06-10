@@ -402,6 +402,9 @@ class TestEnterWorkspaceSignal:
     def test_signal_emitted_with_directory(self, tmp_path):
         from app.views.overview_view import OverviewView
         json_path = tmp_path / "user_projects.json"
+        # Directory must really exist — entering an offline/missing dir now
+        # warns (modal) instead of fabricating a ghost workspace.
+        (tmp_path / "proj_dir").mkdir()
         proj = {
             "id": "s001",
             "name": "Test",

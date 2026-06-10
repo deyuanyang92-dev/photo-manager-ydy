@@ -276,7 +276,10 @@ def import_all(global_data_dir: str, projects: list[dict]) -> ImportReport:
             continue
 
         proj_dir_str = str(Path(proj_dir).resolve())
-        conn = open_project_db(proj_dir_str)
+        # Import = deliberately claiming this project's workspace, so db
+        # creation is legitimate (create=True still refuses a phantom
+        # mountpoint via require_project_root).
+        conn = open_project_db(proj_dir_str, create=True)
         counts = ProjectImportCounts(project_dir=proj_dir_str)
 
         # -- specimens --

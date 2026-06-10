@@ -614,6 +614,22 @@ class MainWindow(QMainWindow):
         self.ctx.settings.save_geometry(self.saveGeometry())
         self.ctx.settings.save_window_state(self.saveState())
         self.ctx.settings.sync()
+        # Silent metadata safety net: snapshot the current project's tiny
+        # project.db + the recent-projects list to the local user-data dir
+        # (per-project model keeps the only live copy on possibly-removable
+        # disks). Never blocks shutdown — backup_service swallows all errors.
+        try:
+            from app.services.backup_service import (
+                snapshot_project,
+                snapshot_projects_json,
+            )
+            from app.services.project_service import default_user_projects_json_path
+            cur = getattr(self.ctx, "current_project_dir", None)
+            if cur:
+                snapshot_project(cur)
+            snapshot_projects_json(default_user_projects_json_path())
+        except Exception:  # noqa: BLE001
+            pass
         # Stop the global hotkey listener thread before exit.
         gh = getattr(self, "_global_hotkey", None)
         if gh is not None:

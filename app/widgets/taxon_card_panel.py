@@ -481,8 +481,12 @@ class TaxonCardPanel(QWidget):
         from app.views.worms_view import WormsQuickFillDialog
         try:
             project_dir = getattr(self.ctx, "current_project_dir", None)
-            _data = (_Path(project_dir) / "_data") if project_dir else \
-                    (_Path.home() / ".photo_workbench" / "data")
+            # Only use the project _data dir when the project ROOT is actually
+            # present — mkdir on a gone volume would fabricate a ghost tree at
+            # the mountpoint (the unmounted-drive data-loss bug).
+            _data = (_Path(project_dir) / "_data") \
+                if (project_dir and _Path(project_dir).is_dir()) \
+                else (_Path.home() / ".photo_workbench" / "data")
             _data.mkdir(parents=True, exist_ok=True)
             svc = WormsService(
                 cache_path=str(_data / "worms_cache.json"),

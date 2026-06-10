@@ -292,11 +292,15 @@ class TestBoundaryCases:
         with pytest.raises(Exception):
             import_all(str(data_dir), projects)
 
-        # Verify nothing was written to specimens
+        # Verify nothing was written: corrupt JSON aborts BEFORE the project db
+        # is even created (the strongest no-partial-write guarantee). If a db
+        # does exist, it must hold zero specimens.
         db_manager.close_all()
-        conn = db_manager.open_project_db(str(proj_dir))
-        count = conn.execute("SELECT COUNT(*) FROM specimens").fetchone()[0]
-        assert count == 0
+        db_file = proj_dir / "_data" / "project.db"
+        if db_file.exists():
+            conn = db_manager.open_project_db(str(proj_dir))
+            count = conn.execute("SELECT COUNT(*) FROM specimens").fetchone()[0]
+            assert count == 0
 
     def test_empty_specimens_empty_projects(self, tmp_path):
         """Boundary: empty data produces empty db without error."""

@@ -240,7 +240,8 @@ class CollectionMapView(BaseView):
 
     # ── 项目行（名称 + 站位数徽章）──────────────────────────────────────────────
 
-    def _make_project_item(self, name: str, count: Optional[int], directory):
+    def _make_project_item(self, name: str, count: Optional[int], directory,
+                           offline: bool = False):
         item = QListWidgetItem()
         item.setData(Qt.ItemDataRole.UserRole, directory)
         row = QFrame()
@@ -265,7 +266,9 @@ class CollectionMapView(BaseView):
         col.setSpacing(1)
         nm = QLabel(name)
         nm.setObjectName("ProjName")
-        sub = QLabel(f"{count} 站位" if count is not None else "—")
+        # 离线(盘未连接)要明说,不能让用户以为数据丢了——真数据在没挂载的盘上。
+        sub = QLabel("盘未连接" if offline
+                     else (f"{count} 站位" if count is not None else "—"))
         sub.setObjectName("ProjSub")
         col.addWidget(nm)
         col.addWidget(sub)
@@ -691,9 +694,14 @@ class CollectionMapView(BaseView):
         self._proj_list.blockSignals(True)
         self._proj_list.clear()
         entries = [("全部项目", None)] + self._known_projects()
+        from app.services.project_paths import project_root_available
         target_row = 0
         for i, (name, d) in enumerate(entries):
-            item, w = self._make_project_item(name, self._station_count(d), d)
+            offline = bool(d) and not project_root_available(d)
+            item, w = self._make_project_item(
+                name, None if offline else self._station_count(d), d,
+                offline=offline,
+            )
             self._proj_list.addItem(item)
             self._proj_list.setItemWidget(item, w)
             if d == self._project_filter:
@@ -840,6 +848,12 @@ class CollectionMapView(BaseView):
 
     def _do_open_workspace(self, directory) -> None:
         """切换到该项目的工作区（跳转工作台）。"""
+        from app.services.project_paths import project_root_available
+        if not project_root_available(directory):
+            ui.warn(self, "盘未连接",
+                    f"该项目所在磁盘未挂载或路径不可用：\n{directory}\n\n"
+                    "请接回数据盘后再进入。数据仍在盘上，没有丢失。")
+            return
         self.ctx.current_project_dir = directory
         self._project_filter = directory
         self._populate_projects()
@@ -918,6 +932,9 @@ class CollectionMapView(BaseView):
 
         dlg = CoordImportDialog(db, parent=self)
         if dlg.exec():
+            # 批量导入是高价值写入 → 立即快照元数据库(本地安全网,静默)。
+            from app.services.backup_service import snapshot_project
+            snapshot_project(target_dir)
             self._project_filter = target_dir
             self._populate_projects()
             self._reload()

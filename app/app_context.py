@@ -86,7 +86,12 @@ class AppContext:
             db = open_project_db(target)
         except (OSError, sqlite3.Error) as exc:
             self.last_db_error = exc
-            if target == self._project_dir:
+            # Unavailable = TRANSIENT (drive unplugged / share offline): keep
+            # the project pointer so replugging the disk restores everything —
+            # clearing it here made the app "forget" the project permanently.
+            from app.services.project_paths import ProjectUnavailableError
+            if (target == self._project_dir
+                    and not isinstance(exc, ProjectUnavailableError)):
                 self._project_dir = None
                 self.settings.last_project_dir = None
             return None

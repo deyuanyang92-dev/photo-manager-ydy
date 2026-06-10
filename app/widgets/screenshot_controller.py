@@ -205,6 +205,12 @@ class ScreenshotController(QObject):
         project_dir = getattr(self._ctx, "current_project_dir", None) if self._ctx else None
         if not project_dir:
             return None
+        # Project volume gone (unmounted drive)? Skip the project auto-save —
+        # mkdir would fabricate a ghost tree at the mountpoint. Clipboard /
+        # save-as still work.
+        from app.services.project_paths import project_root_available
+        if not project_root_available(project_dir):
+            return None
         target = default_screenshot_path(project_dir, datetime.now())
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
