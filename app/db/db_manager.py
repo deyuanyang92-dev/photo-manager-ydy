@@ -103,11 +103,70 @@ def get_db(project_dir: str) -> sqlite3.Connection:
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
-    """Idempotently apply schema.sql, then recreate darwin_core view."""
+    """Idempotently apply schema.sql, then recreate darwin_core view.
+
+    ``CREATE TABLE IF NOT EXISTS`` creates *missing tables* but never adds new
+    *columns* to a table that already exists. A project.db created by an older
+    schema — notably the web prototype (db-utils.js:64, whose ``grouping`` table
+    has only 5 columns) — therefore keeps its stale shape: archive/compression
+    state becomes unreadable (shows "尚未压缩") and explicit-column writes crash
+    ("no column named archive_zip"). ``_migrate_add_missing_columns`` closes that
+    gap additively, before the view is rebuilt.
+    """
     schema_sql = _SCHEMA_SQL_PATH.read_text(encoding="utf-8")
     conn.executescript(schema_sql)
+    _migrate_add_missing_columns(conn, schema_sql)
     conn.executescript(_DARWIN_CORE_SQL)
     conn.commit()
+
+
+def _migrate_add_missing_columns(conn: sqlite3.Connection, schema_sql: str) -> None:
+    """Add any columns present in *schema_sql* but missing from existing tables.
+
+    The expected shape is derived by materialising *schema_sql* in a throwaway
+    in-memory DB and introspecting it — so this stays in lock-step with
+    ``schema.sql`` automatically as columns are added in the future, with no
+    hand-maintained column list. Idempotent: only genuinely-missing columns are
+    ALTERed in, so repeated calls are no-ops.
+
+    SQLite restriction: ``ALTER TABLE ADD COLUMN`` cannot add a NOT NULL column
+    without a default, and the default must be constant. Every additive column
+    in this schema is nullable or has a literal default, so we carry the
+    reference default through; a NOT NULL column lacking a default is skipped
+    (cannot happen in the current schema) rather than raising.
+    """
+    ref = sqlite3.connect(":memory:")
+    try:
+        ref.executescript(schema_sql)
+        ref_tables = [
+            r[0] for r in ref.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            ).fetchall()
+        ]
+        for table in ref_tables:
+            actual = {
+                r[1] for r in conn.execute(f'PRAGMA table_info("{table}")').fetchall()
+            }
+            if not actual:
+                continue  # table did not pre-exist — schema_sql just created it fresh
+            for cid, name, ctype, notnull, dflt, pk in ref.execute(
+                f'PRAGMA table_info("{table}")'
+            ).fetchall():
+                if name in actual:
+                    continue
+                col_def = f'"{name}" {ctype}' if ctype else f'"{name}"'
+                if dflt is not None:
+                    col_def += f" DEFAULT {dflt}"
+                    if notnull:
+                        col_def += " NOT NULL"
+                elif notnull:
+                    # Can't safely add NOT NULL without a default — skip.
+                    continue
+                conn.execute(f'ALTER TABLE "{table}" ADD COLUMN {col_def}')
+        conn.commit()
+    finally:
+        ref.close()
 
 
 def close_all() -> None:

@@ -208,6 +208,51 @@ def save_grouping(
             )
 
 
+# ── Archive-zip backfill ──────────────────────────────────────────────────────
+
+def backfill_archive_zips(db: sqlite3.Connection) -> int:
+    """Recover ``grouping.archive_zip`` for results compressed by an older build.
+
+    archive_service writes the bundle as ``<tiff-stem>.zip`` next to the composed
+    TIFF (archive_service.py:227-228). A project.db whose ``archive_zip`` was
+    never recorded — e.g. one created by the web prototype (db-utils.js, 5-column
+    grouping) or migrated from an older schema — therefore shows "尚未压缩" even
+    though the zip is right there on disk.
+
+    For each group whose ``composed_tiff_path`` exists on disk but whose
+    ``archive_zip`` is empty, this records the sibling ``.zip`` (size >= 32 B —
+    the same validity gate as archive_service.py:301). It NEVER recompresses,
+    deletes, or fabricates a zip; it only points the DB at an archive that
+    already exists. Returns the number of rows backfilled. Idempotent.
+    """
+    _ensure_grouping_table(db)
+    rows = db.execute(
+        "SELECT uid, group_index, composed_tiff_path, archive_zip FROM grouping"
+    ).fetchall()
+    updated = 0
+    for row in rows:
+        d = dict(row) if not isinstance(row, dict) else row
+        if d.get("archive_zip"):
+            continue  # already recorded — never override
+        tiff = d.get("composed_tiff_path")
+        if not tiff or not os.path.isfile(tiff):
+            continue  # no real TIFF → never fabricate an archive pointer
+        candidate = str(Path(tiff).with_suffix(".zip"))
+        try:
+            if not (os.path.isfile(candidate) and os.path.getsize(candidate) >= 32):
+                continue
+        except OSError:
+            continue
+        db.execute(
+            "UPDATE grouping SET archive_zip = ? WHERE uid = ? AND group_index = ?",
+            (candidate, d["uid"], d["group_index"]),
+        )
+        updated += 1
+    if updated:
+        db.commit()
+    return updated
+
+
 # ── explicitUnassigns ─────────────────────────────────────────────────────────
 
 def add_explicit_unassign(db: sqlite3.Connection, path: str) -> None:

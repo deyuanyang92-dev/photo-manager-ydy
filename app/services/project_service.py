@@ -148,7 +148,17 @@ def open_project(directory: str) -> dict:
     # but un-workspaced folder works, while a missing volume still refuses.
     dirs = ensure_project_dirs(resolved, create_root=False)
     from app.db.db_manager import open_project_db
-    open_project_db(resolved, create=True)
+    db = open_project_db(resolved, create=True)
+
+    # Recover archive-zip pointers for results compressed by an older build /
+    # the web prototype (zip on disk but archive_zip never recorded), so they
+    # show "已压缩" instead of "尚未压缩". Best-effort — never block opening the
+    # workspace on a backfill hiccup.
+    try:
+        from app.services.grouping_service import backfill_archive_zips
+        backfill_archive_zips(db)
+    except Exception:
+        pass
 
     # Register the project root so assert_safe() passes for its children
     default_registry.register_root(resolved)

@@ -21,6 +21,7 @@ from app.services.grouping_service import (
     Group,
     SpecimenGrouping,
     add_explicit_unassign,
+    backfill_archive_zips,
     get_explicit_unassigns,
     load_grouping,
     remove_explicit_unassign,
@@ -248,3 +249,79 @@ class TestExplicitUnassigns:
         unassigns = get_explicit_unassigns(db)
         for p in paths:
             assert str(Path(p).resolve()) in unassigns
+
+
+# ── backfill_archive_zips ───────────────────────────────────────────────────
+
+def _write(path: str, size: int) -> str:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(b"\x00" * size)
+    return path
+
+
+def _save_group_with_tiff(db, uid, tiff_path, archive_zip=None):
+    save_grouping(db, uid, [Group(
+        group_index=1, angle_label="g", jpg_paths=[],
+        composed_tiff_path=tiff_path, archive_zip=archive_zip,
+    )])
+
+
+class TestBackfillArchiveZips:
+    """A result composed + compressed by an older build has its zip on disk
+    (``results/<stem>.zip``) but, on a DB whose ``archive_zip`` was never
+    recorded, shows '尚未压缩'. backfill recovers the pointer from disk —
+    without recompressing, deleting, or fabricating anything.
+    """
+
+    def test_sets_archive_zip_from_sibling_zip(self, tmp_path):
+        db = _db()
+        results = tmp_path / "results"
+        tiff = _write(str(results / "FJ-XM-B2-DLC004-1-T95E-20260602.tif"), 100)
+        _write(str(results / "FJ-XM-B2-DLC004-1-T95E-20260602.zip"), 5000)
+        _save_group_with_tiff(db, "U1", tiff)
+
+        n = backfill_archive_zips(db)
+
+        assert n == 1
+        g = load_grouping(db, "U1").groups[0]
+        assert g.archive_zip == str(results / "FJ-XM-B2-DLC004-1-T95E-20260602.zip")
+
+    def test_no_sibling_zip_leaves_null(self, tmp_path):
+        db = _db()
+        tiff = _write(str(tmp_path / "results" / "X-1-T-20260602.tif"), 100)
+        _save_group_with_tiff(db, "U1", tiff)
+
+        n = backfill_archive_zips(db)
+
+        assert n == 0
+        assert load_grouping(db, "U1").groups[0].archive_zip is None
+
+    def test_tiny_zip_ignored(self, tmp_path):
+        # A <=32 byte zip is treated as absent (mirrors archive_service's gate).
+        db = _db()
+        results = tmp_path / "results"
+        tiff = _write(str(results / "X-1-T-20260602.tif"), 100)
+        _write(str(results / "X-1-T-20260602.zip"), 20)
+        _save_group_with_tiff(db, "U1", tiff)
+
+        assert backfill_archive_zips(db) == 0
+        assert load_grouping(db, "U1").groups[0].archive_zip is None
+
+    def test_existing_archive_zip_untouched(self, tmp_path):
+        db = _db()
+        results = tmp_path / "results"
+        tiff = _write(str(results / "X-1-T-20260602.tif"), 100)
+        _write(str(results / "X-1-T-20260602.zip"), 5000)
+        _save_group_with_tiff(db, "U1", tiff, archive_zip="/already/set.zip")
+
+        assert backfill_archive_zips(db) == 0
+        assert load_grouping(db, "U1").groups[0].archive_zip == "/already/set.zip"
+
+    def test_missing_tiff_on_disk_skipped(self, tmp_path):
+        # composed_tiff_path points nowhere → never fabricate an archive pointer.
+        db = _db()
+        _save_group_with_tiff(db, "U1", str(tmp_path / "gone" / "X-1-T-20260602.tif"))
+
+        assert backfill_archive_zips(db) == 0
+        assert load_grouping(db, "U1").groups[0].archive_zip is None

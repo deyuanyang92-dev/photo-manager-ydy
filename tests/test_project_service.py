@@ -88,6 +88,34 @@ class TestOpenProject:
         result = open_project(str(proj_dir))
         assert "dir" in result or "directory" in result
 
+    def test_backfills_archive_zip_for_existing_compressed_result(self, tmp_path):
+        """Opening a workspace recovers archive-zip pointers for results that
+        were already compressed (zip on disk) but whose DB never recorded it —
+        so they show '已压缩' instead of '尚未压缩'."""
+        from app.db import db_manager
+        from app.services.project_service import open_project
+        from app.services import grouping_service as gs
+
+        db_manager.close_all()
+        proj = tmp_path / "old_proj"
+        results = proj / "results"
+        results.mkdir(parents=True)
+        tiff = results / "FJ-XM-B2-DLC004-1-T95E-20260602.tif"
+        tiff.write_bytes(b"\x00" * 100)
+        zipf = results / "FJ-XM-B2-DLC004-1-T95E-20260602.zip"
+        zipf.write_bytes(b"\x00" * 5000)
+        db = db_manager.open_project_db(str(proj), create=True)
+        gs.save_grouping(db, "U1", [gs.Group(
+            group_index=1, angle_label="g", jpg_paths=[],
+            composed_tiff_path=str(tiff), archive_zip=None)])
+        db_manager.close_all()
+
+        open_project(str(proj))
+
+        db2 = db_manager.get_db(str(proj))
+        assert gs.load_grouping(db2, "U1").groups[0].archive_zip == str(zipf)
+        db_manager.close_all()
+
 
 # ── list_projects ──────────────────────────────────────────────────────────
 
@@ -183,7 +211,7 @@ class TestEnsureProjectDirs:
     def test_creates_incoming_results_data(self, tmp_path):
         from app.services.project_service import ensure_project_dirs
         proj_dir = tmp_path / "proj"
-        ensure_project_dirs(str(proj_dir))
+        ensure_project_dirs(str(proj_dir), create_root=True)
         assert (proj_dir / "incoming-jpg").is_dir()
         assert (proj_dir / "results").is_dir()
         assert (proj_dir / "_data").is_dir()
@@ -191,14 +219,14 @@ class TestEnsureProjectDirs:
     def test_idempotent(self, tmp_path):
         from app.services.project_service import ensure_project_dirs
         proj_dir = tmp_path / "proj"
-        ensure_project_dirs(str(proj_dir))
-        ensure_project_dirs(str(proj_dir))  # should not raise
+        ensure_project_dirs(str(proj_dir), create_root=True)
+        ensure_project_dirs(str(proj_dir), create_root=True)  # should not raise
         assert (proj_dir / "incoming-jpg").is_dir()
 
     def test_returns_dict_with_paths(self, tmp_path):
         from app.services.project_service import ensure_project_dirs
         proj_dir = tmp_path / "proj"
-        result = ensure_project_dirs(str(proj_dir))
+        result = ensure_project_dirs(str(proj_dir), create_root=True)
         assert isinstance(result, dict)
         assert "projectDir" in result or "project_dir" in result
 
@@ -227,7 +255,7 @@ class TestGetProjectSummary:
         import sqlite3 as _sqlite3
         from app.services.project_service import ensure_project_dirs, get_project_summary
         proj = tmp_path / "proj"
-        ensure_project_dirs(str(proj))
+        ensure_project_dirs(str(proj), create_root=True)
         results = proj / "results"
         (results / "A001-1.tif").write_bytes(b"")
         (results / "A002-1.tiff").write_bytes(b"")
@@ -239,7 +267,7 @@ class TestGetProjectSummary:
         """TIF files in results/freeform/ are also counted."""
         from app.services.project_service import ensure_project_dirs, get_project_summary
         proj = tmp_path / "proj"
-        ensure_project_dirs(str(proj))
+        ensure_project_dirs(str(proj), create_root=True)
         freeform = proj / "results" / "freeform"
         freeform.mkdir(parents=True, exist_ok=True)
         (freeform / "free001.tif").write_bytes(b"")
@@ -250,7 +278,7 @@ class TestGetProjectSummary:
         """JPG files in incoming-jpg/ are counted as pendingJpgCount."""
         from app.services.project_service import ensure_project_dirs, get_project_summary
         proj = tmp_path / "proj"
-        ensure_project_dirs(str(proj))
+        ensure_project_dirs(str(proj), create_root=True)
         incoming = proj / "incoming-jpg"
         (incoming / "shot001.jpg").write_bytes(b"")
         (incoming / "shot002.jpeg").write_bytes(b"")
@@ -263,7 +291,7 @@ class TestGetProjectSummary:
         import sqlite3 as _sqlite3
         from app.services.project_service import ensure_project_dirs, get_project_summary
         proj = tmp_path / "proj"
-        ensure_project_dirs(str(proj))
+        ensure_project_dirs(str(proj), create_root=True)
         db_path = proj / "_data" / "project.db"
         conn = _sqlite3.connect(str(db_path))
         conn.execute(
@@ -279,7 +307,7 @@ class TestGetProjectSummary:
     def test_no_db_returns_zero_specimens(self, tmp_path):
         from app.services.project_service import ensure_project_dirs, get_project_summary
         proj = tmp_path / "proj"
-        ensure_project_dirs(str(proj))
+        ensure_project_dirs(str(proj), create_root=True)
         # _data/ exists but no project.db
         result = get_project_summary(str(proj))
         assert result["specimenCount"] == 0
@@ -298,7 +326,7 @@ class TestGetProjectSummary:
         change — adding a JPG/TIFF re-counts, never returns a stale chip."""
         from app.services.project_service import ensure_project_dirs, get_project_summary
         proj = tmp_path / "proj"
-        ensure_project_dirs(str(proj))
+        ensure_project_dirs(str(proj), create_root=True)
         incoming = proj / "incoming-jpg"
         (incoming / "shot001.jpg").write_bytes(b"")
         assert get_project_summary(str(proj))["pendingJpgCount"] == 1
@@ -316,7 +344,7 @@ class TestGetProjectSummary:
         import sqlite3 as _sqlite3
         from app.services.project_service import ensure_project_dirs, get_project_summary
         proj = tmp_path / "proj"
-        ensure_project_dirs(str(proj))
+        ensure_project_dirs(str(proj), create_root=True)
         db_path = proj / "_data" / "project.db"
         conn = _sqlite3.connect(str(db_path))
         conn.execute("CREATE TABLE specimens (uid TEXT PRIMARY KEY)")
@@ -357,7 +385,7 @@ class TestGetProjectResults:
         """7-segment TIF files appear as items with uid and seq parsed."""
         from app.services.project_service import ensure_project_dirs, get_project_results
         proj = tmp_path / "proj"
-        ensure_project_dirs(str(proj))
+        ensure_project_dirs(str(proj), create_root=True)
         results = proj / "results"
         # valid 7-segment name: province-site-station-speciesId-seq-storage-dateSeg.tif
         (results / "FJ-YGLZ-B2-DLC001-1-RD75E-20260506.tif").write_bytes(b"")
@@ -370,7 +398,7 @@ class TestGetProjectResults:
         """Two TIFs with the same UID should appear in the same group."""
         from app.services.project_service import ensure_project_dirs, get_project_results
         proj = tmp_path / "proj"
-        ensure_project_dirs(str(proj))
+        ensure_project_dirs(str(proj), create_root=True)
         results = proj / "results"
         (results / "FJ-YGLZ-B2-DLC001-1-RD75E-20260506.tif").write_bytes(b"")
         (results / "FJ-YGLZ-B2-DLC001-2-RD75E-20260506.tif").write_bytes(b"")
@@ -383,7 +411,7 @@ class TestGetProjectResults:
         """TIFs with different UIDs produce separate groups."""
         from app.services.project_service import ensure_project_dirs, get_project_results
         proj = tmp_path / "proj"
-        ensure_project_dirs(str(proj))
+        ensure_project_dirs(str(proj), create_root=True)
         results = proj / "results"
         (results / "FJ-YGLZ-B2-DLC001-1-RD75E-20260506.tif").write_bytes(b"")
         (results / "FJ-YGLZ-B2-DLC002-1-RD75E-20260506.tif").write_bytes(b"")
@@ -394,7 +422,7 @@ class TestGetProjectResults:
         """TIFs with non-standard names go into ungrouped."""
         from app.services.project_service import ensure_project_dirs, get_project_results
         proj = tmp_path / "proj"
-        ensure_project_dirs(str(proj))
+        ensure_project_dirs(str(proj), create_root=True)
         (proj / "results" / "freeform_result.tif").write_bytes(b"")
         result = get_project_results(str(proj))
         assert result["total"] == 1
@@ -405,7 +433,7 @@ class TestGetProjectResults:
         """TIFs in results/freeform/ are counted in total."""
         from app.services.project_service import ensure_project_dirs, get_project_results
         proj = tmp_path / "proj"
-        ensure_project_dirs(str(proj))
+        ensure_project_dirs(str(proj), create_root=True)
         freeform = proj / "results" / "freeform"
         freeform.mkdir(parents=True, exist_ok=True)
         (freeform / "free001.tif").write_bytes(b"")
@@ -416,7 +444,7 @@ class TestGetProjectResults:
         """Each item dict must contain path, name, uid, seq, mtime fields."""
         from app.services.project_service import ensure_project_dirs, get_project_results
         proj = tmp_path / "proj"
-        ensure_project_dirs(str(proj))
+        ensure_project_dirs(str(proj), create_root=True)
         results = proj / "results"
         (results / "FJ-YGLZ-B2-DLC001-3-RD75E-20260506.tif").write_bytes(b"")
         result = get_project_results(str(proj))
@@ -432,7 +460,7 @@ class TestGetProjectResults:
         """Groups are returned sorted by uid string."""
         from app.services.project_service import ensure_project_dirs, get_project_results
         proj = tmp_path / "proj"
-        ensure_project_dirs(str(proj))
+        ensure_project_dirs(str(proj), create_root=True)
         results = proj / "results"
         (results / "ZZ-SITE-S1-ZZZ001-1-D75E-20260101.tif").write_bytes(b"")
         (results / "AA-SITE-S1-AAA001-1-D75E-20260101.tif").write_bytes(b"")
@@ -511,6 +539,7 @@ class TestEnterWorkspace:
         from app.services.project_service import enter_workspace
         ctx = _FakeCtx()
         leaf = tmp_path / "survey" / "断面a"
+        leaf.mkdir(parents=True)  # workspace root must exist (strict-open contract)
         enter_workspace(ctx, str(leaf), root=str(tmp_path / "survey"))
         assert ctx.current_project_dir == str(leaf)
         assert ctx.current_project_root == str(tmp_path / "survey")
@@ -521,6 +550,7 @@ class TestEnterWorkspace:
         from app.services.project_service import enter_workspace
         ctx = _FakeCtx()
         proj = tmp_path / "flat-proj"
+        proj.mkdir()  # workspace root must exist (strict-open contract)
         enter_workspace(ctx, str(proj))
         assert ctx.current_project_dir == str(proj)
         assert ctx.current_project_root == str(proj)
@@ -529,6 +559,7 @@ class TestEnterWorkspace:
         from app.services.project_service import enter_workspace
         ctx = _FakeCtx()
         proj = tmp_path / "proj"
+        proj.mkdir()  # workspace root must exist; subdirs are still created inside
         enter_workspace(ctx, str(proj))
         assert (proj / "incoming-jpg").exists()
         assert (proj / "results").exists()
