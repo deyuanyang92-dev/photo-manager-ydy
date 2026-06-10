@@ -470,7 +470,7 @@ class SummaryView(BaseView):
         install_lunar_popup(self._date_from_edit)   # 万年历弹窗：农历+节日+节气
         self._date_from_edit.setDisplayFormat("yyyy-MM-dd")
         self._date_from_edit.setMinimumDate(QDate(1900, 1, 1))
-        self._date_from_edit.setEnabled(False)
+        self._date_from_edit.setToolTip("直接选日期即按采集日期筛选；左侧可切换为拍照日期")
         self._date_from_edit.dateChanged.connect(self._on_date_edit_changed)
         bar.addWidget(self._date_from_edit)
 
@@ -481,7 +481,7 @@ class SummaryView(BaseView):
         install_lunar_popup(self._date_to_edit)     # 万年历弹窗：农历+节日+节气
         self._date_to_edit.setDisplayFormat("yyyy-MM-dd")
         self._date_to_edit.setMinimumDate(QDate(1900, 1, 1))
-        self._date_to_edit.setEnabled(False)
+        self._date_to_edit.setToolTip("直接选日期即按采集日期筛选；左侧可切换为拍照日期")
         self._date_to_edit.dateChanged.connect(self._on_date_edit_changed)
         bar.addWidget(self._date_to_edit)
 
@@ -844,15 +844,12 @@ class SummaryView(BaseView):
         self._rebuild_table()
 
     def _sync_date_widgets(self) -> None:
-        active = self._date_field in ("采集日期", "拍照日期")
         for w in (self._date_field_combo, self._date_from_edit, self._date_to_edit):
             w.blockSignals(True)
         try:
             idx = self._date_field_combo.findText(self._date_field)
             if idx >= 0:
                 self._date_field_combo.setCurrentIndex(idx)
-            self._date_from_edit.setEnabled(active)
-            self._date_to_edit.setEnabled(active)
             if self._date_from:
                 self._date_from_edit.setDate(QDate.fromString(self._date_from, "yyyy-MM-dd"))
             if self._date_to:
@@ -881,8 +878,6 @@ class SummaryView(BaseView):
             self._date_field = "不限日期"
             self._date_from = ""
             self._date_to = ""
-            self._date_from_edit.setEnabled(False)
-            self._date_to_edit.setEnabled(False)
             self._rebuild_table()
             return
         # Selecting a field: default the range to the data's own min/max so the
@@ -892,6 +887,15 @@ class SummaryView(BaseView):
 
     def _on_date_edit_changed(self, _qdate) -> None:
         if self._date_field not in ("采集日期", "拍照日期"):
+            # "不限日期"下直接选日期 → 自动启用按采集日期筛选（点击必须有反馈）。
+            # 未动过的另一端用数据自身边界兜底，避免范围倒挂筛出空表。
+            chosen_from = self._date_from_edit.date().toString("yyyy-MM-dd")
+            chosen_to = self._date_to_edit.date().toString("yyyy-MM-dd")
+            lo, hi = self._data_date_bounds("采集日期")
+            if self.sender() is self._date_to_edit:
+                self._apply_date_filter("采集日期", lo or chosen_from, chosen_to)
+            else:
+                self._apply_date_filter("采集日期", chosen_from, hi or chosen_to)
             return
         self._date_from = self._date_from_edit.date().toString("yyyy-MM-dd")
         self._date_to = self._date_to_edit.date().toString("yyyy-MM-dd")

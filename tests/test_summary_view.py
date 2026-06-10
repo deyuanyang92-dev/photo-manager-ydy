@@ -385,6 +385,44 @@ class TestDateFilter:
         view_with_data._apply_date_filter("不限日期", "", "")
         assert len(view_with_data._filtered_specimens()) == 2
 
+    def test_date_edits_always_clickable(self, view_with_data) -> None:
+        # 默认"不限日期"时日期框也不能是死按钮 —— 永远可点（否则点击零反馈）
+        assert view_with_data._date_from_edit.isEnabled()
+        assert view_with_data._date_to_edit.isEnabled()
+
+    def test_picking_from_date_auto_activates_collection_filter(self, view_with_data) -> None:
+        from PyQt6.QtCore import QDate
+        db = view_with_data.ctx.get_db()
+        db.execute("DELETE FROM specimens")
+        _insert_specimen_full(db, "D1", coll_date="2026-01-15")
+        _insert_specimen_full(db, "D2", coll_date="2026-06-10")
+        view_with_data.on_activate()
+        assert view_with_data._date_field == "不限日期"
+        # 用户在"不限日期"下直接从日历选起始日 → 自动切换为按采集日期筛选
+        view_with_data._date_from_edit.setDate(QDate(2026, 5, 1))
+        assert view_with_data._date_field == "采集日期"
+        assert view_with_data._date_field_combo.currentText() == "采集日期"
+        # 未动的截止端以数据上界兜底 → 范围 [2026-05-01, 2026-06-10] → 只剩 D2
+        assert [s.uid for s in view_with_data._filtered_specimens()] == ["D2"]
+
+    def test_picking_to_date_auto_activates_with_data_lower_bound(self, view_with_data) -> None:
+        from PyQt6.QtCore import QDate
+        db = view_with_data.ctx.get_db()
+        db.execute("DELETE FROM specimens")
+        _insert_specimen_full(db, "D1", coll_date="2026-01-15")
+        _insert_specimen_full(db, "D2", coll_date="2026-06-10")
+        view_with_data.on_activate()
+        view_with_data._date_to_edit.setDate(QDate(2026, 2, 1))
+        assert view_with_data._date_field == "采集日期"
+        # 起始端以数据下界兜底 → 范围 [2026-01-15, 2026-02-01] → 只剩 D1
+        assert [s.uid for s in view_with_data._filtered_specimens()] == ["D1"]
+
+    def test_clearing_filter_keeps_edits_clickable(self, view_with_data) -> None:
+        view_with_data._apply_date_filter("采集日期", "2026-01-01", "2026-12-31")
+        view_with_data._apply_date_filter("不限日期", "", "")
+        assert view_with_data._date_from_edit.isEnabled()
+        assert view_with_data._date_to_edit.isEnabled()
+
     def test_search_and_date_compose(self, view_with_data) -> None:
         db = view_with_data.ctx.get_db()
         db.execute("DELETE FROM specimens")
