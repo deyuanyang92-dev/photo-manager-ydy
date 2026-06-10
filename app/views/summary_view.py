@@ -24,11 +24,12 @@ from datetime import date as _date
 from pathlib import Path
 from typing import Optional
 
-from PyQt6.QtCore import Qt, QSortFilterProxyModel
+from PyQt6.QtCore import Qt, QDate, QSortFilterProxyModel
 from PyQt6.QtGui import QColor, QBrush, QStandardItem, QStandardItemModel
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDateEdit,
     QFileDialog,
     QFrame,
     QHBoxLayout,
@@ -100,6 +101,57 @@ def _date_seg(sp: Specimen) -> str:
     if c and p and c != p:
         return f"{c.replace('-', '')}_{p.replace('-', '')}"
     return (c or p).replace("-", "")
+
+
+# ── Search / date-range filter helpers (Qt-free, unit-testable) ───────────────
+
+def _norm_date(value) -> str:
+    """Normalise a date string to ISO ``yyyy-mm-dd`` (slashes → dashes).
+
+    None / empty → "".  Slash-separated forms (``2026/06/01``) become
+    dash-separated so string comparison against ISO bounds is well-ordered.
+    """
+    if not value:
+        return ""
+    return str(value).strip().replace("/", "-")
+
+
+def _date_in_range(value, lo, hi) -> bool:
+    """Inclusive range test on ISO date strings.
+
+    Empty ``value`` is *excluded* (a row with no date never matches an active
+    range).  Empty ``lo`` / ``hi`` mean an open end on that side.
+    """
+    v = _norm_date(value)
+    if not v:
+        return False
+    lo_s = _norm_date(lo)
+    hi_s = _norm_date(hi)
+    if lo_s and v < lo_s:
+        return False
+    if hi_s and v > hi_s:
+        return False
+    return True
+
+
+def _preset_range(name: str, today) -> tuple:
+    """Map a quick-preset name to an inclusive ``(from, to)`` ISO pair.
+
+    ``today`` is the reference :class:`datetime.date` (injected so this stays
+    pure / testable).  ``all`` → ``(None, None)`` (no bound).
+    """
+    from datetime import timedelta
+    if name == "today":
+        iso = today.isoformat()
+        return (iso, iso)
+    if name == "7d":
+        return ((today - timedelta(days=6)).isoformat(), today.isoformat())
+    if name == "30d":
+        return ((today - timedelta(days=29)).isoformat(), today.isoformat())
+    if name == "year":
+        return (today.replace(month=1, day=1).isoformat(),
+                today.replace(month=12, day=31).isoformat())
+    return (None, None)
 
 
 # ── All-column definitions (mirrors app.js ALL_COLS) ─────────────────────────
@@ -325,6 +377,10 @@ class SummaryView(BaseView):
         self._specimens: list[Specimen] = []
         self._grouping: dict[str, dict] = {}          # uid → {count, status, projCode}
         self._project_filter: str = ""                # "" = all
+        self._search_text: str = ""                   # cross-column substring filter
+        self._date_field: str = "不限日期"            # 不限日期 / 采集日期 / 拍照日期
+        self._date_from: str = ""                     # ISO lower bound ("" = open)
+        self._date_to: str = ""                       # ISO upper bound ("" = open)
         self._projects: list[dict] = []               # list of {id, name, directory, projectCode?}
         self._picker_open: bool = False
         self._model: Optional[QStandardItemModel] = None
@@ -392,6 +448,47 @@ class SummaryView(BaseView):
         self._filter_combo.setMinimumWidth(160)
         self._filter_combo.currentIndexChanged.connect(self._on_filter_changed)
         bar.addWidget(self._filter_combo)
+
+        # Search box — instant cross-column substring filter
+        self._search_input = QLineEdit()
+        self._search_input.setPlaceholderText("🔍 检索 编号/物种/采集人…")
+        self._search_input.setClearButtonEnabled(True)
+        self._search_input.setMinimumWidth(200)
+        self._search_input.setToolTip("跨所有列模糊匹配（编号、物种名、采集人等）")
+        self._search_input.textChanged.connect(self._on_search_changed)
+        bar.addWidget(self._search_input)
+
+        # Date-range filter group: field selector + from/to + quick presets
+        self._date_field_combo = QComboBox()
+        self._date_field_combo.addItems(["不限日期", "采集日期", "拍照日期"])
+        self._date_field_combo.setToolTip("按采集日期或拍照日期筛选")
+        self._date_field_combo.currentTextChanged.connect(self._on_date_field_changed)
+        bar.addWidget(self._date_field_combo)
+
+        self._date_from_edit = QDateEdit()
+        self._date_from_edit.setCalendarPopup(True)
+        self._date_from_edit.setDisplayFormat("yyyy-MM-dd")
+        self._date_from_edit.setMinimumDate(QDate(1900, 1, 1))
+        self._date_from_edit.setEnabled(False)
+        self._date_from_edit.dateChanged.connect(self._on_date_edit_changed)
+        bar.addWidget(self._date_from_edit)
+
+        _dash = QLabel("—")
+        bar.addWidget(_dash)
+
+        self._date_to_edit = QDateEdit()
+        self._date_to_edit.setCalendarPopup(True)
+        self._date_to_edit.setDisplayFormat("yyyy-MM-dd")
+        self._date_to_edit.setMinimumDate(QDate(1900, 1, 1))
+        self._date_to_edit.setEnabled(False)
+        self._date_to_edit.dateChanged.connect(self._on_date_edit_changed)
+        bar.addWidget(self._date_to_edit)
+
+        self._preset_combo = QComboBox()
+        self._preset_combo.addItems(["快捷", "今天", "近7天", "近30天", "今年", "全部"])
+        self._preset_combo.setToolTip("快速套用日期范围")
+        self._preset_combo.activated.connect(self._on_preset_selected)
+        bar.addWidget(self._preset_combo)
 
         # Field selector toggle
         self._btn_cols = QPushButton("⚙ 字段")
@@ -626,12 +723,31 @@ class SummaryView(BaseView):
     # ── Table rebuild ─────────────────────────────────────────────────────────
 
     def _filtered_specimens(self) -> list[Specimen]:
-        if not self._project_filter:
-            return list(self._specimens)
-        return [
-            s for s in self._specimens
-            if s.owner_project_dir == self._project_filter
-        ]
+        specs = self._specimens
+        if self._project_filter:
+            specs = [s for s in specs if s.owner_project_dir == self._project_filter]
+        if self._date_field in ("采集日期", "拍照日期"):
+            specs = [s for s in specs if self._match_date(s)]
+        q = self._search_text.strip().lower()
+        if q:
+            specs = [s for s in specs if self._match_search(s, q)]
+        return list(specs)
+
+    def _match_date(self, sp: Specimen) -> bool:
+        value = sp.collection_date if self._date_field == "采集日期" else sp.photo_date
+        return _date_in_range(value, self._date_from, self._date_to)
+
+    def _match_search(self, sp: Specimen, q: str) -> bool:
+        """Substring match across every column value (case-insensitive)."""
+        g = self._grouping.get(sp.uid or "", {"count": 0, "status": "无成果", "projCode": ""})
+        for col in ALL_COLS:
+            try:
+                val = col["get"](sp, g)
+            except Exception:
+                val = ""
+            if val and q in str(val).lower():
+                return True
+        return False
 
     def _rebuild_table(self) -> None:
         """Build QStandardItemModel from filtered specimens + visible columns."""
@@ -700,6 +816,103 @@ class SummaryView(BaseView):
     def _on_filter_changed(self, idx: int) -> None:
         self._project_filter = self._filter_combo.currentData() or ""
         self._rebuild_table()
+
+    # ── Search ────────────────────────────────────────────────────────────────
+
+    def _on_search_changed(self, text: str) -> None:
+        self._search_text = text or ""
+        self._rebuild_table()
+
+    # Alias kept for callers/tests that prefer the imperative name.
+    def _apply_search(self, text: str) -> None:
+        self._on_search_changed(text)
+
+    # ── Date-range filter ─────────────────────────────────────────────────────
+
+    def _apply_date_filter(self, field: str, frm, to) -> None:
+        """Programmatic entry point: set the active date filter and rebuild.
+
+        ``field`` ∈ {不限日期, 采集日期, 拍照日期}; ``frm``/``to`` are ISO
+        bounds ("" / None = open). Widgets are synced (signals blocked) so the
+        UI mirrors the state.
+        """
+        self._date_field = field or "不限日期"
+        self._date_from = _norm_date(frm)
+        self._date_to = _norm_date(to)
+        self._sync_date_widgets()
+        self._rebuild_table()
+
+    def _sync_date_widgets(self) -> None:
+        active = self._date_field in ("采集日期", "拍照日期")
+        for w in (self._date_field_combo, self._date_from_edit, self._date_to_edit):
+            w.blockSignals(True)
+        try:
+            idx = self._date_field_combo.findText(self._date_field)
+            if idx >= 0:
+                self._date_field_combo.setCurrentIndex(idx)
+            self._date_from_edit.setEnabled(active)
+            self._date_to_edit.setEnabled(active)
+            if self._date_from:
+                self._date_from_edit.setDate(QDate.fromString(self._date_from, "yyyy-MM-dd"))
+            if self._date_to:
+                self._date_to_edit.setDate(QDate.fromString(self._date_to, "yyyy-MM-dd"))
+        finally:
+            for w in (self._date_field_combo, self._date_from_edit, self._date_to_edit):
+                w.blockSignals(False)
+
+    def _data_date_bounds(self, field: str) -> tuple:
+        """Min/max ISO date across project-filtered specimens for ``field``."""
+        attr = "collection_date" if field == "采集日期" else "photo_date"
+        vals = []
+        base = self._specimens
+        if self._project_filter:
+            base = [s for s in base if s.owner_project_dir == self._project_filter]
+        for s in base:
+            v = _norm_date(getattr(s, attr, "") or "")
+            if v:
+                vals.append(v)
+        if not vals:
+            return ("", "")
+        return (min(vals), max(vals))
+
+    def _on_date_field_changed(self, field: str) -> None:
+        if field not in ("采集日期", "拍照日期"):
+            self._date_field = "不限日期"
+            self._date_from = ""
+            self._date_to = ""
+            self._date_from_edit.setEnabled(False)
+            self._date_to_edit.setEnabled(False)
+            self._rebuild_table()
+            return
+        # Selecting a field: default the range to the data's own min/max so the
+        # initial view shows everything, then the user narrows it.
+        lo, hi = self._data_date_bounds(field)
+        self._apply_date_filter(field, lo, hi)
+
+    def _on_date_edit_changed(self, _qdate) -> None:
+        if self._date_field not in ("采集日期", "拍照日期"):
+            return
+        self._date_from = self._date_from_edit.date().toString("yyyy-MM-dd")
+        self._date_to = self._date_to_edit.date().toString("yyyy-MM-dd")
+        self._rebuild_table()
+
+    def _on_preset_selected(self, idx: int) -> None:
+        name_map = {1: "today", 2: "7d", 3: "30d", 4: "year", 5: "all"}
+        preset = name_map.get(idx)
+        if preset is None:  # "快捷" placeholder
+            return
+        lo, hi = _preset_range(preset, _date.today())
+        if preset == "all":
+            # Keep the current field but clear bounds (show all dated rows).
+            field = self._date_field if self._date_field in ("采集日期", "拍照日期") else "采集日期"
+            self._apply_date_filter(field, "", "")
+        else:
+            field = self._date_field if self._date_field in ("采集日期", "拍照日期") else "采集日期"
+            self._apply_date_filter(field, lo, hi)
+        # reset placeholder so the same preset can be re-picked
+        self._preset_combo.blockSignals(True)
+        self._preset_combo.setCurrentIndex(0)
+        self._preset_combo.blockSignals(False)
 
     def _toggle_picker(self, checked: bool) -> None:
         self._picker_open = checked

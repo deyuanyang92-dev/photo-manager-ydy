@@ -94,6 +94,26 @@ def _insert_specimen(db: sqlite3.Connection, uid: str, proj: str = "/tmp/proj") 
     db.commit()
 
 
+def _insert_specimen_full(
+    db: sqlite3.Connection,
+    uid: str,
+    proj: str = "/tmp/proj",
+    name: str = "Aplysia californica",
+    name_cn: str = "",
+    coll_date: str | None = None,
+    photo_date: str | None = None,
+    collector: str = "",
+) -> None:
+    db.execute(
+        "INSERT OR REPLACE INTO specimens "
+        "(uid, scientific_name, scientific_name_cn, family, owner_project_dir, "
+        " collection_date, photo_date, collector) "
+        "VALUES (?, ?, ?, 'Aplysiidae', ?, ?, ?, ?)",
+        (uid, name, name_cn, proj, coll_date, photo_date, collector),
+    )
+    db.commit()
+
+
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 @pytest.fixture()
@@ -268,6 +288,116 @@ class TestCsvExport:
         assert header == expected_headers
 
 
+# ── Search box ────────────────────────────────────────────────────────────────
+
+class TestSearch:
+    def test_search_input_exists(self, view_with_data) -> None:
+        assert hasattr(view_with_data, "_search_input")
+        assert view_with_data._search_input is not None
+
+    def test_search_filters_by_substring(self, view_with_data) -> None:
+        db = view_with_data.ctx.get_db()
+        # reset and insert specimens with distinct names
+        db.execute("DELETE FROM specimens")
+        _insert_specimen_full(db, "SP010", "/tmp/proj_A", name="Aplysia californica")
+        _insert_specimen_full(db, "SP011", "/tmp/proj_A", name="Octopus vulgaris")
+        view_with_data.on_activate()
+        assert len(view_with_data._filtered_specimens()) == 2
+        view_with_data._on_search_changed("octopus")
+        specs = view_with_data._filtered_specimens()
+        assert len(specs) == 1
+        assert specs[0].uid == "SP011"
+
+    def test_search_matches_uid(self, view_with_data) -> None:
+        view_with_data._on_search_changed("SP002")
+        specs = view_with_data._filtered_specimens()
+        assert all(s.uid == "SP002" for s in specs)
+        assert len(specs) == 1
+
+    def test_search_case_insensitive(self, view_with_data) -> None:
+        view_with_data._on_search_changed("APLYSIA")
+        assert len(view_with_data._filtered_specimens()) == 3
+
+    def test_empty_search_shows_all(self, view_with_data) -> None:
+        view_with_data._on_search_changed("nomatch_xyz")
+        assert len(view_with_data._filtered_specimens()) == 0
+        view_with_data._on_search_changed("")
+        assert len(view_with_data._filtered_specimens()) == 3
+
+
+# ── Date range filter ───────────────────────────────────────────────────────
+
+class TestDateFilter:
+    def test_date_field_combo_exists(self, view_with_data) -> None:
+        assert hasattr(view_with_data, "_date_field_combo")
+        # 不限日期 / 采集日期 / 拍照日期
+        assert view_with_data._date_field_combo.count() == 3
+
+    def test_date_filter_disabled_by_default(self, view_with_data) -> None:
+        # default = 不限日期 → no date filtering
+        db = view_with_data.ctx.get_db()
+        db.execute("DELETE FROM specimens")
+        _insert_specimen_full(db, "D1", coll_date="2026-01-01")
+        _insert_specimen_full(db, "D2", coll_date="2026-06-01")
+        view_with_data.on_activate()
+        assert len(view_with_data._filtered_specimens()) == 2
+
+    def test_date_range_filters_collection_date(self, view_with_data) -> None:
+        db = view_with_data.ctx.get_db()
+        db.execute("DELETE FROM specimens")
+        _insert_specimen_full(db, "D1", coll_date="2026-01-15")
+        _insert_specimen_full(db, "D2", coll_date="2026-03-20")
+        _insert_specimen_full(db, "D3", coll_date="2026-06-10")
+        view_with_data.on_activate()
+        # enable collection-date filter, range Feb..Apr → only D2
+        view_with_data._apply_date_filter("采集日期", "2026-02-01", "2026-04-30")
+        specs = view_with_data._filtered_specimens()
+        assert [s.uid for s in specs] == ["D2"]
+
+    def test_date_range_filters_photo_date(self, view_with_data) -> None:
+        db = view_with_data.ctx.get_db()
+        db.execute("DELETE FROM specimens")
+        _insert_specimen_full(db, "D1", coll_date="2026-01-15", photo_date="2026-05-01")
+        _insert_specimen_full(db, "D2", coll_date="2026-03-20", photo_date="2026-01-01")
+        view_with_data.on_activate()
+        view_with_data._apply_date_filter("拍照日期", "2026-04-01", "2026-06-30")
+        specs = view_with_data._filtered_specimens()
+        assert [s.uid for s in specs] == ["D1"]
+
+    def test_date_filter_excludes_empty_dates(self, view_with_data) -> None:
+        db = view_with_data.ctx.get_db()
+        db.execute("DELETE FROM specimens")
+        _insert_specimen_full(db, "D1", coll_date="2026-03-01")
+        _insert_specimen_full(db, "D2", coll_date=None)
+        view_with_data.on_activate()
+        view_with_data._apply_date_filter("采集日期", "2026-01-01", "2026-12-31")
+        specs = view_with_data._filtered_specimens()
+        assert [s.uid for s in specs] == ["D1"]
+
+    def test_clearing_date_filter_restores_all(self, view_with_data) -> None:
+        db = view_with_data.ctx.get_db()
+        db.execute("DELETE FROM specimens")
+        _insert_specimen_full(db, "D1", coll_date="2026-01-15")
+        _insert_specimen_full(db, "D2", coll_date="2026-06-10")
+        view_with_data.on_activate()
+        view_with_data._apply_date_filter("采集日期", "2026-05-01", "2026-12-31")
+        assert len(view_with_data._filtered_specimens()) == 1
+        view_with_data._apply_date_filter("不限日期", "", "")
+        assert len(view_with_data._filtered_specimens()) == 2
+
+    def test_search_and_date_compose(self, view_with_data) -> None:
+        db = view_with_data.ctx.get_db()
+        db.execute("DELETE FROM specimens")
+        _insert_specimen_full(db, "C1", name="Aplysia x", coll_date="2026-03-01")
+        _insert_specimen_full(db, "C2", name="Octopus y", coll_date="2026-03-02")
+        _insert_specimen_full(db, "C3", name="Aplysia z", coll_date="2026-09-01")
+        view_with_data.on_activate()
+        view_with_data._on_search_changed("aplysia")
+        view_with_data._apply_date_filter("采集日期", "2026-01-01", "2026-06-30")
+        specs = view_with_data._filtered_specimens()
+        assert [s.uid for s in specs] == ["C1"]
+
+
 # ── Registry ──────────────────────────────────────────────────────────────────
 
 class TestRegistry:
@@ -307,7 +437,106 @@ class TestAllCols:
         assert set(_DEFAULT_KEYS) <= all_keys
 
 
-# ── DwC export button ─────────────────────────────────────────────────────────
+# ── Search + date filter helpers (pure functions) ────────────────────────────
+
+class TestFilterHelpers:
+    def test_norm_date_slashes(self) -> None:
+        from app.views.summary_view import _norm_date
+        assert _norm_date("2026/06/01") == "2026-06-01"
+
+    def test_norm_date_empty(self) -> None:
+        from app.views.summary_view import _norm_date
+        assert _norm_date(None) == ""
+        assert _norm_date("") == ""
+
+    def test_date_in_range_inclusive(self) -> None:
+        from app.views.summary_view import _date_in_range
+        assert _date_in_range("2026-06-01", "2026-06-01", "2026-06-01")
+        assert _date_in_range("2026-06-05", "2026-06-01", "2026-06-10")
+
+    def test_date_in_range_out(self) -> None:
+        from app.views.summary_view import _date_in_range
+        assert not _date_in_range("2026-05-31", "2026-06-01", "2026-06-10")
+        assert not _date_in_range("2026-06-11", "2026-06-01", "2026-06-10")
+
+    def test_date_in_range_empty_value_excluded(self) -> None:
+        from app.views.summary_view import _date_in_range
+        assert not _date_in_range("", "2026-06-01", None)
+        assert not _date_in_range(None, None, "2026-06-10")
+
+    def test_date_in_range_open_ends(self) -> None:
+        from app.views.summary_view import _date_in_range
+        assert _date_in_range("2026-06-05", "2026-06-01", None)
+        assert _date_in_range("2026-06-05", None, "2026-06-10")
+
+    def test_preset_range_today(self) -> None:
+        from datetime import date
+        from app.views.summary_view import _preset_range
+        assert _preset_range("today", date(2026, 6, 10)) == ("2026-06-10", "2026-06-10")
+
+    def test_preset_range_7d(self) -> None:
+        from datetime import date
+        from app.views.summary_view import _preset_range
+        assert _preset_range("7d", date(2026, 6, 10)) == ("2026-06-04", "2026-06-10")
+
+    def test_preset_range_30d(self) -> None:
+        from datetime import date
+        from app.views.summary_view import _preset_range
+        assert _preset_range("30d", date(2026, 6, 10)) == ("2026-05-12", "2026-06-10")
+
+    def test_preset_range_year(self) -> None:
+        from datetime import date
+        from app.views.summary_view import _preset_range
+        assert _preset_range("year", date(2026, 6, 10)) == ("2026-01-01", "2026-12-31")
+
+    def test_preset_range_all(self) -> None:
+        from datetime import date
+        from app.views.summary_view import _preset_range
+        assert _preset_range("all", date(2026, 6, 10)) == (None, None)
+
+
+# ── Search filter (view level) ────────────────────────────────────────────────
+
+@pytest.fixture()
+def view_filterable():
+    """View with specimens carrying distinct names/dates for filter tests."""
+    from app.views.summary_view import SummaryView
+    db = _make_db()
+    _insert_specimen_full(db, "FJ-XM-A1-haitu-D75E-20260601", name="Aplysia californica",
+                          name_cn="海兔", coll_date="2026-06-01", photo_date="2026-06-02",
+                          collector="王某")
+    _insert_specimen_full(db, "FJ-XM-A1-haixing-DRY-20260520", name="Asterias amurensis",
+                          name_cn="海星", coll_date="2026-05-20", photo_date=None,
+                          collector="李某")
+    _insert_specimen_full(db, "ZJ-SM-B2-shanhu-FRZ", name="Acropora",
+                          name_cn="珊瑚", coll_date=None, photo_date="2026-06-05",
+                          collector="王某")
+    ctx = _make_ctx(db=db)
+    v = SummaryView(ctx)
+    v.on_activate()
+    return v
+
+
+class TestSearchFilter:
+    def test_search_input_exists(self, view_filterable) -> None:
+        assert view_filterable._search_input is not None
+
+    def test_search_by_latin_name(self, view_filterable) -> None:
+        view_filterable._apply_search("aplysia")
+        assert len(view_filterable._filtered_specimens()) == 1
+
+    def test_search_case_insensitive(self, view_filterable) -> None:
+        view_filterable._apply_search("APLYSIA")
+        assert len(view_filterable._filtered_specimens()) == 1
+
+    def test_search_by_chinese_name(self, view_filterable) -> None:
+        view_filterable._apply_search("海星")
+        assert len(view_filterable._filtered_specimens()) == 1
+
+    def test_search_by_uid_fragment(self, view_filterable) -> None:
+        view_filterable._apply_search("haixing")
+        assert len(view_filterable._filtered_specimens()) == 1
+
 
 class TestDwcExportButton:
     """Oracle: export_service.export_darwin_core exists; SummaryView must expose it."""
