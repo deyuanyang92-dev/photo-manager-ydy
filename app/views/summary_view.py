@@ -50,6 +50,7 @@ from app.models.specimen import Specimen
 # registry) does not pay the openpyxl cost unless the user actually exports.
 from app.config.theme import local_font_css
 from app.views.base_view import BaseView
+from app.widgets.lunar_calendar_widget import install_lunar_popup
 
 if True:  # TYPE_CHECKING guard
     from typing import TYPE_CHECKING
@@ -466,7 +467,7 @@ class SummaryView(BaseView):
         bar.addWidget(self._date_field_combo)
 
         self._date_from_edit = QDateEdit()
-        self._date_from_edit.setCalendarPopup(True)
+        install_lunar_popup(self._date_from_edit)   # 万年历弹窗：农历+节日+节气
         self._date_from_edit.setDisplayFormat("yyyy-MM-dd")
         self._date_from_edit.setMinimumDate(QDate(1900, 1, 1))
         self._date_from_edit.setEnabled(False)
@@ -477,7 +478,7 @@ class SummaryView(BaseView):
         bar.addWidget(_dash)
 
         self._date_to_edit = QDateEdit()
-        self._date_to_edit.setCalendarPopup(True)
+        install_lunar_popup(self._date_to_edit)     # 万年历弹窗：农历+节日+节气
         self._date_to_edit.setDisplayFormat("yyyy-MM-dd")
         self._date_to_edit.setMinimumDate(QDate(1900, 1, 1))
         self._date_to_edit.setEnabled(False)
