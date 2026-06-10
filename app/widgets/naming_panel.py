@@ -845,7 +845,9 @@ class NamingPanel(QWidget):
             model.appendRow(item)
 
         def _add_method(code: str, detail: str) -> None:
-            item = QStandardItem(f"{code} — {detail}")
+            # Oracle app.js:9268-9271 — option 文本只放 code,detail 进 tooltip;
+            # 全文说明由灰字行(_pres_detail)承担。
+            item = QStandardItem(code)
             item.setData(code, Qt.ItemDataRole.UserRole)
             item.setToolTip(detail)
             model.appendRow(item)

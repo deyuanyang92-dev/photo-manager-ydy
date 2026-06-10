@@ -144,3 +144,43 @@ class TestSectionVisibilityPersistence:
     def test_load_missing_key_returns_default(self, panel):
         val = panel._load_section_vis("nonexistent_key", default=True)
         assert val is True
+
+
+# ── 保存方式下拉:收起只显缩写 (oracle app.js:9268-9271) ─────────────────────
+
+class TestStorageComboDisplay:
+    """Option 文本只放 code,detail 进 tooltip;全文说明由灰字行承担。"""
+
+    def _method_rows(self, panel):
+        from PyQt6.QtCore import Qt
+        model = panel._storage_combo.model()
+        rows = []
+        for i in range(model.rowCount()):
+            item = model.item(i)
+            code = item.data(Qt.ItemDataRole.UserRole)
+            if code and code != "__custom__":
+                rows.append(item)
+        return rows
+
+    def test_method_items_show_code_only(self, panel):
+        from PyQt6.QtCore import Qt
+        from app.widgets.naming_panel import STANDARD_PRESERVATION_METHODS
+        details = dict(STANDARD_PRESERVATION_METHODS)
+        rows = [r for r in self._method_rows(panel)
+                if r.data(Qt.ItemDataRole.UserRole) == "T95E"]
+        assert rows, "T95E row missing from storage combo"
+        item = rows[0]
+        assert item.text() == "T95E", f"expected code-only text, got {item.text()!r}"
+        assert item.toolTip() == details["T95E"]
+
+    def test_all_method_rows_text_equals_userrole_code(self, panel):
+        from PyQt6.QtCore import Qt
+        for item in self._method_rows(panel):
+            code = item.data(Qt.ItemDataRole.UserRole)
+            assert item.text() == code, \
+                f"row text {item.text()!r} != code {code!r}"
+
+    def test_storage_value_roundtrip_unchanged(self, panel):
+        panel._on_storage_btn("R95E")
+        assert panel._storage.text() == "R95E"
+        assert "R95E" in panel.current_uid()
