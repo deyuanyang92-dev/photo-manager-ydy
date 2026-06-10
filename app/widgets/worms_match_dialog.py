@@ -42,6 +42,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from app.config.i18n import current_language, tr
 from app.services import coord_import_service as cis
 from app.services.export_service import (
     MATCH_APPEND_COLUMNS,
@@ -153,14 +154,14 @@ class _CandidatePickerDialog(QDialog):
         self._result = result
         self.chosen: Optional[dict] = None
         self.mark_none = False
-        self.setWindowTitle("选择 WoRMS 候选")
+        self.setWindowTitle(tr("选择 WoRMS 候选"))
         self.resize(640, 420)
         self._build_ui()
         ui.center_on(self, parent)
 
     def _build_ui(self) -> None:
         v = QVBoxLayout(self)
-        head = QLabel(f"输入名：{self._result.get('input', '')}")
+        head = QLabel(tr("输入名：{}").format(self._result.get("input", "")))
         head.setStyleSheet("font-size:14px;font-weight:600;")
         v.addWidget(head)
 
@@ -171,7 +172,7 @@ class _CandidatePickerDialog(QDialog):
             )
             label = (
                 f"{c.get('scientificname', '')}  {c.get('authority', '')}\n"
-                f"    命中:{c.get('match_type', '')}  状态:{c.get('status', '')}  "
+                f"    {tr('命中')}:{c.get('match_type', '')}  {tr('状态')}:{c.get('status', '')}  "
                 f"AphiaID:{c.get('AphiaID', '')}\n    {taxon}"
             )
             item = QListWidgetItem(label)
@@ -180,18 +181,18 @@ class _CandidatePickerDialog(QDialog):
         if self._list.count():
             self._list.setCurrentRow(0)
         else:
-            self._list.addItem(QListWidgetItem("（无候选——可标记为无匹配）"))
+            self._list.addItem(QListWidgetItem(tr("（无候选——可标记为无匹配）")))
         self._list.itemDoubleClicked.connect(lambda *_: self._accept_choice())
         v.addWidget(self._list, 1)
 
         bar = QHBoxLayout()
-        btn_none = QPushButton("标记为无匹配")
+        btn_none = QPushButton(tr("标记为无匹配"))
         btn_none.clicked.connect(self._mark_none)
         bar.addWidget(btn_none)
         bar.addStretch()
-        cancel = QPushButton("取消")
+        cancel = QPushButton(tr("取消"))
         cancel.clicked.connect(self.reject)
-        adopt = QPushButton("采用")
+        adopt = QPushButton(tr("采用"))
         adopt.setDefault(True)
         adopt.clicked.connect(self._accept_choice)
         bar.addWidget(cancel)
@@ -202,7 +203,7 @@ class _CandidatePickerDialog(QDialog):
         item = self._list.currentItem()
         c = item.data(Qt.ItemDataRole.UserRole) if item else None
         if not c:
-            ui.warn(self, "选择", "没有可采用的候选。可点「标记为无匹配」。")
+            ui.warn(self, tr("选择"), tr("没有可采用的候选。可点「标记为无匹配」。"))
             return
         self.chosen = c
         self.accept()
@@ -227,7 +228,7 @@ class WormsMatchDialog(QDialog):
         self._file_path: Optional[str] = None
         self._worker: Optional[WormsMatchWorker] = None
         self._progress: Optional[QProgressDialog] = None
-        self.setWindowTitle("WoRMS 批量匹配 (Match Taxa)")
+        self.setWindowTitle(tr("WoRMS 批量匹配 (Match Taxa)"))
         self.resize(940, 660)
         self._build_ui()
         ui.center_on(self, parent)
@@ -246,62 +247,62 @@ class WormsMatchDialog(QDialog):
         v = QVBoxLayout(page)
 
         top = QHBoxLayout()
-        btn_file = QPushButton("选择文件 (Excel/CSV/TXT)…")
+        btn_file = QPushButton(tr("选择文件 (Excel/CSV/TXT)…"))
         btn_file.clicked.connect(self._pick_file)
-        self._file_lbl = QLabel("未选择文件")
+        self._file_lbl = QLabel(tr("未选择文件"))
         self._file_lbl.setStyleSheet("color:#667085;")
         top.addWidget(btn_file)
         top.addWidget(self._file_lbl, 1)
         v.addLayout(top)
 
-        hint = QLabel(
+        hint = QLabel(tr(
             "导入一份含拉丁学名的表格，用 WoRMS 的 TAXAMATCH 算法批量匹配。"
             "原表所有列都会保留，按下方勾选追加 WoRMS 列。"
-        )
+        ))
         hint.setWordWrap(True)
         hint.setStyleSheet("color:#667085;")
         v.addWidget(hint)
 
         # 列映射 + 匹配选项
         opt = QGridLayout()
-        opt.addWidget(QLabel("学名列"), 0, 0)
+        opt.addWidget(QLabel(tr("学名列")), 0, 0)
         self._name_combo = QComboBox()
         self._name_combo.addItem(_NONE)
         self._name_combo.currentIndexChanged.connect(lambda *_: self._refresh_preview())
         opt.addWidget(self._name_combo, 0, 1)
 
-        opt.addWidget(QLabel("命名人列（可选）"), 0, 2)
+        opt.addWidget(QLabel(tr("命名人列（可选）")), 0, 2)
         self._author_combo = QComboBox()
         self._author_combo.addItem(_NONE)
         opt.addWidget(self._author_combo, 0, 3)
 
-        self._header_cb = QCheckBox("首行为表头")
+        self._header_cb = QCheckBox(tr("首行为表头"))
         self._header_cb.setChecked(True)
         self._header_cb.toggled.connect(self._on_header_toggled)
         opt.addWidget(self._header_cb, 1, 0, 1, 2)
 
-        self._marine_cb = QCheckBox("仅海洋物种 (marine_only)")
+        self._marine_cb = QCheckBox(tr("仅海洋物种 (marine_only)"))
         self._marine_cb.setChecked(False)
         opt.addWidget(self._marine_cb, 1, 2, 1, 2)
 
-        self._authority_cb = QCheckBox("匹配命名人 (Match authority)")
+        self._authority_cb = QCheckBox(tr("匹配命名人 (Match authority)"))
         self._authority_cb.setChecked(False)
         opt.addWidget(self._authority_cb, 2, 0, 1, 2)
 
-        opt.addWidget(QLabel("近似匹配处理"), 2, 2)
+        opt.addWidget(QLabel(tr("近似匹配处理")), 2, 2)
         self._near_combo = QComboBox()
-        self._near_combo.addItems(["强制人工确认", "自动采纳（后续校正）"])
+        self._near_combo.addItems([tr("强制人工确认"), tr("自动采纳（后续校正）")])
         opt.addWidget(self._near_combo, 2, 3)
 
-        opt.addWidget(QLabel("匹配阶元 (Match upto)"), 3, 0)
+        opt.addWidget(QLabel(tr("匹配阶元 (Match upto)")), 3, 0)
         self._rank_combo = QComboBox()
         for label, _rank in _MATCH_UPTO:
-            self._rank_combo.addItem(label)
+            self._rank_combo.addItem(tr(label))
         opt.addWidget(self._rank_combo, 3, 1)
 
-        opt.addWidget(QLabel("限定于高阶类群 (Limit to)"), 3, 2)
+        opt.addWidget(QLabel(tr("限定于高阶类群 (Limit to)")), 3, 2)
         self._limit_edit = QLineEdit()
-        self._limit_edit.setPlaceholderText("如 Porifera / Copepoda，避开同名歧义")
+        self._limit_edit.setPlaceholderText(tr("如 Porifera / Copepoda，避开同名歧义"))
         opt.addWidget(self._limit_edit, 3, 3)
         v.addLayout(opt)
 
@@ -309,13 +310,14 @@ class WormsMatchDialog(QDialog):
         cols_box = QFrame()
         cols_box.setFrameShape(QFrame.Shape.StyledPanel)
         cg = QGridLayout(cols_box)
-        cg.addWidget(QLabel("追加 WoRMS 列："), 0, 0, 1, 4)
-        for idx, (key, zh, _en, _fn) in enumerate(MATCH_APPEND_COLUMNS):
-            cb = QCheckBox(zh)
+        cg.addWidget(QLabel(tr("追加 WoRMS 列：")), 0, 0, 1, 4)
+        _en_ui = current_language() == "en"
+        for idx, (key, zh, en, _fn) in enumerate(MATCH_APPEND_COLUMNS):
+            cb = QCheckBox(en if _en_ui else zh)
             cb.setChecked(True)
             self._append_checks[key] = cb
             cg.addWidget(cb, 1 + idx // 4, idx % 4)
-        note = QLabel("「完整分类链」勾选时会为每个已接受名额外查一次 WoRMS（有缓存，冷启动稍慢）。")
+        note = QLabel(tr("「完整分类链」勾选时会为每个已接受名额外查一次 WoRMS（有缓存，冷启动稍慢）。"))
         note.setStyleSheet("color:#667085;font-size:11px;")
         note.setWordWrap(True)
         cg.addWidget(note, 1 + (len(MATCH_APPEND_COLUMNS) - 1) // 4 + 1, 0, 1, 4)
@@ -325,16 +327,16 @@ class WormsMatchDialog(QDialog):
         self._preview_summary = QLabel("")
         v.addWidget(self._preview_summary)
         self._preview_table = QTableWidget(0, 2)
-        self._preview_table.setHorizontalHeaderLabels(["#", "学名"])
+        self._preview_table.setHorizontalHeaderLabels(["#", tr("学名")])
         self._preview_table.horizontalHeader().setStretchLastSection(True)
         self._preview_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         v.addWidget(self._preview_table, 1)
 
         bar = QHBoxLayout()
         bar.addStretch()
-        cancel = QPushButton("取消")
+        cancel = QPushButton(tr("取消"))
         cancel.clicked.connect(self.reject)
-        self._btn_run = QPushButton("开始匹配 →")
+        self._btn_run = QPushButton(tr("开始匹配 →"))
         self._btn_run.setDefault(True)
         self._btn_run.clicked.connect(self._on_run)
         bar.addWidget(cancel)
@@ -349,13 +351,14 @@ class WormsMatchDialog(QDialog):
         self._review_summary = QLabel("")
         self._review_summary.setStyleSheet("font-weight:600;")
         v.addWidget(self._review_summary)
-        tip = QLabel("双击任意行可在候选中选择 / 标记无匹配。")
+        tip = QLabel(tr("双击任意行可在候选中选择 / 标记无匹配。"))
         tip.setStyleSheet("color:#667085;font-size:11px;")
         v.addWidget(tip)
 
         self._review_table = QTableWidget(0, 8)
         self._review_table.setHorizontalHeaderLabels(
-            ["状态", "输入名", "匹配名", "接受名", "命中类型", "命名人", "AphiaID", "阶元"]
+            [tr("状态"), tr("输入名"), tr("匹配名"), tr("接受名"),
+             tr("命中类型"), tr("命名人"), "AphiaID", tr("阶元")]
         )
         self._review_table.horizontalHeader().setStretchLastSection(True)
         self._review_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -364,16 +367,16 @@ class WormsMatchDialog(QDialog):
         v.addWidget(self._review_table, 1)
 
         bar = QHBoxLayout()
-        back = QPushButton("← 返回")
+        back = QPushButton(tr("← 返回"))
         back.clicked.connect(lambda: self._stack.setCurrentIndex(0))
         bar.addWidget(back)
         bar.addStretch()
-        bar.addWidget(QLabel("输出语言"))
+        bar.addWidget(QLabel(tr("输出语言")))
         self._lang_combo = QComboBox()
         for label, _code in _OUTPUT_LANG_OPTIONS:
-            self._lang_combo.addItem(label)
+            self._lang_combo.addItem(tr(label))
         bar.addWidget(self._lang_combo)
-        self._btn_export = QPushButton("导出标注文件…")
+        self._btn_export = QPushButton(tr("导出标注文件…"))
         self._btn_export.setDefault(True)
         self._btn_export.clicked.connect(self._on_export)
         bar.addWidget(self._btn_export)
@@ -479,8 +482,8 @@ class WormsMatchDialog(QDialog):
 
     def _pick_file(self) -> None:
         path = ui.get_open_file_name(
-            self, "选择学名表", "",
-            "表格 (*.xlsx *.xlsm *.csv *.txt);;所有文件 (*)",
+            self, tr("选择学名表"), "",
+            tr("表格 (*.xlsx *.xlsm *.csv *.txt);;所有文件 (*)"),
         )
         if path:
             self.load_file(path)
@@ -507,21 +510,21 @@ class WormsMatchDialog(QDialog):
             self._preview_table.setItem(row, 1, item)
         uniq = len(seen)
         self._preview_summary.setText(
-            f"待匹配 {non_blank} 个名称（去重 {uniq} 个） / 共 {len(names)} 行"
+            tr("待匹配 {} 个名称（去重 {} 个） / 共 {} 行").format(non_blank, uniq, len(names))
         )
 
     def _on_run(self) -> None:
         if not self.name_column():
-            ui.warn(self, "批量匹配", "请先选择「学名列」。")
+            ui.warn(self, tr("批量匹配"), tr("请先选择「学名列」。"))
             return
         names = self.name_list()
         if not any(n.strip() for n in names):
-            ui.warn(self, "批量匹配", "选中的列没有任何学名。")
+            ui.warn(self, tr("批量匹配"), tr("选中的列没有任何学名。"))
             return
         fetch_chain = "classification" in self.selected_append_cols()
         self._btn_run.setEnabled(False)
-        self._progress = QProgressDialog("正在匹配 WoRMS…", "取消", 0, 0, self)
-        self._progress.setWindowTitle("批量匹配")
+        self._progress = QProgressDialog(tr("正在匹配 WoRMS…"), tr("取消"), 0, 0, self)
+        self._progress.setWindowTitle(tr("批量匹配"))
         self._progress.setWindowModality(Qt.WindowModality.WindowModal)
         self._progress.setMinimumDuration(0)
         self._progress.setAutoClose(False)
@@ -550,7 +553,7 @@ class WormsMatchDialog(QDialog):
         if total > 0:
             self._progress.setMaximum(total)
             self._progress.setValue(done)
-            self._progress.setLabelText(f"正在匹配 WoRMS… {done}/{total}")
+            self._progress.setLabelText(tr("正在匹配 WoRMS… {}/{}").format(done, total))
 
     def _on_match_done(self, results: object) -> None:
         if self._progress is not None:
@@ -565,7 +568,7 @@ class WormsMatchDialog(QDialog):
             self._progress.close()
             self._progress = None
         self._btn_run.setEnabled(True)
-        ui.critical(self, "批量匹配失败", msg)
+        ui.critical(self, tr("批量匹配失败"), msg)
 
     def _refresh_review(self) -> None:
         self._review_table.setRowCount(0)
@@ -578,7 +581,7 @@ class WormsMatchDialog(QDialog):
             self._review_table.insertRow(row)
             badge_text, color = _RES_BADGE.get(res, (res, "#667085"))
             cells = [
-                badge_text,
+                tr(badge_text),
                 r.get("input", ""),
                 str(best.get("scientificname", "")),
                 str(best.get("valid_name", "") or best.get("scientificname", "")),
@@ -596,7 +599,8 @@ class WormsMatchDialog(QDialog):
         resolved = counts["matched"]
         pending = counts["near"] + counts["ambiguous"]
         self._review_summary.setText(
-            f"已解析 {resolved} / 待复核 {pending} / 无匹配 {counts['none']} / 共 {total}"
+            tr("已解析 {} / 待复核 {} / 无匹配 {} / 共 {}").format(
+                resolved, pending, counts["none"], total)
         )
 
     def _on_review_double_click(self, row: int, _col: int) -> None:
@@ -611,13 +615,13 @@ class WormsMatchDialog(QDialog):
 
     def _on_export(self) -> None:
         if not self._results:
-            ui.warn(self, "导出", "还没有匹配结果。")
+            ui.warn(self, tr("导出"), tr("还没有匹配结果。"))
             return
         if not self.selected_append_cols():
-            ui.warn(self, "导出", "请至少勾选一个要追加的 WoRMS 列。")
+            ui.warn(self, tr("导出"), tr("请至少勾选一个要追加的 WoRMS 列。"))
             return
         path = ui.get_save_file_name(
-            self, "导出匹配结果", "worms_match.xlsx",
+            self, tr("导出匹配结果"), "worms_match.xlsx",
             "Excel (*.xlsx);;CSV (*.csv)",
         )
         if not path:
@@ -625,6 +629,6 @@ class WormsMatchDialog(QDialog):
         try:
             out = self.export(path)
         except Exception as exc:  # noqa: BLE001
-            ui.critical(self, "导出失败", str(exc))
+            ui.critical(self, tr("导出失败"), str(exc))
             return
-        ui.info(self, "导出完成", f"已导出标注文件：\n{out}")
+        ui.info(self, tr("导出完成"), tr("已导出标注文件：\n{}").format(out))

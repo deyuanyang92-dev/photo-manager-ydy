@@ -93,6 +93,15 @@ class AppSettings:
         self._qs.setValue("appearance/theme", name)
 
     @property
+    def current_language(self) -> str:
+        """UI language: "zh" (default) or "en". Applied at startup (restart-to-apply)."""
+        return self._qs.value("appearance/language", "zh", type=str)
+
+    @current_language.setter
+    def current_language(self, lang: str) -> None:
+        self._qs.setValue("appearance/language", lang)
+
+    @property
     def performance_mode(self) -> bool:
         """Drop card shadows + canvas gradients for smoother remote-desktop use."""
         return self._qs.value("appearance/performance_mode", False, type=bool)

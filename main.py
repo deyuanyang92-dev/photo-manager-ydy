@@ -240,6 +240,12 @@ def main() -> int:
     # on Linux), causing the startup text-overlap and garbled glyphs.
     apply_default_font(app)
 
+    # ── Language ──────────────────────────────────────────────────────
+    # Apply BEFORE any widget/view is built — the UI is translated once at
+    # construction time (restart-to-apply). tr() then resolves to this language.
+    from app.config.i18n import set_language
+    set_language(_s.current_language)
+
     # ── Theme ─────────────────────────────────────────────────────────
     # Performance mode must be set before apply_theme (QSS drops gradients) and
     # before any card widget is built (apply_card_shadow becomes a no-op).
