@@ -26,7 +26,7 @@ import sqlite3
 from pathlib import Path
 from typing import Optional
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QFileSystemWatcher, QTimer
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QCheckBox,
@@ -587,10 +587,21 @@ class WorkbenchView(BaseView):
         self._save_timer.setInterval(500)
         self._save_timer.timeout.connect(self._flush_grouping_save)
 
-        # Auto-refresh monitor directory every 2 s (mirrors web startMonitorPoll)
-        self._auto_refresh_timer = QTimer(self)
-        self._auto_refresh_timer.setInterval(2000)
-        self._auto_refresh_timer.timeout.connect(self._refresh_monitor)
+        # ── File-system real-time monitoring (replaces 2 s poll) ─────────
+        # Primary: QFileSystemWatcher pushes OS-level directory change events.
+        # Debounce: 300 ms window merges rapid bursts (camera burst / batch copy).
+        # Fallback: 30 s full-rescan timer catches missed events on WSL2 / SMB.
+        self._fs_watcher = QFileSystemWatcher(self)
+        self._fs_watcher.directoryChanged.connect(self._on_fs_changed)
+
+        self._debounce_timer = QTimer(self)
+        self._debounce_timer.setSingleShot(True)
+        self._debounce_timer.setInterval(300)
+        self._debounce_timer.timeout.connect(self._refresh_monitor)
+
+        self._fallback_timer = QTimer(self)
+        self._fallback_timer.setInterval(30000)
+        self._fallback_timer.timeout.connect(self._refresh_monitor)
 
         # Track current UID for grouping edits
         self._current_uid: Optional[str] = None
@@ -707,13 +718,35 @@ class WorkbenchView(BaseView):
             self._load_specimen(active_uid)
         self._refresh_batch_header()
 
-        # Start auto-poll (mirrors web startMonitorPoll)
-        if not self._auto_refresh_timer.isActive():
-            self._auto_refresh_timer.start()
+        # Start filesystem watcher + fallback poll
+        self._setup_fs_watcher()
+        self._debounce_timer.start(50)  # first refresh almost immediately
+        if not self._fallback_timer.isActive():
+            self._fallback_timer.start()
 
     def on_deactivate(self) -> None:
-        """Called when navigating away; stop auto-poll."""
-        self._auto_refresh_timer.stop()
+        """Called when navigating away; stop watchers and timers."""
+        self._debounce_timer.stop()
+        self._fallback_timer.stop()
+        self._fs_watcher.removePaths(self._fs_watcher.directories())
+
+    # ── Filesystem watcher helpers ──────────────────────────────────────────
+
+    def _setup_fs_watcher(self) -> None:
+        """Watch incoming-jpg/ and results/ for OS-level change events."""
+        self._fs_watcher.removePaths(self._fs_watcher.directories())
+        project_dir = self.ctx.current_project_dir
+        if not project_dir:
+            return
+        for sub in ("incoming-jpg", "results"):
+            d = os.path.join(project_dir, sub)
+            os.makedirs(d, exist_ok=True)
+            self._fs_watcher.addPath(d)
+
+    def _on_fs_changed(self, _path: str) -> None:
+        """Debounced handler: merge rapid file events into one refresh."""
+        if not self._debounce_timer.isActive():
+            self._debounce_timer.start(300)
 
     # ── Specimen selection ────────────────────────────────────────────────────
 
@@ -1007,7 +1040,7 @@ class WorkbenchView(BaseView):
             qs = self.ctx.settings._qs
             self._helicon_params.set_params({
                 "method": int(qs.value(_K_HELICON_METHOD, 1)),
-                "radius": float(qs.value(_K_HELICON_RADIUS, 4)),
+                "radius": float(qs.value(_K_HELICON_RADIUS, 8.0)),
                 "smoothing": int(qs.value(_K_HELICON_SMOOTHING, 4)),
             })
         except Exception:
@@ -1521,14 +1554,15 @@ class WorkbenchView(BaseView):
                 )
                 return
 
-            # Determine output path
+            # Determine output path — TIFF lands in incoming-jpg/ first;
+            # organize step moves it to results/ (oracle app.js:4336,8867).
             results_dir = os.path.join(project_dir, "results")
-            os.makedirs(results_dir, exist_ok=True)
             incoming_dir = os.path.join(project_dir, "incoming-jpg")
+            os.makedirs(incoming_dir, exist_ok=True)
 
             preview = organize_preview(db, uid, results_dir, incoming_dir)
             output_name = preview.suggested_tiff_name
-            output_path = os.path.join(results_dir, output_name)
+            output_path = os.path.join(incoming_dir, output_name)  # incoming, not results
             # Honor 输出格式 (tif/jpg); default tif keeps the lossless archival master.
             output_path = self._with_output_ext(output_path, self._helicon_output_opts()["format"])
             output_name = os.path.basename(output_path)
@@ -1796,11 +1830,31 @@ class WorkbenchView(BaseView):
             )
 
             if result.ok:
+                # ── Move TIFF + ZIP from incoming-jpg/ to results/ (oracle app.js:4336)
+                import shutil
+                _results_dir = os.path.join(project_dir, "results")
+                os.makedirs(_results_dir, exist_ok=True)
+                _tiff_src = group.composed_tiff_path
+                _zip_src = result.zip_path
+                _moved_tiff = _tiff_src
+                for _src in [_tiff_src, _zip_src]:
+                    if _src and os.path.isfile(_src) and "incoming-jpg" in _src:
+                        _dst = os.path.join(_results_dir, os.path.basename(_src))
+                        if not os.path.exists(_dst):
+                            shutil.move(_src, _dst)
+                        if _src == _tiff_src:
+                            _moved_tiff = _dst
+
                 # Update grouping record with archive info
                 from datetime import datetime, timezone
                 now = datetime.now(tz=timezone.utc).isoformat()
                 group.status = "organized"
-                group.archive_zip = result.zip_path
+                group.composed_tiff_path = _moved_tiff  # update to results/ path
+                group.archive_zip = (
+                    os.path.join(_results_dir, os.path.basename(result.zip_path))
+                    if "incoming-jpg" in result.zip_path
+                    else result.zip_path
+                )
                 group.updated_at = now
                 save_grouping(db, uid, grouping.groups)
                 self._grouping.load_grouping(uid, grouping)

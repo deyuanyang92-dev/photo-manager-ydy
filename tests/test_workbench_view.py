@@ -190,8 +190,8 @@ class TestOnActivate:
         w = WorkbenchView(ctx)
         w.on_activate()  # must not raise
 
-    def test_auto_poll_timer_starts_on_activate(self, tmp_path):
-        """on_activate must start _auto_refresh_timer."""
+    def test_fs_watcher_starts_on_activate(self, tmp_path):
+        """on_activate must start filesystem watcher + fallback timer."""
         from app.views.workbench_view import WorkbenchView
         project_dir = str(tmp_path / "proj")
         Path(project_dir).mkdir(parents=True)
@@ -203,12 +203,14 @@ class TestOnActivate:
         ctx = _make_ctx(project_dir=project_dir, db=db)
         w = WorkbenchView(ctx)
         w.on_activate()
-        assert hasattr(w, "_auto_refresh_timer")
-        assert w._auto_refresh_timer.isActive()
+        assert hasattr(w, "_fs_watcher")
+        assert w._fs_watcher.directories()
+        assert w._debounce_timer.isActive() or w._debounce_timer.isSingleShot()
+        assert w._fallback_timer.isActive()
         db.close()
 
-    def test_auto_poll_timer_stops_on_deactivate(self, tmp_path):
-        """on_deactivate must stop _auto_refresh_timer."""
+    def test_fs_watcher_stops_on_deactivate(self, tmp_path):
+        """on_deactivate must stop timers and clear watcher paths."""
         from app.views.workbench_view import WorkbenchView
         project_dir = str(tmp_path / "proj2")
         Path(project_dir).mkdir(parents=True)
@@ -221,7 +223,9 @@ class TestOnActivate:
         w = WorkbenchView(ctx)
         w.on_activate()
         w.on_deactivate()
-        assert not w._auto_refresh_timer.isActive()
+        assert not w._debounce_timer.isActive()
+        assert not w._fallback_timer.isActive()
+        assert not w._fs_watcher.directories()
         db.close()
 
     def test_on_activate_with_project(self, tmp_path):
@@ -996,36 +1000,36 @@ class TestHeliconParamsPanel:
         w.set_params({"method": 0})
         assert w._radius_slider.isEnabled()
 
-    def test_oracle_ranges(self):
-        # Ranges mirror the web oracle app.js:7145/7147 — Radius 0–8 (float,
-        # step 0.5), Smoothing 0–8 (int). NOT Helicon's own desktop bounds.
+    def test_helicon_desktop_ranges(self):
+        # Ranges follow Helicon Focus desktop/help, not the old web prototype
+        # cap that stopped Radius at 8. Official examples use Radius=22.
         from app.widgets.helicon_params_panel import HeliconParamsPanel
         w = HeliconParamsPanel()
-        assert w._radius_spin.minimum() == 0.0
-        assert w._radius_spin.maximum() == 8.0
+        assert w._radius_spin.minimum() == 1.0
+        assert w._radius_spin.maximum() == 30.0
         assert w._radius_spin.singleStep() == 0.5
-        assert w._smooth_spin.minimum() == 0
-        assert w._smooth_spin.maximum() == 8
+        assert w._smooth_spin.minimum() == 1
+        assert w._smooth_spin.maximum() == 10
         # float radius round-trips
-        w.set_params({"radius": 4.5})
-        assert w.get_params()["radius"] == 4.5
-        # whole radius returns as int → CLI -rp:8 not -rp:8.0
-        w.set_params({"radius": 8})
-        assert w.get_params()["radius"] == 8
+        w.set_params({"radius": 22.5})
+        assert w.get_params()["radius"] == 22.5
+        # whole radius returns as int -> CLI -rp:30 not -rp:30.0
+        w.set_params({"radius": 30})
+        assert w.get_params()["radius"] == 30
         assert isinstance(w.get_params()["radius"], int)
 
     def test_radius_slider_spin_synced(self):
         from app.widgets.helicon_params_panel import HeliconParamsPanel
         w = HeliconParamsPanel()
-        w._radius_spin.setValue(4.5)          # float, 0–8 step 0.5
-        assert w._radius_slider.value() == 9   # 4.5 × 2 (int slider scaling)
-        assert w.get_params()["radius"] == 4.5
-        w._smooth_spin.setValue(6)
-        assert w._smooth_slider.value() == 6
-        assert w.get_params()["smoothing"] == 6
+        w._radius_spin.setValue(22.5)         # float, 1-30 step 0.5
+        assert w._radius_slider.value() == 45  # 22.5 x 2 (int slider scaling)
+        assert w.get_params()["radius"] == 22.5
+        w._smooth_spin.setValue(10)
+        assert w._smooth_slider.value() == 10
+        assert w.get_params()["smoothing"] == 10
 
     def test_reset_button_restores_defaults(self):
-        # Oracle Reset button (app.js:7311-7318) → Method B / Radius 8 / Smoothing 4.
+        # Helicon default reset -> Method B / Radius 8 / Smoothing 4.
         from app.widgets.helicon_params_panel import HeliconParamsPanel
         w = HeliconParamsPanel()
         w.set_params({"method": 0, "radius": 2, "smoothing": 1})
@@ -1165,10 +1169,14 @@ class TestGroupingPanelCaptureActions:
         ctx = _make_ctx()
         w = MonitorPanel(ctx)
         assert hasattr(w, "_phase_pills")
-        assert "拍摄中" in w._phase_pills
-        assert "已拍完" in w._phase_pills
-        assert "整理中" in w._phase_pills
-        assert "完成" in w._phase_pills
+        assert "shooting" in w._phase_pills
+        assert "shot_done" in w._phase_pills
+        assert "organizing" in w._phase_pills
+        assert "done" in w._phase_pills
+        assert w._phase_pills["shooting"].text() == "拍摄中"
+        assert w._phase_pills["shot_done"].text() == "已拍完"
+        assert w._phase_pills["organizing"].text() == "整理中"
+        assert w._phase_pills["done"].text() == "完成"
 
 
 # ── GroupingPanel delete / clear group  #cursor ─────────────────────────────
@@ -1421,7 +1429,7 @@ class TestComposePreviewDialog:
         assert dlg.windowTitle() == "合成工作台"
         assert dlg.selected_jpgs() == [str(jpg1), str(jpg2)]
         assert dlg.params()["method"] == 1
-        # Oracle radius is float (0–8 step 0.5) — fractional values round-trip.
+        # Helicon radius is float (step 0.5) and fractional values round-trip.
         assert dlg.params()["radius"] == 4.5
         assert dlg.params()["smoothing"] == 3
 
@@ -1843,3 +1851,119 @@ class TestPhasePillWiring:
         w._on_phase_clicked("shooting")  # 无激活编号,不应崩溃
         assert ctx.collab_service.store.get("shooting") is None
         assert all(not b.isChecked() for b in w._monitor._phase_pills.values())
+
+
+# ── QFileSystemWatcher integration ───────────────────────────────────
+
+
+class TestFileSystemWatcher:
+    """QFileSystemWatcher replaces 2 s polling with OS-level events."""
+
+    @staticmethod
+    def _make_view(tmp_path):
+        from app.views.workbench_view import WorkbenchView
+        project_dir = str(tmp_path / "proj")
+        Path(project_dir).mkdir(parents=True)
+        (Path(project_dir) / "incoming-jpg").mkdir()
+        (Path(project_dir) / "results").mkdir()
+        (Path(project_dir) / "_data").mkdir()
+        db_path = str(tmp_path / "proj" / "_data" / "project.db")
+        db = _make_db(db_path)
+        ctx = _make_ctx(project_dir=project_dir, db=db)
+        w = WorkbenchView(ctx)
+        return w, ctx, db
+
+    def test_watcher_exists(self, tmp_path):
+        w, _, db = self._make_view(tmp_path)
+        assert hasattr(w, "_fs_watcher")
+        db.close()
+
+    def test_watcher_has_directory_changed_signal(self, tmp_path):
+        w, _, db = self._make_view(tmp_path)
+        # directoryChanged signal should be connected
+        assert w._fs_watcher.receivers(w._fs_watcher.directoryChanged) > 0
+        db.close()
+
+    def test_debounce_timer_is_single_shot(self, tmp_path):
+        w, _, db = self._make_view(tmp_path)
+        assert w._debounce_timer.isSingleShot() is True
+        db.close()
+
+    def test_debounce_interval_300ms(self, tmp_path):
+        w, _, db = self._make_view(tmp_path)
+        assert w._debounce_timer.interval() == 300
+        db.close()
+
+    def test_fallback_interval_30s(self, tmp_path):
+        w, _, db = self._make_view(tmp_path)
+        assert w._fallback_timer.interval() == 30000
+        db.close()
+
+    def test_on_activate_watches_directories(self, tmp_path):
+        w, _, db = self._make_view(tmp_path)
+        w.on_activate()
+        dirs = w._fs_watcher.directories()
+        assert len(dirs) >= 2
+        assert any("incoming-jpg" in d for d in dirs)
+        assert any("results" in d for d in dirs)
+        db.close()
+
+    def test_on_activate_starts_fallback_timer(self, tmp_path):
+        w, _, db = self._make_view(tmp_path)
+        w.on_activate()
+        assert w._fallback_timer.isActive()
+        db.close()
+
+    def test_on_deactivate_clears_watcher(self, tmp_path):
+        w, _, db = self._make_view(tmp_path)
+        w.on_activate()
+        w.on_deactivate()
+        assert not w._fs_watcher.directories()
+        assert not w._fallback_timer.isActive()
+        assert not w._debounce_timer.isActive()
+        db.close()
+
+    def test_on_fs_changed_starts_debounce(self, tmp_path):
+        w, _, db = self._make_view(tmp_path)
+        w.on_activate()
+        # Stop any existing debounce from on_activate
+        w._debounce_timer.stop()
+        assert not w._debounce_timer.isActive()
+        w._on_fs_changed("/fake/path")
+        assert w._debounce_timer.isActive()
+        db.close()
+
+    def test_on_fs_changed_does_not_restart_running_debounce(self, tmp_path):
+        """If debounce already active, don't reset its countdown."""
+        w, _, db = self._make_view(tmp_path)
+        w.on_activate()
+        assert w._debounce_timer.isActive()
+        remaining = w._debounce_timer.remainingTime()
+        w._on_fs_changed("/fake/path")
+        # Timer should still be running with same remaining time (not restarted)
+        assert w._debounce_timer.isActive()
+        # remainingTime should be roughly the same (within 50ms tolerance)
+        assert abs(w._debounce_timer.remainingTime() - remaining) < 50
+        db.close()
+
+    def test_creates_missing_directories(self, tmp_path):
+        """Watched dirs are auto-created if absent (new project)."""
+        from app.views.workbench_view import WorkbenchView
+        project_dir = str(tmp_path / "newproj")
+        Path(project_dir).mkdir(parents=True)
+        (Path(project_dir) / "_data").mkdir()
+        db_path = str(tmp_path / "newproj" / "_data" / "project.db")
+        db = _make_db(db_path)
+        ctx = _make_ctx(project_dir=project_dir, db=db)
+        w = WorkbenchView(ctx)
+        # incoming-jpg/ and results/ don't exist yet
+        w.on_activate()
+        assert (Path(project_dir) / "incoming-jpg").is_dir()
+        assert (Path(project_dir) / "results").is_dir()
+        db.close()
+
+    def test_no_old_auto_refresh_timer(self, tmp_path):
+        """_auto_refresh_timer should no longer exist."""
+        w, _, db = self._make_view(tmp_path)
+        assert not hasattr(w, "_auto_refresh_timer")
+        db.close()
