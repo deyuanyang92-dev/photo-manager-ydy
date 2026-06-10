@@ -861,3 +861,331 @@ class TestAutoPollingTimer:
         view._refresh_jobs()
 
         assert view._poll_timer is None
+
+
+# ── Batch executor: match_one / _save_accepted_mapping / record_job_result ────
+
+class TestMatchOne:
+    """WormsService.match_one() — mirrors oracle updateOneFromWorms.
+
+    All network access is stubbed by monkeypatching `search` / `record` /
+    `classification`; no live HTTP.
+    """
+
+    @staticmethod
+    def _rec(**kw):
+        base = {
+            "recordId": "user:abc",
+            "class": "Polychaeta", "order": "Phyllodocida",
+            "family": "Polynoidae", "genus": "Lepidonotus",
+            "species": "Halosydna brevisetosa",
+            "classCn": "多毛纲", "orderCn": "叶须虫目",
+            "familyCn": "多鳞虫科", "speciesCn": "短毛海鳞虫",
+            "genusCn": "海鳞虫属",
+        }
+        base.update(kw)
+        return base
+
+    def _load(self, svc):
+        with open(svc._taxonomy_path, encoding="utf-8") as fh:
+            return json.load(fh)
+
+    def test_single_exact_accepted_is_matched(self, tmp_path, monkeypatch):
+        svc = _make_service(str(tmp_path))
+        rec = self._rec()
+        monkeypatch.setattr(svc, "search", lambda *a, **k: [
+            {"AphiaID": 100, "valid_AphiaID": 100, "rank": "Species",
+             "status": "accepted", "scientificname": "Halosydna brevisetosa",
+             "valid_name": "Halosydna brevisetosa", "class": "Polychaeta"},
+        ])
+        monkeypatch.setattr(svc, "record", lambda aid: {
+            "AphiaID": 100, "status": "accepted",
+            "scientificname": "Halosydna brevisetosa", "valid_name": "Halosydna brevisetosa"})
+        monkeypatch.setattr(svc, "classification", lambda aid: {
+            "rank": "Species", "scientificname": "Halosydna brevisetosa", "AphiaID": 100, "child": None})
+        assert svc.match_one(rec) == "matched"
+        m = self._load(svc)["mappings"]["user:abc"]
+        assert m["status"] == "matched"
+        assert m["worms"]["AphiaID"] == 100
+        assert m["chain"]  # flattened classification present
+
+    def test_name_change_is_renamed(self, tmp_path, monkeypatch):
+        svc = _make_service(str(tmp_path))
+        rec = self._rec(species="Lepidonotus oldname")
+        monkeypatch.setattr(svc, "search", lambda *a, **k: [
+            {"AphiaID": 7, "valid_AphiaID": 9, "rank": "Species",
+             "status": "unaccepted", "scientificname": "Lepidonotus oldname",
+             "valid_name": "Lepidonotus newname"},
+        ])
+        monkeypatch.setattr(svc, "record", lambda aid: {
+            "AphiaID": 9, "status": "accepted",
+            "scientificname": "Lepidonotus newname", "valid_name": "Lepidonotus newname"})
+        monkeypatch.setattr(svc, "classification", lambda aid: {
+            "rank": "Species", "scientificname": "Lepidonotus newname", "AphiaID": 9})
+        assert svc.match_one(rec) == "renamed"
+        assert self._load(svc)["mappings"]["user:abc"]["status"] == "renamed"
+
+    def test_multiple_candidates_is_review(self, tmp_path, monkeypatch):
+        svc = _make_service(str(tmp_path))
+        rec = self._rec(species="Genus ambigua")
+        monkeypatch.setattr(svc, "search", lambda *a, **k: [
+            {"AphiaID": 1, "valid_AphiaID": 1, "rank": "Species",
+             "status": "accepted", "scientificname": "Genus ambigua"},
+            {"AphiaID": 2, "valid_AphiaID": 2, "rank": "Species",
+             "status": "accepted", "scientificname": "Genus ambigua"},
+        ])
+        assert svc.match_one(rec) == "review"
+        m = self._load(svc)["mappings"]["user:abc"]
+        assert m["status"] == "review"
+        assert len(m["candidates"]) == 2
+
+    def test_no_candidate_is_not_found(self, tmp_path, monkeypatch):
+        svc = _make_service(str(tmp_path))
+        rec = self._rec(species="Nonexistent species")
+        monkeypatch.setattr(svc, "search", lambda *a, **k: [])
+        assert svc.match_one(rec) == "not_found"
+        assert self._load(svc)["mappings"]["user:abc"]["status"] == "not_found"
+
+    def test_search_exception_is_error(self, tmp_path, monkeypatch):
+        svc = _make_service(str(tmp_path))
+        rec = self._rec()
+        def boom(*a, **k):
+            raise RuntimeError("network down")
+        monkeypatch.setattr(svc, "search", boom)
+        assert svc.match_one(rec) == "error"
+        m = self._load(svc)["mappings"]["user:abc"]
+        assert m["status"] == "error"
+        assert "network down" in m["error"]
+
+    def test_empty_species_is_not_found(self, tmp_path, monkeypatch):
+        svc = _make_service(str(tmp_path))
+        rec = self._rec(species="")
+        monkeypatch.setattr(svc, "search", lambda *a, **k: (_ for _ in ()).throw(AssertionError("search must not be called")))
+        assert svc.match_one(rec) == "not_found"
+
+    def test_redline_no_cn_field_written_into_worms(self, tmp_path, monkeypatch):
+        """The persisted `worms` object must contain zero *Cn keys, and the
+        original Chinese fields must survive only inside the `original` snapshot."""
+        svc = _make_service(str(tmp_path))
+        rec = self._rec()
+        monkeypatch.setattr(svc, "search", lambda *a, **k: [
+            {"AphiaID": 100, "valid_AphiaID": 100, "rank": "Species",
+             "status": "accepted", "scientificname": "Halosydna brevisetosa",
+             "valid_name": "Halosydna brevisetosa"}])
+        monkeypatch.setattr(svc, "record", lambda aid: {
+            "AphiaID": 100, "status": "accepted",
+            "scientificname": "Halosydna brevisetosa", "valid_name": "Halosydna brevisetosa"})
+        monkeypatch.setattr(svc, "classification", lambda aid: {"rank": "Species", "AphiaID": 100})
+        svc.match_one(rec)
+        m = self._load(svc)["mappings"]["user:abc"]
+        assert not any(k.endswith("Cn") for k in m["worms"].keys()), "WoRMS object leaked a Cn field"
+        # original snapshot keeps the Chinese name for display
+        assert m["original"]["speciesCn"] == "短毛海鳞虫"
+
+    def test_list_mappings_round_trips(self, tmp_path, monkeypatch):
+        svc = _make_service(str(tmp_path))
+        rec = self._rec()
+        monkeypatch.setattr(svc, "search", lambda *a, **k: [])
+        svc.match_one(rec)
+        mappings = svc.list_mappings()
+        assert "user:abc" in mappings
+        assert mappings["user:abc"]["status"] == "not_found"
+
+
+class TestRecordJobResult:
+    """WormsService.record_job_result() — per-record cursor/counts bookkeeping."""
+
+    def test_increments_counts_and_cursor(self, tmp_path):
+        svc = _make_service(str(tmp_path))
+        job = svc.create_job(["r1", "r2", "r3"])
+        updated = svc.record_job_result(job.id, "matched")
+        assert updated["cursor"] == 1
+        assert updated["counts"]["matched"] == 1
+        assert updated["status"] == "running"
+
+    def test_completes_at_end(self, tmp_path):
+        svc = _make_service(str(tmp_path))
+        job = svc.create_job(["r1", "r2"])
+        svc.record_job_result(job.id, "matched")
+        final = svc.record_job_result(job.id, "not_found")
+        assert final["cursor"] == 2
+        assert final["status"] == "completed"
+        assert final["completed_at"]
+        assert final["counts"]["matched"] == 1
+        assert final["counts"]["not_found"] == 1
+
+    def test_missing_job_returns_none(self, tmp_path):
+        svc = _make_service(str(tmp_path))
+        assert svc.record_job_result("nope", "matched") is None
+
+
+# ── Batch match (AphiaRecordsByMatchNames / TAXAMATCH) ────────────────────────
+
+def _make_match_service(tmp_dir: str) -> WormsService:
+    """WormsService with the rate limiter disabled (fast tests)."""
+    return WormsService(
+        cache_path=os.path.join(tmp_dir, "worms_cache.json"),
+        jobs_path =os.path.join(tmp_dir, "worms_jobs.json"),
+        timeout=5.0,
+        rate_interval=0.0,
+    )
+
+
+def _mock_resp(payload, status_code: int = 200):
+    """A MagicMock mimicking an httpx.Response with .status_code/.json()."""
+    resp = MagicMock()
+    resp.status_code = status_code
+    resp.json.return_value = payload
+    return resp
+
+
+class TestMatchNames:
+    """WormsService.match_names() — batch TAXAMATCH over a name list."""
+
+    def test_parses_array_of_arrays(self, tmp_path):
+        svc = _make_match_service(str(tmp_path))
+        resp = _mock_resp([
+            [{"AphiaID": 1, "scientificname": "Abra alba", "match_type": "exact"}],
+            [{"AphiaID": 2, "scientificname": "Cancer pagurus", "match_type": "exact"},
+             {"AphiaID": 3, "scientificname": "Cancer pagurus", "match_type": "exact"}],
+        ])
+        with patch("httpx.get", return_value=resp) as mock_get:
+            results = svc.match_names(["Abra alba", "Cancer pagurus"])
+            mock_get.assert_called_once()
+        assert [r["input"] for r in results] == ["Abra alba", "Cancer pagurus"]
+        assert len(results[0]["candidates"]) == 1
+        assert len(results[1]["candidates"]) == 2
+
+    def test_chunks_over_50(self, tmp_path):
+        svc = _make_match_service(str(tmp_path))
+        names = [f"Aaa bb{i:03d}" for i in range(120)]
+        calls: list[str] = []
+
+        def fake_get(url, **kw):
+            calls.append(url)
+            n = url.count("scientificnames[]=")
+            return _mock_resp([[] for _ in range(n)])
+
+        with patch("httpx.get", side_effect=fake_get) as mock_get:
+            results = svc.match_names(names)
+        assert mock_get.call_count == 3
+        assert sorted(u.count("scientificnames[]=") for u in calls) == [20, 50, 50]
+        assert all("marine_only=false" in u for u in calls)
+        assert [r["input"] for r in results] == names
+        assert len(results) == 120
+
+    def test_cache_hit_on_rerun(self, tmp_path):
+        svc = _make_match_service(str(tmp_path))
+        resp = _mock_resp([[{"AphiaID": 1, "scientificname": "Abra alba", "match_type": "exact"}]])
+        with patch("httpx.get", return_value=resp) as mock_get:
+            svc.match_names(["Abra alba"])
+            assert mock_get.call_count == 1
+        with patch("httpx.get") as mock_get2:
+            results = svc.match_names(["Abra alba"])
+            mock_get2.assert_not_called()
+        assert results[0]["candidates"][0]["AphiaID"] == 1
+
+    def test_partial_cache_only_fetches_misses(self, tmp_path):
+        svc = _make_match_service(str(tmp_path))
+        _write_cache(svc._cache_path, {
+            "match:0:abra alba": {
+                "data": [{"AphiaID": 1, "scientificname": "Abra alba", "match_type": "exact"}],
+                "fetched_at": _iso_ago(60),
+            },
+        })
+        captured: dict = {}
+
+        def fake_get(url, **kw):
+            captured["url"] = url
+            return _mock_resp([[{"AphiaID": 2, "scientificname": "Cancer pagurus", "match_type": "exact"}]])
+
+        with patch("httpx.get", side_effect=fake_get) as mock_get:
+            results = svc.match_names(["Abra alba", "Cancer pagurus"])
+            assert mock_get.call_count == 1
+        assert "Cancer" in captured["url"]
+        assert "Abra" not in captured["url"]
+        assert results[0]["candidates"][0]["AphiaID"] == 1
+        assert results[1]["candidates"][0]["AphiaID"] == 2
+
+    def test_204_yields_empty_candidates(self, tmp_path):
+        svc = _make_match_service(str(tmp_path))
+        resp = MagicMock()
+        resp.status_code = 204
+        with patch("httpx.get", return_value=resp):
+            results = svc.match_names(["Foo bar", "Baz qux"])
+        assert all(r["candidates"] == [] for r in results)
+        assert all(r["resolution"] == "none" for r in results)
+
+    def test_surfaces_match_type(self, tmp_path):
+        svc = _make_match_service(str(tmp_path))
+        resp = _mock_resp([[{"AphiaID": 1, "scientificname": "Abra alba", "match_type": "near_1"}]])
+        with patch("httpx.get", return_value=resp):
+            results = svc.match_names(["Abra alba"])
+        assert results[0]["candidates"][0]["match_type"] == "near_1"
+        assert results[0]["resolution"] == "near"
+
+    def test_blank_input_no_network(self, tmp_path):
+        svc = _make_match_service(str(tmp_path))
+        with patch("httpx.get") as mock_get:
+            results = svc.match_names(["", "   "])
+            mock_get.assert_not_called()
+        assert [r["resolution"] for r in results] == ["none", "none"]
+        assert [r["input"] for r in results] == ["", "   "]
+
+    def test_url_encodes_names(self, tmp_path):
+        svc = _make_match_service(str(tmp_path))
+        captured: dict = {}
+
+        def fake_get(url, **kw):
+            captured["url"] = url
+            return _mock_resp([[]])
+
+        with patch("httpx.get", side_effect=fake_get):
+            svc.match_names(["Abra alba"])
+        assert "scientificnames[]=Abra%20alba" in captured["url"]
+
+    def test_auto_accept_near_promotes_to_matched(self, tmp_path):
+        svc = _make_match_service(str(tmp_path))
+        resp = _mock_resp([[{"AphiaID": 5, "scientificname": "Abra albva", "match_type": "near_1"}]])
+        with patch("httpx.get", return_value=resp):
+            results = svc.match_names(["Abra albva"], auto_accept_near=True)
+        assert results[0]["resolution"] == "matched"
+        assert results[0]["best"]["AphiaID"] == 5
+
+
+class TestClassifyMatch:
+    """WormsService.classify_match() — resolution status from candidate list."""
+
+    def test_exact_single_is_matched(self):
+        r, best = WormsService.classify_match([{"match_type": "exact", "AphiaID": 1}])
+        assert r == "matched"
+        assert best["AphiaID"] == 1
+
+    def test_multiple_is_ambiguous(self):
+        r, best = WormsService.classify_match(
+            [{"match_type": "exact", "AphiaID": 1}, {"match_type": "exact", "AphiaID": 2}]
+        )
+        assert r == "ambiguous"
+        assert best is None
+
+    def test_near_is_near_with_tentative_best(self):
+        r, best = WormsService.classify_match([{"match_type": "near_1", "AphiaID": 5}])
+        assert r == "near"
+        assert best["AphiaID"] == 5
+
+    def test_near_auto_accept(self):
+        r, best = WormsService.classify_match(
+            [{"match_type": "near_1", "AphiaID": 5}], auto_accept_near=True
+        )
+        assert r == "matched"
+        assert best["AphiaID"] == 5
+
+    def test_quarantine_forces_ambiguous(self):
+        r, best = WormsService.classify_match([{"match_type": "match_quarantine", "AphiaID": 9}])
+        assert r == "ambiguous"
+        assert best is None
+
+    def test_empty_is_none(self):
+        r, best = WormsService.classify_match([])
+        assert r == "none"
+        assert best is None

@@ -971,6 +971,19 @@ class WormsView(BaseView):
         title_row.addWidget(ext_link)
         title_row.addWidget(_label("查询", color=_C_MUTED, size=12))
         title_row.addStretch()
+
+        # 批量匹配 (Match Taxa) — 复刻 WoRMS 官网批量匹配工具的入口
+        self._match_btn = QPushButton("批量匹配 (Match Taxa)")
+        self._match_btn.setObjectName("WMatchBtn")
+        self._match_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._match_btn.setStyleSheet(
+            f"QPushButton#WMatchBtn {{ background:{_C_ACCENT}; color:{_C_BG};"
+            f"  border:none; border-radius:6px; padding:7px 16px;"
+            f"  font-size:12px; font-weight:600; }}"
+            f"QPushButton#WMatchBtn:hover {{ background:{_C_ACCENT_H}; }}"
+        )
+        self._match_btn.clicked.connect(self._on_open_match)
+        title_row.addWidget(self._match_btn)
         header_lay.addLayout(title_row)
 
         # worms-desc
@@ -1204,6 +1217,13 @@ class WormsView(BaseView):
         self._refresh_jobs()
 
     # ── Search ─────────────────────────────────────────────────────────
+
+    def _on_open_match(self) -> None:
+        """Open the batch Match-Taxa wizard (shares this view's WoRMS cache)."""
+        from app.widgets.worms_match_dialog import WormsMatchDialog
+        if not self._service:
+            self._service = self._init_service()
+        WormsMatchDialog(self._service, parent=self).exec()
 
     def _on_search(self) -> None:
         name = self._search_input.text().strip()

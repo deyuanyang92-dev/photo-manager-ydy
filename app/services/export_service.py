@@ -308,6 +308,206 @@ def export_csv(
     return path.resolve()
 
 
+# ── WoRMS Match-Taxa annotated export ─────────────────────────────────────────
+#
+# Writes the user's ORIGINAL table verbatim (all columns, original order — zero
+# loss) and APPENDS selected WoRMS columns derived from each row's match result.
+# Never merges WoRMS data into an original column, so a `*Cn` (Chinese-name)
+# column simply passes through as one of the original columns (red line).
+
+def _ms(v) -> str:
+    """Match-string: None → '', everything else str()."""
+    return "" if v is None else str(v)
+
+
+def _m_best(result: dict, field: str) -> str:
+    return _ms((result.get("best") or {}).get(field))
+
+
+_RANK_FIELDS = ("kingdom", "phylum", "class", "order", "family", "genus")
+
+
+def _m_rank(result: dict, rank_key: str) -> str:
+    """Rank name from the (optional) full chain, else the best record's inline field."""
+    chain = result.get("chain")
+    if chain:
+        for node in chain:
+            if str(node.get("rank", "")).lower() == rank_key:
+                return _ms(node.get("scientificname"))
+    return _ms((result.get("best") or {}).get(rank_key))
+
+
+def _m_classification(result: dict) -> str:
+    chain = result.get("chain")
+    if chain:
+        return " > ".join(_ms(n.get("scientificname")) for n in chain if n.get("scientificname"))
+    best = result.get("best") or {}
+    return " > ".join(_ms(best.get(r)) for r in _RANK_FIELDS if best.get(r))
+
+
+_ENV_FLAGS = (("isMarine", "海洋"), ("isBrackish", "半咸水"),
+              ("isFreshwater", "淡水"), ("isTerrestrial", "陆生"))
+
+
+def _m_environment(result: dict) -> str:
+    best = result.get("best") or {}
+    return ",".join(label for k, label in _ENV_FLAGS if best.get(k))
+
+
+_RESOLUTION_CN = {"matched": "已匹配", "near": "待确认", "ambiguous": "多候选", "none": "无匹配"}
+
+
+def _m_resolution(result: dict) -> str:
+    r = result.get("resolution", "")
+    return _RESOLUTION_CN.get(r, r)
+
+
+#: WoRMS append-column catalog: (key, header label, extractor(result) -> str).
+#: ``key`` is the stable identifier the UI passes in ``append_cols``; the header
+#: is what lands in the file.  Mirrors the WoRMS website's output-column choices.
+MATCH_APPEND_COLUMNS: list[tuple[str, str, callable]] = [
+    ("aphia_id",           "AphiaID",      lambda r: _m_best(r, "AphiaID")),
+    ("matched_name",       "匹配名",        lambda r: _m_best(r, "scientificname")),
+    ("accepted_name",      "接受名",        lambda r: _ms((r.get("best") or {}).get("valid_name")
+                                                        or (r.get("best") or {}).get("scientificname"))),
+    ("accepted_aphia_id",  "接受AphiaID",   lambda r: _ms((r.get("best") or {}).get("valid_AphiaID")
+                                                        or (r.get("best") or {}).get("AphiaID"))),
+    ("authority",          "命名人",        lambda r: _m_best(r, "authority")),
+    ("accepted_authority", "接受名命名人",   lambda r: _m_best(r, "valid_authority")),
+    ("status",             "分类状态",       lambda r: _m_best(r, "status")),
+    ("match_type",         "命中类型",       lambda r: _m_best(r, "match_type")),
+    ("rank",               "阶元",          lambda r: _m_best(r, "rank")),
+    ("kingdom",            "界",            lambda r: _m_rank(r, "kingdom")),
+    ("phylum",             "门",            lambda r: _m_rank(r, "phylum")),
+    ("class",              "纲",            lambda r: _m_rank(r, "class")),
+    ("order",              "目",            lambda r: _m_rank(r, "order")),
+    ("family",             "科",            lambda r: _m_rank(r, "family")),
+    ("genus",              "属",            lambda r: _m_rank(r, "genus")),
+    ("classification",     "完整分类链",      _m_classification),
+    ("lsid",               "LSID",         lambda r: _m_best(r, "lsid")),
+    ("tsn",                "TSN",          lambda r: _m_best(r, "tsn")),
+    ("environment",        "生境",          _m_environment),
+    ("url",                "WoRMS链接",     lambda r: _m_best(r, "url")),
+    ("resolution",         "复核状态",       _m_resolution),
+]
+
+
+def _resolve_match_cols(append_cols: Optional[list[str]]) -> list[tuple[str, str, callable]]:
+    """Filter the append catalog to the requested keys (None/empty → all)."""
+    if not append_cols:
+        return MATCH_APPEND_COLUMNS
+    by_key = {k: (k, h, fn) for k, h, fn in MATCH_APPEND_COLUMNS}
+    return [by_key[k] for k in append_cols if k in by_key]
+
+
+def _annotated_rows(headers, rows, results, cols) -> list[list]:
+    """Build [original cells…, appended WoRMS cells…] per row, index-aligned."""
+    data_rows: list[list] = []
+    for i, row in enumerate(rows):
+        result = results[i] if i < len(results) else {}
+        out = [row.get(h, "") for h in headers]
+        for _key, _hdr, fn in cols:
+            try:
+                out.append(fn(result))
+            except Exception:
+                out.append("")
+        data_rows.append(out)
+    return data_rows
+
+
+def _match_counts(results) -> dict:
+    counts: dict[str, int] = {}
+    for r in results:
+        k = r.get("resolution", "")
+        counts[k] = counts.get(k, 0) + 1
+    return counts
+
+
+def export_annotated_xlsx(
+    headers: list[str],
+    rows: list[dict],
+    results: list[dict],
+    append_cols: Optional[list[str]],
+    path: str | Path,
+) -> Path:
+    """Write the original table + appended WoRMS columns to an .xlsx file.
+
+    Parameters
+    ----------
+    headers / rows:
+        The original table as returned by ``coord_import_service.read_table``
+        (preserved verbatim, in order — zero loss).
+    results:
+        Per-row match results from ``WormsService.match_names`` (index-aligned to
+        *rows*).  May carry an optional ``chain`` list for full classification.
+    append_cols:
+        Stable keys from :data:`MATCH_APPEND_COLUMNS` to append; None → all.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    cols = _resolve_match_cols(append_cols)
+    out_headers = list(headers) + [h for _k, h, _fn in cols]
+    data_rows = _annotated_rows(headers, rows, results, cols)
+
+    wb = openpyxl.Workbook()
+    wb.properties.creator = "拍照工作台"
+    ws = wb.active
+    ws.title = "匹配结果"
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = f"A1:{get_column_letter(max(len(out_headers), 1))}1"
+
+    _apply_header_row(ws, out_headers)
+    for row_idx, row_data in enumerate(data_rows, start=2):
+        for col_idx, value in enumerate(row_data, start=1):
+            ws.cell(row=row_idx, column=col_idx, value=value)
+        if (row_idx - 2) % 2 == 1:
+            for col_idx in range(1, len(out_headers) + 1):
+                ws.cell(row=row_idx, column=col_idx).fill = _ALT_FILL
+    _auto_col_widths(ws, out_headers, data_rows)
+
+    counts = _match_counts(results)
+    ws2 = wb.create_sheet("匹配信息")
+    info = [
+        ("导出日期", date.today().isoformat()),
+        ("总行数", len(rows)),
+        ("已匹配", counts.get("matched", 0)),
+        ("待确认", counts.get("near", 0)),
+        ("多候选", counts.get("ambiguous", 0)),
+        ("无匹配", counts.get("none", 0)),
+    ]
+    for i, (k, v) in enumerate(info, start=1):
+        ws2.cell(row=i, column=1, value=k)
+        ws2.cell(row=i, column=2, value=v)
+
+    wb.save(str(path))
+    return path.resolve()
+
+
+def export_annotated_csv(
+    headers: list[str],
+    rows: list[dict],
+    results: list[dict],
+    append_cols: Optional[list[str]],
+    path: str | Path,
+) -> Path:
+    """Write the original table + appended WoRMS columns to a UTF-8-BOM CSV."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    cols = _resolve_match_cols(append_cols)
+    out_headers = list(headers) + [h for _k, h, _fn in cols]
+    data_rows = _annotated_rows(headers, rows, results, cols)
+
+    with path.open("w", encoding="utf-8-sig", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(out_headers)
+        for row in data_rows:
+            writer.writerow(row)
+
+    return path.resolve()
+
+
 def export_darwin_core(db: sqlite3.Connection, path: str | Path) -> Path:
     """Export the darwin_core VIEW to a CSV file.
 

@@ -36,7 +36,8 @@ import uuid
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
+from urllib.parse import quote
 
 import httpx
 
@@ -53,10 +54,20 @@ TTL_CHILDREN        = 14 * 86400
 TTL_RECORD          = 14 * 86400
 TTL_FAMILY          = 30 * 86400
 TTL_GENUS           = 30 * 86400
+TTL_MATCH           = 30 * 86400   # TAXAMATCH (AphiaRecordsByMatchNames) — stable
 
 CACHE_MAX_BYTES = 10 * 1024 * 1024   # 10 MB
 
 RATE_MIN_INTERVAL = 0.6  # seconds
+
+# Batch-match (AphiaRecordsByMatchNames) tuning
+MATCH_CHUNK_SIZE = 50   # WoRMS hard cap: scientificnames[] per request
+
+# TAXAMATCH match_type buckets (oracle: tutorial_taxonmatch.php).
+# Auto-accept set is configurable here; the review UI surfaces the rest.
+AUTO_ACCEPT_MATCH_TYPES = {"exact", "exact_subgenus", "exact_replaced"}
+NEAR_MATCH_TYPES        = {"near_1", "near_2", "near_3", "phonetic"}
+QUARANTINE_MATCH_TYPES  = {"match_quarantine", "match_deleted"}
 
 
 # ── Data classes ──────────────────────────────────────────────────────────────
@@ -147,6 +158,46 @@ def _atomic_write_json(path: str, data: Any) -> None:
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(data, fh, ensure_ascii=False, indent=2)
     os.replace(tmp, path)
+
+
+# Taxonomy fields snapshotted into a mapping's read-only `original` block
+# (mirrors oracle saveAcceptedMapping). Includes *Cn fields for display only —
+# they are NEVER written into the WoRMS result object.
+_SNAPSHOT_FIELDS = (
+    "class", "order", "family", "genus", "genusCn", "species",
+    "classCn", "orderCn", "familyCn", "speciesCn",
+)
+
+
+def _taxonomy_key(record: dict) -> str:
+    """Pipe-joined class|order|family|species key (oracle taxonomyKey)."""
+    return "|".join(
+        str(record.get(k) or "").strip()
+        for k in ("class", "order", "family", "species")
+    )
+
+
+def _original_snapshot(record: dict) -> dict:
+    """Read-only snapshot of the original taxonomy fields for display."""
+    return {k: record.get(k, "") for k in _SNAPSHOT_FIELDS}
+
+
+def _summarise_worms_candidate(rec: dict) -> dict:
+    """Trim a WoRMS record to the fields the review UI needs (oracle
+    summariseWormsCandidate)."""
+    return {
+        "AphiaID": rec.get("AphiaID"),
+        "valid_AphiaID": rec.get("valid_AphiaID") or rec.get("AphiaID"),
+        "scientificname": rec.get("scientificname", ""),
+        "valid_name": rec.get("valid_name") or rec.get("scientificname", ""),
+        "authority": rec.get("authority", ""),
+        "rank": rec.get("rank", ""),
+        "status": rec.get("status", ""),
+        "class": rec.get("class", ""),
+        "order": rec.get("order", ""),
+        "family": rec.get("family", ""),
+        "genus": rec.get("genus", ""),
+    }
 
 
 # ── WoRMS Service ─────────────────────────────────────────────────────────────
@@ -261,7 +312,25 @@ class WormsService:
                 if _elapsed_seconds(entry.get("fetched_at", "")) < ttl:
                     return entry["data"]
 
-        # Live fetch with retries
+        # Live fetch (rate-limited + retried), then cache (even None results).
+        data = self._http_json(api_path)
+        with self._cache_lock:
+            cache = self._read_cache()
+            cache.setdefault("records", {})[cache_key] = {
+                "data": data,
+                "fetched_at": _now_iso(),
+            }
+            self._evict_if_needed(cache)
+            self._write_cache(cache)
+        return data
+
+    def _http_json(self, api_path: str) -> Any:
+        """Rate-limited GET against the WoRMS REST API with 3-retry backoff.
+
+        Returns parsed JSON (list / dict), or ``None`` for 204/404.  No
+        caching — callers decide how to persist.  Raises the last exception
+        after 3 failed attempts.
+        """
         self._rate_wait()
         url = WORMS_BASE_URL + api_path
         last_err: Optional[Exception] = None
@@ -273,31 +342,18 @@ class WormsService:
                     timeout=self._timeout,
                 )
                 if response.status_code in (204, 404):
-                    data = None
-                elif response.status_code != 200:
+                    return None
+                if response.status_code != 200:
                     raise httpx.HTTPStatusError(
                         f"WoRMS {response.status_code}",
                         request=response.request,
                         response=response,
                     )
-                else:
-                    data = response.json()
-
-                with self._cache_lock:
-                    cache = self._read_cache()
-                    cache.setdefault("records", {})[cache_key] = {
-                        "data": data,
-                        "fetched_at": _now_iso(),
-                    }
-                    self._evict_if_needed(cache)
-                    self._write_cache(cache)
-                return data
-
+                return response.json()
             except Exception as exc:
                 last_err = exc
                 if attempt < 2:
                     time.sleep(0.5 * (attempt + 1))
-
         raise last_err  # type: ignore[misc]
 
     # ── Public API methods ────────────────────────────────────────────────
@@ -387,6 +443,174 @@ class WormsService:
         )
         result = self._fetch(api_path, f"children:{aphia_id}:{offset}", TTL_CHILDREN)
         return result if isinstance(result, list) else []
+
+    # ── Batch match (oracle: WoRMS Match Taxa / AphiaRecordsByMatchNames) ──
+
+    def match_names(
+        self,
+        names: list[str],
+        *,
+        marine_only: bool = False,
+        auto_accept_near: bool = False,
+        progress_cb: Optional[Callable[[int, int], None]] = None,
+    ) -> list[dict]:
+        """Batch-match scientific names against WoRMS via TAXAMATCH.
+
+        Calls the ``AphiaRecordsByMatchNames`` endpoint (the same fuzzy /
+        phonetic algorithm the website's "Match Taxa" tool uses), chunked into
+        ``MATCH_CHUNK_SIZE`` (≤50) names per request.
+
+        Returns **one result dict per input name, in input order** — the UI
+        relies on this 1:1 alignment, so blank / duplicate inputs still yield a
+        row::
+
+            {
+              "input":      <original query string, verbatim>,
+              "candidates": [<AphiaRecord>, ...],   # each carries match_type
+              "resolution": "matched"|"ambiguous"|"near"|"none",
+              "best":       <AphiaRecord | None>,
+            }
+
+        Caching is **per-name** (key ``match:<int marine_only>:<lower name>``):
+        a re-run, or a second file sharing names, hits cache and only fans out
+        the genuinely-new names.  Blank names short-circuit with no API call.
+
+        ``progress_cb(done, total)`` (if given) is invoked after each chunk,
+        where *total* is the number of unique cache-miss names being fetched.
+        Never reads or writes any ``*Cn`` field — WoRMS supplies only Latin
+        names and hierarchy.
+        """
+        norm = [(n or "").strip() for n in names]
+
+        # Per-name cache probe; collect unique misses (original case for query).
+        candidates_by_lower: dict[str, list] = {}
+        to_fetch: list[str] = []
+        queued: set[str] = set()
+        for n in norm:
+            if not n:
+                continue
+            low = n.lower()
+            if low in candidates_by_lower or low in queued:
+                continue
+            cached = self._match_cache_get(low, marine_only)
+            if cached is not None:
+                candidates_by_lower[low] = cached
+            else:
+                queued.add(low)
+                to_fetch.append(n)
+
+        # Fetch misses in ≤50-name chunks; persist each name's result per-name.
+        total = len(to_fetch)
+        done = 0
+        for start in range(0, total, MATCH_CHUNK_SIZE):
+            chunk = to_fetch[start:start + MATCH_CHUNK_SIZE]
+            chunk_results = self._match_chunk(chunk, marine_only)
+            new_entries: dict[str, list] = {}
+            for name, cand in zip(chunk, chunk_results):
+                low = name.lower()
+                candidates_by_lower[low] = cand
+                new_entries[self._match_key(low, marine_only)] = cand
+            self._cache_put_many(new_entries)
+            done += len(chunk)
+            if progress_cb is not None:
+                progress_cb(done, total)
+
+        # Assemble per-input results in original order.
+        results: list[dict] = []
+        for i, n in enumerate(norm):
+            if not n:
+                results.append({"input": names[i], "candidates": [],
+                                "resolution": "none", "best": None})
+                continue
+            cands = candidates_by_lower.get(n.lower(), [])
+            resolution, best = self.classify_match(cands, auto_accept_near=auto_accept_near)
+            results.append({"input": names[i], "candidates": cands,
+                            "resolution": resolution, "best": best})
+        return results
+
+    def _match_chunk(self, chunk: list[str], marine_only: bool) -> list[list]:
+        """Fetch one ≤50-name chunk; return a candidate list per input name.
+
+        The endpoint returns an array-of-arrays aligned to ``chunk`` order; a
+        204 (no matches for the whole chunk) yields an empty list for each name.
+        """
+        if not chunk:
+            return []
+        parts = "&".join(f"scientificnames[]={quote(n)}" for n in chunk)
+        api_path = (
+            f"/AphiaRecordsByMatchNames?{parts}"
+            f"&marine_only={'true' if marine_only else 'false'}"
+        )
+        data = self._http_json(api_path)
+        if not isinstance(data, list):
+            return [[] for _ in chunk]
+        out: list[list] = []
+        for i in range(len(chunk)):
+            item = data[i] if i < len(data) else []
+            out.append(item if isinstance(item, list) else [])
+        return out
+
+    @staticmethod
+    def _match_key(lower_name: str, marine_only: bool) -> str:
+        return f"match:{int(bool(marine_only))}:{lower_name}"
+
+    def _match_cache_get(self, lower_name: str, marine_only: bool) -> Optional[list]:
+        """Return a cached candidate list (possibly empty) or None if absent/stale."""
+        key = self._match_key(lower_name, marine_only)
+        with self._cache_lock:
+            cache = self._read_cache()
+            entry = cache.get("records", {}).get(key)
+            if entry and entry.get("data") is not None:
+                if _elapsed_seconds(entry.get("fetched_at", "")) < TTL_MATCH:
+                    data = entry["data"]
+                    return data if isinstance(data, list) else []
+        return None
+
+    def _cache_put_many(self, entries: dict) -> None:
+        """Write several cache entries (key → data) under a single lock + write."""
+        if not entries:
+            return
+        now = _now_iso()
+        with self._cache_lock:
+            cache = self._read_cache()
+            records = cache.setdefault("records", {})
+            for key, data in entries.items():
+                records[key] = {"data": data, "fetched_at": now}
+            self._evict_if_needed(cache)
+            self._write_cache(cache)
+
+    @staticmethod
+    def classify_match(
+        candidates: Optional[list],
+        *,
+        auto_accept_near: bool = False,
+    ) -> tuple[str, Optional[dict]]:
+        """Classify a name's candidate list into (resolution, best_candidate).
+
+        Driven by each candidate's ``match_type``:
+
+          * no candidates                       → ("none", None)
+          * any quarantined/deleted candidate   → ("ambiguous", None)  (never auto-pick)
+          * >1 candidate                        → ("ambiguous", None)
+          * 1 candidate, exact-family match     → ("matched", it)
+          * 1 candidate, near/phonetic          → ("near", it)  — or "matched" if
+                                                  ``auto_accept_near`` is set
+        """
+        cands = candidates or []
+        if not cands:
+            return ("none", None)
+        if any(str(c.get("match_type", "")).lower() in QUARANTINE_MATCH_TYPES for c in cands):
+            return ("ambiguous", None)
+        if len(cands) > 1:
+            return ("ambiguous", None)
+        only = cands[0]
+        mt = str(only.get("match_type", "")).lower()
+        if mt in AUTO_ACCEPT_MATCH_TYPES:
+            return ("matched", only)
+        if mt in NEAR_MATCH_TYPES:
+            return ("matched", only) if auto_accept_near else ("near", only)
+        # Unknown/absent match_type on a single candidate → needs confirmation.
+        return ("matched", only) if auto_accept_near else ("near", only)
 
     # ── Classification chain flattening ──────────────────────────────────
 
@@ -643,6 +867,7 @@ class WormsService:
             "classification:": TTL_CLASSIFICATION,
             "synonyms:":       TTL_SYNONYMS,
             "children:":       TTL_CHILDREN,
+            "match:":          TTL_MATCH,
         }
         default_ttl = TTL_RECORD
 
@@ -922,6 +1147,180 @@ class WormsService:
         }
         _atomic_write_json(self._taxonomy_path, store)
         return status
+
+    # ── Batch executor (oracle: server.js updateOneFromWorms / saveAcceptedMapping) ──
+
+    def list_mappings(self) -> dict:
+        """Return all taxonomy WoRMS mappings keyed by recordId.
+
+        Reads ``worms_taxonomy.json`` — the same store that
+        :py:meth:`match_one` and :py:meth:`resolve_mapping` write to.  Used by
+        the taxonomy view to back-fill each row's ``mappingStatus`` /
+        ``mappingCandidates`` after a batch run.
+        """
+        store = _read_json_safe(self._taxonomy_path, {"mappings": {}})
+        mappings = store.get("mappings", {})
+        return mappings if isinstance(mappings, dict) else {}
+
+    def match_one(self, record: dict, reviewed_by: str = "匿名") -> str:
+        """Validate one taxonomy record against WoRMS and persist the mapping.
+
+        Mirrors oracle ``updateOneFromWorms`` (server.js).  Searches WoRMS for
+        the record's species name (exact), keeps species-rank records whose
+        scientific or valid name matches, de-dupes by accepted AphiaID, then:
+
+          * exactly one candidate → :py:meth:`_save_accepted_mapping`
+            ("matched" / "renamed")
+          * more than one         → status "review" with candidate summaries
+          * none                  → status "not_found"
+          * any exception         → status "error"
+
+        The decision is written under the record's ``recordId`` in
+        ``worms_taxonomy.json``.  Returns the status string.  NEVER writes a
+        ``*Cn`` field into the WoRMS result; the original Chinese names are kept
+        only inside the read-only ``original`` snapshot.
+        """
+        record_id = str(record.get("recordId") or "")
+        query = str(record.get("species") or "").strip()
+        try:
+            if not query:
+                self._write_pending_mapping(record_id, record, query, status="not_found")
+                return "not_found"
+            rows = self.search(query, like=False)
+            lower = query.lower()
+            relevant = [
+                r for r in (rows or [])
+                if str(r.get("rank", "")).lower() == "species"
+                and (
+                    str(r.get("scientificname", "")).lower() == lower
+                    or str(r.get("valid_name", "")).lower() == lower
+                )
+            ]
+            candidates: list[dict] = []
+            seen: set[str] = set()
+            for r in relevant:
+                accepted_id = str(r.get("valid_AphiaID") or r.get("AphiaID") or "")
+                if not accepted_id or accepted_id in seen:
+                    continue
+                seen.add(accepted_id)
+                candidates.append(r)
+            if len(candidates) == 1:
+                return self._save_accepted_mapping(record, candidates[0], reviewed_by)
+            status = "review" if candidates else "not_found"
+            self._write_pending_mapping(
+                record_id, record, query, status=status,
+                candidates=[_summarise_worms_candidate(c) for c in candidates],
+            )
+            return status
+        except Exception as exc:
+            self._write_pending_mapping(
+                record_id, record, query, status="error", error=str(exc)
+            )
+            return "error"
+
+    def _write_pending_mapping(
+        self,
+        record_id: str,
+        record: dict,
+        query_name: str,
+        *,
+        status: str,
+        candidates: Optional[list[dict]] = None,
+        error: Optional[str] = None,
+    ) -> None:
+        """Persist a non-accepted mapping (review / not_found / error)."""
+        store = _read_json_safe(self._taxonomy_path, {"mappings": {}})
+        if not isinstance(store.get("mappings"), dict):
+            store["mappings"] = {}
+        entry = {
+            "recordId": record_id,
+            "sourceKey": _taxonomy_key(record),
+            "original": _original_snapshot(record),
+            "queryName": query_name,
+            "status": status,
+            "updatedAt": _now_iso(),
+        }
+        if candidates is not None:
+            entry["candidates"] = candidates
+        if error is not None:
+            entry["error"] = error
+        store["mappings"][record_id] = entry
+        _atomic_write_json(self._taxonomy_path, store)
+
+    def _save_accepted_mapping(
+        self, record: dict, matched_rec: dict, reviewed_by: str = ""
+    ) -> str:
+        """Persist an accepted WoRMS match — mirrors oracle ``saveAcceptedMapping``.
+
+        Resolves the accepted record + classification chain, decides
+        "matched" vs "renamed", and writes both the ``taxa`` cache and the
+        ``mappings`` entry.  Returns the status.
+        """
+        accepted_id = matched_rec.get("valid_AphiaID") or matched_rec.get("AphiaID")
+        accepted_id_int = int(accepted_id)
+        if matched_rec.get("status") == "accepted" and matched_rec.get("AphiaID") == accepted_id:
+            accepted = matched_rec
+        else:
+            accepted = self.record(accepted_id_int) or matched_rec
+        try:
+            chain = self.flatten_classification(self.classification(accepted_id_int))
+        except Exception:
+            chain = []
+        original_name = str(record.get("species") or "").lower()
+        accepted_name = str(
+            (accepted or {}).get("scientificname") or matched_rec.get("valid_name") or ""
+        ).lower()
+        status = (
+            "matched"
+            if original_name == accepted_name and matched_rec.get("status") == "accepted"
+            else "renamed"
+        )
+        record_id = str(record.get("recordId") or "")
+        store = _read_json_safe(self._taxonomy_path, {"mappings": {}, "taxa": {}})
+        if not isinstance(store.get("mappings"), dict):
+            store["mappings"] = {}
+        store.setdefault("taxa", {})[str(accepted_id)] = {
+            "record": accepted or matched_rec,
+            "chain": chain,
+            "fetchedAt": _now_iso(),
+        }
+        store["mappings"][record_id] = {
+            "recordId": record_id,
+            "sourceKey": _taxonomy_key(record),
+            "original": _original_snapshot(record),
+            "queryName": record.get("species", ""),
+            "status": status,
+            "inputAphiaId": matched_rec.get("AphiaID"),
+            "acceptedAphiaId": accepted_id,
+            "worms": accepted or matched_rec,
+            "chain": chain,
+            "reviewedBy": reviewed_by or "",
+            "updatedAt": _now_iso(),
+        }
+        _atomic_write_json(self._taxonomy_path, store)
+        return status
+
+    def record_job_result(self, job_id: str, status: str) -> Optional[dict]:
+        """Advance a job by one record: bump ``counts[status]`` and ``cursor``.
+
+        Marks the job ``completed`` once the cursor reaches the end and
+        persists after each step (crash-safe, mirrors oracle ``runWormsJob``).
+        Returns the updated job dict, or None if the job is missing.
+        """
+        store = self._read_jobs()
+        for j in store.get("jobs", []):
+            if j.get("id") != job_id:
+                continue
+            counts = j.setdefault("counts", {})
+            counts[status] = counts.get(status, 0) + 1
+            j["cursor"] = j.get("cursor", 0) + 1
+            j["updated_at"] = _now_iso()
+            if j["cursor"] >= len(j.get("record_ids", [])):
+                j["status"] = "completed"
+                j["completed_at"] = _now_iso()
+            self._write_jobs(store)
+            return j
+        return None
 
     # ── Internal helpers (family/genus pagination) ──────────────────────────
 
