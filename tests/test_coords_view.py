@@ -484,6 +484,116 @@ class TestBatch:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# 搜索地名 (place search)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestPlaceSearch:
+    """Regression: after the first search finished, ``thread.deleteLater`` left
+    ``self._geo_thread`` pointing at a destroyed QThread — the next search died
+    in ``isRunning()`` with ``RuntimeError: wrapped C/C++ object … deleted`` and
+    the「搜索中...」label stayed up forever."""
+
+    _HIT = [{"name": "三门湾, 台州市, 浙江省", "wgs": {"lat": 29.05122, "lon": 121.74451}}]
+
+    @staticmethod
+    def _patch_geocode(monkeypatch, *, results=None, exc=None):
+        import app.services.geocode_service as gs
+
+        def fake(query, *, backend="nominatim", amap_key="", timeout=6):
+            if exc is not None:
+                raise exc
+            return list(results or [])
+
+        monkeypatch.setattr(gs, "geocode", fake)
+
+    @staticmethod
+    def _run_search(v, text="三门湾", timeout_s=4.0):
+        """Trigger a search and pump the event loop until it settles.
+
+        Returns True iff the loading state cleared within the timeout.  Extra
+        spins after settling flush queued signals AND DeferredDelete events —
+        the latter is what destroys the worker QThread between searches.
+        """
+        import time
+        v._place_input.setText(text)
+        v._on_place_search()
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            QApplication.processEvents()
+            if not v._place_loading:
+                for _ in range(10):
+                    QApplication.processEvents()
+                    time.sleep(0.01)
+                return True
+            time.sleep(0.01)
+        return False
+
+    def test_search_shows_results(self, monkeypatch):
+        self._patch_geocode(monkeypatch, results=self._HIT)
+        v = _view()
+        assert self._run_search(v), "search never completed"
+        assert v._place_results == self._HIT
+        assert v._place_results_widget.isVisible()
+        assert not v._place_loading_lbl.isVisible()
+
+    def test_second_search_completes(self, monkeypatch):
+        """THE bug: second search must complete, not hang at「搜索中...」."""
+        self._patch_geocode(monkeypatch, results=self._HIT)
+        v = _view()
+        assert self._run_search(v), "first search never completed"
+        assert self._run_search(v, text="北海"), "second search hung (stale QThread)"
+        assert v._place_results == self._HIT
+        assert v._place_results_widget.isVisible()
+        assert not v._place_loading_lbl.isVisible()
+
+    def test_failed_search_shows_error(self, monkeypatch):
+        self._patch_geocode(monkeypatch, exc=OSError("network unreachable"))
+        v = _view()
+        assert self._run_search(v), "failed search never settled"
+        assert v._place_results == []
+        assert v._place_loading_lbl.isVisible()
+        assert "搜索失败" in v._place_loading_lbl.text()
+
+    def test_nominatim_failure_hints_amap_key(self, monkeypatch):
+        # OpenStreetMap is unreachable from mainland China without a proxy —
+        # when the default Nominatim backend fails, point the user at the
+        # 高德 Web 服务 Key setting (the in-app fallback that does work).
+        self._patch_geocode(monkeypatch, exc=OSError("Network is unreachable"))
+        v = _view()
+        v.ctx.settings.amap_web_key = ""   # → resolve_backend picks nominatim
+        assert self._run_search(v), "failed search never settled"
+        assert "搜索失败" in v._place_loading_lbl.text()
+        assert "高德" in v._place_loading_lbl.text()
+
+    def test_empty_results_show_not_found(self, monkeypatch):
+        self._patch_geocode(monkeypatch, results=[])
+        v = _view()
+        assert self._run_search(v), "empty search never settled"
+        assert v._place_results == []
+        assert v._place_loading_lbl.isVisible()
+        assert "未找到匹配地点" in v._place_loading_lbl.text()
+
+    def test_search_recovers_after_failure(self, monkeypatch):
+        import app.services.geocode_service as gs
+        calls = {"n": 0}
+
+        def flaky(query, *, backend="nominatim", amap_key="", timeout=6):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise OSError("boom")
+            return list(self._HIT)
+
+        monkeypatch.setattr(gs, "geocode", flaky)
+        v = _view()
+        assert self._run_search(v)
+        assert "搜索失败" in v._place_loading_lbl.text()
+        assert self._run_search(v, text="三门湾")
+        assert v._place_results == self._HIT
+        # Loading label must be back to normal (hidden, no stale error text).
+        assert not v._place_loading_lbl.isVisible()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Esc closes map modal  (mirrors coordMapEscHandler in app.js line 13556)
 # ══════════════════════════════════════════════════════════════════════════════
 

@@ -330,9 +330,17 @@ class TileMapWidget(QWidget):
         worker.failed.connect(thread.quit)
         thread.started.connect(worker.run)
         thread.finished.connect(thread.deleteLater)
+        # deleteLater destroys the C++ QThread — clear the refs when it fires,
+        # or the next search dies in isRunning() on the zombie wrapper.
+        thread.finished.connect(self._on_search_thread_finished)
         self._search_thread = thread
         self._search_worker = worker  # keep alive until thread finishes
         thread.start()
+
+    def _on_search_thread_finished(self) -> None:
+        if self.sender() is self._search_thread:
+            self._search_thread = None
+            self._search_worker = None
 
     def _on_search_results(self, results: list) -> None:
         if results:
@@ -352,10 +360,17 @@ class TileMapWidget(QWidget):
         worker.done.connect(thread.quit)
         worker.failed.connect(thread.quit)
         thread.finished.connect(thread.deleteLater)
+        # Same zombie-wrapper hazard as search_place — clear refs on finish.
+        thread.finished.connect(self._on_loc_thread_finished)
         self._loc_thread = thread
         # keep worker alive until thread finishes
         self._loc_worker = worker
         thread.start()
+
+    def _on_loc_thread_finished(self) -> None:
+        if self.sender() is self._loc_thread:
+            self._loc_thread = None
+            self._loc_worker = None
 
     def _on_loc_done(self, lon: float, lat: float) -> None:
         self.set_center(lon, lat, zoom=10)

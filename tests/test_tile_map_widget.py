@@ -234,6 +234,51 @@ class TestTileMapWidget:
             w._search_thread.quit()
             w._search_thread.wait(2000)
 
+    @staticmethod
+    def _pump_until(cond, timeout_s=4.0):
+        """Pump the event loop (incl. DeferredDelete) until cond() or timeout."""
+        import time
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            QApplication.processEvents()
+            if cond():
+                for _ in range(10):   # flush queued signals + deleteLater
+                    QApplication.processEvents()
+                    time.sleep(0.01)
+                return True
+            time.sleep(0.01)
+        return False
+
+    def test_search_place_twice_sets_marker(self, monkeypatch):
+        # Regression: thread.deleteLater left a stale _search_thread → the
+        # second in-map search raised RuntimeError and never ran.
+        import app.services.geocode_service as gs
+        monkeypatch.setattr(
+            gs, "geocode",
+            lambda q, **k: [{"name": "x", "wgs": {"lat": 30.25, "lon": 122.17}}],
+        )
+        TileMapWidget = _import_widget()
+        w = TileMapWidget()
+        w.search_place("舟山")
+        assert self._pump_until(lambda: w.marker_lat is not None), "first search no marker"
+        w.clear_marker()
+        w.search_place("舟山")   # must not raise on deleted QThread
+        assert self._pump_until(lambda: w.marker_lat is not None), "second search no marker"
+
+    def test_locate_current_twice_no_crash(self, monkeypatch):
+        # Same stale-thread pattern in locate_current (_loc_thread).
+        import app.widgets.tile_map_widget as tmw
+        monkeypatch.setattr(
+            tmw._IpGeoWorker, "run", lambda self: self.done.emit(120.0, 30.0)
+        )
+        TileMapWidget = _import_widget()
+        w = TileMapWidget()
+        w.locate_current()
+        assert self._pump_until(lambda: w.marker_lat is not None), "first locate no marker"
+        w.clear_marker()
+        w.locate_current()   # must not raise on deleted QThread
+        assert self._pump_until(lambda: w.marker_lat is not None), "second locate no marker"
+
 
 # ── MapPickDialog integration ────────────────────────────────────────────────
 

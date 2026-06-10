@@ -232,6 +232,8 @@ class CoordsView(BaseView):
         self._cs_tab: str = "dd"
         self._place_loading: bool = False
         self._place_results: list[dict] = []
+        # Post-search status line: "" | "未找到匹配地点" | "搜索失败：…"
+        self._place_status: str = ""
         self._show_structured: bool = False
         self._show_batch: bool = False
 
@@ -442,8 +444,9 @@ class CoordsView(BaseView):
         self._place_applied_lbl.setVisible(False)
         lay.addWidget(self._place_applied_lbl)
 
-        # Place loading label
+        # Place loading / status label (搜索中… / 未找到 / 搜索失败：…)
         self._place_loading_lbl = QLabel("搜索中...")
+        self._place_loading_lbl.setWordWrap(True)
         self._place_loading_lbl.setStyleSheet(
             f"font-size: 12px; color: {_C['muted']}; background: transparent; padding: 6px 0;"
         )
@@ -887,6 +890,7 @@ class CoordsView(BaseView):
             return
         self._place_loading = True
         self._place_results = []
+        self._place_status = ""
         self._refresh_place_ui()
 
         # Unified geocoding via GeocodeService (Nominatim, or 高德 when a Web-服务
@@ -904,6 +908,7 @@ class CoordsView(BaseView):
             self._geo_thread.wait(500)
 
         backend, amap_key = resolve_backend(self.ctx.settings)
+        self._geo_backend_used = backend
         thread = QThread(self)
         worker = GeocodeWorker(q, backend=backend, amap_key=amap_key)
         worker.moveToThread(thread)
@@ -913,27 +918,55 @@ class CoordsView(BaseView):
         worker.failed.connect(thread.quit)
         thread.started.connect(worker.run)
         thread.finished.connect(thread.deleteLater)
+        # deleteLater destroys the C++ QThread — clear our refs when it fires,
+        # or the next search dies in isRunning() on the zombie wrapper
+        # (RuntimeError "wrapped C/C++ object … deleted") and「搜索中...」
+        # stays up forever.
+        thread.finished.connect(self._on_geo_thread_finished)
         # Keep refs alive until the thread finishes (overwritten next search).
         self._geo_thread = thread
         self._geo_worker = worker
         thread.start()
 
+    def _on_geo_thread_finished(self) -> None:
+        if self.sender() is self._geo_thread:  # a newer search may already own the slot
+            self._geo_thread = None
+            self._geo_worker = None
+
     def _on_geo_done(self, results: list) -> None:
         self._place_loading = False
         self._place_results = results
+        self._place_status = "" if results else "未找到匹配地点"
         self._refresh_place_ui()
         # If the map is open, drop a marker on the top hit (WGS-84 direct).
         if self._map_open and self._tile_map and results:
             wgs = results[0]["wgs"]
             self._tile_map.set_marker(wgs["lon"], wgs["lat"])
 
-    def _on_geo_failed(self, _msg: str) -> None:
+    def _on_geo_failed(self, msg: str) -> None:
         self._place_loading = False
         self._place_results = []
+        hint = ""
+        if getattr(self, "_geo_backend_used", "nominatim") == "nominatim":
+            # OSM is often unreachable from mainland China without a proxy;
+            # the app's working fallback is the user's own 高德 Web 服务 Key.
+            hint = "（OpenStreetMap 国内可能无法直连；可在 设置→项目 填入高德 Web 服务 Key 改用高德搜索）"
+        self._place_status = f"搜索失败：{msg}{hint}"
         self._refresh_place_ui()
 
     def _refresh_place_ui(self) -> None:
-        self._place_loading_lbl.setVisible(self._place_loading)
+        if self._place_loading:
+            self._place_loading_lbl.setText("搜索中...")
+            colour = _C["muted"]
+        elif self._place_status:
+            self._place_loading_lbl.setText(self._place_status)
+            colour = _C["danger"] if self._place_status.startswith("搜索失败") else _C["muted"]
+        else:
+            colour = _C["muted"]
+        self._place_loading_lbl.setStyleSheet(
+            f"font-size: 12px; color: {colour}; background: transparent; padding: 6px 0;"
+        )
+        self._place_loading_lbl.setVisible(self._place_loading or bool(self._place_status))
 
         # Rebuild results
         while self._place_results_lay.count():
