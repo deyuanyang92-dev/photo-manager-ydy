@@ -9,19 +9,24 @@ from __future__ import annotations
 import collections
 import json
 import math
+import urllib.parse
 import urllib.request
 from typing import Optional
 
 from PyQt6.QtCore import (
     QObject,
     QPoint,
+    QPointF,
+    QRectF,
     Qt,
     QThread,
+    QTimer,
     QUrl,
     pyqtSignal,
 )
 from PyQt6.QtGui import (
     QColor,
+    QFont,
     QMouseEvent,
     QPainter,
     QPainterPath,
@@ -29,8 +34,15 @@ from PyQt6.QtGui import (
     QPixmap,
     QWheelEvent,
 )
-from PyQt6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
+from PyQt6.QtNetwork import (
+    QNetworkAccessManager,
+    QNetworkProxy,
+    QNetworkReply,
+    QNetworkRequest,
+)
 from PyQt6.QtWidgets import QLabel, QSizePolicy, QWidget
+
+from app.utils import net_proxy
 
 # ── coordinate math ──────────────────────────────────────────────────────────
 
@@ -142,6 +154,13 @@ class TileMapWidget(QWidget):
     _MARKER_COLOR = QColor(41, 185, 171)
     _MARKER_HIT_R = 14  # pixels, hit-test radius
     _POINT_R = 11       # base bubble radius for multi-point layer
+    _SHAPE_ALIASES = {
+        "圆": "circle", "o": "circle", "circle": "circle",
+        "三角": "triangle", "^": "triangle", "triangle": "triangle",
+        "方": "square", "s": "square", "square": "square",
+        "星": "star", "*": "star", "star": "star",
+        "倒三角": "triangle_down", "v": "triangle_down", "triangle_down": "triangle_down",
+    }
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -165,6 +184,17 @@ class TileMapWidget(QWidget):
         self._cache = _TileCache(200)
         self._nam = QNetworkAccessManager(self)
         self._pending: dict[tuple, QNetworkReply] = {}
+        # 拉取失败（超时/网络不可达）的瓦片 key：跳过重试直到任一瓦片成功，
+        # 否则每次 repaint 都会重新发起请求形成 15s 超时风暴。
+        self._failed_keys: set[tuple] = set()
+        # OSM 直连在大陆被拦 → 后台探测本地 Clash 代理（net_proxy），只应用到
+        # 本 widget 的 NAM，绝不全局（全局会劫持局域网协作同步）。
+        self._applied_proxy: Optional[str] = None
+        self._proxy_retry = QTimer(self)
+        self._proxy_retry.setInterval(5000)
+        self._proxy_retry.timeout.connect(self._retry_after_failure)
+        self._proxy_retry_left = 0
+        net_proxy.start_detection()
         self._search_thread: Optional[QThread] = None
         self._search_worker = None
         self._loc_thread: Optional[QThread] = None
@@ -376,6 +406,26 @@ class TileMapWidget(QWidget):
         self.set_center(lon, lat, zoom=10)
         self.set_marker(lon, lat)
 
+    def stop_threads(self) -> None:
+        """Quit + wait any in-flight search/locate threads.
+
+        Call before the widget is destroyed so a finishing worker never calls
+        back into freed C++ (same zombie-thread hazard guarded elsewhere).
+        """
+        for attr in ("_search_thread", "_loc_thread"):
+            th = getattr(self, attr, None)
+            if th is not None:
+                try:
+                    if th.isRunning():
+                        th.quit()
+                        th.wait(800)
+                except RuntimeError:
+                    pass  # already deleted
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        self.stop_threads()
+        super().closeEvent(event)
+
     @property
     def marker_lon(self) -> Optional[float]:
         return self._marker_lon
@@ -414,6 +464,7 @@ class TileMapWidget(QWidget):
 
         painter.fillRect(0, 0, w, h, QColor("#e0e8e8"))
 
+        any_drawn = False
         for ty_i in range(y0, y1 + 1):
             for tx_i in range(x0, x1 + 1):
                 tx_w = tx_i % n  # wrap x
@@ -423,24 +474,91 @@ class TileMapWidget(QWidget):
                 pixmap = self._cache.get(key)
                 if pixmap is not None:
                     painter.drawPixmap(px, py, pixmap)
+                    any_drawn = True
                 else:
                     painter.fillRect(px, py, _TILE_SIZE, _TILE_SIZE, QColor("#d8e4e4"))
                     self._request_tile(z, tx_w, ty_i)
+
+        if self._failed_keys and not any_drawn:
+            painter.setPen(QPen(QColor("#6f8585")))
+            painter.drawText(
+                self.rect(), Qt.AlignmentFlag.AlignCenter,
+                "地图瓦片加载失败：无法连接 OpenStreetMap\n（直连可能被拦截，请确认代理已开启后平移/缩放重试）",
+            )
 
     def _point_radius(self, count: int) -> int:
         """Bubble radius grows slowly with the aggregated record count."""
         extra = int(min(10, math.log2(count + 1) * 3)) if count > 0 else 0
         return self._POINT_R + extra
 
+    @staticmethod
+    def _style_float(style: dict, key: str, default: float) -> float:
+        try:
+            return float(style.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _style_color(style: dict, key: str, default: QColor) -> QColor:
+        col = QColor(style.get(key, ""))
+        return col if col.isValid() else QColor(default)
+
+    def _point_visual_radius(self, point: dict) -> int:
+        style = self._point_style or {}
+        size_scale = self._style_float(style, "size", 80.0) / 80.0 if style else 1.0
+        count = int(point.get("count", 1) or 1)
+        return max(4, int(self._point_radius(count) * size_scale))
+
+    def _point_shape(self) -> str:
+        raw = (self._point_style or {}).get("shape", "圆")
+        return self._SHAPE_ALIASES.get(str(raw), "circle")
+
+    def _point_path(self, px: int, py: int, r: int, shape: str) -> QPainterPath:
+        path = QPainterPath()
+        if shape == "square":
+            path.addRoundedRect(QRectF(px - r, py - r, 2 * r, 2 * r), 2, 2)
+            return path
+        if shape == "triangle":
+            path.moveTo(QPointF(px, py - r))
+            path.lineTo(QPointF(px + r, py + r))
+            path.lineTo(QPointF(px - r, py + r))
+            path.closeSubpath()
+            return path
+        if shape == "triangle_down":
+            path.moveTo(QPointF(px, py + r))
+            path.lineTo(QPointF(px + r, py - r))
+            path.lineTo(QPointF(px - r, py - r))
+            path.closeSubpath()
+            return path
+        if shape == "star":
+            for i in range(10):
+                ang = -math.pi / 2 + i * math.pi / 5
+                rr = r if i % 2 == 0 else r * 0.45
+                pt = QPointF(px + math.cos(ang) * rr, py + math.sin(ang) * rr)
+                if i == 0:
+                    path.moveTo(pt)
+                else:
+                    path.lineTo(pt)
+            path.closeSubpath()
+            return path
+        path.addEllipse(QPointF(px, py), r, r)
+        return path
+
     def _draw_points(self, painter: QPainter) -> None:
         w, h = self.width(), self.height()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         self._point_pix = []
         style = self._point_style or {}
-        fill = QColor(style["fill"]) if style.get("fill") else self._MARKER_COLOR
-        edge = QColor(style["edge"]) if style.get("edge") else QColor(255, 255, 255)
-        size_scale = (style.get("size", 80) / 80.0) if style.get("size") else 1.0
+        fill = self._style_color(style, "fill", self._MARKER_COLOR)
+        edge = self._style_color(style, "edge", QColor(255, 255, 255))
+        alpha = max(0.05, min(1.0, self._style_float(style, "alpha", 0.9)))
+        fill.setAlphaF(alpha)
+        edge.setAlphaF(alpha)
+        edge_width = max(0.0, self._style_float(style, "edge_width", 2.0))
+        shape = self._point_shape()
         show_label = style.get("show_label", True)   # 默认显示计数 = v1 外观
+        label_color = self._style_color(style, "label_color", edge)
+        label_size = max(5, int(self._style_float(style, "label_size", 9.0)))
         for p in self._points:
             if p.get("lon") is None or p.get("lat") is None:
                 self._point_pix.append((0, 0))
@@ -450,10 +568,10 @@ class TileMapWidget(QWidget):
                 self._zoom, w, h,
             )
             self._point_pix.append((px, py))
-            r = int(self._point_radius(int(p.get("count", 1))) * size_scale)
+            r = self._point_visual_radius(p)
             painter.setBrush(fill)
-            painter.setPen(QPen(edge, 2))
-            painter.drawEllipse(px - r, py - r, 2 * r, 2 * r)
+            painter.setPen(QPen(edge, edge_width))
+            painter.drawPath(self._point_path(px, py, r, shape))
             if not show_label:
                 continue
             src = style.get("label_source", "count")  # 无样式时默认 count = v1 外观
@@ -462,13 +580,18 @@ class TileMapWidget(QWidget):
             from app.services.collection_record_service import marker_label
             txt = marker_label(p, src)
             if txt:
-                painter.setPen(QPen(edge))
+                old_font = painter.font()
+                font = QFont(old_font)
+                font.setPointSize(label_size)
+                painter.setFont(font)
+                painter.setPen(QPen(label_color))
                 from PyQt6.QtCore import QRect
                 painter.drawText(
                     QRect(px - r, py - r, 2 * r, 2 * r),
                     Qt.AlignmentFlag.AlignCenter,
                     txt,
                 )
+                painter.setFont(old_font)
 
     def _point_at(self, pos: QPoint) -> Optional[int]:
         """Return the index of the multi-point bubble under *pos*, or None.
@@ -483,7 +606,7 @@ class TileMapWidget(QWidget):
                 p["lon"], p["lat"], self._center_lon, self._center_lat,
                 self._zoom, w, h,
             )
-            r = self._point_radius(int(p.get("count", 1)))
+            r = self._point_visual_radius(p) + 4
             if math.hypot(pos.x() - px, pos.y() - py) <= r:
                 return idx
         return None
@@ -518,11 +641,15 @@ class TileMapWidget(QWidget):
 
     def _request_tile(self, z: int, x: int, y: int) -> None:
         key = (z, x, y)
-        if key in self._pending or self._cache.get(key) is not None:
+        if key in self._pending or key in self._failed_keys \
+                or self._cache.get(key) is not None:
             return
+        self._apply_osm_proxy()
         url = QUrl(self._TILE_URL.format(z=z, x=x, y=y))
         req = QNetworkRequest(url)
         req.setHeader(QNetworkRequest.KnownHeaders.UserAgentHeader, self._UA)
+        # 直连 OSM 不通（如无代理）时请求会无限挂起、key 永远占住 _pending
+        req.setTransferTimeout(15000)
         reply = self._nam.get(req)
         self._pending[key] = reply
         reply.finished.connect(lambda r=reply, k=key: self._on_tile_received(k, r))
@@ -537,8 +664,40 @@ class TileMapWidget(QWidget):
             px = QPixmap()
             if px.loadFromData(data):
                 self._cache.put(key, px)
+                self._failed_keys.clear()   # 网络恢复，允许重试旧失败区域
                 self.update()
+        else:
+            self._failed_keys.add(key)
+            # 探测可能晚于首批请求完成 —— 有限次轮询，代理一就绪即自动重试
+            if not self._proxy_retry.isActive():
+                self._proxy_retry_left = 6
+                self._proxy_retry.start()
+            self.update()   # 触发重绘以显示失败提示
         reply.deleteLater()
+
+    def _apply_osm_proxy(self) -> None:
+        """把 net_proxy 探测到的代理应用到本 widget 的 NAM（幂等）。"""
+        proxy = net_proxy.osm_proxy()
+        if not proxy or proxy == self._applied_proxy:
+            return
+        parts = urllib.parse.urlsplit(proxy)
+        if not parts.hostname:
+            return
+        self._nam.setProxy(QNetworkProxy(
+            QNetworkProxy.ProxyType.HttpProxy, parts.hostname, parts.port or 80,
+        ))
+        self._applied_proxy = proxy
+
+    def _retry_after_failure(self) -> None:
+        """失败后轮询：代理探测完成 → 清失败标记重绘（重绘即重新请求）。"""
+        self._proxy_retry_left -= 1
+        proxy = net_proxy.osm_proxy()
+        if proxy and proxy != self._applied_proxy:
+            self._proxy_retry.stop()
+            self._failed_keys.clear()
+            self.update()
+        elif self._proxy_retry_left <= 0 or not self._failed_keys:
+            self._proxy_retry.stop()
 
     def _abort_stale_pending(self) -> None:
         stale = [(k, r) for k, r in list(self._pending.items()) if k[0] != self._zoom]

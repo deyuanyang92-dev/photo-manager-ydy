@@ -31,6 +31,41 @@ def test_nominatim_parses_results_and_biases_to_china(monkeypatch):
     assert out[0]["name"]
 
 
+def test_nominatim_requests_addressdetails_and_disambiguates_duplicates(monkeypatch):
+    """Two bays both named 三门湾 must get distinct, province-qualified labels.
+
+    Without addressdetails the top-level ``name`` is identical for both, so the
+    user sees「三门湾 / 三门湾」and cannot tell浙江 from广东.  We request
+    ``addressdetails=1`` so each result carries 省/市 components.
+    """
+    captured = {}
+
+    def fake_get(url, *, headers=None, timeout=gs._TIMEOUT):
+        captured["url"] = url
+        return [
+            {
+                "lat": "29.0512", "lon": "121.7445", "name": "三门湾",
+                "display_name": "三门湾, 台州市, 浙江省, 中国",
+                "address": {"bay": "三门湾", "city": "台州市", "state": "浙江省"},
+            },
+            {
+                "lat": "22.0448", "lon": "113.9940", "name": "三门湾",
+                "display_name": "三门湾, 香洲区, 广东省, 中国",
+                "address": {"bay": "三门湾", "city": "香洲区", "state": "广东省"},
+            },
+        ]
+
+    monkeypatch.setattr(gs, "_http_get_json", fake_get)
+
+    out = gs.geocode("三门湾", backend="nominatim")
+
+    assert "addressdetails=1" in captured["url"]
+    assert len(out) == 2
+    assert out[0]["name"] != out[1]["name"]
+    assert "浙江省" in out[0]["name"]
+    assert "广东省" in out[1]["name"]
+
+
 # ── AMap backend ─────────────────────────────────────────────────────────────
 
 def test_amap_converts_gcj02_to_wgs84(monkeypatch):
@@ -125,3 +160,36 @@ def test_worker_emits_failed_on_exception(qtbot, monkeypatch):
     w.failed.connect(errors.append)
     w.run()  # must NOT raise
     assert errors and "network down" in errors[0]
+
+
+# ── OSM 代理选择（Nominatim 直连被墙时走 net_proxy 探测到的本地代理）──────────
+
+def test_opener_for_amap_url_skips_detection(monkeypatch):
+    from app.utils import net_proxy
+
+    def boom():
+        raise AssertionError("detection must not run for non-OSM hosts")
+
+    monkeypatch.setattr(net_proxy, "detect_osm_proxy", boom)
+    assert gs._opener_for("https://restapi.amap.com/v3/place/text?x=1") is None
+
+
+def test_opener_for_osm_without_proxy_is_direct(monkeypatch):
+    from app.utils import net_proxy
+    monkeypatch.setattr(net_proxy, "detect_osm_proxy", lambda force=False: None)
+    assert gs._opener_for("https://nominatim.openstreetmap.org/search?q=x") is None
+
+
+def test_opener_for_osm_with_proxy_routes_through_it(monkeypatch):
+    import urllib.request
+    from app.utils import net_proxy
+    monkeypatch.setattr(
+        net_proxy, "detect_osm_proxy", lambda force=False: "http://127.0.0.1:7892"
+    )
+    opener = gs._opener_for("https://nominatim.openstreetmap.org/search?q=x")
+    assert opener is not None
+    proxies = [
+        h.proxies for h in opener.handlers
+        if isinstance(h, urllib.request.ProxyHandler) and getattr(h, "proxies", None)
+    ]
+    assert proxies and proxies[0].get("https") == "http://127.0.0.1:7892"

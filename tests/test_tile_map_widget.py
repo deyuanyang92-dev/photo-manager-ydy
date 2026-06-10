@@ -410,6 +410,36 @@ class TestMultiPointLayer:
         w.render(pm)   # exercises paintEvent → _draw_points
         p.end()
 
+    def test_paint_with_each_point_shape_no_crash(self):
+        from PyQt6.QtGui import QPixmap
+        TileMapWidget = _import_widget()
+        w = TileMapWidget()
+        w.resize(400, 300)
+        w.set_points(_pts((121.0, 29.0)))
+        for shape in ("圆", "三角", "方", "星", "倒三角"):
+            w.set_point_style({"shape": shape, "size": 120, "fill": "#29b9ab",
+                               "edge": "#ffffff", "edge_width": 1.5,
+                               "alpha": 0.85, "show_label": True,
+                               "label_source": "label", "label_size": 10,
+                               "label_color": "#17212b"})
+            pm = QPixmap(400, 300)
+            w.render(pm)
+
+    def test_point_hit_radius_follows_style_size(self):
+        from PyQt6.QtCore import QPoint
+        from app.widgets.tile_map_widget import lon_lat_to_pixel
+        TileMapWidget = _import_widget()
+        w = TileMapWidget()
+        w.resize(800, 600)
+        w.set_points(_pts((121.0, 29.0)))
+        px, py = lon_lat_to_pixel(121.0, 29.0, w._center_lon, w._center_lat, w._zoom, 800, 600)
+
+        w.set_point_style({"size": 8})
+        assert w._point_at(QPoint(px + 20, py)) is None
+
+        w.set_point_style({"size": 240})
+        assert w._point_at(QPoint(px + 20, py)) == 0
+
     def test_click_on_point_emits_index(self):
         from PyQt6.QtCore import QPoint, Qt
         from PyQt6.QtGui import QMouseEvent
@@ -466,3 +496,162 @@ class TestMultiPointLayer:
             (w.mousePressEvent if typ == QMouseEvent.Type.MouseButtonPress
              else w.mouseReleaseEvent)(ev)
         assert w.marker_lon is not None   # 放置成功
+
+
+# ── tile fetch hardening（网络不可达：超时 + 失败反馈，不再无限挂起） ─────────────
+
+class _FakeReply:
+    """Stands in for QNetworkReply in _request_tile/_on_tile_received tests."""
+
+    def __init__(self, error=None, data=b""):
+        from PyQt6.QtNetwork import QNetworkReply
+        self._error = error if error is not None else QNetworkReply.NetworkError.NoError
+        self._data = data
+        self.finished = _FakeSignal()
+
+    def error(self):
+        return self._error
+
+    def readAll(self):
+        return self._data
+
+    def deleteLater(self):
+        pass
+
+
+class _FakeSignal:
+    def connect(self, *_):
+        pass
+
+
+def _png_bytes():
+    from PyQt6.QtCore import QBuffer, QIODevice
+    from PyQt6.QtGui import QPixmap
+    pm = QPixmap(8, 8)
+    pm.fill()
+    buf = QBuffer()
+    buf.open(QIODevice.OpenModeFlag.WriteOnly)
+    pm.save(buf, "PNG")
+    return bytes(buf.data())
+
+
+class TestTileFetchHardening:
+    def test_request_tile_sets_transfer_timeout(self):
+        """直连被墙时请求必须能超时失败，不能永久挂起占住 _pending。"""
+        TileMapWidget = _import_widget()
+        w = TileMapWidget()
+        captured = {}
+
+        def fake_get(req):
+            captured["req"] = req
+            return _FakeReply()
+
+        w._nam.get = fake_get
+        w._request_tile(5, 1, 2)
+        assert "req" in captured
+        assert captured["req"].transferTimeout() > 0
+
+    def test_failed_tile_marked_and_not_retried(self):
+        """失败 key 记入 _failed_keys；后续 _request_tile 跳过，不再风暴重试。"""
+        from PyQt6.QtNetwork import QNetworkReply
+        TileMapWidget = _import_widget()
+        w = TileMapWidget()
+        w._zoom = 5
+        key = (5, 1, 2)
+        reply = _FakeReply(error=QNetworkReply.NetworkError.OperationCanceledError)
+        w._pending[key] = reply
+        w._on_tile_received(key, reply)
+        assert key not in w._pending
+        assert key in w._failed_keys
+
+        calls = []
+        w._nam.get = lambda req: calls.append(req) or _FakeReply()
+        w._request_tile(5, 1, 2)
+        assert calls == []   # skipped, no re-request
+
+    def test_success_clears_failed_keys(self):
+        """网络恢复（任一瓦片成功）后清空失败标记，允许重试旧区域。"""
+        TileMapWidget = _import_widget()
+        w = TileMapWidget()
+        w._zoom = 5
+        w._failed_keys.add((5, 9, 9))
+        key = (5, 1, 2)
+        reply = _FakeReply(data=_png_bytes())
+        w._pending[key] = reply
+        w._on_tile_received(key, reply)
+        assert w._failed_keys == set()
+        assert w._cache.get(key) is not None
+
+
+# ── OSM proxy auto-detection integration ────────────────────────────────────
+# 根因：大陆直连 *.openstreetmap.org 被拦（TCP 挂死），桌面启动的 GUI 没有
+# http_proxy 环境变量 → Qt 直连 → 瓦片永不到达。net_proxy 自动探测本地
+# Clash 代理，TileMapWidget 仅对自己的 NAM 应用（绝不全局，保护局域网协作）。
+
+class TestOsmProxyIntegration:
+    def test_init_starts_background_detection(self, monkeypatch):
+        from app.utils import net_proxy
+        calls = []
+        monkeypatch.setattr(net_proxy, "start_detection", lambda: calls.append(1))
+        TileMapWidget = _import_widget()
+        TileMapWidget()
+        assert calls == [1]
+
+    def test_request_applies_detected_proxy_to_nam(self, monkeypatch):
+        from app.utils import net_proxy
+        from PyQt6.QtNetwork import QNetworkProxy
+        monkeypatch.setattr(net_proxy, "osm_proxy", lambda: "http://127.0.0.1:7892")
+        TileMapWidget = _import_widget()
+        w = TileMapWidget()
+        w._nam.get = lambda req: _FakeReply()
+        w._request_tile(5, 1, 2)
+        proxy = w._nam.proxy()
+        assert proxy.type() == QNetworkProxy.ProxyType.HttpProxy
+        assert proxy.hostName() == "127.0.0.1"
+        assert proxy.port() == 7892
+
+    def test_no_proxy_detected_leaves_nam_default(self, monkeypatch):
+        from app.utils import net_proxy
+        from PyQt6.QtNetwork import QNetworkProxy
+        monkeypatch.setattr(net_proxy, "osm_proxy", lambda: None)
+        TileMapWidget = _import_widget()
+        w = TileMapWidget()
+        w._nam.get = lambda req: _FakeReply()
+        w._request_tile(5, 1, 2)
+        assert w._nam.proxy().type() == QNetworkProxy.ProxyType.DefaultProxy
+
+    def test_retry_clears_failed_keys_when_proxy_appears(self, monkeypatch):
+        """探测晚于首批请求完成时：定时器发现新代理 → 清失败标记触发重试。"""
+        from app.utils import net_proxy
+        TileMapWidget = _import_widget()
+        w = TileMapWidget()
+        w._failed_keys.add((5, 1, 2))
+        monkeypatch.setattr(net_proxy, "osm_proxy", lambda: "http://127.0.0.1:7892")
+        w._proxy_retry_left = 3
+        w._retry_after_failure()
+        assert w._failed_keys == set()
+        assert not w._proxy_retry.isActive()
+
+    def test_failure_starts_retry_timer(self):
+        from PyQt6.QtNetwork import QNetworkReply
+        TileMapWidget = _import_widget()
+        w = TileMapWidget()
+        w._zoom = 5
+        key = (5, 1, 2)
+        reply = _FakeReply(error=QNetworkReply.NetworkError.OperationCanceledError)
+        w._pending[key] = reply
+        w._on_tile_received(key, reply)
+        assert w._proxy_retry.isActive()
+        w._proxy_retry.stop()
+
+    def test_retry_gives_up_after_budget(self, monkeypatch):
+        from app.utils import net_proxy
+        TileMapWidget = _import_widget()
+        w = TileMapWidget()
+        w._failed_keys.add((5, 1, 2))
+        monkeypatch.setattr(net_proxy, "osm_proxy", lambda: None)
+        w._proxy_retry_left = 1
+        w._proxy_retry.start()
+        w._retry_after_failure()
+        assert not w._proxy_retry.isActive()
+        assert (5, 1, 2) in w._failed_keys   # 仍标记失败，错误提示持续显示

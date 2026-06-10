@@ -39,10 +39,31 @@ _TIMEOUT = 6
 _LIMIT = 5
 
 
+def _opener_for(url: str):
+    """OSM 域名且探测到本地代理时返回带代理的 opener；其余返回 None（直连）。
+
+    Nominatim 直连在大陆被拦（TCP 挂死）；net_proxy 自动发现 Clash 类本地代理。
+    ``detect_osm_proxy`` 是阻塞缓存式探测 —— 本函数只会在 GeocodeWorker 的
+    工作线程里被调用，不会卡 UI。AMap 国内直连可达，永不走代理。
+    """
+    host = urllib.parse.urlsplit(url).hostname or ""
+    if not host.endswith("openstreetmap.org"):
+        return None
+    from app.utils import net_proxy
+    proxy = net_proxy.detect_osm_proxy()
+    if not proxy:
+        return None
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler({"http": proxy, "https": proxy})
+    )
+
+
 def _http_get_json(url: str, *, headers: Optional[dict] = None, timeout: int = _TIMEOUT):
     """GET ``url`` and parse JSON.  Single network choke-point (tests patch this)."""
     req = urllib.request.Request(url, headers=headers or {"User-Agent": _UA})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    opener = _opener_for(url)
+    open_fn = opener.open if opener is not None else urllib.request.urlopen
+    with open_fn(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode())
 
 
@@ -53,6 +74,7 @@ def _search_nominatim(query: str, *, timeout: int = _TIMEOUT) -> list[dict]:
         "limit": _LIMIT,
         "accept-language": "zh",
         "countrycodes": "cn",
+        "addressdetails": 1,  # carry 省/市 so same-named places (两个「三门湾」) stay distinct
     })
     data = _http_get_json(
         url,
