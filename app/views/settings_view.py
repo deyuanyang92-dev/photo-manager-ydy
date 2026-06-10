@@ -26,7 +26,7 @@ import os
 import platform
 from typing import TYPE_CHECKING
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QKeySequence
 from PyQt6.QtWidgets import (
     QApplication,
@@ -419,7 +419,7 @@ class SettingsView(BaseView):
 
         self._refresh_btn = QPushButton("重新探测")
         self._refresh_btn.setStyleSheet(_btn_style("outline"))
-        self._refresh_btn.clicked.connect(self._detect_helicon)
+        self._refresh_btn.clicked.connect(self._on_redetect_click)
 
         btn_row.addWidget(self._test_btn)
         btn_row.addWidget(self._save_btn)
@@ -1776,6 +1776,26 @@ class SettingsView(BaseView):
             if bar:
                 bar.showMessage(msg, timeout_ms)
 
+    def _flash_button(self, btn: QPushButton, text: str, duration_ms: int = 1500) -> None:
+        """按钮文字瞬时确认后恢复 — 路径/标签不变时唯一可见反馈（同 40ce2c9 对话框）。"""
+        if btn.property("_flashing"):
+            return
+        orig = btn.text()
+        btn.setProperty("_flashing", True)
+        btn.setText(text)
+
+        def _restore() -> None:
+            btn.setText(orig)
+            btn.setProperty("_flashing", False)
+
+        # Timer parented to the button: it dies with the button, so leaving the
+        # page within the flash window can't fire _restore on a dead widget.
+        timer = QTimer(btn)
+        timer.setSingleShot(True)
+        timer.timeout.connect(_restore)
+        timer.timeout.connect(timer.deleteLater)
+        timer.start(duration_ms)
+
     def _on_test_click(self) -> None:
         """检测 — validate custom path then auto-detect (mirrors web testBtn handler)."""
         custom = self._helicon_exe_edit.text().strip()
@@ -1785,12 +1805,14 @@ class SettingsView(BaseView):
             self._show_status("正在自动探测 Helicon Focus…")
         self._save_helicon()
         self._detect_helicon(custom_path=custom)
+        self._flash_button(self._test_btn, "已检测 ✓")
 
     def _on_save_click(self) -> None:
         """保存 — persist custom path."""
         self._save_helicon()
         self._refresh_helicon_display()
         self._show_status("✓ Helicon 设置已保存")
+        self._flash_button(self._save_btn, "已保存 ✓")
 
     def _on_clear_click(self) -> None:
         """清除自定义 — wipe custom path and re-detect."""
@@ -1798,6 +1820,12 @@ class SettingsView(BaseView):
         self._save_helicon()
         self._detect_helicon()
         self._show_status("已清除自定义路径，已重新探测")
+        self._flash_button(self._clear_btn, "已清除 ✓")
+
+    def _on_redetect_click(self) -> None:
+        """重新探测按钮 — 结果不变时标签一字不动，必须闪按钮确认。"""
+        self._detect_helicon()
+        self._flash_button(self._refresh_btn, "已重新探测 ✓")
 
     def _detect_helicon(self, custom_path: str = "") -> None:
         """重新探测 / auto-detect — calls helicon_service.detect_helicon()."""

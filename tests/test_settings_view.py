@@ -856,3 +856,43 @@ class TestTaskSpecRoundTrips:
 
         stored = view.ctx.settings._qs.value(_K_WB_FILE_VIEW_MODE, "jpg-tif")
         assert stored == "all"
+
+
+# ── Helicon 配置按钮可见反馈（镜像 40ce2c9 对话框同病修复）────────────────────
+# 「保存」成功只闪底部状态栏：路径/标签均不变时按钮附近纹丝不动 → 用户读作
+# "无响应死按钮"。修复 = 按钮文字瞬时确认（已保存 ✓），1.5s 后恢复。
+
+class TestHeliconButtonFlash:
+    def test_save_click_flashes_button(self, view):
+        view._helicon_exe_edit.setText("/tmp/HeliconFocus.exe")
+        view._save_btn.click()
+        assert view._save_btn.text() == "已保存 ✓"
+        assert view._save_btn.property("_flashing") is True
+
+    def test_flash_restores_after_timeout(self, view, qtbot):
+        view._save_btn.click()
+        qtbot.waitUntil(lambda: view._save_btn.text() == "保存", timeout=3000)
+        assert not view._save_btn.property("_flashing")
+
+    def test_clear_click_flashes_button(self, view, monkeypatch):
+        monkeypatch.setattr(view, "_detect_helicon", lambda *a, **k: None)
+        view._clear_btn.click()
+        assert view._clear_btn.text() == "已清除 ✓"
+
+    def test_redetect_click_flashes_button(self, view, monkeypatch):
+        monkeypatch.setattr(view, "_detect_helicon", lambda *a, **k: None)
+        view._refresh_btn.click()
+        assert view._refresh_btn.text() == "已重新探测 ✓"
+
+    def test_test_click_flashes_button(self, view, monkeypatch):
+        monkeypatch.setattr(view, "_detect_helicon", lambda *a, **k: None)
+        view._test_btn.click()
+        assert view._test_btn.text() == "已检测 ✓"
+
+    def test_programmatic_detect_does_not_flash_redetect(self, view, monkeypatch):
+        """on_activate 等程序化探测不得闪「重新探测」按钮。"""
+        monkeypatch.setattr(
+            "app.services.helicon_service.detect_helicon", lambda **k: None
+        )
+        view._detect_helicon()
+        assert view._refresh_btn.text() == "重新探测"
