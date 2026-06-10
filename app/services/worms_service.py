@@ -169,6 +169,15 @@ _SNAPSHOT_FIELDS = (
 )
 
 
+def _norm_authority(s: Any) -> str:
+    """Normalise an authority string for tolerant comparison.
+
+    Lowercases and strips every non-alphanumeric character, so
+    ``"(W. Wood, 1802)"`` and ``"W. Wood, 1802"`` compare equal.
+    """
+    return "".join(ch for ch in str(s or "").lower() if ch.isalnum())
+
+
 def _taxonomy_key(record: dict) -> str:
     """Pipe-joined class|order|family|species key (oracle taxonomyKey)."""
     return "|".join(
@@ -452,6 +461,10 @@ class WormsService:
         *,
         marine_only: bool = False,
         auto_accept_near: bool = False,
+        limit_taxon: Optional[str] = None,
+        match_authority: bool = False,
+        authorities: Optional[list[str]] = None,
+        match_rank: Optional[str] = None,
         progress_cb: Optional[Callable[[int, int], None]] = None,
     ) -> list[dict]:
         """Batch-match scientific names against WoRMS via TAXAMATCH.
@@ -479,6 +492,18 @@ class WormsService:
         where *total* is the number of unique cache-miss names being fetched.
         Never reads or writes any ``*Cn`` field — WoRMS supplies only Latin
         names and hierarchy.
+
+        Mirrors the website Match-Taxa options (applied AFTER the cached raw
+        TAXAMATCH candidates, so the cache stays filter-independent):
+
+          * ``limit_taxon`` — keep only candidates belonging to this higher
+            taxon (homonym disambiguator, e.g. "Porifera").
+          * ``match_authority`` + ``authorities`` (per-input-row) — when on,
+            narrow each row's candidates to those whose authority matches the
+            supplied author string; lenient (keeps all if none match, so an
+            author typo never zeroes a real match).
+          * ``match_rank`` — keep only candidates of this WoRMS rank
+            (e.g. "Genus"); the website's "Match upto".
         """
         norm = [(n or "").strip() for n in names]
 
@@ -515,18 +540,59 @@ class WormsService:
             if progress_cb is not None:
                 progress_cb(done, total)
 
-        # Assemble per-input results in original order.
+        # Assemble per-input results in original order, applying the website
+        # Match-Taxa filters to each row's raw (cached) candidate list.
         results: list[dict] = []
         for i, n in enumerate(norm):
             if not n:
                 results.append({"input": names[i], "candidates": [],
                                 "resolution": "none", "best": None})
                 continue
-            cands = candidates_by_lower.get(n.lower(), [])
+            raw = candidates_by_lower.get(n.lower(), [])
+            authority = None
+            if match_authority and authorities and i < len(authorities):
+                authority = authorities[i]
+            cands = self._filter_candidates(
+                raw, limit_taxon=limit_taxon, authority=authority, rank=match_rank
+            )
             resolution, best = self.classify_match(cands, auto_accept_near=auto_accept_near)
             results.append({"input": names[i], "candidates": cands,
                             "resolution": resolution, "best": best})
         return results
+
+    @staticmethod
+    def _filter_candidates(
+        candidates: list,
+        *,
+        limit_taxon: Optional[str] = None,
+        authority: Optional[str] = None,
+        rank: Optional[str] = None,
+    ) -> list:
+        """Apply Limit-to-taxon / Match-authority / Match-upto filters.
+
+        Operates on the inline AphiaRecord fields only (no extra API calls).
+        Authority filtering is lenient: if no candidate's author matches, the
+        full list is kept rather than emptied.
+        """
+        out = list(candidates or [])
+        if limit_taxon:
+            lt = limit_taxon.strip().lower()
+            ranks = ("kingdom", "phylum", "class", "order", "family", "genus")
+            out = [
+                c for c in out
+                if any(str(c.get(r, "")).strip().lower() == lt for r in ranks)
+                or str(c.get("scientificname", "")).strip().lower() == lt
+            ]
+        if rank:
+            rk = rank.strip().lower()
+            out = [c for c in out if str(c.get("rank", "")).strip().lower() == rk]
+        if authority:
+            target = _norm_authority(authority)
+            if target:
+                matched = [c for c in out if _norm_authority(c.get("authority", "")) == target]
+                if matched:                       # lenient — keep all on no match
+                    out = matched
+        return out
 
     def _match_chunk(self, chunk: list[str], marine_only: bool) -> list[list]:
         """Fetch one ≤50-name chunk; return a candidate list per input name.

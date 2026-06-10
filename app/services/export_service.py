@@ -363,41 +363,62 @@ def _m_resolution(result: dict) -> str:
 
 
 #: WoRMS append-column catalog: (key, header label, extractor(result) -> str).
-#: ``key`` is the stable identifier the UI passes in ``append_cols``; the header
-#: is what lands in the file.  Mirrors the WoRMS website's output-column choices.
-MATCH_APPEND_COLUMNS: list[tuple[str, str, callable]] = [
-    ("aphia_id",           "AphiaID",      lambda r: _m_best(r, "AphiaID")),
-    ("matched_name",       "匹配名",        lambda r: _m_best(r, "scientificname")),
-    ("accepted_name",      "接受名",        lambda r: _ms((r.get("best") or {}).get("valid_name")
-                                                        or (r.get("best") or {}).get("scientificname"))),
-    ("accepted_aphia_id",  "接受AphiaID",   lambda r: _ms((r.get("best") or {}).get("valid_AphiaID")
-                                                        or (r.get("best") or {}).get("AphiaID"))),
-    ("authority",          "命名人",        lambda r: _m_best(r, "authority")),
-    ("accepted_authority", "接受名命名人",   lambda r: _m_best(r, "valid_authority")),
-    ("status",             "分类状态",       lambda r: _m_best(r, "status")),
-    ("match_type",         "命中类型",       lambda r: _m_best(r, "match_type")),
-    ("rank",               "阶元",          lambda r: _m_best(r, "rank")),
-    ("kingdom",            "界",            lambda r: _m_rank(r, "kingdom")),
-    ("phylum",             "门",            lambda r: _m_rank(r, "phylum")),
-    ("class",              "纲",            lambda r: _m_rank(r, "class")),
-    ("order",              "目",            lambda r: _m_rank(r, "order")),
-    ("family",             "科",            lambda r: _m_rank(r, "family")),
-    ("genus",              "属",            lambda r: _m_rank(r, "genus")),
-    ("classification",     "完整分类链",      _m_classification),
-    ("lsid",               "LSID",         lambda r: _m_best(r, "lsid")),
-    ("tsn",                "TSN",          lambda r: _m_best(r, "tsn")),
-    ("environment",        "生境",          _m_environment),
-    ("url",                "WoRMS链接",     lambda r: _m_best(r, "url")),
-    ("resolution",         "复核状态",       _m_resolution),
+#: ``key`` is the stable identifier the UI passes in ``append_cols``; each entry
+#: carries a Chinese AND an English header (output language is user-selectable),
+#: plus the extractor.  Mirrors the WoRMS website's output-column choices.
+#: NOTE: WoRMS "Qualitystatus" is NOT exposed by the public REST
+#: AphiaRecordsByMatchNames endpoint, so it cannot be a column here; "分类状态 /
+#: Taxon status" (``status``) is the available taxon-status field.
+MATCH_APPEND_COLUMNS: list[tuple[str, str, str, callable]] = [
+    ("aphia_id",           "AphiaID",      "AphiaID",          lambda r: _m_best(r, "AphiaID")),
+    ("matched_name",       "匹配名",        "ScientificName",   lambda r: _m_best(r, "scientificname")),
+    ("accepted_name",      "接受名",        "Accepted name",    lambda r: _ms((r.get("best") or {}).get("valid_name")
+                                                                            or (r.get("best") or {}).get("scientificname"))),
+    ("accepted_aphia_id",  "接受AphiaID",   "Accepted AphiaID", lambda r: _ms((r.get("best") or {}).get("valid_AphiaID")
+                                                                            or (r.get("best") or {}).get("AphiaID"))),
+    ("authority",          "命名人",        "Authority",        lambda r: _m_best(r, "authority")),
+    ("accepted_authority", "接受名命名人",   "Accepted Authority", lambda r: _m_best(r, "valid_authority")),
+    ("status",             "分类状态",       "Taxon status",     lambda r: _m_best(r, "status")),
+    ("unacceptreason",     "不接受原因",     "Unaccept reason",  lambda r: _m_best(r, "unacceptreason")),
+    ("match_type",         "命中类型",       "Match type",       lambda r: _m_best(r, "match_type")),
+    ("rank",               "阶元",          "Rank",             lambda r: _m_best(r, "rank")),
+    ("kingdom",            "界",            "Kingdom",          lambda r: _m_rank(r, "kingdom")),
+    ("phylum",             "门",            "Phylum",           lambda r: _m_rank(r, "phylum")),
+    ("class",              "纲",            "Class",            lambda r: _m_rank(r, "class")),
+    ("order",              "目",            "Order",            lambda r: _m_rank(r, "order")),
+    ("family",             "科",            "Family",           lambda r: _m_rank(r, "family")),
+    ("genus",              "属",            "Genus",            lambda r: _m_rank(r, "genus")),
+    ("classification",     "完整分类链",      "Classification",   _m_classification),
+    ("lsid",               "LSID",         "LSID",             lambda r: _m_best(r, "lsid")),
+    ("tsn",                "TSN",          "TSN",              lambda r: _m_best(r, "tsn")),
+    ("environment",        "生境",          "Environment",      _m_environment),
+    ("citation",           "引用",          "Citation",         lambda r: _m_best(r, "citation")),
+    ("url",                "WoRMS链接",     "URL",              lambda r: _m_best(r, "url")),
+    ("resolution",         "复核状态",       "Match status",     _m_resolution),
 ]
 
+#: Output-header language: "zh" (中文), "en" (English), "both" (双语).
+OUTPUT_LANGS = ("zh", "en", "both")
 
-def _resolve_match_cols(append_cols: Optional[list[str]]) -> list[tuple[str, str, callable]]:
+
+def _col_header(zh: str, en: str, lang: str) -> str:
+    if lang == "en":
+        return en
+    if lang == "both" and zh != en:
+        return f"{zh} ({en})"
+    return zh
+
+
+def _resolve_match_cols(append_cols: Optional[list[str]]) -> list[tuple[str, str, str, callable]]:
     """Filter the append catalog to the requested keys (None/empty → all)."""
     if not append_cols:
         return MATCH_APPEND_COLUMNS
-    by_key = {k: (k, h, fn) for k, h, fn in MATCH_APPEND_COLUMNS}
+    by_key = {k: (k, zh, en, fn) for k, zh, en, fn in MATCH_APPEND_COLUMNS}
     return [by_key[k] for k in append_cols if k in by_key]
+
+
+def _append_headers(cols, lang: str) -> list[str]:
+    return [_col_header(zh, en, lang) for _k, zh, en, _fn in cols]
 
 
 def _annotated_rows(headers, rows, results, cols) -> list[list]:
@@ -406,7 +427,7 @@ def _annotated_rows(headers, rows, results, cols) -> list[list]:
     for i, row in enumerate(rows):
         result = results[i] if i < len(results) else {}
         out = [row.get(h, "") for h in headers]
-        for _key, _hdr, fn in cols:
+        for _key, _zh, _en, fn in cols:
             try:
                 out.append(fn(result))
             except Exception:
@@ -429,6 +450,7 @@ def export_annotated_xlsx(
     results: list[dict],
     append_cols: Optional[list[str]],
     path: str | Path,
+    lang: str = "zh",
 ) -> Path:
     """Write the original table + appended WoRMS columns to an .xlsx file.
 
@@ -442,12 +464,15 @@ def export_annotated_xlsx(
         *rows*).  May carry an optional ``chain`` list for full classification.
     append_cols:
         Stable keys from :data:`MATCH_APPEND_COLUMNS` to append; None → all.
+    lang:
+        Header language for the appended WoRMS columns — "zh" / "en" / "both".
+        Original columns are always kept verbatim.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
     cols = _resolve_match_cols(append_cols)
-    out_headers = list(headers) + [h for _k, h, _fn in cols]
+    out_headers = list(headers) + _append_headers(cols, lang)
     data_rows = _annotated_rows(headers, rows, results, cols)
 
     wb = openpyxl.Workbook()
@@ -490,13 +515,17 @@ def export_annotated_csv(
     results: list[dict],
     append_cols: Optional[list[str]],
     path: str | Path,
+    lang: str = "zh",
 ) -> Path:
-    """Write the original table + appended WoRMS columns to a UTF-8-BOM CSV."""
+    """Write the original table + appended WoRMS columns to a UTF-8-BOM CSV.
+
+    ``lang`` sets the appended-column header language ("zh"/"en"/"both").
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
     cols = _resolve_match_cols(append_cols)
-    out_headers = list(headers) + [h for _k, h, _fn in cols]
+    out_headers = list(headers) + _append_headers(cols, lang)
     data_rows = _annotated_rows(headers, rows, results, cols)
 
     with path.open("w", encoding="utf-8-sig", newline="") as fh:

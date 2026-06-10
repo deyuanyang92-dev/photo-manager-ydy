@@ -44,6 +44,27 @@ class TestReadTable:
         assert headers == ["地区", "站位", "经度", "纬度"]
         assert rows[0]["站位"] == "B2"
 
+    def test_read_csv_no_header(self, tmp_path: Path):
+        """has_header=False → synthesise column names, keep row 0 as data."""
+        p = tmp_path / "n.csv"
+        p.write_text("Abra alba\nCancer pagurus\n", encoding="utf-8")
+        headers, rows = cis.read_table(str(p), has_header=False)
+        assert len(rows) == 2                       # first row NOT consumed as header
+        assert rows[0][headers[0]] == "Abra alba"
+        assert rows[1][headers[0]] == "Cancer pagurus"
+
+    def test_read_xlsx_no_header(self, tmp_path: Path):
+        import openpyxl
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.append(["Abra alba"])
+        ws.append(["Cancer pagurus"])
+        p = tmp_path / "n.xlsx"
+        wb.save(p)
+        headers, rows = cis.read_table(str(p), has_header=False)
+        assert len(rows) == 2
+        assert rows[0][headers[0]] == "Abra alba"
+
 
 class TestSampleTable:
     def test_sample_table_is_previewable(self):

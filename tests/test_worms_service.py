@@ -1153,6 +1153,69 @@ class TestMatchNames:
         assert results[0]["best"]["AphiaID"] == 5
 
 
+class TestMatchFilters:
+    """match_names candidate filters — Limit-to-taxon / Match-authority / Match-upto."""
+
+    def test_limit_taxon_filters_by_higher_taxon(self, tmp_path):
+        svc = _make_match_service(str(tmp_path))
+        resp = _mock_resp([[
+            {"AphiaID": 1, "scientificname": "Abra alba", "match_type": "exact", "phylum": "Mollusca"},
+            {"AphiaID": 2, "scientificname": "Abra alba", "match_type": "exact", "phylum": "Porifera"},
+        ]])
+        with patch("httpx.get", return_value=resp):
+            results = svc.match_names(["Abra alba"], limit_taxon="Mollusca")
+        assert [c["AphiaID"] for c in results[0]["candidates"]] == [1]
+        assert results[0]["resolution"] == "matched"
+
+    def test_match_authority_narrows_to_matching_author(self, tmp_path):
+        svc = _make_match_service(str(tmp_path))
+        resp = _mock_resp([[
+            {"AphiaID": 1, "scientificname": "Abra alba", "match_type": "exact", "authority": "(W. Wood, 1802)"},
+            {"AphiaID": 2, "scientificname": "Abra alba", "match_type": "exact", "authority": "Smith, 1900"},
+        ]])
+        with patch("httpx.get", return_value=resp):
+            results = svc.match_names(["Abra alba"], match_authority=True, authorities=["W. Wood, 1802"])
+        assert [c["AphiaID"] for c in results[0]["candidates"]] == [1]
+        assert results[0]["resolution"] == "matched"
+
+    def test_authority_no_match_keeps_all(self, tmp_path):
+        svc = _make_match_service(str(tmp_path))
+        resp = _mock_resp([[
+            {"AphiaID": 1, "scientificname": "Abra alba", "match_type": "exact", "authority": "X, 1"},
+            {"AphiaID": 2, "scientificname": "Abra alba", "match_type": "exact", "authority": "Y, 2"},
+        ]])
+        with patch("httpx.get", return_value=resp):
+            results = svc.match_names(["Abra alba"], match_authority=True, authorities=["Zzz, 9999"])
+        assert len(results[0]["candidates"]) == 2          # lenient: kept all on no author match
+        assert results[0]["resolution"] == "ambiguous"
+
+    def test_match_rank_filters(self, tmp_path):
+        svc = _make_match_service(str(tmp_path))
+        resp = _mock_resp([[
+            {"AphiaID": 1, "scientificname": "Abra", "match_type": "exact", "rank": "Genus"},
+            {"AphiaID": 2, "scientificname": "Abra alba", "match_type": "exact", "rank": "Species"},
+        ]])
+        with patch("httpx.get", return_value=resp):
+            results = svc.match_names(["Abra"], match_rank="Genus")
+        assert [c["AphiaID"] for c in results[0]["candidates"]] == [1]
+
+    def test_cache_stores_unfiltered_so_filters_recompute(self, tmp_path):
+        """Cache holds the raw TAXAMATCH result; a re-run with a different filter
+        must re-filter the cached candidates, not the previously-filtered set."""
+        svc = _make_match_service(str(tmp_path))
+        resp = _mock_resp([[
+            {"AphiaID": 1, "scientificname": "Abra alba", "match_type": "exact", "phylum": "Mollusca"},
+            {"AphiaID": 2, "scientificname": "Abra alba", "match_type": "exact", "phylum": "Porifera"},
+        ]])
+        with patch("httpx.get", return_value=resp):
+            svc.match_names(["Abra alba"], limit_taxon="Mollusca")
+        # second run, cache hit (no network), different filter → other candidate
+        with patch("httpx.get") as mock_get:
+            results = svc.match_names(["Abra alba"], limit_taxon="Porifera")
+            mock_get.assert_not_called()
+        assert [c["AphiaID"] for c in results[0]["candidates"]] == [2]
+
+
 class TestClassifyMatch:
     """WormsService.classify_match() — resolution status from candidate list."""
 

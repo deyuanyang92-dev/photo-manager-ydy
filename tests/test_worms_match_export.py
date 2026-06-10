@@ -77,6 +77,66 @@ def test_writer_passes_cn_column_through_once(tmp_path):
     assert not any(str(h).endswith("Cn") for h in appended)
 
 
+def test_xlsx_citation_column(tmp_path):
+    headers = ["学名"]
+    rows = [{"学名": "Abra alba"}]
+    results = [_result("Abra alba", best={
+        "AphiaID": 1, "scientificname": "Abra alba",
+        "citation": "WoRMS (2024). Abra alba.",
+    })]
+
+    out = tmp_path / "o.xlsx"
+    export_annotated_xlsx(headers, rows, results, ["citation"], out)
+
+    ws = openpyxl.load_workbook(out).active
+    hdr = [c.value for c in ws[1]]
+    assert hdr == ["学名", "引用"]                # default zh
+    assert ws.cell(row=2, column=2).value == "WoRMS (2024). Abra alba."
+
+
+def test_xlsx_unacceptreason_column(tmp_path):
+    headers = ["学名"]
+    rows = [{"学名": "Abra alba"}]
+    results = [_result("Abra alba", best={
+        "AphiaID": 1, "scientificname": "Abra alba", "unacceptreason": "synonym",
+    })]
+
+    out = tmp_path / "o.xlsx"
+    export_annotated_xlsx(headers, rows, results, ["unacceptreason"], out)
+
+    ws = openpyxl.load_workbook(out).active
+    hdr = [c.value for c in ws[1]]
+    assert hdr == ["学名", "不接受原因"]
+    assert ws.cell(row=2, column=2).value == "synonym"
+
+
+def test_xlsx_lang_english_headers(tmp_path):
+    headers = ["学名"]
+    rows = [{"学名": "Abra alba"}]
+    results = [_result("Abra alba", best={"AphiaID": 1, "scientificname": "Abra alba", "authority": "A"})]
+
+    out = tmp_path / "o.xlsx"
+    export_annotated_xlsx(headers, rows, results, ["matched_name", "authority"], out, lang="en")
+
+    ws = openpyxl.load_workbook(out).active
+    hdr = [c.value for c in ws[1]]
+    assert hdr == ["学名", "ScientificName", "Authority"]   # original col stays; appended in English
+
+
+def test_xlsx_lang_bilingual_headers(tmp_path):
+    headers = ["学名"]
+    rows = [{"学名": "Abra alba"}]
+    results = [_result("Abra alba", best={"AphiaID": 1, "scientificname": "Abra alba"})]
+
+    out = tmp_path / "o.xlsx"
+    export_annotated_xlsx(headers, rows, results, ["aphia_id", "matched_name"], out, lang="both")
+
+    ws = openpyxl.load_workbook(out).active
+    hdr = [c.value for c in ws[1]]
+    # AphiaID has identical zh/en → not doubled; matched_name → "中文 (English)"
+    assert hdr == ["学名", "AphiaID", "匹配名 (ScientificName)"]
+
+
 def test_csv_is_utf8_sig_bom(tmp_path):
     headers = ["学名"]
     rows = [{"学名": "Abra alba"}]

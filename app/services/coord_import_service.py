@@ -66,16 +66,24 @@ def write_sample_file(path: str) -> None:
 
 # ── 读表 ───────────────────────────────────────────────────────────────────────
 
-def read_table(path: str) -> tuple[list[str], list[dict]]:
-    """读 CSV/TXT/XLSX → (表头, 行 dict 列表)。首行为表头。"""
+def read_table(path: str, *, has_header: bool = True) -> tuple[list[str], list[dict]]:
+    """读 CSV/TXT/XLSX → (表头, 行 dict 列表)。
+
+    has_header=True（默认）：首行为表头。
+    has_header=False：合成列名（列1、列2…），首行计入数据（无表头文件不丢首行）。
+    """
     p = Path(path)
     ext = p.suffix.lower()
     if ext in (".xlsx", ".xlsm"):
-        return _read_xlsx(p)
-    return _read_delimited(p)
+        return _read_xlsx(p, has_header=has_header)
+    return _read_delimited(p, has_header=has_header)
 
 
-def _read_delimited(p: Path) -> tuple[list[str], list[dict]]:
+def _synth_headers(n: int) -> list[str]:
+    return [f"列{i + 1}" for i in range(n)]
+
+
+def _read_delimited(p: Path, *, has_header: bool = True) -> tuple[list[str], list[dict]]:
     text = p.read_text(encoding="utf-8-sig")
     sample = text[:4096]
     try:
@@ -87,33 +95,49 @@ def _read_delimited(p: Path) -> tuple[list[str], list[dict]]:
     rows = [r for r in reader if any(c.strip() for c in r)]
     if not rows:
         return [], []
-    headers = [h.strip() for h in rows[0]]
+    if has_header:
+        headers = [h.strip() for h in rows[0]]
+        data = rows[1:]
+    else:
+        headers = _synth_headers(max(len(r) for r in rows))
+        data = rows
     out: list[dict] = []
-    for r in rows[1:]:
+    for r in data:
         d = {headers[i]: (r[i] if i < len(r) else "") for i in range(len(headers))}
         out.append(d)
     return headers, out
 
 
-def _read_xlsx(p: Path) -> tuple[list[str], list[dict]]:
+def _read_xlsx(p: Path, *, has_header: bool = True) -> tuple[list[str], list[dict]]:
     import openpyxl
     wb = openpyxl.load_workbook(p, read_only=True, data_only=True)
     ws = wb.active
     rows_iter = ws.iter_rows(values_only=True)
     try:
-        header_row = next(rows_iter)
+        first_row = next(rows_iter)
     except StopIteration:
         return [], []
-    headers = [str(h).strip() if h is not None else "" for h in header_row]
-    out: list[dict] = []
-    for row in rows_iter:
-        if row is None or all(c is None for c in row):
-            continue
+    if has_header:
+        headers = [str(h).strip() if h is not None else "" for h in first_row]
+        first_data: Optional[tuple] = None
+    else:
+        headers = _synth_headers(len(first_row))
+        first_data = first_row
+
+    def _coerce_row(row) -> dict:
         d = {}
         for i, h in enumerate(headers):
             v = row[i] if i < len(row) else None
             d[h] = "" if v is None else (str(v) if not isinstance(v, str) else v)
-        out.append(d)
+        return d
+
+    out: list[dict] = []
+    if first_data is not None and not all(c is None for c in first_data):
+        out.append(_coerce_row(first_data))
+    for row in rows_iter:
+        if row is None or all(c is None for c in row):
+            continue
+        out.append(_coerce_row(row))
     wb.close()
     return headers, out
 

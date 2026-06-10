@@ -30,6 +30,7 @@ from PyQt6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QProgressDialog,
@@ -62,6 +63,20 @@ _RES_BADGE = {
 _NAME_HINTS = ["学名", "拉丁", "scientific", "species", "taxon", "物种", "name"]
 _AUTHOR_HINTS = ["命名人", "作者", "权威", "author", "authority"]
 
+# 输出列表头语言（界面标签 → export lang code）
+_OUTPUT_LANG_OPTIONS = [("中文", "zh"), ("English", "en"), ("双语 / Bilingual", "both")]
+
+# Match-upto 阶元（界面中文 → WoRMS rank；种=ScientificName 不过滤）
+_MATCH_UPTO = [
+    ("种 (ScientificName)", None),
+    ("属 (Genus)", "Genus"),
+    ("科 (Family)", "Family"),
+    ("目 (Order)", "Order"),
+    ("纲 (Class)", "Class"),
+    ("门 (Phylum)", "Phylum"),
+    ("界 (Kingdom)", "Kingdom"),
+]
+
 
 # ── Background match worker ───────────────────────────────────────────────────
 
@@ -80,6 +95,10 @@ class WormsMatchWorker(QThread):
         marine_only: bool = False,
         auto_accept_near: bool = False,
         fetch_chain: bool = False,
+        limit_taxon: Optional[str] = None,
+        match_authority: bool = False,
+        authorities: Optional[list[str]] = None,
+        match_rank: Optional[str] = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -88,6 +107,10 @@ class WormsMatchWorker(QThread):
         self._marine_only = bool(marine_only)
         self._auto_accept_near = bool(auto_accept_near)
         self._fetch_chain = bool(fetch_chain)
+        self._limit_taxon = limit_taxon or None
+        self._match_authority = bool(match_authority)
+        self._authorities = list(authorities) if authorities else None
+        self._match_rank = match_rank or None
 
     def run(self) -> None:  # noqa: D401 — runs in a separate thread
         try:
@@ -95,6 +118,10 @@ class WormsMatchWorker(QThread):
                 self._names,
                 marine_only=self._marine_only,
                 auto_accept_near=self._auto_accept_near,
+                limit_taxon=self._limit_taxon,
+                match_authority=self._match_authority,
+                authorities=self._authorities,
+                match_rank=self._match_rank,
                 progress_cb=lambda d, t: self.progress.emit(d, t),
             )
             if self._fetch_chain:
@@ -197,6 +224,7 @@ class WormsMatchDialog(QDialog):
         self._rows: list[dict] = []
         self._results: list[dict] = []
         self._append_checks: dict[str, QCheckBox] = {}
+        self._file_path: Optional[str] = None
         self._worker: Optional[WormsMatchWorker] = None
         self._progress: Optional[QProgressDialog] = None
         self.setWindowTitle("WoRMS 批量匹配 (Match Taxa)")
@@ -247,14 +275,34 @@ class WormsMatchDialog(QDialog):
         self._author_combo.addItem(_NONE)
         opt.addWidget(self._author_combo, 0, 3)
 
+        self._header_cb = QCheckBox("首行为表头")
+        self._header_cb.setChecked(True)
+        self._header_cb.toggled.connect(self._on_header_toggled)
+        opt.addWidget(self._header_cb, 1, 0, 1, 2)
+
         self._marine_cb = QCheckBox("仅海洋物种 (marine_only)")
         self._marine_cb.setChecked(False)
-        opt.addWidget(self._marine_cb, 1, 0, 1, 2)
+        opt.addWidget(self._marine_cb, 1, 2, 1, 2)
 
-        opt.addWidget(QLabel("近似匹配处理"), 1, 2)
+        self._authority_cb = QCheckBox("匹配命名人 (Match authority)")
+        self._authority_cb.setChecked(False)
+        opt.addWidget(self._authority_cb, 2, 0, 1, 2)
+
+        opt.addWidget(QLabel("近似匹配处理"), 2, 2)
         self._near_combo = QComboBox()
         self._near_combo.addItems(["强制人工确认", "自动采纳（后续校正）"])
-        opt.addWidget(self._near_combo, 1, 3)
+        opt.addWidget(self._near_combo, 2, 3)
+
+        opt.addWidget(QLabel("匹配阶元 (Match upto)"), 3, 0)
+        self._rank_combo = QComboBox()
+        for label, _rank in _MATCH_UPTO:
+            self._rank_combo.addItem(label)
+        opt.addWidget(self._rank_combo, 3, 1)
+
+        opt.addWidget(QLabel("限定于高阶类群 (Limit to)"), 3, 2)
+        self._limit_edit = QLineEdit()
+        self._limit_edit.setPlaceholderText("如 Porifera / Copepoda，避开同名歧义")
+        opt.addWidget(self._limit_edit, 3, 3)
         v.addLayout(opt)
 
         # 追加列勾选（复刻网站输出列）
@@ -262,8 +310,8 @@ class WormsMatchDialog(QDialog):
         cols_box.setFrameShape(QFrame.Shape.StyledPanel)
         cg = QGridLayout(cols_box)
         cg.addWidget(QLabel("追加 WoRMS 列："), 0, 0, 1, 4)
-        for idx, (key, header, _fn) in enumerate(MATCH_APPEND_COLUMNS):
-            cb = QCheckBox(header)
+        for idx, (key, zh, _en, _fn) in enumerate(MATCH_APPEND_COLUMNS):
+            cb = QCheckBox(zh)
             cb.setChecked(True)
             self._append_checks[key] = cb
             cg.addWidget(cb, 1 + idx // 4, idx % 4)
@@ -320,6 +368,11 @@ class WormsMatchDialog(QDialog):
         back.clicked.connect(lambda: self._stack.setCurrentIndex(0))
         bar.addWidget(back)
         bar.addStretch()
+        bar.addWidget(QLabel("输出语言"))
+        self._lang_combo = QComboBox()
+        for label, _code in _OUTPUT_LANG_OPTIONS:
+            self._lang_combo.addItem(label)
+        bar.addWidget(self._lang_combo)
         self._btn_export = QPushButton("导出标注文件…")
         self._btn_export.setDefault(True)
         self._btn_export.clicked.connect(self._on_export)
@@ -330,7 +383,8 @@ class WormsMatchDialog(QDialog):
     # ── 逻辑（可单测）───────────────────────────────────────────────────────
 
     def load_file(self, path: str) -> None:
-        self._headers, self._rows = cis.read_table(path)
+        self._file_path = path
+        self._headers, self._rows = cis.read_table(path, has_header=self._header_cb.isChecked())
         self._file_lbl.setText(path)
         for combo, hints in ((self._name_combo, _NAME_HINTS),
                              (self._author_combo, _AUTHOR_HINTS)):
@@ -343,6 +397,28 @@ class WormsMatchDialog(QDialog):
                 combo.setCurrentText(guess)
             combo.blockSignals(False)
         self._refresh_preview()
+
+    def _on_header_toggled(self, _checked: bool) -> None:
+        if self._file_path:
+            self.load_file(self._file_path)
+
+    def limit_taxon(self) -> Optional[str]:
+        txt = self._limit_edit.text().strip()
+        return txt or None
+
+    def match_rank(self) -> Optional[str]:
+        return _MATCH_UPTO[self._rank_combo.currentIndex()][1]
+
+    def match_authority(self) -> bool:
+        return self._authority_cb.isChecked()
+
+    def authorities(self) -> Optional[list[str]]:
+        if not self.match_authority():
+            return None
+        col = self._author_combo.currentText()
+        if not col or col == _NONE:
+            return None
+        return [str(row.get(col, "") or "") for row in self._rows]
 
     def _guess_header(self, hints: list[str]) -> Optional[str]:
         for h in self._headers:
@@ -384,15 +460,19 @@ class WormsMatchDialog(QDialog):
             r.pop("chain", None)  # stale chain from a prior pick
         self._refresh_review()
 
+    def output_lang(self) -> str:
+        return _OUTPUT_LANG_OPTIONS[self._lang_combo.currentIndex()][1]
+
     def export(self, path: str) -> str:
         cols = self.selected_append_cols()
+        lang = self.output_lang()
         low = path.lower()
         if low.endswith(".csv"):
-            out = export_annotated_csv(self._headers, self._rows, self._results, cols, path)
+            out = export_annotated_csv(self._headers, self._rows, self._results, cols, path, lang=lang)
         else:
             if not low.endswith(".xlsx"):
                 path += ".xlsx"
-            out = export_annotated_xlsx(self._headers, self._rows, self._results, cols, path)
+            out = export_annotated_xlsx(self._headers, self._rows, self._results, cols, path, lang=lang)
         return str(out)
 
     # ── UI 事件 ─────────────────────────────────────────────────────────────
@@ -452,6 +532,10 @@ class WormsMatchDialog(QDialog):
             marine_only=self._marine_cb.isChecked(),
             auto_accept_near=self.auto_accept_near(),
             fetch_chain=fetch_chain,
+            limit_taxon=self.limit_taxon(),
+            match_authority=self.match_authority(),
+            authorities=self.authorities(),
+            match_rank=self.match_rank(),
             parent=self,
         )
         self._worker.progress.connect(self._on_progress)
