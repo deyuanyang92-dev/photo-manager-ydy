@@ -145,20 +145,20 @@ class HeliconConfigDialog(QDialog):
         browse.clicked.connect(self._on_browse)
         btn_row.addWidget(browse)
 
-        save_path = QPushButton("保存路径")
-        save_path.setObjectName("Outline")
-        save_path.clicked.connect(self._on_save_path)
-        btn_row.addWidget(save_path)
+        self._save_path_btn = QPushButton("保存路径")
+        self._save_path_btn.setObjectName("Outline")
+        self._save_path_btn.clicked.connect(self._on_save_path)
+        btn_row.addWidget(self._save_path_btn)
 
-        clear = QPushButton("清除自定义")
-        clear.setObjectName("Ghost")
-        clear.clicked.connect(self._on_clear_path)
-        btn_row.addWidget(clear)
+        self._clear_btn = QPushButton("清除自定义")
+        self._clear_btn.setObjectName("Ghost")
+        self._clear_btn.clicked.connect(self._on_clear_path)
+        btn_row.addWidget(self._clear_btn)
 
-        redetect = QPushButton("重新探测")
-        redetect.setObjectName("Ghost")
-        redetect.clicked.connect(self._detect_and_refresh)
-        btn_row.addWidget(redetect)
+        self._redetect_btn = QPushButton("重新探测")
+        self._redetect_btn.setObjectName("Ghost")
+        self._redetect_btn.clicked.connect(self._on_redetect)
+        btn_row.addWidget(self._redetect_btn)
 
         btn_row.addStretch()
         lay.addLayout(btn_row)
@@ -307,6 +307,7 @@ class HeliconConfigDialog(QDialog):
             self.ctx.settings.sync()
         except Exception:
             pass
+        self._flash_button(self._save_btn, "已保存 ✓")
 
     def _on_reset(self) -> None:
         self._params.set_params({
@@ -336,6 +337,7 @@ class HeliconConfigDialog(QDialog):
         if custom:
             os.environ["HELICON_FOCUS_PATH"] = custom
         self._detect_and_refresh()
+        self._flash_button(self._save_path_btn, "已保存 ✓")
 
     def _on_clear_path(self) -> None:
         self._path_edit.clear()
@@ -346,6 +348,34 @@ class HeliconConfigDialog(QDialog):
         except Exception:
             pass
         self._detect_and_refresh()
+        self._flash_button(self._clear_btn, "已清除 ✓")
+
+    def _on_redetect(self) -> None:
+        """重新探测 — re-run detection AND flash the button: when the result is
+        unchanged the labels stay identical, which users read as a dead button."""
+        self._detect_and_refresh()
+        self._flash_button(self._redetect_btn, "已重新探测 ✓")
+
+    def _flash_button(self, btn: QPushButton, text: str, duration_ms: int = 1500) -> None:
+        """Swap *btn* text to a transient confirmation, restore after a delay."""
+        if btn.property("_flashing"):
+            return
+        orig = btn.text()
+        btn.setProperty("_flashing", True)
+        btn.setText(text)
+        from PyQt6.QtCore import QTimer
+
+        def _restore() -> None:
+            btn.setText(orig)
+            btn.setProperty("_flashing", False)
+
+        # Timer parented to the button: it dies with the button, so closing the
+        # dialog within the flash window can't fire _restore on a dead widget.
+        timer = QTimer(btn)
+        timer.setSingleShot(True)
+        timer.timeout.connect(_restore)
+        timer.timeout.connect(timer.deleteLater)
+        timer.start(duration_ms)
 
     def _detect_and_refresh(self) -> None:
         from app.services.helicon_service import detect_helicon, reset_helicon_cache

@@ -133,3 +133,50 @@ class TestPersistence:
         assert p["method"] == 1
         assert int(p["radius"]) == 8
         assert p["smoothing"] == 4
+
+
+# ── Button feedback ────────────────────────────────────────────────────────────
+# When detection state doesn't change, 重新探测/清除自定义/保存… used to update
+# NOTHING visible — users read that as a dead button ("点击没有响应"). Every
+# action button must flash a transient confirmation, then restore its label.
+
+class TestButtonFeedback:
+    def _dlg(self, qtbot, tmp_path):
+        from app.widgets.helicon_config_dialog import HeliconConfigDialog
+        ctx = _make_ctx(tmp_path)
+        fake_exe = r"C:\Program Files\Helicon\HeliconFocus.exe"
+        with mock.patch("app.services.helicon_service.detect_helicon", return_value=fake_exe):
+            dlg = HeliconConfigDialog(ctx)
+        qtbot.addWidget(dlg)
+        return dlg
+
+    def _assert_flash(self, qtbot, btn, expect_text, trigger):
+        orig = btn.text()
+        trigger()
+        assert expect_text in btn.text(), f"no visible feedback on {orig!r}"
+        qtbot.waitUntil(lambda: btn.text() == orig, timeout=4000)
+
+    def test_redetect_flashes(self, qtbot, tmp_path):
+        dlg = self._dlg(qtbot, tmp_path)
+        with mock.patch("app.services.helicon_service.detect_helicon",
+                        return_value=r"C:\x\HeliconFocus.exe"):
+            self._assert_flash(qtbot, dlg._redetect_btn, "已重新探测",
+                               dlg._redetect_btn.click)
+
+    def test_clear_flashes(self, qtbot, tmp_path):
+        dlg = self._dlg(qtbot, tmp_path)
+        with mock.patch("app.services.helicon_service.detect_helicon",
+                        return_value=None):
+            self._assert_flash(qtbot, dlg._clear_btn, "已清除",
+                               dlg._clear_btn.click)
+
+    def test_save_path_flashes(self, qtbot, tmp_path):
+        dlg = self._dlg(qtbot, tmp_path)
+        with mock.patch("app.services.helicon_service.detect_helicon",
+                        return_value=None):
+            self._assert_flash(qtbot, dlg._save_path_btn, "已保存",
+                               dlg._save_path_btn.click)
+
+    def test_save_defaults_flashes(self, qtbot, tmp_path):
+        dlg = self._dlg(qtbot, tmp_path)
+        self._assert_flash(qtbot, dlg._save_btn, "已保存", dlg._save_btn.click)
