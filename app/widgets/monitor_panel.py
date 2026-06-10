@@ -451,7 +451,7 @@ class MonitorPanel(QWidget):
 
         # Hidden real checkbox kept for state + tests; the visible control is in
         # the "更多" menu.
-        self._hide_archived_cb = QCheckBox("隐藏已归档", self)
+        self._hide_archived_cb = QCheckBox("隐藏已分组原片", self)
         self._hide_archived_cb.toggled.connect(self._on_hide_archived_toggled)
         self._hide_archived_cb.hide()
 
@@ -985,7 +985,7 @@ class MonitorPanel(QWidget):
 
         menu.addSeparator()
 
-        hide_action = menu.addAction("隐藏已归档")
+        hide_action = menu.addAction("隐藏已分组原片")
         hide_action.setCheckable(True)
         hide_action.setChecked(self._hide_archived_cb.isChecked())
         hide_action.toggled.connect(self._hide_archived_cb.setChecked)

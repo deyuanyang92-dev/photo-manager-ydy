@@ -1,7 +1,7 @@
 """test_monitor_panel.py — Tests for 1-C, 1-D, and 2-A context menu actions.
 
 1-C: Right-click context menu on JPG cards has "复制路径" action.
-1-D: "隐藏已归档" checkbox hides cards where is_grouped=True.
+1-D: "隐藏已分组原片" checkbox hides cards where is_grouped=True.
 2-A: Context menu "加入当前分组" / "指定归属标本" / "取消归属" actions.
 """
 
@@ -142,16 +142,16 @@ class TestClipboardCopyAction:
 # ── 1-D: hide archived filter ─────────────────────────────────────────────────
 
 class TestHideArchivedFilter:
-    def test_hide_archived_checkbox_exists(self, panel):
-        """MonitorPanel must have a '隐藏已归档' QCheckBox."""
+    def test_hide_grouped_checkbox_exists(self, panel):
+        """MonitorPanel must have a '隐藏已分组原片' QCheckBox."""
         from PyQt6.QtWidgets import QCheckBox
         checkboxes = panel.findChildren(QCheckBox)
         labels = [c.text() for c in checkboxes]
-        assert "隐藏已归档" in labels, \
-            f"Expected '隐藏已归档' checkbox, found: {labels}"
+        assert "隐藏已分组原片" in labels, \
+            f"Expected '隐藏已分组原片' checkbox, found: {labels}"
 
-    def test_hide_archived_filter(self, panel, qtbot):
-        """When '隐藏已归档' is checked, grouped files are hidden."""
+    def test_hide_grouped_filter(self, panel, qtbot):
+        """When '隐藏已分组原片' is checked, grouped files are hidden."""
         from PyQt6.QtWidgets import QCheckBox
 
         grouped_entry = _jpg_entry("grouped.jpg", "/tmp/grouped.jpg", is_grouped=True)
@@ -165,29 +165,44 @@ class TestHideArchivedFilter:
         assert "solo.jpg" in visible_names_before
 
         # Check the checkbox
-        cb = next(c for c in panel.findChildren(QCheckBox) if c.text() == "隐藏已归档")
+        cb = next(c for c in panel.findChildren(QCheckBox) if c.text() == "隐藏已分组原片")
         cb.setChecked(True)
 
         visible_names_after = _visible_card_names(panel)
         assert "grouped.jpg" not in visible_names_after, \
-            "grouped.jpg should be hidden when '隐藏已归档' is checked"
+            "grouped.jpg should be hidden when '隐藏已分组原片' is checked"
         assert "solo.jpg" in visible_names_after
 
     def test_uncheck_restores_all_files(self, panel, qtbot):
-        """Unchecking '隐藏已归档' restores all files."""
+        """Unchecking '隐藏已分组原片' restores all files."""
         from PyQt6.QtWidgets import QCheckBox
 
         grouped_entry = _jpg_entry("grouped.jpg", "/tmp/grouped.jpg", is_grouped=True)
         solo_entry = _jpg_entry("solo.jpg", "/tmp/solo.jpg", is_grouped=False)
         panel.load_scan(_scan([grouped_entry, solo_entry]))
 
-        cb = next(c for c in panel.findChildren(QCheckBox) if c.text() == "隐藏已归档")
+        cb = next(c for c in panel.findChildren(QCheckBox) if c.text() == "隐藏已分组原片")
         cb.setChecked(True)
         cb.setChecked(False)
 
         visible_names = _visible_card_names(panel)
         assert "grouped.jpg" in visible_names
         assert "solo.jpg" in visible_names
+
+    def test_hide_grouped_menu_item_label(self, panel):
+        """"…"菜单项与行为一致:隐藏的是已分组原片,不是"已归档"。"""
+        actions_seen = []
+
+        def fake_exec(self_menu, *args, **kwargs):
+            actions_seen.extend([a.text() for a in self_menu.actions()])
+            return None
+
+        with patch.object(QMenu, "exec", fake_exec):
+            panel._open_more_menu(QPoint(0, 0))
+
+        assert "隐藏已分组原片" in actions_seen, \
+            f"Expected '隐藏已分组原片' in more-menu, got: {actions_seen}"
+        assert "隐藏已归档" not in actions_seen
 
 
 # ── 2-A: enhanced context menu ───────────────────────────────────────────────
