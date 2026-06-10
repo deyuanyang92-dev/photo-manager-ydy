@@ -413,6 +413,7 @@ class WorkbenchView(BaseView):
         self._monitor.unassign_requested.connect(self._on_unassign_jpg)
         self._monitor.add_jpg_requested.connect(self._on_add_jpg_files)
         self._monitor.grouping_requested.connect(self._on_open_grouping)
+        self._monitor.settings_requested.connect(self._on_open_settings)
         centre.addWidget(self._monitor)
 
         # 分组工具 lives in an on-demand popup, NOT permanently in the main

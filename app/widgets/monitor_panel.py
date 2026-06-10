@@ -3,11 +3,11 @@
 Faithfully mirrors the web prototype's "目录监控 / 拍照工作台" centre column
 (app.js renderDirectoryMonitor):
 
-  ┌ batch-ident bar ─ current batch UID + activation state ───────────┐
-  ├ activity stats ─ 今日新增 / 未整理 / 最近写入 ───────────────────┤
-  ├ controls ─ 自动压缩 / 刷新 / 显示模式 / 添加照片 ────────────────┤
-  ├ stream header ─ 刚写入目录 · 选中操作（全选/清除/删除）──────────┤
-  ├ capture stream ─ gradient-preview file cards, 4-col grid ─────────┤
+  ┌ batch/status strip ─ UID + phase + compact JPG/TIFF stats ────────┐
+  ├ primary toolbar ─ 刷新 / 添加照片 / 分组 / 自动压缩 / 更多 ──────┤
+  ├ stream header ─ 待处理照片 · 右键处理文件 ───────────────────────┤
+  ├ contextual selection bar ─ appears only after selecting files ─────┤
+  ├ capture stream ─ compact file cards with row/right-click menus ────┤
   └ unattributed warning ─ ⚠️ N 张 JPG 尚未归入任何编号 ─────────────┘
 
 Each capture card carries (web parity):
@@ -98,6 +98,7 @@ class _FileCard(QFrame):
     deactivate_requested = pyqtSignal(str)    # path
     assign_requested = pyqtSignal(str)        # path
     selection_toggled = pyqtSignal(str, bool) # path, selected
+    delete_requested = pyqtSignal(str)        # path
 
     def __init__(self, entry, active_uid: Optional[str] = None,
                  parent: Optional[QWidget] = None,
@@ -115,7 +116,7 @@ class _FileCard(QFrame):
         self._setup_ui()
 
     def _setup_ui(self) -> None:
-        self.setFixedHeight(68)
+        self.setFixedHeight(60)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         lay = QHBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -137,7 +138,7 @@ class _FileCard(QFrame):
 
         # ── Preview tile with corner chip ──
         preview = QWidget()
-        preview.setFixedWidth(64)
+        preview.setFixedWidth(56)
         preview.setStyleSheet(_TIFF_PREVIEW if kind == "tiff" else _JPG_PREVIEW)
         pv_lay = QVBoxLayout(preview)
         pv_lay.setContentsMargins(6, 6, 6, 6)
@@ -190,26 +191,18 @@ class _FileCard(QFrame):
         body_lay.addLayout(attr_row)
         lay.addWidget(body, stretch=1)
 
-        # ── Action column (JPG only) — vector icon buttons ──
-        if kind == "jpg":
-            act_col = QVBoxLayout()
-            act_col.setContentsMargins(0, 8, 10, 8)
-            act_col.setSpacing(5)
-            act_btn = QPushButton("归属")
-            act_btn.setObjectName("Tiny")
-            act_btn.setFixedHeight(24)
-            icons.set_button_icon(act_btn, "mdi6.link-variant", color=icons.TONE_ACCENT, size=13)
-            act_btn.setToolTip("手动归属到当前激活标本")
-            act_btn.clicked.connect(lambda: self.assign_requested.emit(getattr(self._entry, "path", "")))
-            act_col.addWidget(act_btn)
-            deact_btn = QPushButton("撤销")
-            deact_btn.setObjectName("Tiny")
-            deact_btn.setFixedHeight(24)
-            icons.set_button_icon(deact_btn, "mdi6.link-variant-off", color=icons.TONE_MUTED, size=13)
-            deact_btn.setToolTip("撤销此 JPG 的归属（变回无主）")
-            deact_btn.clicked.connect(lambda: self.deactivate_requested.emit(getattr(self._entry, "path", "")))
-            act_col.addWidget(deact_btn)
-            lay.addLayout(act_col)
+        # ── Row actions: keep the file row clean; actions live in this menu
+        # and the right-click menu.
+        menu_btn = QPushButton()
+        menu_btn.setObjectName("Ghost")
+        menu_btn.setFixedSize(28, 28)
+        menu_btn.setToolTip("文件操作")
+        icons.set_button_icon(menu_btn, "mdi6.dots-vertical",
+                              color=icons.TONE_MUTED, size=15)
+        menu_btn.clicked.connect(
+            lambda: self._show_context_menu(menu_btn.mapToGlobal(menu_btn.rect().bottomLeft()))
+        )
+        lay.addWidget(menu_btn)
 
         from app.config.effects import apply_card_shadow
         apply_card_shadow(self, blur=16, y=3, alpha=55)
@@ -234,41 +227,74 @@ class _FileCard(QFrame):
         self._update_selection_style()
 
     def contextMenuEvent(self, event) -> None:
-        if getattr(self._entry, "kind", "") == "jpg":
-            self._on_jpg_context_menu(event.pos())
+        self._show_context_menu(event.globalPos())
 
     def _on_jpg_context_menu(self, pos) -> None:
-        jpg_path = getattr(self._entry, "path", "")
+        self._show_context_menu(self.mapToGlobal(pos))
+
+    def _show_context_menu(self, global_pos) -> None:
+        path = getattr(self._entry, "path", "")
+        kind = getattr(self._entry, "kind", "")
         menu = QMenu(self)
 
         action = menu.addAction("复制路径")
-        action.triggered.connect(lambda: QApplication.clipboard().setText(jpg_path))
+        action.triggered.connect(lambda: QApplication.clipboard().setText(path))
 
-        menu.addSeparator()
+        show_action = menu.addAction("在文件夹中显示")
+        show_action.triggered.connect(lambda: self._show_in_folder(path))
 
-        add_action = menu.addAction("加入当前分组")
-        if self._on_add_to_group is not None:
-            add_action.triggered.connect(lambda: self._on_add_to_group(jpg_path))
-        else:
-            add_action.setEnabled(False)
+        if kind == "jpg":
+            menu.addSeparator()
 
-        assign_action = menu.addAction("指定归属标本")
-        if self._on_assign_uid is not None:
-            def _do_assign_uid():
-                uid, ok = QInputDialog.getText(self, "指定标本", "输入标本编号：")
-                if ok and uid.strip():
-                    self._on_assign_uid(jpg_path, uid.strip())
-            assign_action.triggered.connect(_do_assign_uid)
-        else:
-            assign_action.setEnabled(False)
+            active_action = menu.addAction("归属到激活标本")
+            active_action.triggered.connect(lambda: self.assign_requested.emit(path))
 
-        unassign_action = menu.addAction("取消归属")
-        if self._on_unassign is not None:
-            unassign_action.triggered.connect(lambda: self._on_unassign(jpg_path))
-        else:
-            unassign_action.setEnabled(False)
+            add_action = menu.addAction("加入当前分组")
+            if self._on_add_to_group is not None:
+                add_action.triggered.connect(lambda: self._on_add_to_group(path))
+            else:
+                add_action.setEnabled(False)
 
-        menu.exec(self.mapToGlobal(pos))
+            assign_action = menu.addAction("指定归属标本")
+            if self._on_assign_uid is not None:
+                def _do_assign_uid():
+                    uid, ok = QInputDialog.getText(self, "指定标本", "输入标本编号：")
+                    if ok and uid.strip():
+                        self._on_assign_uid(path, uid.strip())
+                assign_action.triggered.connect(_do_assign_uid)
+            else:
+                assign_action.setEnabled(False)
+
+            unassign_action = menu.addAction("取消归属")
+            if self._on_unassign is not None:
+                unassign_action.triggered.connect(lambda: self._on_unassign(path))
+            else:
+                unassign_action.setEnabled(False)
+
+            menu.addSeparator()
+            delete_action = menu.addAction("删除此文件")
+            delete_action.triggered.connect(lambda: self.delete_requested.emit(path))
+
+        menu.exec(global_pos)
+
+    def _show_in_folder(self, path: str) -> None:
+        import os
+        import subprocess
+        import sys
+        if not path:
+            return
+        try:
+            if sys.platform == "win32":
+                subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
+            else:
+                try:
+                    from app.utils.path_utils import wsl_to_windows
+                    win_path = wsl_to_windows(path) or path
+                    subprocess.Popen(["explorer.exe", "/select,", win_path])
+                except Exception:
+                    subprocess.Popen(["xdg-open", str(Path(path).parent)])
+        except Exception:
+            pass
 
 
 class MonitorPanel(QWidget):
@@ -286,6 +312,7 @@ class MonitorPanel(QWidget):
     refresh_requested = pyqtSignal()
     add_jpg_requested = pyqtSignal()   # emitted when user clicks "添加照片"
     grouping_requested = pyqtSignal()  # emitted when user clicks "分组工具" (opens popup)
+    settings_requested = pyqtSignal()  # emitted from the compact "更多" menu
 
     def __init__(self, ctx: "AppContext", parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -317,31 +344,22 @@ class MonitorPanel(QWidget):
         from app.config.effects import apply_card_shadow
         apply_card_shadow(section)
 
-        # ── Batch-ident bar ──
+        # ── Compact batch/status strip ──
         batch = QFrame()
         batch.setObjectName("BatchIdentBar")
         b_lay = QHBoxLayout(batch)
-        b_lay.setContentsMargins(14, 10, 14, 10)
-        b_lay.setSpacing(10)
-        b_title = QLabel("当前照片批次")
+        b_lay.setContentsMargins(12, 8, 12, 8)
+        b_lay.setSpacing(8)
+        b_title = QLabel("批次")
         b_title.setObjectName("Section")
         b_lay.addWidget(b_title)
         self._batch_uid = QLabel("—")
         self._batch_uid.setObjectName("BatchUid")
         b_lay.addWidget(self._batch_uid)
-        b_lay.addStretch()
         self._activate_state = QLabel("未激活")
         self._activate_state.setObjectName("ActivateState")
         b_lay.addWidget(self._activate_state)
-        sec.addWidget(batch)
 
-        # ── Phase pills: 拍摄中 / 已拍完 / 整理中 / 完成 ──
-        phase_row = QHBoxLayout()
-        phase_row.setContentsMargins(2, 0, 2, 0)
-        phase_row.setSpacing(6)
-        _phase_label = QLabel("阶段：")
-        _phase_label.setObjectName("MutedSmall")
-        phase_row.addWidget(_phase_label)
         self._phase_pills: dict[str, QPushButton] = {}
         for phase, obj in (
             ("拍摄中", "PhasePillActive"),
@@ -356,117 +374,127 @@ class MonitorPanel(QWidget):
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             if phase == "拍摄中":
                 btn.setChecked(True)
-            phase_row.addWidget(btn)
+            b_lay.addWidget(btn)
             self._phase_pills[phase] = btn
-        phase_row.addStretch()
-        sec.addLayout(phase_row)
 
-        # ── Compose-mode hints ──
-        hints_row = QHBoxLayout()
-        hints_row.setContentsMargins(2, 0, 2, 0)
-        hints_row.setSpacing(16)
-        hint_auto = QLabel("自动合成 提交后后台执行")
-        hint_auto.setObjectName("MutedSmall")
-        hints_row.addWidget(hint_auto)
-        hint_manual = QLabel("手动 Helicon 选中本组原片拖入外部软件")
-        hint_manual.setObjectName("MutedSmall")
-        hints_row.addWidget(hint_manual)
-        hints_row.addStretch()
-        sec.addLayout(hints_row)
+        b_lay.addStretch()
+        self._stat_today = QLabel("JPG 0")
+        self._stat_today.setObjectName("ChipArchived")
+        b_lay.addWidget(self._stat_today)
+        self._stat_recent = QLabel("TIFF 0")
+        self._stat_recent.setObjectName("ChipTiff")
+        b_lay.addWidget(self._stat_recent)
+        self._stat_untidy = QLabel("未整理 0")
+        self._stat_untidy.setObjectName("ChipRaw")
+        b_lay.addWidget(self._stat_untidy)
+        sec.addWidget(batch)
 
-        # ── Activity stats ──
-        stats = QHBoxLayout()
-        stats.setContentsMargins(2, 0, 2, 0)
-        stats.setSpacing(28)
-        self._stat_today = self._stat_block(stats, "0 张", "今日新增")
-        self._stat_untidy = self._stat_block(stats, "0 张", "未整理")
-        self._stat_recent = self._stat_block(stats, "刚刚", "最近写入")
-        stats.addStretch()
-        # Keep legacy compact stat label for tests / status text
+        # Keep legacy compact stat label for tests / status text.
         self._stat_label = QLabel("无项目")
         self._stat_label.setObjectName("MutedSmall")
-        stats.addWidget(self._stat_label, alignment=Qt.AlignmentFlag.AlignBottom)
-        sec.addLayout(stats)
+        self._stat_label.hide()
 
-        # ── Controls row ──
+        # ── Primary toolbar: only the daily path stays visible ──
         controls = QHBoxLayout()
         controls.setContentsMargins(0, 0, 0, 0)
         controls.setSpacing(8)
-        settings_btn = QPushButton("项目设置")
-        settings_btn.setObjectName("Ghost")
-        settings_btn.setFixedHeight(26)
-        settings_btn.setToolTip("打开项目设置")
-        icons.set_button_icon(settings_btn, "mdi6.cog-outline", color=icons.TONE_MUTED, size=15)
-        controls.addWidget(settings_btn)
-        self._auto_toggle = QPushButton("新 TIFF 自动压缩")
-        self._auto_toggle.setObjectName("Outline")
-        self._auto_toggle.setCheckable(True)
-        icons.set_button_icon(self._auto_toggle, "mdi6.checkbox-blank-outline",
-                              color=icons.TONE_MUTED, size=15)
-        self._auto_toggle.toggled.connect(self._on_auto_toggled)
-        controls.addWidget(self._auto_toggle)
-        refresh_btn = QPushButton("刷新目录")
+        title = QLabel("拍摄队列")
+        title.setObjectName("WorkspaceTitle")
+        controls.addWidget(title)
+        controls.addStretch()
+        refresh_btn = QPushButton("刷新")
         refresh_btn.setObjectName("Outline")
+        refresh_btn.setFixedHeight(28)
         icons.set_button_icon(refresh_btn, "mdi6.refresh", color=icons.TONE_MUTED, size=15)
         refresh_btn.clicked.connect(self._on_refresh)
         controls.addWidget(refresh_btn)
         add_btn = QPushButton("添加照片")
         add_btn.setObjectName("Outline")
+        add_btn.setFixedHeight(28)
         icons.set_button_icon(add_btn, "mdi6.image-plus-outline", color=icons.TONE_MUTED, size=15)
         add_btn.setToolTip("把已有照片添加进来（导入 incoming-jpg/）")
         add_btn.clicked.connect(self.add_jpg_requested.emit)
         controls.addWidget(add_btn)
-        dir_btn = QPushButton("选目录")
-        dir_btn.setObjectName("Ghost")
-        dir_btn.setFixedHeight(26)
-        dir_btn.setToolTip("选择工作目录")
-        icons.set_button_icon(dir_btn, "mdi6.folder-outline", color=icons.TONE_MUTED, size=15)
-        controls.addWidget(dir_btn)
-        # 分组工具 — opens the grouping/compose popup on demand (oracle keeps this
-        # panel collapsed by default, app.js:568/8595).  Keeps the main column clean.
-        self._grouping_btn = QPushButton("分组工具")
-        self._grouping_btn.setObjectName("Outline")
-        self._grouping_btn.setFixedHeight(26)
+        self._grouping_btn = QPushButton("分组")
+        self._grouping_btn.setObjectName("Primary")
+        self._grouping_btn.setFixedHeight(28)
         icons.set_button_icon(self._grouping_btn, "mdi6.layers-triple-outline",
-                              color=icons.TONE_MUTED, size=15)
+                              color=icons.TONE_ON_ACCENT, size=15)
         self._grouping_btn.setToolTip("打开分组 / 合成工具")
         self._grouping_btn.clicked.connect(self.grouping_requested.emit)
         controls.addWidget(self._grouping_btn)
+        self._auto_toggle = QPushButton("自动压缩")
+        self._auto_toggle.setObjectName("Ghost")
+        self._auto_toggle.setFixedHeight(28)
+        self._auto_toggle.setCheckable(True)
+        self._auto_toggle.setToolTip("新 TIFF 写入后自动压缩")
+        icons.set_button_icon(self._auto_toggle, "mdi6.checkbox-blank-outline",
+                              color=icons.TONE_MUTED, size=15)
+        self._auto_toggle.toggled.connect(self._on_auto_toggled)
+        controls.addWidget(self._auto_toggle)
+        more_btn = QPushButton()
+        more_btn.setObjectName("Ghost")
+        more_btn.setFixedSize(28, 28)
+        more_btn.setToolTip("更多")
+        icons.set_button_icon(more_btn, "mdi6.dots-horizontal",
+                              color=icons.TONE_MUTED, size=16)
+        more_btn.clicked.connect(
+            lambda: self._open_more_menu(more_btn.mapToGlobal(more_btn.rect().bottomLeft()))
+        )
+        controls.addWidget(more_btn)
         self._raw_count = QLabel("本组原片 0 张")
         self._raw_count.setObjectName("MutedSmall")
-        controls.addWidget(self._raw_count)
-        controls.addStretch()
+        self._raw_count.hide()
         sec.addLayout(controls)
 
         sec.addWidget(_divider())
 
-        # ── Stream header + selection bar ──
+        # Hidden real checkbox kept for state + tests; the visible control is in
+        # the "更多" menu.
+        self._hide_archived_cb = QCheckBox("隐藏已归档", self)
+        self._hide_archived_cb.toggled.connect(self._on_hide_archived_toggled)
+        self._hide_archived_cb.hide()
+
+        # ── Stream header ──
         sh = QHBoxLayout()
         sh.setContentsMargins(0, 0, 0, 0)
         sh.setSpacing(8)
-        sh_title = QLabel("刚写入目录")
+        sh_title = QLabel("待处理照片")
         sh_title.setObjectName("Section")
         sh.addWidget(sh_title)
-        sh_hint = QLabel("单击可选中")
+        sh_hint = QLabel("单击选择 · 右键处理文件")
         sh_hint.setObjectName("MutedSmall")
         sh.addWidget(sh_hint)
         sh.addStretch()
-        self._hide_archived_cb = QCheckBox("隐藏已归档")
-        self._hide_archived_cb.toggled.connect(self._on_hide_archived_toggled)
-        sh.addWidget(self._hide_archived_cb)
-        self._sel_count = QLabel("未选中")
+        self._sel_count = QLabel("")
         self._sel_count.setObjectName("MutedSmall")
         sh.addWidget(self._sel_count)
+        sec.addLayout(sh)
+
+        # ── Contextual selection bar: hidden until one or more files selected ──
+        self._selection_bar = QFrame()
+        self._selection_bar.setObjectName("Panel")
+        sel = QHBoxLayout(self._selection_bar)
+        sel.setContentsMargins(10, 6, 10, 6)
+        sel.setSpacing(8)
+        self._selection_count = QLabel("已选 0 个")
+        self._selection_count.setObjectName("MutedSmall")
+        sel.addWidget(self._selection_count)
+        add_group_btn = QPushButton("加入分组")
+        add_group_btn.setObjectName("Tiny")
+        add_group_btn.setFixedHeight(22)
+        add_group_btn.clicked.connect(self._on_selected_add_to_group)
+        sel.addWidget(add_group_btn)
         sel_all_btn = QPushButton("全选")
         sel_all_btn.setObjectName("Tiny")
         sel_all_btn.setFixedHeight(22)
         sel_all_btn.clicked.connect(self._on_select_all)
-        sh.addWidget(sel_all_btn)
+        sel.addWidget(sel_all_btn)
         sel_none_btn = QPushButton("清除")
         sel_none_btn.setObjectName("Tiny")
         sel_none_btn.setFixedHeight(22)
         sel_none_btn.clicked.connect(self._on_select_none)
-        sh.addWidget(sel_none_btn)
+        sel.addWidget(sel_none_btn)
         self._del_btn = QPushButton("删除")
         self._del_btn.setObjectName("Danger")
         self._del_btn.setFixedHeight(24)
@@ -474,15 +502,17 @@ class MonitorPanel(QWidget):
         icons.set_button_icon(self._del_btn, "mdi6.delete-outline", color=icons.TONE_DANGER, size=14)
         self._del_btn.setToolTip("删除选中文件（含 TIFF 时二次确认）")
         self._del_btn.clicked.connect(self._on_delete_clicked)
-        sh.addWidget(self._del_btn)
-        # Also add ↩ 撤销归属 from spec
+        sel.addWidget(self._del_btn)
         undo_attr_btn = QPushButton("撤销归属")
         undo_attr_btn.setObjectName("Tiny")
         undo_attr_btn.setFixedHeight(22)
         undo_attr_btn.setToolTip("撤销选中 JPG 的归属")
         icons.set_button_icon(undo_attr_btn, "mdi6.undo", color=icons.TONE_MUTED, size=14)
-        sh.addWidget(undo_attr_btn)
-        sec.addLayout(sh)
+        undo_attr_btn.clicked.connect(self._on_selected_unassign)
+        sel.addWidget(undo_attr_btn)
+        sel.addStretch()
+        self._selection_bar.hide()
+        sec.addWidget(self._selection_bar)
 
         # ── Capture stream (scrollable grid) ──
         scroll = QScrollArea()
@@ -587,11 +617,14 @@ class MonitorPanel(QWidget):
         self._cards = []
         self._clear_grid()
         self._stat_label.setText("无项目")
-        self._stat_today.setText("0 张")
-        self._stat_untidy.setText("0 张")
+        self._stat_today.setText("JPG 0")
+        self._stat_recent.setText("TIFF 0")
+        self._stat_untidy.setText("未整理 0")
         self._raw_count.setText("本组原片 0 张")
         self._del_btn.setEnabled(False)
-        self._sel_count.setText("未选中")
+        self._sel_count.setText("")
+        self._selection_count.setText("已选 0 个")
+        self._selection_bar.hide()
         self._unattr_warning.hide()
         self._empty_label.show()
 
@@ -619,8 +652,9 @@ class MonitorPanel(QWidget):
             self._sync_cards(all_files)
 
         self._stat_label.setText(f"JPG {jpg_c} · TIFF {tiff_c}")
-        self._stat_today.setText(f"{jpg_c} 张")
-        self._stat_untidy.setText(f"{len(all_files)} 张")
+        self._stat_today.setText(f"JPG {jpg_c}")
+        self._stat_recent.setText(f"TIFF {tiff_c}")
+        self._stat_untidy.setText(f"未整理 {len(all_files)}")
         self._raw_count.setText(f"本组原片 {jpg_c} 张")
 
         self._apply_filter()
@@ -659,6 +693,7 @@ class MonitorPanel(QWidget):
         card.assign_requested.connect(self.assign_requested)
         card.deactivate_requested.connect(self.unassign_requested)
         card.selection_toggled.connect(self._on_card_selection_toggled)
+        card.delete_requested.connect(self._on_delete_single_requested)
         return card
 
     def _sync_cards(self, all_files: list) -> None:
@@ -728,27 +763,30 @@ class MonitorPanel(QWidget):
 
     def _on_card_selection_toggled(self, path: str, selected: bool) -> None:
         """Update selection count label and delete button state."""
-        sel = self._selected_cards()
-        n = len(sel)
-        if n:
-            self._sel_count.setText(f"已选 {n} 个")
-            self._del_btn.setEnabled(True)
-        else:
-            self._sel_count.setText("未选中")
-            self._del_btn.setEnabled(False)
+        self._refresh_selection_bar()
 
     def _on_select_all(self) -> None:
         for card in self._cards:
             card.set_selected(True)
-        n = len(self._cards)
-        self._sel_count.setText(f"已选 {n} 个" if n else "未选中")
-        self._del_btn.setEnabled(bool(self._cards))
+        self._refresh_selection_bar()
 
     def _on_select_none(self) -> None:
         for card in self._cards:
             card.set_selected(False)
-        self._sel_count.setText("未选中")
-        self._del_btn.setEnabled(False)
+        self._refresh_selection_bar()
+
+    def _refresh_selection_bar(self) -> None:
+        n = len(self._selected_cards())
+        if n:
+            self._sel_count.setText(f"已选 {n}")
+            self._selection_count.setText(f"已选 {n} 个")
+            self._del_btn.setEnabled(True)
+            self._selection_bar.show()
+        else:
+            self._sel_count.setText("")
+            self._selection_count.setText("已选 0 个")
+            self._del_btn.setEnabled(False)
+            self._selection_bar.hide()
 
     def selected_jpg_paths(self) -> list[str]:
         """Return absolute paths of all currently selected JPG cards."""
@@ -788,6 +826,12 @@ class MonitorPanel(QWidget):
             return
 
         paths = [getattr(c._entry, "path", "") for c in sel]
+        self._delete_paths(paths, clear_selection=True)
+
+    def _on_delete_single_requested(self, path: str) -> None:
+        self._delete_paths([path], clear_selection=False)
+
+    def _delete_paths(self, paths: list[str], *, clear_selection: bool) -> None:
         tiff_paths = [p for p in paths if p.lower().endswith((".tif", ".tiff"))]
         jpg_paths  = [p for p in paths if p and not p.lower().endswith((".tif", ".tiff"))]
 
@@ -830,8 +874,36 @@ class MonitorPanel(QWidget):
             QMessageBox.warning(self, "删除部分失败", "\n".join(errors[:5]))
 
         if deleted:
-            self._on_select_none()
+            if clear_selection:
+                self._on_select_none()
             self.refresh_requested.emit()
+
+    def _on_selected_add_to_group(self) -> None:
+        jpg_paths = self.selected_jpg_paths()
+        if not jpg_paths:
+            QMessageBox.information(self, "加入分组", "请先选中 JPG。")
+            return
+        db = self.ctx.get_db()
+        if db is None:
+            return
+        active_uid = activation_service.get_active_uid(db)
+        if not active_uid:
+            QMessageBox.warning(self, "无激活标本", "请先激活一个标本")
+            return
+        for jpg_path in jpg_paths:
+            self._add_jpg_to_grouping(db, active_uid, jpg_path)
+        self._on_select_none()
+        self.refresh_requested.emit()
+
+    def _on_selected_unassign(self) -> None:
+        jpg_paths = self.selected_jpg_paths()
+        if not jpg_paths:
+            QMessageBox.information(self, "撤销归属", "请先选中 JPG。")
+            return
+        for jpg_path in jpg_paths:
+            self._on_ctx_unassign(jpg_path)
+        self._on_select_none()
+        self.refresh_requested.emit()
 
     # ── Context menu handlers ─────────────────────────────────────────────────
 
@@ -892,6 +964,36 @@ class MonitorPanel(QWidget):
         glyph = "mdi6.checkbox-marked" if on else "mdi6.checkbox-blank-outline"
         tone = icons.TONE_ACCENT if on else icons.TONE_MUTED
         icons.set_button_icon(self._auto_toggle, glyph, color=tone, size=15)
+
+    def _open_more_menu(self, global_pos) -> None:
+        menu = QMenu(self)
+
+        settings_action = menu.addAction("项目设置")
+        settings_action.triggered.connect(self.settings_requested.emit)
+
+        choose_dir_action = menu.addAction("选目录")
+        choose_dir_action.setEnabled(False)
+        choose_dir_action.setToolTip("请从项目树切换工作目录")
+
+        menu.addSeparator()
+
+        hide_action = menu.addAction("隐藏已归档")
+        hide_action.setCheckable(True)
+        hide_action.setChecked(self._hide_archived_cb.isChecked())
+        hide_action.toggled.connect(self._hide_archived_cb.setChecked)
+
+        auto_action = menu.addAction("新 TIFF 自动压缩")
+        auto_action.setCheckable(True)
+        auto_action.setChecked(self._auto_toggle.isChecked())
+        auto_action.toggled.connect(self._auto_toggle.setChecked)
+
+        menu.addSeparator()
+
+        scan_action = menu.addAction("扫描旧文件")
+        scan_action.setEnabled(False)
+        scan_action.setToolTip("旧文件扫描在分组工具/批量整理流程中执行")
+
+        menu.exec(global_pos)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

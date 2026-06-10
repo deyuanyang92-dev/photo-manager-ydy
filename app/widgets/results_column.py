@@ -36,6 +36,7 @@ from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QMenu,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -307,14 +308,15 @@ class _TiffCard(_ResultCardBase):
         state_chip.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         row.addWidget(state_chip)
         row.addStretch()
-        if self._open_fn:
-            open_btn = QPushButton("📂")
-            open_btn.setObjectName("Ghost")
-            open_btn.setFixedSize(26, 26)
-            open_btn.setToolTip("在文件夹中显示")
-            p = self._info.get("path", "")
-            open_btn.clicked.connect(lambda _, _p=p: self._open_fn(_p))
-            row.addWidget(open_btn)
+        menu_btn = QPushButton()
+        menu_btn.setObjectName("Ghost")
+        menu_btn.setFixedSize(26, 26)
+        menu_btn.setToolTip("成果操作")
+        icons.set_button_icon(menu_btn, "mdi6.dots-vertical", size=14)
+        menu_btn.clicked.connect(
+            lambda: self._show_menu(menu_btn.mapToGlobal(menu_btn.rect().bottomLeft()))
+        )
+        row.addWidget(menu_btn)
         body_lay.addLayout(row)
         body_lay.addStretch()
         return body
@@ -325,6 +327,20 @@ class _TiffCard(_ResultCardBase):
             if path:
                 self._lightbox_fn(Path(path))
         super().mouseDoubleClickEvent(event)
+
+    def contextMenuEvent(self, event) -> None:
+        self._show_menu(event.globalPos())
+
+    def _show_menu(self, global_pos) -> None:
+        path = self._info.get("path", "")
+        menu = QMenu(self)
+        preview_action = menu.addAction("打开预览")
+        preview_action.setEnabled(bool(self._lightbox_fn and path))
+        preview_action.triggered.connect(lambda: self._lightbox_fn(Path(path)))
+        open_action = menu.addAction("在文件夹中显示")
+        open_action.setEnabled(bool(self._open_fn and path))
+        open_action.triggered.connect(lambda: self._open_fn(path))
+        menu.exec(global_pos)
 
 
 class _ArchiveCard(_ResultCardBase):
@@ -367,25 +383,32 @@ class _ArchiveCard(_ResultCardBase):
         state_lbl.setObjectName("MutedSmall")
         row.addWidget(state_lbl)
         row.addStretch()
-        p = self._info.get("path", "")
-        if self._restore_fn:
-            restore_btn = QPushButton("还原")
-            restore_btn.setObjectName("Ghost")
-            restore_btn.setFixedHeight(26)
-            restore_btn.setToolTip("无损还原出原始 JPG 到指定文件夹")
-            icons.set_button_icon(restore_btn, "mdi6.folder-download-outline", size=14)
-            restore_btn.clicked.connect(lambda _, _p=p: self._restore_fn(_p))
-            row.addWidget(restore_btn)
-        if self._open_fn:
-            open_btn = QPushButton("📂")
-            open_btn.setObjectName("Ghost")
-            open_btn.setFixedSize(26, 26)
-            open_btn.setToolTip("在文件夹中显示")
-            open_btn.clicked.connect(lambda _, _p=p: self._open_fn(_p))
-            row.addWidget(open_btn)
+        menu_btn = QPushButton()
+        menu_btn.setObjectName("Ghost")
+        menu_btn.setFixedSize(26, 26)
+        menu_btn.setToolTip("归档操作")
+        icons.set_button_icon(menu_btn, "mdi6.dots-vertical", size=14)
+        menu_btn.clicked.connect(
+            lambda: self._show_menu(menu_btn.mapToGlobal(menu_btn.rect().bottomLeft()))
+        )
+        row.addWidget(menu_btn)
         body_lay.addLayout(row)
         body_lay.addStretch()
         return body
+
+    def contextMenuEvent(self, event) -> None:
+        self._show_menu(event.globalPos())
+
+    def _show_menu(self, global_pos) -> None:
+        path = self._info.get("path", "")
+        menu = QMenu(self)
+        restore_action = menu.addAction("还原原片")
+        restore_action.setEnabled(bool(self._restore_fn and path))
+        restore_action.triggered.connect(lambda: self._restore_fn(path))
+        open_action = menu.addAction("在文件夹中显示")
+        open_action.setEnabled(bool(self._open_fn and path))
+        open_action.triggered.connect(lambda: self._open_fn(path))
+        menu.exec(global_pos)
 
 
 def _placeholder(text: str) -> QWidget:
@@ -510,7 +533,7 @@ class ResultsColumn(QWidget):
         )
         hdr.addWidget(self._collapse_btn)
 
-        title = QLabel("成果内容")
+        title = QLabel("成果")
         title.setObjectName("WorkspaceTitle")
         hdr.addWidget(title)
 
