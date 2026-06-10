@@ -271,6 +271,50 @@ def get_active_uid(db: sqlite3.Connection) -> Optional[str]:
         return None
 
 
+def set_collab_status(db: sqlite3.Connection, uid: str, status: str) -> None:
+    """Persist the collab phase status for *uid* into tasks.raw_json.
+
+    Mirrors the oracle's server-side task persistence (server.js:3117,
+    specimen_tasks.json) — the in-memory TaskStore does not survive a
+    restart, the project DB does.  Merges into existing raw_json; never
+    touches is_active / activated_at.
+    """
+    _ensure_tasks_table(db)
+    row = db.execute("SELECT raw_json FROM tasks WHERE uid = ?", (uid,)).fetchone()
+    raw: dict = {}
+    if row and row[0]:
+        try:
+            parsed = json.loads(row[0])
+            if isinstance(parsed, dict):
+                raw = parsed
+        except (json.JSONDecodeError, TypeError):
+            raw = {}
+    raw["status"] = status
+    raw["updatedAt"] = _iso_now()
+    db.execute(
+        """
+        INSERT INTO tasks (uid, raw_json) VALUES (?, ?)
+        ON CONFLICT(uid) DO UPDATE SET raw_json = excluded.raw_json
+        """,
+        (uid, json.dumps(raw, ensure_ascii=False)),
+    )
+    db.commit()
+
+
+def get_collab_status(db: sqlite3.Connection, uid: str) -> Optional[str]:
+    """Read the persisted collab phase status from tasks.raw_json, or None."""
+    try:
+        row = db.execute(
+            "SELECT raw_json FROM tasks WHERE uid = ?", (uid,)
+        ).fetchone()
+        if not row or not row[0]:
+            return None
+        parsed = json.loads(row[0])
+        return parsed.get("status") if isinstance(parsed, dict) else None
+    except Exception:
+        return None
+
+
 # ── Internal helpers ───────────────────────────────────────────────────────────
 
 def _iso_now() -> str:

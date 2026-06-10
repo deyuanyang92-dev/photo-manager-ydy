@@ -1782,3 +1782,64 @@ class TestSupplementaryArchival:
         # Source TIFF moved (data preserved at dest, never destroyed).
         assert not os.path.isfile(tiff)
         db.close()
+
+
+# ── 阶段按钮 → collab store + DB 持久化接线 ──────────────────────────────────
+
+class TestPhasePillWiring:
+    """点击 pill → TaskStore + tasks.raw_json + pill 高亮三处一致;
+    重启(空 store)后由 DB 回读;非法迁移不崩溃。"""
+
+    def _make_view(self, tmp_path, db=None):
+        from app.views.workbench_view import WorkbenchView
+        from app.services.collab_service import CollabService
+        if db is None:
+            db = _make_db(":memory:")
+        ctx = _make_ctx(project_dir=str(tmp_path), db=db)
+        ctx.collab_service = CollabService()
+        return WorkbenchView(ctx), ctx, db
+
+    def test_phase_click_updates_store_db_and_pill(self, tmp_path):
+        from app.services import activation_service
+        from app.services.collab_service import TaskStatus
+        w, ctx, db = self._make_view(tmp_path)
+        activation_service.activate(str(tmp_path), db, "U1")
+        w._refresh_batch_header()
+
+        w._on_phase_clicked("shooting")
+
+        assert ctx.collab_service.store.get("U1").status is TaskStatus.SHOOTING
+        assert activation_service.get_collab_status(db, "U1") == "shooting"
+        assert w._monitor._phase_pills["shooting"].isChecked()
+
+    def test_phase_readback_from_db_after_restart(self, tmp_path):
+        from app.services import activation_service
+        db = _make_db(":memory:")
+        activation_service.activate(str(tmp_path), db, "U1")
+        activation_service.set_collab_status(db, "U1", "organizing")
+
+        # 新实例 = 模拟重启:TaskStore 为空,只剩 DB 里的状态
+        w, ctx, _ = self._make_view(tmp_path, db=db)
+        w._refresh_batch_header()
+
+        assert w._monitor._phase_pills["organizing"].isChecked()
+
+    def test_invalid_transition_keeps_pill_and_no_crash(self, tmp_path):
+        from app.services import activation_service
+        from app.services.collab_service import TaskStatus
+        w, ctx, db = self._make_view(tmp_path)
+        activation_service.activate(str(tmp_path), db, "U1")
+        w._refresh_batch_header()
+        w._on_phase_clicked("shooting")
+
+        w._on_phase_clicked("done")  # SHOOTING→DONE 非法,应提示而非崩溃
+
+        assert ctx.collab_service.store.get("U1").status is TaskStatus.SHOOTING
+        assert w._monitor._phase_pills["shooting"].isChecked()
+        assert not w._monitor._phase_pills["done"].isChecked()
+
+    def test_click_without_active_uid_is_noop(self, tmp_path):
+        w, ctx, db = self._make_view(tmp_path)
+        w._on_phase_clicked("shooting")  # 无激活编号,不应崩溃
+        assert ctx.collab_service.store.get("shooting") is None
+        assert all(not b.isChecked() for b in w._monitor._phase_pills.values())

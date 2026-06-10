@@ -453,3 +453,47 @@ class TestArchivedTiffFilter:
         after = _tiff_entry(name="a.tif", path="/tmp/results/a.tif", has_zip=True)
         panel.load_scan(_scan([], [after]))
         assert "a.tif" not in _visible_card_names(panel)
+
+
+# ── 阶段按钮(拍摄中/已拍完/整理中/完成)接线 (oracle app.js:8357-8383) ───────
+
+class TestPhasePills:
+    """Pills 发 status code 信号;checked 互斥、只由 set_phase 驱动;
+    永不禁用——无激活 UID 时点击由工作台给状态栏反馈(零反馈=bug)。"""
+
+    def test_pills_always_enabled(self, panel):
+        panel.set_batch("X", None)
+        assert all(b.isEnabled() for b in panel._phase_pills.values())
+        panel.set_batch("X", "X")
+        assert all(b.isEnabled() for b in panel._phase_pills.values())
+
+    def test_pills_keyed_by_status_code(self, panel):
+        assert set(panel._phase_pills.keys()) == {
+            "shooting", "shot_done", "organizing", "done"}
+
+    def test_click_emits_status_code_without_self_check(self, panel, qtbot):
+        panel.set_batch("X", "X")
+        received = []
+        panel.phase_clicked.connect(received.append)
+        btn = panel._phase_pills["shooting"]
+        qtbot.mouseClick(btn, Qt.MouseButton.LeftButton)
+        assert received == ["shooting"]
+        assert not btn.isChecked(), "checked 只能由 set_phase 驱动"
+
+    def test_set_phase_checks_exactly_one(self, panel):
+        panel.set_batch("X", "X")
+        panel.set_phase("organizing")
+        checked = [c for c, b in panel._phase_pills.items() if b.isChecked()]
+        assert checked == ["organizing"]
+
+    def test_set_phase_none_unchecks_all(self, panel):
+        panel.set_batch("X", "X")
+        panel.set_phase("shooting")
+        panel.set_phase(None)
+        assert all(not b.isChecked() for b in panel._phase_pills.values())
+
+    def test_deactivate_clears_phase(self, panel):
+        panel.set_batch("X", "X")
+        panel.set_phase("shooting")
+        panel.set_batch("X", None)
+        assert all(not b.isChecked() for b in panel._phase_pills.values())

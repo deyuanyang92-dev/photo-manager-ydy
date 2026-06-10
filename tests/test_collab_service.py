@@ -1006,3 +1006,49 @@ def test_remote_409_real_two_machines():
       Machine B: same (run simultaneously)
     """
     pytest.skip("manual two-machine test — run manually on a real LAN")
+
+
+# ── update_task_status: 工作台阶段按钮的 UI 入口 ─────────────────────────────
+
+class TestUpdateTaskStatusUiHelper:
+    """镜像 oracle ensureCollabTask + update-status(server.js:4015-4031):
+    任务不存在则先植入;非法迁移不抛、返回 (False, msg)。"""
+
+    def test_creates_missing_task_then_sets_status(self):
+        svc = CollabService()
+        ok, msg = svc.update_task_status("ZJ-TMW-B2-001", "shooting")
+        assert ok is True
+        assert svc.store.get("ZJ-TMW-B2-001").status is TaskStatus.SHOOTING
+
+    def test_seed_status_allows_resumed_chain(self):
+        svc = CollabService()
+        ok, _ = svc.update_task_status("U1", "done", seed_status="organizing")
+        assert ok is True
+        assert svc.store.get("U1").status is TaskStatus.DONE
+
+    def test_invalid_transition_returns_false_no_raise(self):
+        svc = CollabService()
+        assert svc.update_task_status("U2", "shooting")[0] is True
+        ok, msg = svc.update_task_status("U2", "done")  # SHOOTING→DONE 非法
+        assert ok is False
+        assert msg
+        assert svc.store.get("U2").status is TaskStatus.SHOOTING
+
+    def test_same_status_idempotent_ok(self):
+        svc = CollabService()
+        assert svc.update_task_status("U3", "shooting")[0] is True
+        ok, _ = svc.update_task_status("U3", "shooting")
+        assert ok is True
+        assert svc.store.get("U3").status is TaskStatus.SHOOTING
+
+    def test_invalid_status_string_returns_false(self):
+        svc = CollabService()
+        ok, msg = svc.update_task_status("U4", "not-a-status")
+        assert ok is False
+
+    def test_emits_tasks_changed_on_success(self):
+        svc = CollabService()
+        seen = []
+        svc.tasks_changed.connect(lambda: seen.append(True))
+        svc.update_task_status("U5", "shooting")
+        assert seen

@@ -276,3 +276,50 @@ class TestGetActiveUid:
         activate(tmp_project, db, "UID-A")
         deactivate(tmp_project, db, "UID-A")
         assert get_active_uid(db) is None
+
+
+# ── 协作阶段状态持久化(工作台阶段按钮跨重启回读)────────────────────────────
+
+class TestCollabStatusPersistence:
+    """阶段状态写 tasks.raw_json(镜像 oracle specimen_tasks.json 持久化,
+    server.js:3117);TaskStore 纯内存,重启后由 DB 回读。"""
+
+    def test_set_collab_status_roundtrip(self):
+        from app.services.activation_service import set_collab_status, get_collab_status
+        db = _make_db()
+        set_collab_status(db, "ZJ-TMW-B2-001", "shooting")
+        assert get_collab_status(db, "ZJ-TMW-B2-001") == "shooting"
+
+    def test_merge_preserves_existing_raw_json_keys(self):
+        from app.services.activation_service import set_collab_status
+        db = _make_db()
+        db.execute("INSERT INTO tasks (uid, raw_json) VALUES (?, ?)",
+                   ("U1", json.dumps({"foo": 1})))
+        db.commit()
+        set_collab_status(db, "U1", "organizing")
+        raw = json.loads(db.execute(
+            "SELECT raw_json FROM tasks WHERE uid='U1'").fetchone()[0])
+        assert raw["foo"] == 1
+        assert raw["status"] == "organizing"
+
+    def test_set_does_not_touch_activation_columns(self, tmp_project):
+        from app.services.activation_service import set_collab_status
+        db = _make_db()
+        activate(tmp_project, db, "U2")
+        set_collab_status(db, "U2", "shooting")
+        row = db.execute(
+            "SELECT is_active, activated_at FROM tasks WHERE uid='U2'").fetchone()
+        assert row["is_active"] == 1
+        assert row["activated_at"]
+
+    def test_get_missing_returns_none(self):
+        from app.services.activation_service import get_collab_status
+        db = _make_db()
+        assert get_collab_status(db, "nope") is None
+
+    def test_get_tolerates_corrupt_raw_json(self):
+        from app.services.activation_service import get_collab_status
+        db = _make_db()
+        db.execute("INSERT INTO tasks (uid, raw_json) VALUES ('U3', 'not json')")
+        db.commit()
+        assert get_collab_status(db, "U3") is None

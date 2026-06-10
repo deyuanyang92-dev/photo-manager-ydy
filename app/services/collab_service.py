@@ -1414,6 +1414,43 @@ class CollabService(QObject):
         except ValueError as exc:
             logger.warning("assign_task failed uid=%s: %s", uid, exc)
 
+    def update_task_status(self, uid: str, status: str,
+                           seed_status: Optional[str] = None) -> tuple[bool, str]:
+        """Set task *uid* to *status* — UI entry for the workbench phase pills.
+
+        Mirrors oracle ensureCollabTask + /api/collab/tasks/update-status
+        (server.js:4015-4031): a missing task is seeded first (at
+        *seed_status*, e.g. the status persisted in the project DB across
+        restarts), then transitioned.  Never raises: returns (ok, message)
+        so the caller can surface failures in the status bar.
+
+        Deliberate deviation from oracle: the local state machine
+        (is_valid_transition) stays enforced — out-of-order jumps return
+        (False, msg) instead of being applied.
+        """
+        if self.store.get(uid) is None:
+            self.store.merge_from_peer([{
+                "uid": uid,
+                "status": seed_status or "created",
+                "updatedAt": _now_iso(),
+            }])
+        try:
+            to_status = TaskStatus(status)
+        except ValueError:
+            return (False, f"未知状态: {status}")
+        task = self.store.get(uid)
+        if task is not None and task.status is to_status:
+            return (True, "ok")  # idempotent re-set, oracle allows it
+        try:
+            self.store.update_status(uid, to_status)
+        except ValueError as exc:
+            return (False, str(exc))
+        self.tasks_changed.emit()
+        self.specimen_status_changed.emit(uid)
+        self._log_activity("status_changed", uid,
+                           detail=f"编号 {uid} 阶段 → {to_status.value}")
+        return (True, "ok")
+
     def release_task(self, uid: str) -> None:
         """Revoke a UID claim = *release* it for reuse.
 

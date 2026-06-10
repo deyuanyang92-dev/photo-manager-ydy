@@ -313,12 +313,14 @@ class MonitorPanel(QWidget):
     add_jpg_requested = pyqtSignal()   # emitted when user clicks "添加照片"
     grouping_requested = pyqtSignal()  # emitted when user clicks "分组工具" (opens popup)
     settings_requested = pyqtSignal()  # emitted from the compact "更多" menu
+    phase_clicked = pyqtSignal(str)    # status code: shooting/shot_done/organizing/done
 
     def __init__(self, ctx: "AppContext", parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.ctx = ctx
         self._scan_result: Optional["ScanResult"] = None
         self._active_uid: Optional[str] = None
+        self._current_phase: Optional[str] = None
         self._last_scan_sig = None  # change-detection: skip rebuild when unchanged
         self._cards: list[_FileCard] = []  # all current cards (for selection ops)
         # Incremental rebuild: reuse card widgets across scans keyed by file
@@ -360,22 +362,25 @@ class MonitorPanel(QWidget):
         self._activate_state.setObjectName("ActivateState")
         b_lay.addWidget(self._activate_state)
 
+        # Oracle app.js:8368-8383 — click → collabUpdateTaskStatus(uid, code).
+        # checked is driven only by set_phase() (confirmed status), never by
+        # the click itself.  Pills stay enabled even without an active
+        # specimen: clicking then yields a status-bar hint (零反馈=bug).
         self._phase_pills: dict[str, QPushButton] = {}
-        for phase, obj in (
-            ("拍摄中", "PhasePillActive"),
-            ("已拍完", "PhasePill"),
-            ("整理中", "PhasePill"),
-            ("完成",   "PhasePill"),
+        for label, code in (
+            ("拍摄中", "shooting"),
+            ("已拍完", "shot_done"),
+            ("整理中", "organizing"),
+            ("完成",   "done"),
         ):
-            btn = QPushButton(phase)
-            btn.setObjectName(obj)
+            btn = QPushButton(label)
+            btn.setObjectName("PhasePill")
             btn.setCheckable(True)
             btn.setFixedHeight(22)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            if phase == "拍摄中":
-                btn.setChecked(True)
+            btn.clicked.connect(lambda _=False, c=code: self._on_phase_pill_clicked(c))
             b_lay.addWidget(btn)
-            self._phase_pills[phase] = btn
+            self._phase_pills[code] = btn
 
         b_lay.addStretch()
         self._stat_today = QLabel("JPG 0")
@@ -574,6 +579,20 @@ class MonitorPanel(QWidget):
         # re-polish to apply object-name-driven style
         self._activate_state.style().unpolish(self._activate_state)
         self._activate_state.style().polish(self._activate_state)
+
+        if not active_uid:
+            self.set_phase(None)
+
+    def set_phase(self, status: Optional[str]) -> None:
+        """Reflect the confirmed task status on the phase pills (exclusive)."""
+        self._current_phase = status if status in self._phase_pills else None
+        for code, btn in self._phase_pills.items():
+            btn.setChecked(code == self._current_phase)
+
+    def _on_phase_pill_clicked(self, code: str) -> None:
+        # Roll back Qt's automatic toggle; the workbench confirms via set_phase.
+        self.set_phase(self._current_phase)
+        self.phase_clicked.emit(code)
 
     def load_scan(self, scan_result: "ScanResult") -> None:
         """Populate the grid from a completed scan result.

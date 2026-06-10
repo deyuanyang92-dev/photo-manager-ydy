@@ -400,6 +400,8 @@ class WorkbenchView(BaseView):
             )
             # Refresh collab card when tasks change (if a specimen is selected)
             svc.tasks_changed.connect(self._refresh_collab_card)
+            # Peer-synced status changes flow back into the phase pills.
+            svc.tasks_changed.connect(self._refresh_batch_header)
         self._sidebar.update_collab_status(svc)
 
         # ── Centre ①: vertical splitter (monitor top, grouping bottom) ───────
@@ -414,6 +416,7 @@ class WorkbenchView(BaseView):
         self._monitor.add_jpg_requested.connect(self._on_add_jpg_files)
         self._monitor.grouping_requested.connect(self._on_open_grouping)
         self._monitor.settings_requested.connect(self._on_open_settings)
+        self._monitor.phase_clicked.connect(self._on_phase_clicked)
         centre.addWidget(self._monitor)
 
         # 分组工具 lives in an on-demand popup, NOT permanently in the main
@@ -724,6 +727,7 @@ class WorkbenchView(BaseView):
         db = self.ctx.get_db()
         active_uid = self._get_active_uid()
         activated_at = None
+        phase = None
         if db and active_uid:
             try:
                 row = db.execute(
@@ -733,8 +737,71 @@ class WorkbenchView(BaseView):
                     activated_at = row[0]
             except Exception:
                 pass
+            phase = self._collab_phase_for(active_uid)
         batch_uid = active_uid or self._current_uid
         self._monitor.set_batch(batch_uid, active_uid, activated_at)
+        if active_uid:
+            self._monitor.set_phase(phase)
+
+    def _collab_phase_for(self, uid: str) -> Optional[str]:
+        """Return confirmed collab phase from memory first, then project DB."""
+        svc = getattr(self.ctx, "collab_service", None)
+        try:
+            task = svc.store.get(uid) if svc is not None else None
+            if task is not None:
+                return task.status.value
+        except Exception:
+            pass
+        db = self.ctx.get_db()
+        if not db:
+            return None
+        try:
+            from app.services.activation_service import get_collab_status
+            return get_collab_status(db, uid)
+        except Exception:
+            return None
+
+    def _on_phase_clicked(self, status: str) -> None:
+        """Persist a monitor phase-pill click to collab state and project DB."""
+        uid = self._get_active_uid()
+        if not uid:
+            self._monitor.set_phase(None)
+            self._status_message("请先激活一个编号，再标记拍摄阶段")
+            return
+
+        allowed = set(getattr(self._monitor, "_phase_pills", {}).keys())
+        if status not in allowed:
+            self._status_message(f"未知阶段：{status}")
+            self._refresh_batch_header()
+            return
+
+        db = self.ctx.get_db()
+        seed_status = self._collab_phase_for(uid)
+        svc = getattr(self.ctx, "collab_service", None)
+        if svc is not None:
+            ok, msg = svc.update_task_status(uid, status, seed_status=seed_status)
+            if not ok:
+                self._status_message(f"阶段未变更：{msg}")
+                self._refresh_batch_header()
+                return
+
+        if db is not None:
+            try:
+                from app.services.activation_service import set_collab_status
+                set_collab_status(db, uid, status)
+            except Exception as exc:
+                self._status_message(f"阶段保存失败：{exc}")
+                self._refresh_batch_header()
+                return
+
+        self._monitor.set_phase(status)
+        self._status_message("阶段已更新")
+        self._refresh_batch_header()
+        try:
+            self._sidebar.update_collab_status(svc)
+            self._refresh_collab_card()
+        except Exception:
+            pass
 
     def _on_new_specimen(self) -> None:
         """Start a fresh blank UID draft in the naming/metadata panels.
