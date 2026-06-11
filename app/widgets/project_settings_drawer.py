@@ -397,6 +397,30 @@ class ProjectSettingsDrawer(QWidget):
 
         lay.addWidget(_divider())
 
+        # 默认采集坐标 / 地理区（项目级兜底）。新建标本自动带；选定具体站位后，
+        # 该站采集记录会以更高优先级覆盖（见 metadata_panel.apply_autofill）。
+        cap_lbl = QLabel("默认采集坐标 / 地理区（新标本兜底，选站位后由采集记录覆盖）")
+        cap_lbl.setObjectName("Section")
+        cap_lbl.setWordWrap(True)
+        lay.addWidget(cap_lbl)
+        self._cap_lon_edit = QLineEdit()
+        self._cap_lon_edit.setFixedHeight(30)
+        self._cap_lon_edit.setPlaceholderText("默认经度，如 121.5")
+        self._cap_lon_edit.editingFinished.connect(self._save_capture_defaults)
+        lay.addWidget(_row("默认经度", self._cap_lon_edit, width=80))
+        self._cap_lat_edit = QLineEdit()
+        self._cap_lat_edit.setFixedHeight(30)
+        self._cap_lat_edit.setPlaceholderText("默认纬度，如 29.1")
+        self._cap_lat_edit.editingFinished.connect(self._save_capture_defaults)
+        lay.addWidget(_row("默认纬度", self._cap_lat_edit, width=80))
+        self._cap_geo_edit = QLineEdit()
+        self._cap_geo_edit.setFixedHeight(30)
+        self._cap_geo_edit.setPlaceholderText("默认采集地理区，如 三门湾")
+        self._cap_geo_edit.editingFinished.connect(self._save_capture_defaults)
+        lay.addWidget(_row("默认地理区", self._cap_geo_edit, width=80))
+
+        lay.addWidget(_divider())
+
         # Stations dict
         sta_lbl = QLabel("站位说明（缩写 → 中文）")
         sta_lbl.setObjectName("Section")
@@ -539,6 +563,7 @@ class ProjectSettingsDrawer(QWidget):
             DEFAULT_PROJECT_META,
             DEFAULT_PERSONNEL,
             DEFAULT_CODE_LABELS,
+            DEFAULT_CAPTURE_DEFAULTS,
             DEFAULT_TIFF_FIELDS,
         )
 
@@ -558,6 +583,11 @@ class ProjectSettingsDrawer(QWidget):
         self._site_edit.setText(cl.get("site", ""))
         self._stations_kv.load(cl.get("stations", {}))
         self._species_kv.load(cl.get("species", {}))
+        # 默认采集坐标 / 地理区
+        cap = load_setting(db, "capture_defaults", DEFAULT_CAPTURE_DEFAULTS)
+        self._cap_lon_edit.setText(str(cap.get("lon", "") or ""))
+        self._cap_lat_edit.setText(str(cap.get("lat", "") or ""))
+        self._cap_geo_edit.setText(cap.get("geoArea", "") or "")
         self._update_code_preview(db)
 
         # TIFF 字段
@@ -602,6 +632,18 @@ class ProjectSettingsDrawer(QWidget):
         }
         save_setting(db, "code_labels", data)
         self._update_code_preview(db)
+
+    def _save_capture_defaults(self) -> None:
+        """保存项目级默认采集坐标 / 地理区（capture_defaults）。"""
+        db = self.ctx.get_db()
+        if db is None:
+            return
+        from app.services.project_settings_service import save_setting
+        save_setting(db, "capture_defaults", {
+            "lon": self._cap_lon_edit.text().strip(),
+            "lat": self._cap_lat_edit.text().strip(),
+            "geoArea": self._cap_geo_edit.text().strip(),
+        })
 
     def _save_tiff_fields(self) -> None:
         db = self.ctx.get_db()

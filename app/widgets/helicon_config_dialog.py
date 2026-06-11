@@ -36,7 +36,12 @@ from PyQt6.QtWidgets import (
 
 from app.config import icons
 from app.utils import ui
-from app.widgets.helicon_params_panel import HeliconParamsPanel
+from app.widgets.helicon_params_panel import (
+    HELICON_DEFAULT_METHOD,
+    HELICON_DEFAULT_RADIUS,
+    HELICON_DEFAULT_SMOOTHING,
+    HeliconParamsPanel,
+)
 from app.views.settings_view import (
     _K_HELICON_CONCURRENCY,
     _K_HELICON_EXE,
@@ -50,10 +55,10 @@ from app.views.settings_view import (
     _K_HELICON_TIFF_COMPRESSION,
 )
 
-# Oracle factory defaults (app.js reset): method B, radius 8, smoothing 4.
-_DEFAULT_METHOD = 1
-_DEFAULT_RADIUS = 8.0
-_DEFAULT_SMOOTHING = 4
+# Helicon Focus factory defaults: method B, radius 8, smoothing 4.
+_DEFAULT_METHOD = HELICON_DEFAULT_METHOD
+_DEFAULT_RADIUS = HELICON_DEFAULT_RADIUS
+_DEFAULT_SMOOTHING = HELICON_DEFAULT_SMOOTHING
 
 _TIFF_VALS = ["u", "lzw", "zip"]
 _RUN_VALS = ["silent", "progress", "gui"]
@@ -292,7 +297,7 @@ class HeliconConfigDialog(QDialog):
         qs = self._qs
         p = self._params.get_params()
         qs.setValue(_K_HELICON_METHOD, int(p["method"]))
-        qs.setValue(_K_HELICON_RADIUS, int(round(float(p["radius"]))))
+        qs.setValue(_K_HELICON_RADIUS, float(p["radius"]))
         qs.setValue(_K_HELICON_SMOOTHING, int(p["smoothing"]))
         qs.setValue(_K_HELICON_OUTPUT_FORMAT,
                     "jpg" if self._output_format_combo.currentIndex() == 1 else "tif")

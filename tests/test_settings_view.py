@@ -22,6 +22,7 @@ from PyQt6.QtWidgets import QApplication, QCheckBox
 from PyQt6.QtCore import QSettings
 
 from app.app_context import AppContext
+from app.config.i18n import set_language
 from app.views.settings_view import (
     SettingsView,
     APP_VERSION,
@@ -47,6 +48,7 @@ from app.views.settings_view import (
     _K_WB_GROUPING_AUTO_WATCH,
     _K_WB_GROUPING_AUTO_WATCH_MODE,
     _K_WB_FILE_VIEW_MODE,
+    _K_UI_FONT_FAMILY,
     _K_UI_FONT_SCALE,
     _K_UI_ICON_GPS,
     _K_UI_ICON_MAP,
@@ -57,6 +59,7 @@ from app.views.settings_view import (
     _K_SHORTCUT_MONITOR_DEACTIVATE,
     _K_SHORTCUT_LABELS_PRINT,
     _K_SHORTCUT_LABELS_NEXT,
+    _installed_font_families,
 )
 
 
@@ -76,6 +79,7 @@ def _get_app() -> QApplication:
 def ctx() -> AppContext:
     """Fresh AppContext using an in-memory QSettings (unique org/app per test)."""
     _get_app()
+    set_language("zh")
     ctx = AppContext()
     # Wipe any persisted keys from prior test runs in this process
     ctx.settings._qs.clear()
@@ -232,10 +236,10 @@ class TestRoundTrip:
         assert view._jxl_effort_combo.currentIndex() == 1
 
     def test_helicon_radius_round_trip(self, view: SettingsView) -> None:
-        view._helicon_param_panel.set_params({"radius": 8})
+        view._helicon_param_panel.set_params({"radius": 22.5})
         view._save_helicon()
         view.on_activate()
-        assert view._helicon_param_panel.get_params()["radius"] == 8
+        assert view._helicon_param_panel.get_params()["radius"] == 22.5
 
     def test_helicon_smoothing_round_trip(self, view: SettingsView) -> None:
         view._helicon_param_panel.set_params({"smoothing": 2})
@@ -334,14 +338,14 @@ class TestPresetCRUD:
 
     def test_save_preset_stores_in_settings(self, view: SettingsView) -> None:
         view._preset_name_edit.setText("标准景深")
-        view._helicon_param_panel.set_params({"method": 1, "radius": 6, "smoothing": 2})  # B
+        view._helicon_param_panel.set_params({"method": 1, "radius": 22.5, "smoothing": 2})  # B
         view._quality_spin.setValue(90)
         view._save_current_as_preset()
         presets = view._load_presets()
         assert len(presets) == 1
         assert presets[0]["name"] == "标准景深"
         assert presets[0]["params"]["method"] == 2   # index+1
-        assert presets[0]["params"]["radius"] == 6
+        assert presets[0]["params"]["radius"] == 22.5
         assert presets[0]["params"]["smoothing"] == 2
         assert presets[0]["params"]["quality"] == 90
 
@@ -365,7 +369,7 @@ class TestPresetCRUD:
     def test_apply_preset_fills_spinboxes(self, view: SettingsView) -> None:
         # First save a preset
         view._preset_name_edit.setText("应用测试预设")
-        view._helicon_param_panel.set_params({"method": 2, "radius": 3, "smoothing": 6})  # C
+        view._helicon_param_panel.set_params({"method": 2, "radius": 22.5, "smoothing": 6})  # C
         view._quality_spin.setValue(80)
         view._save_current_as_preset()
 
@@ -378,21 +382,21 @@ class TestPresetCRUD:
         view._apply_selected_preset()
 
         assert view._helicon_param_panel.get_params()["method"] == 2
-        assert view._helicon_param_panel.get_params()["radius"] == 3
+        assert view._helicon_param_panel.get_params()["radius"] == 22.5
         assert view._helicon_param_panel.get_params()["smoothing"] == 6
         assert view._quality_spin.value() == 80
 
     def test_apply_preset_double_click(self, view: SettingsView) -> None:
         """Double-clicking a list item applies the preset."""
         view._preset_name_edit.setText("双击测试")
-        view._helicon_param_panel.set_params({"radius": 7})
+        view._helicon_param_panel.set_params({"radius": 22.5})
         view._save_current_as_preset()
 
         view._helicon_param_panel.set_params({"radius": 4})  # reset
         view._preset_list.setCurrentRow(0)
         # itemDoubleClicked is connected to _apply_selected_preset; simulate via direct call
         view._apply_selected_preset()
-        assert view._helicon_param_panel.get_params()["radius"] == 7
+        assert view._helicon_param_panel.get_params()["radius"] == 22.5
 
     def test_delete_preset_removes_from_list(self, view: SettingsView) -> None:
         view._preset_name_edit.setText("删除测试")
@@ -673,6 +677,9 @@ class TestUISettings:
     def test_ui_font_scale_key(self) -> None:
         assert _K_UI_FONT_SCALE == "ui/font_scale"
 
+    def test_ui_font_family_key(self) -> None:
+        assert _K_UI_FONT_FAMILY == "ui/font_family"
+
     def test_ui_icon_gps_key(self) -> None:
         assert _K_UI_ICON_GPS == "ui/icon_gps"
 
@@ -720,6 +727,36 @@ class TestUISettings:
         view._font_scale_spin.setValue(1.1)
         view._on_font_scale_changed(1.1)
         assert "110%" in view._font_scale_pct_label.text()
+
+    def test_font_picker_surfaces_common_cjk_and_latin_faces(
+        self, view: SettingsView
+    ) -> None:
+        values = {
+            view._font_family_combo.itemData(i)
+            for i in range(view._font_family_combo.count())
+        }
+
+        assert {"SimSun", "宋体", "Microsoft YaHei", "Times New Roman"} <= values
+
+    def test_font_family_round_trip(self, view: SettingsView) -> None:
+        idx = view._font_family_combo.findData("Times New Roman")
+        assert idx >= 0
+
+        view._font_family_combo.setCurrentIndex(idx)
+        view._save_ui()
+        view._font_family_combo.blockSignals(True)
+        view._font_family_combo.setCurrentIndex(0)
+        view._font_family_combo.blockSignals(False)
+        view.on_activate()
+
+        assert view._font_family_combo.currentData() == "Times New Roman"
+
+    def test_font_picker_list_contains_common_faces_without_qt_enumeration(
+        self,
+    ) -> None:
+        families = _installed_font_families()
+
+        assert families[:4] == ["Microsoft YaHei", "微软雅黑", "SimSun", "宋体"]
 
     def test_icon_gps_round_trip(self, view: SettingsView) -> None:
         view._icon_gps_edit.setText("🛰")
@@ -788,6 +825,44 @@ class TestUISettings:
         """Switching to 界面 tab (index 5) should not raise."""
         view._tabs.setCurrentIndex(5)
         assert view._tabs.currentIndex() == 5
+
+    def test_theme_change_rebuilds_settings_local_styles(
+        self, view: SettingsView
+    ) -> None:
+        """Changing theme refreshes SettingsView inline styles, not just app QSS."""
+        view._tabs.setCurrentIndex(6)
+        idx = view._theme_combo.findData("graphite_focus")
+        assert idx >= 0
+
+        view._theme_combo.setCurrentIndex(idx)
+
+        assert view.ctx.settings.current_theme == "graphite_focus"
+        assert "#111827" in view._tabs.styleSheet()
+        assert view._tabs.currentIndex() == 6
+
+    def test_language_change_rebuilds_ui_tab_immediately(
+        self, view: SettingsView
+    ) -> None:
+        view._tabs.setCurrentIndex(6)
+        idx = view._lang_combo.findData("en")
+        assert idx >= 0
+
+        view._lang_combo.setCurrentIndex(idx)
+
+        assert view.ctx.settings.current_language == "en"
+        assert view._tabs.currentIndex() == 6
+        assert [view._tabs.tabText(i) for i in range(view._tabs.count())] == [
+            "Project",
+            "Helicon",
+            "Archive",
+            "Workbench",
+            "Operator",
+            "Collaboration",
+            "Interface",
+            "About",
+        ]
+        assert view._lang_combo.toolTip() == "Language changes take effect immediately."
+        assert view._theme_combo.itemText(0) == "Current style"
 
 
 # ── Named round-trip tests required by task spec 1-H / 1-I ───────────────────

@@ -24,6 +24,7 @@ from __future__ import annotations
 from PyQt6.QtCore import QPoint, QRect, Qt, pyqtSignal
 from PyQt6.QtGui import (
     QColor,
+    QFont,
     QGuiApplication,
     QKeyEvent,
     QMouseEvent,
@@ -117,6 +118,8 @@ class ScreenshotOverlay(QWidget):
 
         self._sel: QRect | None = None        # finalized selection (logical)
         self._select_origin: QPoint | None = None  # selection-phase rubber band
+        self._live_end: QPoint | None = None
+        self._mouse_pos: QPoint | None = None
 
         self._annotations: list[Annotation] = []
         self._draft: Annotation | None = None  # annotation under construction
@@ -245,8 +248,9 @@ class ScreenshotOverlay(QWidget):
         pen.setWidth(2)
         p.setPen(pen)
         p.drawRect(sel)
-        p.setPen(QColor(255, 255, 255))
-        p.drawText(sel.x(), max(14, sel.y() - 6), f"{sel.width()} × {sel.height()}")
+        self._paint_selection_badge(p, sel)
+        if self._sel is None and self._mouse_pos is not None:
+            self._paint_loupe(p, self._mouse_pos, sel)
         p.end()
 
     def _paint_hint(self, p: QPainter) -> None:
@@ -254,8 +258,71 @@ class ScreenshotOverlay(QWidget):
         p.drawText(
             self.rect(),
             Qt.AlignmentFlag.AlignCenter,
-            "拖动选择截图区域 · Esc 取消",
+            "拖动选择截图区域 · Enter 完成 · Esc 取消",
         )
+
+    def _paint_selection_badge(self, p: QPainter, sel: QRect) -> None:
+        text = f"{sel.width()} x {sel.height()}"
+        fm = p.fontMetrics()
+        box = QRect(sel.x(), sel.y() - 28, fm.horizontalAdvance(text) + 18, 22)
+        if box.top() < 4:
+            box.moveTop(sel.y() + 6)
+        box.moveLeft(max(4, min(box.left(), self.width() - box.width() - 4)))
+        p.save()
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(18, 18, 18, 220))
+        p.drawRoundedRect(box, 5, 5)
+        p.setPen(QColor(245, 245, 245))
+        p.drawText(box, Qt.AlignmentFlag.AlignCenter, text)
+        p.restore()
+
+    def _paint_loupe(self, p: QPainter, pos: QPoint, sel: QRect) -> None:
+        if self._frozen.isNull() or not self.rect().contains(pos):
+            return
+        size = 122
+        margin = 14
+        target = QRect(pos.x() + margin, pos.y() + margin, size, size)
+        if target.right() > self.width() - 4:
+            target.moveRight(pos.x() - margin)
+        if target.bottom() > self.height() - 4:
+            target.moveBottom(pos.y() - margin)
+        target = target.intersected(self.rect().adjusted(4, 4, -4, -4))
+        if target.width() < 64 or target.height() < 64:
+            return
+
+        dpr = self._frozen.devicePixelRatio()
+        src_size = 22
+        src = QRect(
+            int((pos.x() - src_size // 2) * dpr),
+            int((pos.y() - src_size // 2) * dpr),
+            int(src_size * dpr),
+            int(src_size * dpr),
+        )
+        src = src.intersected(self._frozen.rect())
+        img = self._frozen.toImage()
+        px = img.pixelColor(
+            max(0, min(img.width() - 1, int(pos.x() * dpr))),
+            max(0, min(img.height() - 1, int(pos.y() * dpr))),
+        )
+
+        p.save()
+        p.setPen(QColor(255, 255, 255, 230))
+        p.setBrush(QColor(20, 20, 20, 235))
+        p.drawRoundedRect(target, 7, 7)
+        preview = target.adjusted(6, 6, -6, -28)
+        p.drawPixmap(preview, self._frozen, src)
+        cx, cy = preview.center().x(), preview.center().y()
+        p.setPen(QColor(0, 132, 255, 230))
+        p.drawLine(cx, preview.top(), cx, preview.bottom())
+        p.drawLine(preview.left(), cy, preview.right(), cy)
+        p.setFont(QFont("monospace", 8))
+        p.setPen(QColor(245, 245, 245))
+        p.drawText(
+            target.adjusted(7, target.height() - 22, -7, -4),
+            Qt.AlignmentFlag.AlignVCenter,
+            f"{sel.width()}x{sel.height()}  {px.name().upper()}",
+        )
+        p.restore()
 
     # ── selection / drawing ────────────────────────────────────────────────
     def mousePressEvent(self, e: QMouseEvent) -> None:
@@ -270,9 +337,10 @@ class ScreenshotOverlay(QWidget):
         self._start_annotation(e.pos())
 
     def mouseMoveEvent(self, e: QMouseEvent) -> None:
+        self._mouse_pos = e.pos()
         if self._select_origin is not None:
-            self.update()
             self._live_end = e.pos()
+            self.update()
         elif self._draft is not None:
             if self._draft.tool is Tool.PEN:
                 self._draft.points.append(e.pos())
@@ -291,10 +359,17 @@ class ScreenshotOverlay(QWidget):
                 self._cancel()
                 return
             self._sel = rect
+            self._live_end = None
             self._enter_edit_mode()
             self.update()
         elif self._draft is not None:
             self._commit_draft()
+
+    def mouseDoubleClickEvent(self, e: QMouseEvent) -> None:
+        if e.button() == Qt.MouseButton.LeftButton and self._sel is not None:
+            self._deliver(self.actionDone)
+            return
+        super().mouseDoubleClickEvent(e)
 
     @staticmethod
     def _is_cmd(e: QKeyEvent) -> bool:
@@ -313,10 +388,16 @@ class ScreenshotOverlay(QWidget):
     def keyPressEvent(self, e: QKeyEvent) -> None:
         if e.key() == Qt.Key.Key_Escape:
             self._cancel()
+        elif e.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and self._sel is not None:
+            self._deliver(self.actionDone)
         elif e.key() == Qt.Key.Key_Z and self._is_cmd(e):
             self._undo()
         elif e.key() == Qt.Key.Key_C and self._is_cmd(e) and self._sel is not None:
             self._deliver(self.actionCopy)
+        elif e.key() == Qt.Key.Key_S and self._is_cmd(e) and self._sel is not None:
+            self._deliver(self.actionSave)
+        elif e.key() == Qt.Key.Key_P and self._sel is not None:
+            self._deliver_pin()
         else:
             super().keyPressEvent(e)
 
@@ -474,6 +555,6 @@ class ScreenshotOverlay(QWidget):
         if self._sel is not None:
             return self._sel
         if self._select_origin is not None:
-            end = getattr(self, "_live_end", self._select_origin)
+            end = self._live_end or self._select_origin
             return QRect(self._select_origin, end).normalized()
         return None

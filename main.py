@@ -241,8 +241,9 @@ def main() -> int:
     apply_default_font(app)
 
     # ── Language ──────────────────────────────────────────────────────
-    # Apply BEFORE any widget/view is built — the UI is translated once at
-    # construction time (restart-to-apply). tr() then resolves to this language.
+    # Apply the saved language BEFORE any widget/view is built so first paint is
+    # in the right language. Switching at runtime is live (Settings →
+    # MainWindow.retranslate_ui), so no restart is needed thereafter.
     from app.config.i18n import set_language
     set_language(_s.current_language)
 

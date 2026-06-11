@@ -69,6 +69,21 @@
       "dateRange": "20260609",
       "incomingJpgSubdir": "incoming-jpg",
       "resultsSubdir": "results"
+    },
+    {
+      "id": "4d9d837a-f0a0-49f2-a897-681782c2186f",
+      "name": "ceshi8",
+      "dir": "/mnt/n/claude/ceshi8",
+      "directory": "/mnt/n/claude/ceshi8",
+      "incomingJpgDir": "/mnt/n/claude/ceshi8/incoming-jpg",
+      "resultsDir": "/mnt/n/claude/ceshi8/results",
+      "projectCode": "FJ",
+      "location": "fj",
+      "collector": "ydy",
+      "year": "2026",
+      "dateRange": "20260610",
+      "incomingJpgSubdir": "incoming-jpg",
+      "resultsSubdir": "results"
     }
   ]
 }

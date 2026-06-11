@@ -104,6 +104,57 @@ class TestConstruction:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Map modal
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestMapModal:
+    def test_open_map_shows_visible_modal(self, monkeypatch):
+        """📍 must show the map modal — not just the dimmed overlay scrim.
+
+        Regression: modal QFrame was created as a child of an already-shown
+        overlay and never .show()n, so only the scrim appeared.
+        """
+        from PyQt6.QtWidgets import QFrame
+        from app.widgets.tile_map_widget import TileMapWidget
+
+        # No real IP-geolocation network call in the test.
+        monkeypatch.setattr(TileMapWidget, "locate_current", lambda self: None)
+
+        v = _view()
+        v._on_open_map()
+        QApplication.processEvents()
+
+        overlay = v._map_overlay
+        assert overlay is not None and overlay.isVisible()
+        modal = next(
+            (c for c in overlay.findChildren(QFrame) if c.objectName() == "MapModal"),
+            None,
+        )
+        assert modal is not None
+        assert modal.isVisible(), "map modal frame must be visible, not only the scrim"
+        assert v._tile_map is not None
+
+    def test_open_map_without_coords_locates_current(self, monkeypatch):
+        """No parsed coords → opening the map IP-locates the current position."""
+        from app.widgets.tile_map_widget import TileMapWidget
+
+        called = []
+        monkeypatch.setattr(
+            TileMapWidget, "locate_current", lambda self: called.append(True)
+        )
+
+        v = _view()
+        v._parsed = None
+        v._on_open_map()
+        for _ in range(5):
+            QApplication.processEvents()
+        import time
+        time.sleep(0.15)
+        QApplication.processEvents()
+        assert called, "map should IP-locate current position when no coords given"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Input → badge
 # ══════════════════════════════════════════════════════════════════════════════
 

@@ -837,16 +837,19 @@ TOKENS: dict[str, str] = dict(THEME_CLASSIC_LIGHT)
 # PingFang SC (macOS). Latin/generic names trail as last-resort fallbacks.
 _SANS_FONTS = (
     "Noto Sans CJK SC", "Noto Sans SC", "Source Han Sans SC",
-    "Microsoft YaHei", "微软雅黑", "PingFang SC", "Hiragino Sans GB",
-    "Heiti SC", "WenQuanYi Micro Hei", "Segoe UI", "Arial", "sans-serif",
+    "Microsoft YaHei", "微软雅黑", "SimHei", "黑体",
+    "PingFang SC", "Hiragino Sans GB", "Heiti SC", "WenQuanYi Micro Hei",
+    "Segoe UI", "Arial", "Calibri", "sans-serif",
 )
 _SERIF_FONTS = (
     "Noto Serif CJK SC", "Noto Serif SC", "Source Han Serif SC", "Songti SC",
-    "STSong", "SimSun", "宋体", "Georgia", "serif",
+    "STSong", "SimSun", "宋体", "NSimSun", "新宋体",
+    "FangSong", "仿宋", "KaiTi", "楷体",
+    "Times New Roman", "Times", "Georgia", "serif",
 )
 _MONO_FONTS = (
     "JetBrains Mono", "Cascadia Code", "SF Mono", "Consolas",
-    "DejaVu Sans Mono", "monospace",
+    "Courier New", "DejaVu Sans Mono", "monospace",
 )
 
 FONT_SANS = _SANS_FONTS
@@ -1067,6 +1070,24 @@ QPushButton#IconGhost:hover {{
     background-color: {t["nav_segment_hover_bg"]};
     border-color: {t["border"]};
 }}
+QToolButton#ScreenshotTool {{
+    background-color: {t["panel"]};
+    color: {t["text_soft"]};
+    border: 1px solid {t["border_medium"]};
+    border-radius: {t["radius_sm"]};
+    padding: 0 8px;
+    font-size: {t["font_sm"]};
+    font-weight: 600;
+}}
+QToolButton#ScreenshotTool:hover {{
+    border-color: {t["accent"]};
+    color: {t["text"]};
+    background-color: {t["accent_softer"]};
+}}
+QToolButton#ScreenshotTool::menu-button {{
+    border: none;
+    width: 14px;
+}}
 
 /* ── Context bar (project switcher + active badge + quick actions) ─ */
 QFrame#ContextBar {{
@@ -1093,6 +1114,51 @@ QPushButton#ProjectSwitcher {{
 QPushButton#ProjectSwitcher:hover {{
     border-color: {t["accent"]};
     background-color: {t["modal_surface"]};
+}}
+/* 工作区面包屑（EOS Utility 式）：祖先段扁平、叶子似旧 switcher、◀▶ 紧凑 */
+QPushButton#CrumbSeg {{
+    background: transparent;
+    border: none;
+    padding: 6px 4px;
+    color: {t["muted"]};
+    font-size: {t["font_sm"]};
+}}
+QPushButton#CrumbSeg:hover {{
+    color: {t["accent"]};
+}}
+QLabel#CrumbSep {{
+    color: {t["muted_dim"]};
+    font-size: {t["font_sm"]};
+    padding: 0 1px;
+}}
+QPushButton#CrumbLeaf {{
+    background-color: {t["panel_2"]};
+    border: 1px solid {t["border"]};
+    border-radius: {t["radius_sm"]};
+    padding: 6px 10px;
+    color: {t["text"]};
+    font-size: {t["font_sm"]};
+    font-weight: 600;
+    text-align: left;
+}}
+QPushButton#CrumbLeaf:hover {{
+    border-color: {t["accent"]};
+    background-color: {t["modal_surface"]};
+}}
+QToolButton#CrumbArrow {{
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: {t["radius_sm"]};
+    padding: 4px 3px;
+    color: {t["muted"]};
+    font-size: {t["font_xs"]};
+}}
+QToolButton#CrumbArrow:hover {{
+    color: {t["accent"]};
+    border-color: {t["border"]};
+}}
+QToolButton#CrumbArrow:disabled {{
+    color: {t["muted_dim"]};
 }}
 QLabel#ActiveBadgeOn {{
     background: {accent_grad};
@@ -1338,6 +1404,31 @@ QPushButton#PhasePill:checked, QPushButton#PhasePillActive:checked, QPushButton#
     color: {t["accent"]};
     border: 1px solid {t["accent"]};
 }}
+
+/* ── Sidebar per-编号 phase dots ─────────────────────────────────────
+   4 round dots under each specimen UID = 拍摄中/已拍完/整理中/完成.
+   Always show the phase colour as a ring; the current phase fills.
+   Colours reuse per-theme semantic tokens so they track the active theme:
+   蓝 info=shooting · 青 accent=shot_done · 橙 warn=organizing · 绿 success=done. */
+QPushButton#PhaseDotShooting, QPushButton#PhaseDotShotDone,
+QPushButton#PhaseDotOrganizing, QPushButton#PhaseDotDone {{
+    min-width: 12px; max-width: 12px;
+    min-height: 12px; max-height: 12px;
+    border-radius: 6px;
+    background-color: transparent;
+}}
+QPushButton#PhaseDotShooting   {{ border: 2px solid {t["info"]}; }}
+QPushButton#PhaseDotShotDone   {{ border: 2px solid {t["accent"]}; }}
+QPushButton#PhaseDotOrganizing {{ border: 2px solid {t["warn"]}; }}
+QPushButton#PhaseDotDone       {{ border: 2px solid {t["success"]}; }}
+QPushButton#PhaseDotShooting:hover   {{ background-color: {t["info_soft"]}; }}
+QPushButton#PhaseDotShotDone:hover   {{ background-color: {t["accent_soft"]}; }}
+QPushButton#PhaseDotOrganizing:hover {{ background-color: {t["warn_soft"]}; }}
+QPushButton#PhaseDotDone:hover       {{ background-color: {t["success_soft"]}; }}
+QPushButton#PhaseDotShooting:checked   {{ background-color: {t["info"]}; }}
+QPushButton#PhaseDotShotDone:checked   {{ background-color: {t["accent"]}; }}
+QPushButton#PhaseDotOrganizing:checked {{ background-color: {t["warn"]}; }}
+QPushButton#PhaseDotDone:checked       {{ background-color: {t["success"]}; }}
 
 QPushButton#Tiny {{ padding: 3px 11px; font-size: {t["font_xs"]}; border-radius: {t["radius_sm"]}; }}
 

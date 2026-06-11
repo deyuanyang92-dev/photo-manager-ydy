@@ -1,24 +1,24 @@
 """helicon_params_panel.py — Helicon Focus rendering-params editor.
 
-Faithful Qt port of the web oracle's Helicon "Rendering method" panel
-(``app.js:7095–7324``, ``renderHeliconConfigModal``):
+Qt editor for Helicon Focus' own "Rendering method" controls:
 
   - Rendering method radios, value 0/1/2 (app.js:7101-7104):
       0 = Method A (weighted average)
       1 = Method B (depth map)
       2 = Method C (pyramid)
-  - Radius   slider+number, range 0–8 step 0.5 (FLOAT)  — app.js:7145
-  - Smoothing slider+number, range 0–8 step 1   (INT)    — app.js:7147
-  - Reset button → Method B / Radius 8 / Smoothing 4     — app.js:7311-7318
+  - Radius   slider+number, range 1–30 step 0.5 (FLOAT)
+  - Smoothing slider+number, range 1–10 step 1   (INT)
+  - Reset button -> Method B / Radius 8 / Smoothing 4
 
-Radius is disabled for Method C (Helicon uses radius only for A/B). Ranges and
-the float radius mirror the oracle exactly — do NOT substitute Helicon's own
-desktop slider bounds; this project's behavioral oracle is the web prototype.
+The installed Helicon Focus help documents Radius/Smoothing as the two main
+stacking controls, shows practical Radius examples up to 22, and lists the CLI
+flags as ``-mp``, ``-rp`` and ``-sp``. Radius is disabled for Method C because
+Helicon uses it only for A/B.
 
 Public API: ``get_params()`` / ``set_params({method, radius, smoothing})`` and
 ``params_changed``. ``get_params()['radius']`` is an int when whole (8 → ``8``)
 and a float otherwise (4.5 → ``4.5``), so the CLI renders ``-rp:8`` / ``-rp:4.5``
-like the oracle (app.js:7288 uses ``parseFloat``).
+cleanly.
 """
 from __future__ import annotations
 
@@ -39,16 +39,28 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-# Oracle factory defaults (app.js:7311-7318 Reset).
-_DEFAULT_METHOD = 1       # Method B (depth map)
-_DEFAULT_RADIUS = 8.0
-_DEFAULT_SMOOTHING = 4
+# Helicon Focus factory defaults.
+HELICON_DEFAULT_METHOD = 1       # Method B (depth map)
+HELICON_DEFAULT_RADIUS = 8.0
+HELICON_DEFAULT_SMOOTHING = 4
 
-# Oracle slider ranges (app.js:7145, 7147).
-_RADIUS_MIN, _RADIUS_MAX, _RADIUS_STEP = 0.0, 8.0, 0.5
-_SMOOTH_MIN, _SMOOTH_MAX = 0, 8
+# Helicon desktop-style slider ranges. The bundled/online help demonstrates
+# Radius=22 for normal use, so the former web-prototype 0-8 cap was too small.
+HELICON_RADIUS_MIN, HELICON_RADIUS_MAX, HELICON_RADIUS_STEP = 1.0, 30.0, 0.5
+HELICON_SMOOTH_MIN, HELICON_SMOOTH_MAX = 1, 10
 
-# Radius slider is integer-only in Qt → scale by 1/_RADIUS_STEP (×2).
+# Backward-compatible internal aliases used by tests and helper methods.
+_DEFAULT_METHOD = HELICON_DEFAULT_METHOD
+_DEFAULT_RADIUS = HELICON_DEFAULT_RADIUS
+_DEFAULT_SMOOTHING = HELICON_DEFAULT_SMOOTHING
+_RADIUS_MIN, _RADIUS_MAX, _RADIUS_STEP = (
+    HELICON_RADIUS_MIN,
+    HELICON_RADIUS_MAX,
+    HELICON_RADIUS_STEP,
+)
+_SMOOTH_MIN, _SMOOTH_MAX = HELICON_SMOOTH_MIN, HELICON_SMOOTH_MAX
+
+# Radius slider is integer-only in Qt -> scale by 1/_RADIUS_STEP (x2).
 _R_SCALE = int(round(1.0 / _RADIUS_STEP))  # 2
 
 # (label, tooltip) per method — labels mirror the oracle radios.
@@ -111,34 +123,48 @@ class HeliconParamsPanel(QWidget):
         grid.setHorizontalSpacing(8)
         grid.setVerticalSpacing(8)
 
-        # Radius — float 0–8 step 0.5: int slider (×2) + double spinbox.
+        # Radius: float slider (x2) + double spinbox, matching Helicon desktop use.
         self._radius_lbl = QLabel("Radius:")
         self._radius_lbl.setObjectName("MutedSmall")
+        radius_tip = (
+            "Helicon Radius controls the analysed area around each pixel. "
+            "Small values keep fine intersecting detail; higher values reduce noise, halos, and edge artifacts."
+        )
+        self._radius_lbl.setToolTip(radius_tip)
         self._radius_slider = QSlider(Qt.Orientation.Horizontal)
         self._radius_slider.setRange(int(_RADIUS_MIN * _R_SCALE), int(_RADIUS_MAX * _R_SCALE))
         self._radius_slider.setValue(int(self._radius * _R_SCALE))
+        self._radius_slider.setToolTip(radius_tip)
         self._radius_spin = QDoubleSpinBox()
         self._radius_spin.setRange(_RADIUS_MIN, _RADIUS_MAX)
         self._radius_spin.setSingleStep(_RADIUS_STEP)
         self._radius_spin.setDecimals(1)
         self._radius_spin.setValue(self._radius)
-        self._radius_spin.setFixedWidth(64)
+        self._radius_spin.setFixedWidth(74)
+        self._radius_spin.setToolTip(radius_tip)
         self._radius_slider.valueChanged.connect(self._on_radius_slider)
         self._radius_spin.valueChanged.connect(self._on_radius_spin)
         grid.addWidget(self._radius_lbl, 0, 0)
         grid.addWidget(self._radius_slider, 0, 1)
         grid.addWidget(self._radius_spin, 0, 2)
 
-        # Smoothing — int 0–8 step 1: slider + spinbox.
+        # Smoothing: int slider + spinbox.
         smooth_lbl = QLabel("Smoothing:")
         smooth_lbl.setObjectName("MutedSmall")
+        smooth_tip = (
+            "Helicon Smoothing controls transition smoothing. "
+            "For Method B it smooths the depth map; for A/C it smooths combined sharp areas."
+        )
+        smooth_lbl.setToolTip(smooth_tip)
         self._smooth_slider = QSlider(Qt.Orientation.Horizontal)
         self._smooth_slider.setRange(_SMOOTH_MIN, _SMOOTH_MAX)
         self._smooth_slider.setValue(self._smoothing)
+        self._smooth_slider.setToolTip(smooth_tip)
         self._smooth_spin = QSpinBox()
         self._smooth_spin.setRange(_SMOOTH_MIN, _SMOOTH_MAX)
         self._smooth_spin.setValue(self._smoothing)
         self._smooth_spin.setFixedWidth(64)
+        self._smooth_spin.setToolTip(smooth_tip)
         self._smooth_slider.valueChanged.connect(self._on_smooth_changed)
         self._smooth_spin.valueChanged.connect(self._on_smooth_changed)
         grid.addWidget(smooth_lbl, 1, 0)
@@ -148,7 +174,7 @@ class HeliconParamsPanel(QWidget):
         grid.setColumnStretch(1, 1)
         root.addLayout(grid)
 
-        # Reset button — oracle app.js:7311-7318 (Method B / Radius 8 / Smoothing 4).
+        # Reset button: Method B / Radius 8 / Smoothing 4.
         reset_row = QHBoxLayout()
         reset_row.setContentsMargins(0, 4, 0, 0)
         self._reset_btn = QPushButton("Reset")
@@ -210,10 +236,9 @@ class HeliconParamsPanel(QWidget):
     # ── Public API ────────────────────────────────────────────────────────────
 
     def reset_to_defaults(self) -> None:
-        """Reset to oracle factory defaults: Method B / Radius 8 / Smoothing 4.
+        """Reset to Helicon defaults: Method B / Radius 8 / Smoothing 4.
 
-        Mirrors the oracle Reset button (app.js:7311-7318). Emits
-        ``params_changed`` so listeners (settings auto-save) persist the reset.
+        Emits ``params_changed`` so listeners (settings auto-save) persist the reset.
         """
         self.set_params({
             "method": _DEFAULT_METHOD,

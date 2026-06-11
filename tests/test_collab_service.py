@@ -1052,3 +1052,35 @@ class TestUpdateTaskStatusUiHelper:
         svc.tasks_changed.connect(lambda: seen.append(True))
         svc.update_task_status("U5", "shooting")
         assert seen
+
+    # ── force=True: 人工标记旁路状态机(回归原型自由赋值, app.js:3303) ──────────
+
+    def test_force_allows_skip_transition(self):
+        """force=True: SHOOTING→DONE 跳格成功(默认仍非法, 见上)。"""
+        svc = CollabService()
+        assert svc.update_task_status("F1", "shooting")[0] is True
+        ok, _ = svc.update_task_status("F1", "done", force=True)
+        assert ok is True
+        assert svc.store.get("F1").status is TaskStatus.DONE
+
+    def test_force_allows_backward_transition(self):
+        """force=True: 完成→整理中 回退成功(状态机本禁回退)。"""
+        svc = CollabService()
+        svc.update_task_status("F2", "done", seed_status="organizing")
+        ok, _ = svc.update_task_status("F2", "organizing", force=True)
+        assert ok is True
+        assert svc.store.get("F2").status is TaskStatus.ORGANIZING
+
+    def test_force_still_validates_status_string(self):
+        """force 不放过非法枚举。"""
+        svc = CollabService()
+        ok, _ = svc.update_task_status("F3", "not-a-status", force=True)
+        assert ok is False
+
+    def test_default_still_enforces_state_machine(self):
+        """红线: 默认 force=False 时 SHOOTING→DONE 仍非法(契约不破)。"""
+        svc = CollabService()
+        assert svc.update_task_status("F4", "shooting")[0] is True
+        ok, _ = svc.update_task_status("F4", "done")  # 无 force
+        assert ok is False
+        assert svc.store.get("F4").status is TaskStatus.SHOOTING

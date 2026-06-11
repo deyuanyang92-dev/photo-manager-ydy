@@ -344,6 +344,55 @@ class TestContextMenuUnassign:
         assert jpg_path not in all_paths, \
             f"{jpg_path} should be removed after 取消归属, got {all_paths}"
 
+    def test_unassign_adds_to_blacklist(self, qtbot, ctx_with_db, db, tmp_path):
+        """取消归属 = 加入 P0 黑名单(变无主)，连拍摄期自动归属的照片也能取消。"""
+        from app.services.grouping_service import get_explicit_unassigns
+        p = str(tmp_path / "auto.jpg")
+        panel = MonitorPanel(ctx_with_db)
+        qtbot.addWidget(panel)
+        panel._on_ctx_unassign(p)
+        assert any(s.endswith("auto.jpg") for s in get_explicit_unassigns(db))
+
+    def test_unassign_still_removes_from_group(self, qtbot, ctx_with_db, db, tmp_path):
+        """变无主同时踢出合成组(用户选定行为)。"""
+        from app.services.grouping_service import (
+            Group, save_grouping, load_grouping, get_explicit_unassigns,
+        )
+        p = str(tmp_path / "g.jpg")
+        save_grouping(db, "ZJ-TMW-B2-001",
+                      [Group(group_index=0, jpg_paths=[p])], clean_phantoms=False)
+        panel = MonitorPanel(ctx_with_db)
+        qtbot.addWidget(panel)
+        panel._on_ctx_unassign(p)
+        all_paths = [x for g in load_grouping(db, "ZJ-TMW-B2-001").groups for x in g.jpg_paths]
+        assert p not in all_paths                                  # 踢出组
+        assert any(s.endswith("g.jpg") for s in get_explicit_unassigns(db))  # + 黑名单
+
+    def test_assign_uid_clears_blacklist(self, qtbot, ctx_with_db, db, tmp_path):
+        """指定归属 = 主动归属 → 解除黑名单(否则取消后归不回)。"""
+        from app.services.grouping_service import (
+            add_explicit_unassign, get_explicit_unassigns,
+        )
+        p = str(tmp_path / "back.jpg")
+        add_explicit_unassign(db, p)
+        panel = MonitorPanel(ctx_with_db)
+        qtbot.addWidget(panel)
+        panel._on_ctx_assign_uid(p, "ZJ-TMW-B2-001")
+        assert not any(s.endswith("back.jpg") for s in get_explicit_unassigns(db))
+
+    def test_add_to_group_clears_blacklist(self, qtbot, ctx_with_db, db, tmp_path):
+        from app.services.grouping_service import (
+            add_explicit_unassign, get_explicit_unassigns,
+        )
+        p = str(tmp_path / "back2.jpg")
+        add_explicit_unassign(db, p)
+        db.execute("INSERT INTO tasks(uid, is_active) VALUES(?, 1)", ("ZJ-TMW-B2-001",))
+        db.commit()
+        panel = MonitorPanel(ctx_with_db)
+        qtbot.addWidget(panel)
+        panel._on_ctx_add_to_group(p)
+        assert not any(s.endswith("back2.jpg") for s in get_explicit_unassigns(db))
+
     def test_context_menu_has_assign_uid_action(self, qtbot, ctx_with_db):
         """Context menu must contain '指定归属标本' item for JPG cards."""
         entry = _jpg_entry(path="/tmp/myfile.jpg")

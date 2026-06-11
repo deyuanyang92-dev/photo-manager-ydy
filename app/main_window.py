@@ -31,10 +31,11 @@ line up with nav order, exactly as before.
 """
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING, Optional
 
 from PyQt6.QtCore import QSize, Qt
-from PyQt6.QtGui import QCloseEvent, QKeySequence, QShortcut
+from PyQt6.QtGui import QAction, QCloseEvent, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QButtonGroup,
     QFrame,
@@ -52,6 +53,7 @@ from PyQt6.QtWidgets import (
 )
 
 from app.config import icons
+from app.config.i18n import tr
 from app.views.base_view import BaseView
 
 if TYPE_CHECKING:
@@ -73,10 +75,14 @@ class MainWindow(QMainWindow):
         self._views: dict[str, BaseView] = {}        # view_id → instance
         self._view_classes: list[type] = []           # registration order
         self._nav_buttons: list[QPushButton] = []      # registration order
+        self._nav_menu_actions: dict[str, QAction] = {}
+        self._nav_pin_actions: dict[str, QAction] = {}
+        self._nav_group_menus: dict[str, QMenu] = {}
+        self._shot_actions: dict[str, QAction] = {}
         self._nav_group = QButtonGroup(self)
         self._nav_group.setExclusive(True)
 
-        self.setWindowTitle("标本影像")
+        self.setWindowTitle(tr("标本影像"))
         self.resize(1440, 900)
         # Minimum width must stay below common small/remote-desktop screens
         # (e.g. 1024×768). At 1040 the window can't shrink to fit a 1024-wide
@@ -127,23 +133,20 @@ class MainWindow(QMainWindow):
         )
         lay.addWidget(brand_mark)
         lay.addSpacing(8)
-        brand = QLabel("标本影像管理")
-        brand.setObjectName("BrandWord")
-        lay.addWidget(brand)
+        self._brand = QLabel(tr("标本影像管理"))
+        self._brand.setObjectName("BrandWord")
+        lay.addWidget(self._brand)
 
         lay.addSpacing(18)
 
-        # Project switcher in topbar (left side)
-        self._project_switcher = QPushButton("（未选）")
-        self._project_switcher.setObjectName("ProjectSwitcher")
-        self._project_switcher.setToolTip("切换当前工作区项目")
-        self._project_switcher.setMinimumWidth(160)
-        self._project_switcher.setMaximumWidth(240)
-        icons.set_button_icon(self._project_switcher, "mdi6.folder-outline",
-                              color=icons.TONE_MUTED, size=15)
-        self._project_switcher.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
-        self._project_switcher.clicked.connect(lambda: self.navigate_to("overview"))
-        self._project_switcher.setCursor(Qt.CursorShape.PointingHandCursor)
+        # Project switcher in topbar (left side) — EOS-Utility 式面包屑：
+        # 父链可见 + ◀▶ 一键切同级站位（enter_workspace 统一入口）。
+        from app.widgets.workspace_breadcrumb import WorkspaceBreadcrumb
+        self._project_switcher = WorkspaceBreadcrumb(self.ctx)
+        self._project_switcher.setMaximumWidth(420)
+        self._project_switcher.navigate_requested.connect(self.navigate_to)
+        self._project_switcher.workspace_changed.connect(
+            self._on_breadcrumb_switch)
         lay.addWidget(self._project_switcher)
 
         lay.addSpacing(16)
@@ -170,6 +173,40 @@ class MainWindow(QMainWindow):
         nav_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         lay.addWidget(nav_scroll, stretch=1)
 
+        lay.addSpacing(8)
+
+        self._nav_menu_btn = QToolButton()
+        self._nav_menu_btn.setObjectName("NavMenuButton")
+        self._nav_menu_btn.setText(tr("工具箱"))
+        self._nav_menu_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self._nav_menu_btn.setAccessibleName(tr("工具箱"))
+        self._nav_menu_btn.setToolTip(tr("按功能分组打开页面，并选择哪些入口固定在顶栏"))
+        self._nav_menu_btn.setFixedSize(86, 30)
+        self._nav_menu_btn.setIcon(
+            icons.icon("mdi6.toolbox-outline", color=icons.TONE_MUTED,
+                       color_active=icons.TONE_ACCENT_HOVER)
+        )
+        self._nav_menu_btn.setIconSize(QSize(17, 17))
+        self._nav_menu_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._nav_menu_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self._nav_menu = QMenu(self._nav_menu_btn)
+        self._nav_menu.setObjectName("NavMenu")
+        self._nav_menu.setMinimumWidth(176)
+        for group_key, group in _NAV_GROUPS.items():
+            group_menu = self._nav_menu.addMenu(tr(group["title"]))
+            group_menu.setObjectName("NavSubMenu")
+            group_menu.setMinimumWidth(188)
+            group_menu.setIcon(icons.icon(group["icon"], color=icons.TONE_MUTED))
+            self._nav_group_menus[group_key] = group_menu
+        self._build_screenshot_menu()
+        self._nav_menu.addSeparator()
+        self._nav_pin_menu = self._nav_menu.addMenu(tr("固定到顶栏"))
+        self._nav_pin_menu.setObjectName("NavSubMenu")
+        self._nav_pin_menu.setMinimumWidth(188)
+        self._nav_pin_menu.setIcon(icons.icon("mdi6.pin-outline", color=icons.TONE_MUTED))
+        self._nav_menu_btn.setMenu(self._nav_menu)
+        lay.addWidget(self._nav_menu_btn)
+
         # Divider: separate the flexible nav region from the fixed action cluster
         # so the right side reads as one tidy group rather than buttons crowding
         # the tabs.
@@ -179,9 +216,9 @@ class MainWindow(QMainWindow):
 
         # Right side: compact global actions. Uniform 30px height keeps every
         # control on one baseline; uniform 6px gaps keep the cluster even.
-        self._btn_new_project = QPushButton("新建")
+        self._btn_new_project = QPushButton(tr("新建"))
         self._btn_new_project.setObjectName("Outline")
-        self._btn_new_project.setToolTip("新建一个项目工作区目录")
+        self._btn_new_project.setToolTip(tr("新建一个项目工作区目录"))
         self._btn_new_project.setFixedHeight(30)
         icons.set_button_icon(self._btn_new_project, "mdi6.plus",
                               color=icons.TONE_MUTED, size=15)
@@ -191,9 +228,9 @@ class MainWindow(QMainWindow):
 
         lay.addSpacing(6)
 
-        self._btn_open_ws = QPushButton("打开")
+        self._btn_open_ws = QPushButton(tr("打开"))
         self._btn_open_ws.setObjectName("Outline")
-        self._btn_open_ws.setToolTip("打开已有项目工作区目录")
+        self._btn_open_ws.setToolTip(tr("打开已有项目工作区目录"))
         self._btn_open_ws.setFixedHeight(30)
         icons.set_button_icon(self._btn_open_ws, "mdi6.folder-open-outline",
                               color=icons.TONE_MUTED, size=15)
@@ -203,9 +240,9 @@ class MainWindow(QMainWindow):
 
         lay.addSpacing(6)
 
-        self._btn_compress = QPushButton("归档")
+        self._btn_compress = QPushButton(tr("归档"))
         self._btn_compress.setObjectName("Outline")
-        self._btn_compress.setToolTip("智能压缩归档（JPG→JXL→ZIP）")
+        self._btn_compress.setToolTip(tr("智能压缩归档（JPG→JXL→ZIP）"))
         self._btn_compress.setFixedHeight(30)
         icons.set_button_icon(self._btn_compress, "mdi6.archive-outline",
                               color=icons.TONE_MUTED, size=15)
@@ -213,38 +250,13 @@ class MainWindow(QMainWindow):
         self._btn_compress.setCursor(Qt.CursorShape.PointingHandCursor)
         lay.addWidget(self._btn_compress)
 
-        # Thin divider before the icon-only tools, grouping text buttons apart
-        # from the icon cluster.
         lay.addSpacing(10)
         lay.addWidget(self._topbar_divider())
         lay.addSpacing(10)
 
-        # Screenshot tool: click = region capture; dropdown = other modes.
-        self._shot_btn = QToolButton()
-        self._shot_btn.setObjectName("IconGhost")
-        self._shot_btn.setToolTip("截图（Alt+A 区域截图）")
-        self._shot_btn.setFixedSize(44, 30)  # extra width for the dropdown caret
-        self._shot_btn.setIcon(
-            icons.icon("mdi6.scissors-cutting", color=icons.TONE_MUTED,
-                       color_active=icons.TONE_ACCENT_HOVER)
-        )
-        self._shot_btn.setIconSize(QSize(18, 18))
-        self._shot_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._shot_btn.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
-        shot_menu = QMenu(self._shot_btn)
-        shot_menu.addAction("区域截图", lambda: self._shot_ctrl.capture_region())
-        shot_menu.addAction("全屏截图", lambda: self._shot_ctrl.capture_fullscreen())
-        shot_menu.addAction("当前窗口", lambda: self._shot_ctrl.capture_window())
-        shot_menu.addAction("当前页面", lambda: self._shot_ctrl.capture_view())
-        self._shot_btn.setMenu(shot_menu)
-        self._shot_btn.clicked.connect(lambda: self._shot_ctrl.capture_region())
-        lay.addWidget(self._shot_btn)
-
-        lay.addSpacing(6)
-
         self._settings_btn = QPushButton()
         self._settings_btn.setObjectName("IconGhost")
-        self._settings_btn.setToolTip("配置")
+        self._settings_btn.setToolTip(tr("配置"))
         self._settings_btn.setFixedSize(30, 30)
         self._settings_btn.setIcon(
             icons.icon("mdi6.cog-outline", color=icons.TONE_MUTED,
@@ -259,7 +271,7 @@ class MainWindow(QMainWindow):
 
         self._btn_helicon = QPushButton("Helicon")
         self._btn_helicon.setObjectName("Primary")
-        self._btn_helicon.setToolTip("Helicon Focus 景深合成")
+        self._btn_helicon.setToolTip(tr("Helicon Focus 景深合成"))
         self._btn_helicon.setFixedHeight(30)
         icons.set_button_icon(self._btn_helicon, "mdi6.image-filter-center-focus",
                               color=icons.TONE_ON_ACCENT, size=15)
@@ -291,20 +303,20 @@ class MainWindow(QMainWindow):
         lay.setContentsMargins(20, 0, 20, 0)
         lay.setSpacing(10)
 
-        active_label = QLabel("激活标本")
-        active_label.setObjectName("ContextLabel")
-        lay.addWidget(active_label)
+        self._active_label = QLabel(tr("激活标本"))
+        self._active_label.setObjectName("ContextLabel")
+        lay.addWidget(self._active_label)
 
-        self._active_badge = QLabel("无")
+        self._active_badge = QLabel(tr("无"))
         self._active_badge.setObjectName("ActiveBadgeOff")
         lay.addWidget(self._active_badge)
 
         lay.addStretch()
 
         # Quick new-specimen shortcut (wired in _quick_new_specimen)
-        self._btn_new = QPushButton("新增编号")
+        self._btn_new = QPushButton(tr("新增编号"))
         self._btn_new.setObjectName("Outline")
-        self._btn_new.setToolTip("开始填写新标本唯一编号")
+        self._btn_new.setToolTip(tr("开始填写新标本唯一编号"))
         icons.set_button_icon(self._btn_new, "mdi6.dna", color=icons.TONE_ACCENT, size=15)
         self._btn_new.clicked.connect(self._quick_new_specimen)
         lay.addWidget(self._btn_new)
@@ -325,21 +337,21 @@ class MainWindow(QMainWindow):
         self.setStatusBar(bar)
 
         # Segment 1 — activated specimen
-        self._status_specimen = QLabel("未激活标本")
+        self._status_specimen = QLabel(tr("未激活标本"))
         self._status_specimen.setObjectName("StatusSegment")
         bar.addWidget(self._status_specimen)
 
         bar.addWidget(_separator())
 
         # Segment 2 — collaboration
-        self._status_collab = QLabel("协作: 离线")
+        self._status_collab = QLabel(tr("协作: 离线"))
         self._status_collab.setObjectName("StatusSegment")
         bar.addWidget(self._status_collab)
 
         bar.addWidget(_separator())
 
         # Segment 3 — Helicon
-        self._status_helicon = QLabel("Helicon: 未检测")
+        self._status_helicon = QLabel(tr("Helicon: 未检测"))
         self._status_helicon.setObjectName("StatusSegment")
         bar.addWidget(self._status_helicon)
 
@@ -365,11 +377,11 @@ class MainWindow(QMainWindow):
         self._view_classes.append(view_cls)
 
         # Top-nav segment button — vector glyph + title, accent when active.
-        btn = QPushButton(view_cls.nav_title)
+        btn = QPushButton(tr(view_cls.nav_title))
         btn.setObjectName("NavSegment")
         btn.setCheckable(True)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn.setToolTip(view_cls.nav_title)
+        btn.setToolTip(tr(view_cls.nav_title))
         glyph = _NAV_GLYPHS.get(view_cls.view_id, "mdi6.circle-outline")
         btn.setIcon(
             icons.icon(glyph, color=icons.TONE_MUTED,
@@ -381,7 +393,110 @@ class MainWindow(QMainWindow):
         self._nav_group.addButton(btn, idx)
         self._nav_buttons.append(btn)
         self._nav_row.addWidget(btn)
+        self._add_view_to_nav_menu(view_cls, idx)
+        btn.setVisible(self._is_nav_pinned(view_cls.view_id))
         # View is NOT built here — see _ensure_view (lazy, first-activation).
+
+    def _add_view_to_nav_menu(self, view_cls: type, idx: int) -> None:
+        group_key = _NAV_GROUP_FOR_VIEW.get(view_cls.view_id, "tools")
+        menu = self._nav_group_menus.get(group_key)
+        if menu is None:
+            group = _NAV_GROUPS[group_key]
+            menu = self._nav_menu.addMenu(tr(group["title"]))
+            menu.setObjectName("NavSubMenu")
+            menu.setMinimumWidth(188)
+            menu.setIcon(icons.icon(group["icon"], color=icons.TONE_MUTED))
+            self._nav_group_menus[group_key] = menu
+
+        glyph = _NAV_GLYPHS.get(view_cls.view_id, "mdi6.circle-outline")
+        action = QAction(
+            icons.icon(glyph, color=icons.TONE_MUTED, color_active=icons.TONE_ACCENT_HOVER),
+            tr(view_cls.nav_title),
+            self,
+        )
+        action.setCheckable(True)
+        action.setToolTip(tr(view_cls.nav_title))
+        action.triggered.connect(lambda _=False, i=idx: self._activate_index(i))
+        menu.addAction(action)
+        self._nav_menu_actions[view_cls.view_id] = action
+        self._keep_screenshot_last_in_tools()
+
+        self._rebuild_nav_pin_menu()
+
+    def _build_screenshot_menu(self) -> None:
+        tools_menu = self._nav_group_menus["tools"]
+        self._shot_menu = tools_menu.addMenu(tr("截图"))
+        self._shot_menu.setObjectName("NavSubMenu")
+        self._shot_menu.setMinimumWidth(190)
+        self._shot_menu.setIcon(
+            icons.icon("mdi6.scissors-cutting", color=icons.TONE_MUTED,
+                       color_active=icons.TONE_ACCENT_HOVER)
+        )
+        self._shot_menu.setToolTipsVisible(True)
+
+        shot_specs = [
+            ("region", "区域截图", "框选屏幕区域", lambda: self._shot_ctrl.capture_region()),
+            ("fullscreen", "全屏截图", "截取整个屏幕", lambda: self._shot_ctrl.capture_fullscreen()),
+            ("window", "当前窗口", "截取当前窗口", lambda: self._shot_ctrl.capture_window()),
+            ("view", "当前页面", "截取当前应用页面", lambda: self._shot_ctrl.capture_view()),
+        ]
+        for key, text, tip, callback in shot_specs:
+            action = QAction(tr(text), self)
+            action.setToolTip(tr(tip))
+            action.triggered.connect(callback)
+            self._shot_menu.addAction(action)
+            self._shot_actions[key] = action
+        self._update_screenshot_tooltip()
+
+    def _keep_screenshot_last_in_tools(self) -> None:
+        tools_menu = self._nav_group_menus.get("tools")
+        shot_menu = getattr(self, "_shot_menu", None)
+        if tools_menu is None or shot_menu is None:
+            return
+        shot_action = shot_menu.menuAction()
+        tools_menu.removeAction(shot_action)
+        tools_menu.addAction(shot_action)
+
+    def _rebuild_nav_pin_menu(self) -> None:
+        self._nav_pin_menu.clear()
+        self._nav_pin_actions.clear()
+        for i, cls in enumerate(self._view_classes):
+            action = QAction(tr(cls.nav_title), self)
+            action.setCheckable(True)
+            action.setChecked(self._is_nav_pinned(cls.view_id))
+            action.toggled.connect(lambda checked, idx=i: self._set_nav_pinned(idx, checked))
+            self._nav_pin_menu.addAction(action)
+            self._nav_pin_actions[cls.view_id] = action
+
+    def _nav_pins_setting(self) -> set[str]:
+        raw = self.ctx.settings._qs.value("ui/topbar_pinned_views", "", type=str) or ""
+        if not raw:
+            return set(_DEFAULT_PINNED_NAV)
+        if raw == "__none__":
+            return set()
+        return {part for part in raw.split(",") if part}
+
+    def _save_nav_pins(self, pins: set[str]) -> None:
+        ordered = [cls.view_id for cls in self._view_classes if cls.view_id in pins]
+        self.ctx.settings._qs.setValue("ui/topbar_pinned_views", ",".join(ordered) or "__none__")
+
+    def _is_nav_pinned(self, view_id: str) -> bool:
+        return view_id in self._nav_pins_setting()
+
+    def _set_nav_pinned(self, idx: int, checked: bool) -> None:
+        if idx < 0 or idx >= len(self._view_classes):
+            return
+        view_id = self._view_classes[idx].view_id
+        pins = self._nav_pins_setting()
+        if checked:
+            pins.add(view_id)
+        else:
+            pins.discard(view_id)
+        self._save_nav_pins(pins)
+        self._nav_buttons[idx].setVisible(checked)
+        action = self._nav_pin_actions.get(view_id)
+        if action is not None and action.isChecked() != checked:
+            action.setChecked(checked)
 
     def _ensure_view(self, view_cls: type) -> BaseView:
         """Build *view_cls* on first request, then cache + add to the stack.
@@ -406,6 +521,68 @@ class MainWindow(QMainWindow):
             tone = icons.TONE_ACCENT_HOVER if i == active_idx else icons.TONE_MUTED
             b.setIcon(icons.icon(glyph, color=tone,
                                  color_active=icons.TONE_ACCENT_HOVER))
+
+    def retranslate_ui(self) -> None:
+        """Apply the active language to the shell and loaded views immediately."""
+        self.setWindowTitle(tr("标本影像"))
+        self._brand.setText(tr("标本影像管理"))
+        self._project_switcher.refresh()
+        self._nav_menu_btn.setText(tr("工具箱"))
+        self._nav_menu_btn.setAccessibleName(tr("工具箱"))
+        self._nav_menu_btn.setToolTip(tr("按功能分组打开页面，并选择哪些入口固定在顶栏"))
+
+        for group_key, group in _NAV_GROUPS.items():
+            menu = self._nav_group_menus.get(group_key)
+            if menu is not None:
+                menu.setTitle(tr(group["title"]))
+        self._nav_pin_menu.setTitle(tr("固定到顶栏"))
+
+        self._btn_new_project.setText(tr("新建"))
+        self._btn_new_project.setToolTip(tr("新建一个项目工作区目录"))
+        self._btn_open_ws.setText(tr("打开"))
+        self._btn_open_ws.setToolTip(tr("打开已有项目工作区目录"))
+        self._btn_compress.setText(tr("归档"))
+        self._btn_compress.setToolTip(tr("智能压缩归档（JPG→JXL→ZIP）"))
+        self._settings_btn.setToolTip(tr("配置"))
+        self._btn_helicon.setToolTip(tr("Helicon Focus 景深合成"))
+        self._active_label.setText(tr("激活标本"))
+        self._btn_new.setText(tr("新增编号"))
+        self._btn_new.setToolTip(tr("开始填写新标本唯一编号"))
+
+        for i, cls in enumerate(self._view_classes):
+            if i < len(self._nav_buttons):
+                self._nav_buttons[i].setText(tr(cls.nav_title))
+                self._nav_buttons[i].setToolTip(tr(cls.nav_title))
+            menu_action = self._nav_menu_actions.get(cls.view_id)
+            if menu_action is not None:
+                menu_action.setText(tr(cls.nav_title))
+                menu_action.setToolTip(tr(cls.nav_title))
+            pin_action = self._nav_pin_actions.get(cls.view_id)
+            if pin_action is not None:
+                pin_action.setText(tr(cls.nav_title))
+
+        if getattr(self, "_shot_menu", None) is not None:
+            self._shot_menu.setTitle(tr("截图"))
+        for key, text, tip in (
+            ("fullscreen", "全屏截图", "截取整个屏幕"),
+            ("window", "当前窗口", "截取当前窗口"),
+            ("view", "当前页面", "截取当前应用页面"),
+        ):
+            action = self._shot_actions.get(key)
+            if action is not None:
+                action.setText(tr(text))
+                action.setToolTip(tr(tip))
+        self._update_screenshot_tooltip()
+
+        self.refresh_context_bar()
+        if not self._views:
+            self._status_collab.setText(tr("协作: 离线"))
+            self._status_helicon.setText(tr("Helicon: 未检测"))
+
+        for view in list(self._views.values()):
+            handler = getattr(view, "retranslate_ui", None)
+            if callable(handler):
+                handler()
 
     def _open_helicon_config(self) -> None:
         """Open the standalone Helicon Focus config dialog (web 顶栏 Helicon)."""
@@ -433,6 +610,10 @@ class MainWindow(QMainWindow):
         btn = self._nav_buttons[idx]
         if not btn.isChecked():
             btn.setChecked(True)
+        for i, cls in enumerate(self._view_classes):
+            action = self._nav_menu_actions.get(cls.view_id)
+            if action is not None:
+                action.setChecked(i == idx)
         self._recolor_nav_icons(idx)
         view_cls = self._view_classes[idx]
         view = self._ensure_view(view_cls)
@@ -444,25 +625,34 @@ class MainWindow(QMainWindow):
 
     # ── Context bar ────────────────────────────────────────────────────────
 
+    def _on_breadcrumb_switch(self, path: str) -> None:
+        """面包屑 ◀▶/下拉 切换工作区后：刷新顶栏状态 + 让当前页重读新工作区."""
+        self.refresh_context_bar()
+        view = self._stack.currentWidget()
+        if view is not None and hasattr(view, "on_activate"):
+            try:
+                view.on_activate()
+            except Exception:
+                pass
+        self.set_status_specimen(tr("已切换工作区: {}").format(
+            os.path.basename(path)))
+
     def refresh_context_bar(self) -> None:
         """Sync topbar project switcher + context bar active badge with current state."""
-        from pathlib import Path
-
         project_dir = getattr(self.ctx, "current_project_dir", None)
-        name = Path(project_dir).name if project_dir else "（未选）"
-        # Project switcher lives in the topbar now
-        self._project_switcher.setText(f"{name}  ▾")
+        # Project switcher lives in the topbar now (breadcrumb rebuilds from ctx)
+        self._project_switcher.refresh()
 
         active_uid = self._lookup_active_uid()
         if active_uid:
             short = active_uid.split("-")[3] if active_uid.count("-") >= 3 else active_uid
             self._active_badge.setText(short)
             self._active_badge.setObjectName("ActiveBadgeOn")
-            self.set_status_specimen(f"激活: {active_uid}")
+            self.set_status_specimen(tr("激活: {}").format(active_uid))
         else:
-            self._active_badge.setText("无")
+            self._active_badge.setText(tr("无"))
             self._active_badge.setObjectName("ActiveBadgeOff")
-            self.set_status_specimen("未激活标本")
+            self.set_status_specimen(tr("未激活标本"))
         self._active_badge.style().unpolish(self._active_badge)
         self._active_badge.style().polish(self._active_badge)
 
@@ -549,6 +739,17 @@ class MainWindow(QMainWindow):
         seq = self.ctx.settings._qs.value("shortcuts/screenshot_region", "", type=str) or ""
         return seq or "Alt+A"
 
+    def _update_screenshot_tooltip(self, seq: str | None = None) -> None:
+        """Keep the visible screenshot entry distinct from Settings."""
+        seq = seq or self.screenshot_shortcut_seq()
+        region = self._shot_actions.get("region")
+        if region is not None:
+            region.setText(f"{tr('区域截图')}    {seq}")
+            region.setToolTip(f"{seq} {tr('区域截图')}")
+        shot_menu = getattr(self, "_shot_menu", None)
+        if shot_menu is not None:
+            shot_menu.menuAction().setToolTip(tr("截图工具（{} 区域截图）").format(seq))
+
     def _wire_screenshot(self) -> None:
         """Build the screenshot controller and bind the screenshot hotkey.
 
@@ -593,6 +794,7 @@ class MainWindow(QMainWindow):
             self._screenshot_shortcut.setKey(QKeySequence(seq))
         if getattr(self, "_global_hotkey", None) is not None:
             self._global_hotkey.set_hotkey(seq)
+        self._update_screenshot_tooltip(seq)
 
     # ── Persistence ───────────────────────────────────────────────────────
 
@@ -677,13 +879,48 @@ class MainWindow(QMainWindow):
 _NAV_GLYPHS: dict[str, str] = {
     "workbench": "mdi6.microscope",
     "overview":  "mdi6.view-dashboard-outline",
+    "project_tree": "mdi6.file-tree-outline",
     "labels":    "mdi6.tag-outline",
     "worms":     "mdi6.waves",
     "taxonomy":  "mdi6.dna",
     "coords":    "mdi6.map-marker-outline",
+    "summary":   "mdi6.chart-box-outline",
+    "collection_records": "mdi6.clipboard-list-outline",
     "collection_map": "mdi6.map-marker-multiple",
+    "screenshot": "mdi6.scissors-cutting",
     "collab":    "mdi6.chart-bar-stacked",
     "settings":  "mdi6.cog-outline",
+}
+
+
+_DEFAULT_PINNED_NAV: tuple[str, ...] = (
+    "workbench",
+    "project_tree",
+    "collection_records",
+)
+
+
+_NAV_GROUPS: dict[str, dict[str, str]] = {
+    "project": {"title": "项目", "icon": "mdi6.folder-outline"},
+    "taxonomy": {"title": "分类", "icon": "mdi6.dna"},
+    "collection": {"title": "采集", "icon": "mdi6.map-marker-outline"},
+    "tools": {"title": "工具", "icon": "mdi6.tools"},
+    "system": {"title": "系统", "icon": "mdi6.cog-outline"},
+}
+
+
+_NAV_GROUP_FOR_VIEW: dict[str, str] = {
+    "workbench": "project",
+    "overview": "project",
+    "project_tree": "project",
+    "summary": "project",
+    "labels": "tools",
+    "worms": "taxonomy",
+    "taxonomy": "taxonomy",
+    "coords": "collection",
+    "collection_records": "collection",
+    "collection_map": "tools",
+    "settings": "system",
 }
 
 

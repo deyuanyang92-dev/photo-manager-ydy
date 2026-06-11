@@ -49,6 +49,8 @@ def _make_ctx(project_dir: str | None = None, db: sqlite3.Connection | None = No
     ctx.current_project_dir = project_dir
     ctx.get_db.return_value = db
     ctx.settings = MagicMock()
+    # Default OFF so a bare MagicMock's truthiness doesn't auto-activate.
+    ctx.settings.auto_activate_on_new_specimen = False
     return ctx
 
 
@@ -1832,7 +1834,11 @@ class TestPhasePillWiring:
 
         assert w._monitor._phase_pills["organizing"].isChecked()
 
-    def test_invalid_transition_keeps_pill_and_no_crash(self, tmp_path):
+    def test_pill_jump_allowed_via_force(self, tmp_path):
+        """批次条 pill = 人工标记,force=True 放开状态机:SHOOTING→DONE 跳格成功。
+
+        (服务层默认 force=False 的严格状态机仍由 test_collab_service 守住。)
+        """
         from app.services import activation_service
         from app.services.collab_service import TaskStatus
         w, ctx, db = self._make_view(tmp_path)
@@ -1840,17 +1846,218 @@ class TestPhasePillWiring:
         w._refresh_batch_header()
         w._on_phase_clicked("shooting")
 
-        w._on_phase_clicked("done")  # SHOOTING→DONE 非法,应提示而非崩溃
+        w._on_phase_clicked("done")  # 跳格,人工标记应成功
 
-        assert ctx.collab_service.store.get("U1").status is TaskStatus.SHOOTING
-        assert w._monitor._phase_pills["shooting"].isChecked()
-        assert not w._monitor._phase_pills["done"].isChecked()
+        assert ctx.collab_service.store.get("U1").status is TaskStatus.DONE
+        assert activation_service.get_collab_status(db, "U1") == "done"
+        assert w._monitor._phase_pills["done"].isChecked()
+        assert not w._monitor._phase_pills["shooting"].isChecked()
 
     def test_click_without_active_uid_is_noop(self, tmp_path):
         w, ctx, db = self._make_view(tmp_path)
         w._on_phase_clicked("shooting")  # 无激活编号,不应崩溃
         assert ctx.collab_service.store.get("shooting") is None
         assert all(not b.isChecked() for b in w._monitor._phase_pills.values())
+
+    # ── _on_phase_mark: 侧边栏点点 → 标记任意编号(无需激活) ──────────────────
+
+    def test_mark_non_active_uid_persists(self, tmp_path):
+        """对非激活编号标记阶段成功,且不影响当前激活编号。"""
+        from app.services import activation_service
+        from app.services.collab_service import TaskStatus
+        w, ctx, db = self._make_view(tmp_path)
+        activation_service.activate(str(tmp_path), db, "ACTIVE")  # 激活另一个
+
+        w._on_phase_mark("OTHER", "organizing")  # OTHER 未激活
+
+        assert activation_service.get_collab_status(db, "OTHER") == "organizing"
+        assert ctx.collab_service.store.get("OTHER").status is TaskStatus.ORGANIZING
+        # 激活编号未被改动 / 仍激活
+        assert activation_service.get_active_uid(db) == "ACTIVE"
+
+    def test_mark_does_not_require_activation(self, tmp_path):
+        """无任何激活编号时,点点仍能标记。"""
+        from app.services import activation_service
+        w, ctx, db = self._make_view(tmp_path)
+        assert activation_service.get_active_uid(db) is None
+
+        w._on_phase_mark("SOLO", "shooting")
+
+        assert activation_service.get_collab_status(db, "SOLO") == "shooting"
+
+    def test_mark_backward_allowed_via_force(self, tmp_path):
+        """完成→整理中 回退,人工标记应成功(状态机本禁回退)。"""
+        from app.services import activation_service
+        from app.services.collab_service import TaskStatus
+        w, ctx, db = self._make_view(tmp_path)
+        w._on_phase_mark("B", "shooting")
+        w._on_phase_mark("B", "shot_done")
+        w._on_phase_mark("B", "organizing")
+        w._on_phase_mark("B", "done")
+        assert ctx.collab_service.store.get("B").status is TaskStatus.DONE
+
+        w._on_phase_mark("B", "organizing")  # 回退
+
+        assert ctx.collab_service.store.get("B").status is TaskStatus.ORGANIZING
+        assert activation_service.get_collab_status(db, "B") == "organizing"
+
+
+# ── 场景2：激活即置「拍摄中」+ 切换激活号提醒（对齐 oracle app.js:3517-3556） ──
+
+
+class TestActivateBehaviour:
+    def _make_view(self, tmp_path):
+        from app.views.workbench_view import WorkbenchView
+        from app.services.collab_service import CollabService
+        project_dir = str(tmp_path / "proj")
+        Path(project_dir, "_data").mkdir(parents=True)
+        db = _make_db(str(tmp_path / "proj" / "_data" / "project.db"))
+        ctx = _make_ctx(project_dir=project_dir, db=db)
+        ctx.collab_service = CollabService()
+        return WorkbenchView(ctx), ctx, db
+
+    def test_activate_sets_shooting_when_no_phase(self, tmp_path):
+        from app.services import activation_service
+        from app.services.collab_service import TaskStatus
+        w, ctx, db = self._make_view(tmp_path)
+        w._on_sidebar_activate("FJ-XM-B2-AAA001-T95E-20260601")
+        uid = "FJ-XM-B2-AAA001-T95E-20260601"
+        assert ctx.collab_service.store.get(uid).status is TaskStatus.SHOOTING
+        assert activation_service.get_collab_status(db, uid) == "shooting"
+
+    def test_activate_keeps_existing_later_phase(self, tmp_path):
+        from app.services.collab_service import TaskStatus
+        w, ctx, db = self._make_view(tmp_path)
+        uid = "FJ-XM-B2-AAA001-T95E-20260601"
+        # 推进到 organizing
+        for s in ("shooting", "shot_done", "organizing"):
+            w._on_phase_mark(uid, s)
+        w._on_sidebar_activate(uid)
+        # 激活不得把已有更高阶段重置回 shooting
+        assert ctx.collab_service.store.get(uid).status is TaskStatus.ORGANIZING
+
+    def test_switch_active_warns_old_keeps_photos(self, tmp_path, monkeypatch):
+        w, ctx, db = self._make_view(tmp_path)
+        msgs = []
+        monkeypatch.setattr(w, "_status_message",
+                            lambda *a, **k: msgs.append(a[0] if a else ""))
+        w._on_sidebar_activate("FJ-XM-B2-AAA001-T95E-20260601")
+        w._on_sidebar_activate("FJ-XM-B2-BBB002-T95E-20260601")  # 切号
+        assert any("仍归旧号" in m for m in msgs)
+        assert any("AAA001" in m for m in msgs)  # 提到旧号短码
+
+    def test_first_activate_no_switch_warning(self, tmp_path, monkeypatch):
+        w, ctx, db = self._make_view(tmp_path)
+        msgs = []
+        monkeypatch.setattr(w, "_status_message",
+                            lambda *a, **k: msgs.append(a[0] if a else ""))
+        w._on_sidebar_activate("FJ-XM-B2-AAA001-T95E-20260601")  # 首次激活
+        assert not any("仍归旧号" in m for m in msgs)
+
+
+# ── 场景1 修复1：保存按钮 = 存全部（命名 + metadata 一并入库） ───────────────
+
+
+class TestSaveButtonPersistsMetadata:
+    """新号「先填 metadata 再点保存」时，采集人/经纬度/地理区不能丢。
+
+    旧 bug：_on_naming_save 只写命名段；metadata autosave 因新草稿
+    _current_uid=None 整段跳过 → metadata 静默丢失。修复后保存须 flush 右栏。
+    """
+
+    def _make_view(self, tmp_path):
+        from app.views.workbench_view import WorkbenchView
+        project_dir = str(tmp_path / "proj")
+        Path(project_dir, "_data").mkdir(parents=True)
+        db = _make_db(str(tmp_path / "proj" / "_data" / "project.db"))
+        ctx = _make_ctx(project_dir=project_dir, db=db)
+        ctx.collab_service = None  # 单机
+        w = WorkbenchView(ctx)
+        return w, ctx, db
+
+    def _fill_new_specimen(self, w):
+        n = w._naming
+        n._province.setText("FJ"); n._site.setText("XM"); n._station.setText("B2")
+        n._species_id.setText("DLC001"); n._storage.setText("T95E")
+        n._collection_date.setText("20260601")
+        m = w._metadata
+        m._collector.setText("张三")
+        m._lon.setText("119.5"); m._lat.setText("26.3")
+        m._geo_area.setText("三门湾")
+        return n.current_uid()
+
+    def test_save_persists_metadata_for_new_specimen(self, tmp_path):
+        w, ctx, db = self._make_view(tmp_path)
+        uid = self._fill_new_specimen(w)
+        assert uid
+
+        w._on_naming_save()
+
+        row = db.execute(
+            "SELECT collector, lon, lat, geo_area FROM specimens WHERE uid=?",
+            (uid,),
+        ).fetchone()
+        assert row is not None
+        assert row["collector"] == "张三"
+        assert row["lon"] == 26.3 or row["lon"] == 119.5  # 经度存入
+        assert row["lon"] == 119.5
+        assert row["lat"] == 26.3
+        assert row["geo_area"] == "三门湾"
+
+    def test_save_still_persists_naming_segments(self, tmp_path):
+        """修复不得破坏原有命名段保存。"""
+        w, ctx, db = self._make_view(tmp_path)
+        uid = self._fill_new_specimen(w)
+        w._on_naming_save()
+        row = db.execute(
+            "SELECT id, province, station, storage FROM specimens WHERE uid=?",
+            (uid,),
+        ).fetchone()
+        assert row["id"] == "DLC001"
+        assert row["province"] == "FJ"
+        assert row["station"] == "B2"
+        assert row["storage"] == "T95E"
+
+
+# ── 场景1 修复3：新建即激活开关（默认关，opt-in） ──────────────────────────────
+
+
+class TestAutoActivateOnSave:
+    """设置「新建编号后自动激活」(autoActivateOnNewSpecimen) 开启时，
+    保存新号即把它设为当前激活标本；默认关时不动激活（守 oracle 默认）。"""
+
+    def _make_view(self, tmp_path):
+        from app.views.workbench_view import WorkbenchView
+        project_dir = str(tmp_path / "proj")
+        Path(project_dir, "_data").mkdir(parents=True)
+        db = _make_db(str(tmp_path / "proj" / "_data" / "project.db"))
+        ctx = _make_ctx(project_dir=project_dir, db=db)
+        ctx.collab_service = None
+        w = WorkbenchView(ctx)
+        return w, ctx, db
+
+    def _fill(self, w):
+        n = w._naming
+        n._province.setText("FJ"); n._site.setText("XM"); n._station.setText("B2")
+        n._species_id.setText("DLC001"); n._storage.setText("T95E")
+        n._collection_date.setText("20260601")
+        return n.current_uid()
+
+    def test_on_activates_saved_specimen(self, tmp_path):
+        from app.services import activation_service
+        w, ctx, db = self._make_view(tmp_path)
+        ctx.settings.auto_activate_on_new_specimen = True
+        uid = self._fill(w)
+        w._on_naming_save()
+        assert activation_service.get_active_uid(db) == uid
+
+    def test_off_leaves_no_active(self, tmp_path):
+        from app.services import activation_service
+        w, ctx, db = self._make_view(tmp_path)
+        ctx.settings.auto_activate_on_new_specimen = False
+        uid = self._fill(w)
+        w._on_naming_save()
+        assert activation_service.get_active_uid(db) is None
 
 
 # ── QFileSystemWatcher integration ───────────────────────────────────
@@ -1966,4 +2173,60 @@ class TestFileSystemWatcher:
         """_auto_refresh_timer should no longer exist."""
         w, _, db = self._make_view(tmp_path)
         assert not hasattr(w, "_auto_refresh_timer")
+        db.close()
+
+
+# ── 场景3：incoming/results 子目录可配置 + 新拍JPG 遗留兼容 ────────────────────
+
+
+class TestConfigurableIncomingDir:
+    """监控的监听+扫描必须认 设置的 incoming/results 子目录 + 遗留 新拍JPG，
+    而非写死 incoming-jpg。"""
+
+    def _build(self, tmp_path, *, incoming_name, configured, put_jpg=None):
+        from app.views.workbench_view import WorkbenchView
+        project_dir = str(tmp_path / "proj")
+        Path(project_dir, "_data").mkdir(parents=True)
+        Path(project_dir, "results").mkdir()
+        inc_dir = Path(project_dir, incoming_name)
+        inc_dir.mkdir()
+        if put_jpg:
+            (inc_dir / put_jpg).write_bytes(b"\xff\xd8\xff")  # jpg-ish
+        db = _make_db(str(tmp_path / "proj" / "_data" / "project.db"))
+        ctx = _make_ctx(project_dir=project_dir, db=db)
+        ctx.settings.incoming_subdir = configured
+        ctx.settings.results_subdir = "results"
+        return WorkbenchView(ctx), ctx, db, project_dir
+
+    def test_resolve_falls_back_to_legacy_xinpai(self, tmp_path):
+        # 配置是 incoming-jpg(默认) 但项目只有 新拍JPG
+        w, ctx, db, _ = self._build(tmp_path, incoming_name="新拍JPG",
+                                    configured="incoming-jpg")
+        inc, res = w._resolve_capture_subdirs()
+        assert inc == "新拍JPG"
+        assert res == "results"
+        db.close()
+
+    def test_resolve_uses_custom_configured_subdir(self, tmp_path):
+        w, ctx, db, _ = self._build(tmp_path, incoming_name="我的JPG",
+                                    configured="我的JPG")
+        inc, _res = w._resolve_capture_subdirs()
+        assert inc == "我的JPG"
+        db.close()
+
+    def test_watcher_watches_resolved_incoming(self, tmp_path):
+        w, ctx, db, _ = self._build(tmp_path, incoming_name="新拍JPG",
+                                    configured="incoming-jpg")
+        w.on_activate()
+        dirs = w._fs_watcher.directories()
+        assert any("新拍JPG" in d for d in dirs)
+        db.close()
+
+    def test_scan_reads_resolved_incoming(self, tmp_path):
+        # jpg 放进 新拍JPG；扫描应读到 → seen_files 记下该文件名
+        w, ctx, db, _ = self._build(tmp_path, incoming_name="新拍JPG",
+                                    configured="incoming-jpg", put_jpg="a.jpg")
+        w._refresh_monitor()
+        names = [r[0] for r in db.execute("SELECT name FROM seen_files").fetchall()]
+        assert "a.jpg" in names   # 写死 incoming-jpg 时为空 → 红
         db.close()

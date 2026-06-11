@@ -52,3 +52,32 @@ class TestStylePanel:
         p.style_changed.connect(got.append)
         p._show_label.setChecked(not p._show_label.isChecked())
         assert got and "show_label" in got[-1]
+
+    def test_color_can_be_typed_directly(self):
+        p = _panel()
+        got = []
+        p.style_changed.connect(got.append)
+        p._fill_edit.setText("#123456")
+        p._on_color_edited("fill")
+        assert got
+        assert got[-1]["fill"] == "#123456"
+        assert p.style()["fill"] == "#123456"
+
+    def test_invalid_typed_color_does_not_replace_current_style(self):
+        p = _panel({"fill": "#123456"})
+        got = []
+        p.style_changed.connect(got.append)
+        p._fill_edit.setText("not-a-color")
+        p._on_color_edited("fill")
+        assert got == []
+        assert p.style()["fill"] == "#123456"
+
+    def test_reset_restores_defaults_and_emits(self):
+        p = _panel({"size": 200, "fill": "#ff0000", "show_label": True})
+        got = []
+        p.style_changed.connect(got.append)
+        p.reset_style()
+        assert got
+        assert p.style()["size"] == 80
+        assert p.style()["fill"] == "#29b9ab"
+        assert p.style()["show_label"] is False

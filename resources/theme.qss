@@ -9,7 +9,7 @@
 QWidget {
     background-color: #f4f6f8;
     color: #17212b;
-    font-family: "Noto Sans CJK SC", "Noto Sans SC", "Source Han Sans SC", "Microsoft YaHei", 微软雅黑, "PingFang SC", "Hiragino Sans GB", "Heiti SC", "WenQuanYi Micro Hei", "Segoe UI", Arial, sans-serif;
+    font-family: "Noto Sans CJK SC", "Noto Sans SC", "Source Han Sans SC", "Microsoft YaHei", 微软雅黑, SimHei, 黑体, "PingFang SC", "Hiragino Sans GB", "Heiti SC", "WenQuanYi Micro Hei", "Segoe UI", Arial, Calibri, sans-serif;
     font-size: 13px;
     selection-background-color: #0f766e;
     selection-color: #f4f6f8;
@@ -33,7 +33,7 @@ QFrame#TopBar {
 }
 QFrame#TopBarDivider { background: rgba(15,23,42,0.13); border: none; }
 QLabel#BrandWord {
-    font-family: "Noto Serif CJK SC", "Noto Serif SC", "Source Han Serif SC", "Songti SC", STSong, SimSun, 宋体, Georgia, serif;
+    font-family: "Noto Serif CJK SC", "Noto Serif SC", "Source Han Serif SC", "Songti SC", STSong, SimSun, 宋体, NSimSun, 新宋体, FangSong, 仿宋, KaiTi, 楷体, "Times New Roman", Times, Georgia, serif;
     font-size: 13px;
     font-weight: 600;
     color: #17212b;
@@ -77,6 +77,24 @@ QPushButton#IconGhost:hover {
     background-color: rgba(15,118,110,0.06);
     border-color: rgba(15,23,42,0.08);
 }
+QToolButton#ScreenshotTool {
+    background-color: #ffffff;
+    color: #334155;
+    border: 1px solid rgba(15,23,42,0.13);
+    border-radius: 6px;
+    padding: 0 8px;
+    font-size: 12px;
+    font-weight: 600;
+}
+QToolButton#ScreenshotTool:hover {
+    border-color: #0f766e;
+    color: #17212b;
+    background-color: rgba(15,118,110,0.06);
+}
+QToolButton#ScreenshotTool::menu-button {
+    border: none;
+    width: 14px;
+}
 
 /* ── Context bar (project switcher + active badge + quick actions) ─ */
 QFrame#ContextBar {
@@ -104,12 +122,57 @@ QPushButton#ProjectSwitcher:hover {
     border-color: #0f766e;
     background-color: #ffffff;
 }
+/* 工作区面包屑（EOS Utility 式）：祖先段扁平、叶子似旧 switcher、◀▶ 紧凑 */
+QPushButton#CrumbSeg {
+    background: transparent;
+    border: none;
+    padding: 6px 4px;
+    color: #64748b;
+    font-size: 12px;
+}
+QPushButton#CrumbSeg:hover {
+    color: #0f766e;
+}
+QLabel#CrumbSep {
+    color: #94a3b8;
+    font-size: 12px;
+    padding: 0 1px;
+}
+QPushButton#CrumbLeaf {
+    background-color: #f8fafc;
+    border: 1px solid rgba(15,23,42,0.08);
+    border-radius: 6px;
+    padding: 6px 10px;
+    color: #17212b;
+    font-size: 12px;
+    font-weight: 600;
+    text-align: left;
+}
+QPushButton#CrumbLeaf:hover {
+    border-color: #0f766e;
+    background-color: #ffffff;
+}
+QToolButton#CrumbArrow {
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    padding: 4px 3px;
+    color: #64748b;
+    font-size: 11px;
+}
+QToolButton#CrumbArrow:hover {
+    color: #0f766e;
+    border-color: rgba(15,23,42,0.08);
+}
+QToolButton#CrumbArrow:disabled {
+    color: #94a3b8;
+}
 QLabel#ActiveBadgeOn {
     background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #14b8a6, stop:1 #0f766e);
     color: #f4f6f8;
     border-radius: 999px;
     padding: 5px 14px;
-    font-family: "JetBrains Mono", "Cascadia Code", "SF Mono", Consolas, "DejaVu Sans Mono", monospace;
+    font-family: "JetBrains Mono", "Cascadia Code", "SF Mono", Consolas, "Courier New", "DejaVu Sans Mono", monospace;
     font-size: 12px;
     font-weight: 700;
     letter-spacing: 0.5px;
@@ -120,7 +183,7 @@ QLabel#ActiveBadgeOff {
     border: 1px solid rgba(15,23,42,0.08);
     border-radius: 999px;
     padding: 4px 14px;
-    font-family: "JetBrains Mono", "Cascadia Code", "SF Mono", Consolas, "DejaVu Sans Mono", monospace;
+    font-family: "JetBrains Mono", "Cascadia Code", "SF Mono", Consolas, "Courier New", "DejaVu Sans Mono", monospace;
     font-size: 12px;
     font-weight: 600;
 }
@@ -129,7 +192,7 @@ QStackedWidget { background: transparent; border: none; }
 
 /* ── Workspace header ────────────────────────────────────────────── */
 QLabel#WorkspaceTitle {
-    font-family: "Noto Sans CJK SC", "Noto Sans SC", "Source Han Sans SC", "Microsoft YaHei", 微软雅黑, "PingFang SC", "Hiragino Sans GB", "Heiti SC", "WenQuanYi Micro Hei", "Segoe UI", Arial, sans-serif;
+    font-family: "Noto Sans CJK SC", "Noto Sans SC", "Source Han Sans SC", "Microsoft YaHei", 微软雅黑, SimHei, 黑体, "PingFang SC", "Hiragino Sans GB", "Heiti SC", "WenQuanYi Micro Hei", "Segoe UI", Arial, Calibri, sans-serif;
     font-size: 18px;
     font-weight: 600;
     color: #17212b;
@@ -159,7 +222,7 @@ QLabel#DirLabel {
     letter-spacing: 0.04em;
 }
 QLabel#DirPath {
-    font-family: "JetBrains Mono", "Cascadia Code", "SF Mono", Consolas, "DejaVu Sans Mono", monospace;
+    font-family: "JetBrains Mono", "Cascadia Code", "SF Mono", Consolas, "Courier New", "DejaVu Sans Mono", monospace;
     font-size: 11px;
     color: #64748b;
     background-color: transparent;
@@ -231,7 +294,7 @@ QLabel { background: transparent; color: #17212b; }
 QLabel#Muted { color: #64748b; }
 QLabel#MutedSmall { color: #94a3b8; font-size: 11px; }
 QLabel#Accent { color: #0f766e; }
-QLabel#Title { font-family: "Noto Serif CJK SC", "Noto Serif SC", "Source Han Serif SC", "Songti SC", STSong, SimSun, 宋体, Georgia, serif; font-size: 20px; font-weight: 600; color: #17212b; }
+QLabel#Title { font-family: "Noto Serif CJK SC", "Noto Serif SC", "Source Han Serif SC", "Songti SC", STSong, SimSun, 宋体, NSimSun, 新宋体, FangSong, 仿宋, KaiTi, 楷体, "Times New Roman", Times, Georgia, serif; font-size: 20px; font-weight: 600; color: #17212b; }
 QLabel#Section, QLabel#CardTitle {
     font-size: 11px;
     font-weight: 700;
@@ -241,7 +304,7 @@ QLabel#Section, QLabel#CardTitle {
 QLabel#Placeholder { color: #64748b; font-size: 15px; }
 
 QLabel#BatchUid {
-    font-family: "JetBrains Mono", "Cascadia Code", "SF Mono", Consolas, "DejaVu Sans Mono", monospace;
+    font-family: "JetBrains Mono", "Cascadia Code", "SF Mono", Consolas, "Courier New", "DejaVu Sans Mono", monospace;
     color: #0d9488;
     font-size: 13px;
     font-weight: 600;
@@ -349,6 +412,31 @@ QPushButton#PhasePill:checked, QPushButton#PhasePillActive:checked, QPushButton#
     border: 1px solid #0f766e;
 }
 
+/* ── Sidebar per-编号 phase dots ─────────────────────────────────────
+   4 round dots under each specimen UID = 拍摄中/已拍完/整理中/完成.
+   Always show the phase colour as a ring; the current phase fills.
+   Colours reuse per-theme semantic tokens so they track the active theme:
+   蓝 info=shooting · 青 accent=shot_done · 橙 warn=organizing · 绿 success=done. */
+QPushButton#PhaseDotShooting, QPushButton#PhaseDotShotDone,
+QPushButton#PhaseDotOrganizing, QPushButton#PhaseDotDone {
+    min-width: 12px; max-width: 12px;
+    min-height: 12px; max-height: 12px;
+    border-radius: 6px;
+    background-color: transparent;
+}
+QPushButton#PhaseDotShooting   { border: 2px solid #2563eb; }
+QPushButton#PhaseDotShotDone   { border: 2px solid #0f766e; }
+QPushButton#PhaseDotOrganizing { border: 2px solid #b45309; }
+QPushButton#PhaseDotDone       { border: 2px solid #15803d; }
+QPushButton#PhaseDotShooting:hover   { background-color: rgba(37,99,235,0.10); }
+QPushButton#PhaseDotShotDone:hover   { background-color: rgba(15,118,110,0.11); }
+QPushButton#PhaseDotOrganizing:hover { background-color: rgba(180,83,9,0.11); }
+QPushButton#PhaseDotDone:hover       { background-color: rgba(21,128,61,0.11); }
+QPushButton#PhaseDotShooting:checked   { background-color: #2563eb; }
+QPushButton#PhaseDotShotDone:checked   { background-color: #0f766e; }
+QPushButton#PhaseDotOrganizing:checked { background-color: #b45309; }
+QPushButton#PhaseDotDone:checked       { background-color: #15803d; }
+
 QPushButton#Tiny { padding: 3px 11px; font-size: 11px; border-radius: 6px; }
 
 /* ── Sidebar collab-status strip ────────────────────────────────────── */
@@ -369,7 +457,7 @@ QPushButton#StorageBtn {
     padding: 3px 10px;
     font-size: 11px;
     font-weight: 600;
-    font-family: "JetBrains Mono", "Cascadia Code", "SF Mono", Consolas, "DejaVu Sans Mono", monospace;
+    font-family: "JetBrains Mono", "Cascadia Code", "SF Mono", Consolas, "Courier New", "DejaVu Sans Mono", monospace;
 }
 QPushButton#StorageBtn:hover {
     border-color: #0f766e;
@@ -416,7 +504,7 @@ QLineEdit#AutoField {
     color: #64748b;
     border: 1px solid rgba(15,23,42,0.14);
 }
-QLineEdit#MonoInput { font-family: "JetBrains Mono", "Cascadia Code", "SF Mono", Consolas, "DejaVu Sans Mono", monospace; }
+QLineEdit#MonoInput { font-family: "JetBrains Mono", "Cascadia Code", "SF Mono", Consolas, "Courier New", "DejaVu Sans Mono", monospace; }
 QLineEdit#StorageDisplay {
     background-color: #f8fafc;
     color: #17212b;
@@ -426,7 +514,7 @@ QLineEdit#StorageDisplay:focus { border-color: rgba(15,23,42,0.14); }
 
 /* ── Preview blocks ──────────────────────────────────────────────── */
 QLabel#PreviewBlock {
-    font-family: "JetBrains Mono", "Cascadia Code", "SF Mono", Consolas, "DejaVu Sans Mono", monospace;
+    font-family: "JetBrains Mono", "Cascadia Code", "SF Mono", Consolas, "Courier New", "DejaVu Sans Mono", monospace;
     font-size: 13px;
     color: #0d9488;
     background-color: #ffffff;
@@ -435,7 +523,7 @@ QLabel#PreviewBlock {
     padding: 10px 12px;
 }
 QLabel#PreviewEmpty {
-    font-family: "JetBrains Mono", "Cascadia Code", "SF Mono", Consolas, "DejaVu Sans Mono", monospace;
+    font-family: "JetBrains Mono", "Cascadia Code", "SF Mono", Consolas, "Courier New", "DejaVu Sans Mono", monospace;
     font-size: 13px;
     color: #94a3b8;
     background-color: #eef2f6;
@@ -462,7 +550,7 @@ QLabel#UnattributedWarning {
     font-weight: 600;
 }
 QLabel#TargetName {
-    font-family: "JetBrains Mono", "Cascadia Code", "SF Mono", Consolas, "DejaVu Sans Mono", monospace;
+    font-family: "JetBrains Mono", "Cascadia Code", "SF Mono", Consolas, "Courier New", "DejaVu Sans Mono", monospace;
     color: #15803d;
     font-size: 13px;
     font-weight: 600;
@@ -593,7 +681,7 @@ QLabel#StatusSegmentAccent { color: #0f766e; padding: 0 10px; font-size: 11px; }
 
 /* ── Mono label (file paths / UIDs) ──────────────────────────────── */
 QLabel#Mono {
-    font-family: "JetBrains Mono", "Cascadia Code", "SF Mono", Consolas, "DejaVu Sans Mono", monospace;
+    font-family: "JetBrains Mono", "Cascadia Code", "SF Mono", Consolas, "Courier New", "DejaVu Sans Mono", monospace;
     font-size: 11px;
     color: #0f766e;
     background-color: #ffffff;

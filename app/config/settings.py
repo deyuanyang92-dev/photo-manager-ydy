@@ -74,13 +74,37 @@ class AppSettings:
 
     @property
     def auto_activate_on_new_specimen(self) -> bool:
-        return self._qs.value(
-            "workbench/auto_activate_on_new_specimen", False, type=bool
-        )
+        # 必须与 settings_view 的复选框同一个 key（_K_WB_AUTO_ACTIVATE_NEW =
+        # "workbench/auto_activate_new"），它持久化 "true"/"false" 字符串。
+        # 旧实现读的是另一个 key（..._on_new_specimen）+ bool 类型，与复选框
+        # 对不上 → 设置永远读不到用户的勾选。这里对齐 key + 字符串解析。
+        return str(
+            self._qs.value("workbench/auto_activate_new", "false")
+        ).lower() == "true"
 
     @auto_activate_on_new_specimen.setter
     def auto_activate_on_new_specimen(self, val: bool) -> None:
-        self._qs.setValue("workbench/auto_activate_on_new_specimen", val)
+        self._qs.setValue(
+            "workbench/auto_activate_new", "true" if val else "false"
+        )
+
+    @property
+    def incoming_subdir(self) -> str:
+        # 与 settings_view 的 _K_INCOMING_SUBDIR 同 key；用户可在设置页改 incoming
+        # 目录名（不一定是 incoming-jpg）。监控的监听+扫描都应读这里。
+        return str(self._qs.value("project/incoming_subdir", "incoming-jpg")) or "incoming-jpg"
+
+    @incoming_subdir.setter
+    def incoming_subdir(self, name: str) -> None:
+        self._qs.setValue("project/incoming_subdir", name or "incoming-jpg")
+
+    @property
+    def results_subdir(self) -> str:
+        return str(self._qs.value("project/results_subdir", "results")) or "results"
+
+    @results_subdir.setter
+    def results_subdir(self, name: str) -> None:
+        self._qs.setValue("project/results_subdir", name or "results")
 
     # ── Appearance ────────────────────────────────────────────────────
 
@@ -94,7 +118,7 @@ class AppSettings:
 
     @property
     def current_language(self) -> str:
-        """UI language: "zh" (default) or "en". Applied at startup (restart-to-apply)."""
+        """UI language: "zh" (default) or "en"; views refresh it live."""
         return self._qs.value("appearance/language", "zh", type=str)
 
     @current_language.setter

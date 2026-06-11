@@ -64,11 +64,23 @@ class SpecimenSidebar(QWidget):
     new_specimen_requested = pyqtSignal()
     collab_manager_requested = pyqtSignal()   # "协作管理" button clicked
     print_labels_requested = pyqtSignal(str)
+    phase_mark_requested = pyqtSignal(str, str)  # (uid, status_code) — phase dot click
+
+    # 4 per-编号 phase dots: (status_code, objectName, tooltip).  Order = workflow.
+    _PHASE_DOTS = (
+        ("shooting",   "PhaseDotShooting",   "拍摄中"),
+        ("shot_done",  "PhaseDotShotDone",   "已拍完"),
+        ("organizing", "PhaseDotOrganizing", "整理中"),
+        ("done",       "PhaseDotDone",       "完成"),
+    )
 
     def __init__(self, ctx: "AppContext", parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.ctx = ctx
         self._all_items: list[dict] = []  # [{uid, display, active}]
+        # uid -> {code: QPushButton} for the 4 phase dots; uid -> current code.
+        self._phase_dots: dict[str, dict[str, QPushButton]] = {}
+        self._phase_state: dict[str, Optional[str]] = {}
         self._setup_ui()
 
     # ── UI ────────────────────────────────────────────────────────────────────
@@ -276,8 +288,15 @@ class SpecimenSidebar(QWidget):
         return rows
 
     def _apply_filter(self, text: str) -> None:
-        """Rebuild list based on search text."""
+        """Rebuild list based on search text.
+
+        Each row is a custom widget: UID + 学名/中文名 + 协作 badge + a row of
+        4 clickable phase dots (拍摄中/已拍完/整理中/完成).  Clicking a dot marks
+        that 编号's phase via :attr:`phase_mark_requested` — no activation needed.
+        """
         self._list.clear()
+        self._phase_dots.clear()
+        self._phase_state.clear()
         query = text.strip().lower()
         shown = 0
         svc = getattr(self.ctx, "collab_service", None)
@@ -289,27 +308,101 @@ class SpecimenSidebar(QWidget):
             if query and query not in uid.lower() and query not in name.lower() and query not in name_cn.lower():
                 continue
 
-            # Build display text
-            display_parts = [uid]
-            if name:
-                display_parts.append(name)
-            elif name_cn:
-                display_parts.append(name_cn)
-
-            # Append collab badge if task exists
-            badge = self._collab_badge(uid, svc)
-            if badge:
-                display_parts.append(badge)
-
-            display_text = "\n".join(display_parts)
-
-            item = QListWidgetItem(display_text)
+            row = self._build_row_widget(uid, name, name_cn, svc)
+            item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, uid)
             item.setToolTip(uid)
+            item.setSizeHint(row.sizeHint())
             self._list.addItem(item)
+            self._list.setItemWidget(item, row)
             shown += 1
 
         self._count_label.setText(str(shown))
+
+    def _build_row_widget(self, uid: str, name: str, name_cn: str, svc) -> QWidget:
+        """Build one specimen row: UID + name + collab badge + 4 phase dots."""
+        row = QWidget()
+        v = QVBoxLayout(row)
+        v.setContentsMargins(2, 3, 2, 3)
+        v.setSpacing(2)
+
+        uid_lbl = QLabel(uid)
+        uid_lbl.setObjectName("SpecimenUid")
+        v.addWidget(uid_lbl)
+
+        name_text = name or name_cn
+        badge = self._collab_badge(uid, svc)
+        if name_text or badge:
+            line = QHBoxLayout()
+            line.setContentsMargins(0, 0, 0, 0)
+            line.setSpacing(6)
+            if name_text:
+                nm = QLabel(name_text)
+                nm.setObjectName("MutedSmall")
+                line.addWidget(nm)
+            line.addStretch()
+            if badge:
+                bd = QLabel(badge)
+                bd.setObjectName("MutedSmall")
+                line.addWidget(bd)
+            v.addLayout(line)
+
+        # ── Phase dots ──
+        current = self._phase_for(uid, svc)
+        self._phase_state[uid] = current
+        dots_row = QHBoxLayout()
+        dots_row.setContentsMargins(0, 1, 0, 0)
+        dots_row.setSpacing(7)
+        self._phase_dots[uid] = {}
+        for code, obj_name, tip in self._PHASE_DOTS:
+            dot = QPushButton()
+            dot.setObjectName(obj_name)
+            dot.setCheckable(True)
+            dot.setChecked(code == current)
+            dot.setCursor(Qt.CursorShape.PointingHandCursor)
+            dot.setToolTip(f"标记为「{tip}」")
+            dot.clicked.connect(
+                lambda _=False, u=uid, c=code: self._on_dot_clicked(u, c)
+            )
+            dots_row.addWidget(dot)
+            self._phase_dots[uid][code] = dot
+        dots_row.addStretch()
+        v.addLayout(dots_row)
+        return row
+
+    def _phase_for(self, uid: str, svc) -> Optional[str]:
+        """Resolve *uid*'s confirmed phase (collab task first, else project DB)."""
+        try:
+            from app.services.activation_service import resolve_phase
+            return resolve_phase(svc, self.ctx.get_db(), uid)
+        except Exception:
+            return None
+
+    def _on_dot_clicked(self, uid: str, code: str) -> None:
+        """A phase dot was clicked: roll back Qt's auto-toggle, then request mark.
+
+        The workbench confirms the change and calls :meth:`refresh_phases`, which
+        re-syncs the dots to the persisted truth — so an out-of-order or failed
+        mark never leaves a stale dot lit.
+        """
+        self._sync_row_dots(uid, self._phase_state.get(uid))
+        self.phase_mark_requested.emit(uid, code)
+
+    def _sync_row_dots(self, uid: str, current: Optional[str]) -> None:
+        """Set checked-state of *uid*'s dots so only *current* is filled."""
+        dots = self._phase_dots.get(uid)
+        if not dots:
+            return
+        for code, dot in dots.items():
+            dot.setChecked(code == current)
+
+    def refresh_phases(self) -> None:
+        """Re-read each visible 编号's phase and update its dots (no rebuild)."""
+        svc = getattr(self.ctx, "collab_service", None)
+        for uid in list(self._phase_dots.keys()):
+            current = self._phase_for(uid, svc)
+            self._phase_state[uid] = current
+            self._sync_row_dots(uid, current)
 
     # ── Slots ─────────────────────────────────────────────────────────────────
 

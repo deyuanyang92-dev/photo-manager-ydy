@@ -221,6 +221,30 @@ class TestTaxonTableModel:
         m.clear_checked()
         assert len(m.checked_ids()) == 0
 
+    def test_checked_persists_across_pages(self, qapp):
+        """User's bug: select on page 1, page away, selection must survive so
+        'WoRMS 更新所选' targets the originally-selected rows."""
+        from PyQt6.QtCore import Qt
+        from app.views.taxonomy_view import _TaxonTableModel, _COL_CHECK
+        m = _TaxonTableModel()
+        page1 = [{"recordId": f"user:p1-{i}"} for i in range(3)]
+        page2 = [{"recordId": f"user:p2-{i}"} for i in range(3)]
+        m.set_records(page1)
+        m.setData(m.index(0, _COL_CHECK), Qt.CheckState.Checked, Qt.ItemDataRole.CheckStateRole)
+        m.setData(m.index(2, _COL_CHECK), Qt.CheckState.Checked, Qt.ItemDataRole.CheckStateRole)
+        m.set_records(page2)   # page turn must NOT wipe the page-1 checks
+        assert set(m.checked_ids()) == {"user:p1-0", "user:p1-2"}
+
+    def test_checked_changed_signal_fires(self, qapp):
+        from PyQt6.QtCore import Qt
+        from app.views.taxonomy_view import _TaxonTableModel, _COL_CHECK
+        m = _TaxonTableModel()
+        m.set_records([{"recordId": "user:x"}])
+        fired = []
+        m.checked_changed.connect(lambda: fired.append(1))
+        m.setData(m.index(0, _COL_CHECK), Qt.CheckState.Checked, Qt.ItemDataRole.CheckStateRole)
+        assert fired   # toggling a checkbox notifies the view to refresh the note
+
     def test_source_column_shows_seed_or_user(self, qapp):
         from PyQt6.QtCore import Qt
         from app.views.taxonomy_view import _TaxonTableModel, _COL_DATA_START
@@ -428,7 +452,12 @@ class TestTaxonomyWormsUpdate:
         view._filter_text = "叶须虫"
 
         import unittest.mock as mock
-        with mock.patch("app.views.taxonomy_view.QMessageBox.information"):
+        from PyQt6.QtWidgets import QMessageBox
+        # Confirm dialog → Yes; stub the worker so no real WoRMS network runs.
+        with mock.patch(
+            "app.views.taxonomy_view.QMessageBox.question",
+            return_value=QMessageBox.StandardButton.Yes,
+        ), mock.patch.object(view, "_start_job_worker") as start:
             view._on_worms_update(selected_only=False)
 
         jobs_path = tmp_path / "_data" / "worms_jobs.json"
@@ -437,6 +466,105 @@ class TestTaxonomyWormsUpdate:
         assert data["jobs"][0]["source"] == "filtered"
         assert len(data["jobs"][0]["record_ids"]) == 1
         assert view.ctx.pending_worms_job_id == data["jobs"][0]["id"]
+        start.assert_called_once()
+
+    def test_mapping_status_surfaces_on_reload(self, view, tmp_path, qapp, monkeypatch):
+        """After a match writes a mapping, reloading the page must surface that
+        status on the row so the 审核 entry appears (results reflected in table)."""
+        view.ctx.current_project_dir = str(tmp_path)
+        created = view._svc.learn({
+            "class": "Polychaeta", "order": "Phyllodocida", "family": "Polynoidae",
+            "genus": "Halosydna", "species": "Halosydna brevisetosa",
+            "classCn": "多毛纲", "speciesCn": "短毛海鳞虫",
+        })
+        rid = created["recordId"]
+        svc = view._ensure_worms_svc()
+        monkeypatch.setattr(svc, "search", lambda *a, **k: [])   # → not_found
+        svc.match_one(dict(created))
+        view.on_activate()   # reload runs _annotate_mappings
+
+        row = next(
+            (view._model.record_at(i) for i in range(view._model.rowCount())
+             if view._model.record_at(i).get("recordId") == rid),
+            None,
+        )
+        assert row is not None
+        assert row.get("mappingStatus") == "not_found"
+
+
+class TestWormsJobWorker:
+    """_WormsJobWorker drives a job to completion off a stubbed service.
+
+    run() is called directly (synchronously, no new thread) for determinism.
+    """
+
+    class _FakeSvc:
+        def __init__(self, record_ids, statuses):
+            self.job = {
+                "id": "j1", "status": "running", "record_ids": list(record_ids),
+                "cursor": 0, "counts": {},
+            }
+            self._statuses = dict(statuses)   # recordId -> status to return
+            self.matched = []
+
+        def get_job(self, job_id):
+            return self.job
+
+        def match_one(self, record):
+            self.matched.append(record["recordId"])
+            return self._statuses.get(record["recordId"], "not_found")
+
+        def record_job_result(self, job_id, status):
+            self.job["counts"][status] = self.job["counts"].get(status, 0) + 1
+            self.job["cursor"] += 1
+            if self.job["cursor"] >= len(self.job["record_ids"]):
+                self.job["status"] = "completed"
+            return self.job
+
+        def update_job_status(self, job_id, status):
+            self.job["status"] = status
+            return self.job
+
+    def test_worker_drives_job_to_completion(self, qapp):
+        from app.views.taxonomy_view import _WormsJobWorker
+        svc = self._FakeSvc(
+            ["r1", "r2", "r3"],
+            {"r1": "matched", "r2": "renamed", "r3": "not_found"},
+        )
+        records = {"r1": {"recordId": "r1", "species": "A b"},
+                   "r2": {"recordId": "r2", "species": "C d"},
+                   "r3": {"recordId": "r3", "species": "E f"}}
+        progress, finished = [], []
+        w = _WormsJobWorker(svc, "j1", lambda rid: records.get(rid))
+        w.progress.connect(lambda c, t, ct: progress.append((c, t, dict(ct))))
+        w.finished_job.connect(lambda j: finished.append(dict(j)))
+        w.run()   # synchronous
+
+        assert svc.matched == ["r1", "r2", "r3"]
+        assert len(progress) == 3
+        assert finished and finished[-1]["status"] == "completed"
+        assert svc.job["counts"] == {"matched": 1, "renamed": 1, "not_found": 1}
+
+    def test_worker_stops_when_paused(self, qapp):
+        from app.views.taxonomy_view import _WormsJobWorker
+        svc = self._FakeSvc(["r1", "r2"], {"r1": "matched", "r2": "matched"})
+        svc.job["status"] = "paused"   # already paused before first tick
+        finished = []
+        w = _WormsJobWorker(svc, "j1", lambda rid: {"recordId": rid, "species": "x"})
+        w.finished_job.connect(lambda j: finished.append(dict(j)))
+        w.run()
+
+        assert svc.matched == []            # nothing processed
+        assert finished[-1]["status"] == "paused"
+
+    def test_unresolvable_record_is_stale(self, qapp):
+        from app.views.taxonomy_view import _WormsJobWorker
+        svc = self._FakeSvc(["ghost"], {})
+        w = _WormsJobWorker(svc, "j1", lambda rid: None)   # resolver returns None
+        w.run()
+        assert svc.matched == []
+        assert svc.job["counts"] == {"stale": 1}
+        assert svc.job["status"] == "completed"
 
 
 # ── _TaxonFacetPanel ──────────────────────────────────────────────────────────

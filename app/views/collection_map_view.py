@@ -17,7 +17,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QByteArray, QSettings, Qt
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QButtonGroup,
@@ -32,6 +32,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSlider,
+    QSplitter,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -63,6 +64,7 @@ _LEVELS: list[tuple[str, str]] = [
 ]
 
 _STYLE_KEY = "map_marker_style"
+_SPLITTER_STATE_KEY = "collection_map/body_splitter_state_v1"
 
 
 def _theme():
@@ -111,12 +113,22 @@ class CollectionMapView(BaseView):
 
         content = QWidget()
         content.setObjectName("MapPageContent")
-        content.setMinimumWidth(1010)
+        content.setMinimumWidth(920)
         lay = QHBoxLayout(content)
         lay.setContentsMargins(14, 12, 14, 12)
-        lay.setSpacing(12)
-        lay.addWidget(self._build_left_pane(), 0)
-        lay.addWidget(self._build_right_pane(), 1)
+        lay.setSpacing(0)
+
+        self._body_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._body_splitter.setObjectName("MapBodySplitter")
+        self._body_splitter.setChildrenCollapsible(False)
+        self._body_splitter.setHandleWidth(12)
+        self._body_splitter.addWidget(self._build_left_pane())
+        self._body_splitter.addWidget(self._build_right_pane())
+        self._body_splitter.setStretchFactor(0, 0)
+        self._body_splitter.setStretchFactor(1, 1)
+        self._restore_body_splitter()
+        self._body_splitter.splitterMoved.connect(self._save_body_splitter)
+        lay.addWidget(self._body_splitter, 1)
 
         self._page_scroll.setWidget(content)
         root.addWidget(self._page_scroll, 1)
@@ -139,7 +151,8 @@ class CollectionMapView(BaseView):
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        scroll.setFixedWidth(272)
+        scroll.setMinimumWidth(238)
+        scroll.setMaximumWidth(460)
         scroll.setWidget(pane)
         return scroll
 
@@ -560,6 +573,8 @@ class CollectionMapView(BaseView):
             f"QScrollArea#MapPageScroll,QScrollArea#LeftScroll,QScrollArea#StyleScroll{{background:transparent;border:none;}}"
             f"QScrollArea#StyleScroll>QWidget>QWidget{{background:transparent;}}"
             f"QWidget#MapPageContent,QWidget#RightPane{{background:transparent;}}"
+            f"QSplitter#MapBodySplitter::handle{{background:transparent;margin:0 2px;}}"
+            f"QSplitter#MapBodySplitter::handle:hover{{background:{accent_soft};border-radius:4px;}}"
             f"QWidget#MarkerStylePanel{{background:transparent;}}"
             f"QWidget#LeftPane{{background:transparent;}}"
             f"QFrame#Card{{background:{panel};border:1px solid {border};border-radius:8px;}}"
@@ -598,10 +613,11 @@ class CollectionMapView(BaseView):
             f'QLabel#ProjName[sel="1"]{{color:{accent};}}'
             f"QLabel#ProjSub{{color:{muted};font-size:11px;background:transparent;}}"
             f'QLabel#ProjSub[sel="1"]{{color:{accent};}}'
-            f"QComboBox,QSpinBox,QDoubleSpinBox{{background:{input_bg};color:{text};"
+            f"QComboBox,QSpinBox,QDoubleSpinBox,QLineEdit{{background:{input_bg};color:{text};"
             f"border:1px solid {input_border};border-radius:6px;padding:4px 8px;}}"
-            f"QComboBox:hover,QSpinBox:hover,QDoubleSpinBox:hover{{border-color:{border};background:{surface};}}"
-            f"QComboBox:focus,QSpinBox:focus,QDoubleSpinBox:focus{{border-color:{accent};}}"
+            f"QComboBox:hover,QSpinBox:hover,QDoubleSpinBox:hover,QLineEdit:hover{{border-color:{border};background:{surface};}}"
+            f"QComboBox:focus,QSpinBox:focus,QDoubleSpinBox:focus,QLineEdit:focus{{border-color:{accent};}}"
+            f'QLineEdit[invalid="true"]{{border-color:#d65f5f;background:rgba(214,95,95,0.10);}}'
             f"QCheckBox{{color:{text};spacing:8px;}}"
             # 粒度分段控件（站位/断面/地区）
             f"QFrame#SegGroup{{background:{inset};border:1px solid {border};border-radius:9px;}}"
@@ -652,6 +668,22 @@ class CollectionMapView(BaseView):
         self._sync_zoom_slider()
         self._position_zoom_panel()
         self._zoom_panel.raise_()
+
+    def _ui_settings(self) -> QSettings:
+        """Return the app QSettings object when available, otherwise Qt default."""
+        qs = getattr(getattr(self.ctx, "settings", None), "_qs", None)
+        if isinstance(qs, QSettings):
+            return qs
+        return QSettings()
+
+    def _restore_body_splitter(self) -> None:
+        raw = self._ui_settings().value(_SPLITTER_STATE_KEY)
+        restored = isinstance(raw, QByteArray) and self._body_splitter.restoreState(raw)
+        if not restored:
+            self._body_splitter.setSizes([286, 760])
+
+    def _save_body_splitter(self, *_args) -> None:
+        self._ui_settings().setValue(_SPLITTER_STATE_KEY, self._body_splitter.saveState())
 
     def eventFilter(self, obj, event) -> bool:
         """监听地图 resize，重新定位缩放浮层。"""
@@ -990,6 +1022,7 @@ class CollectionMapView(BaseView):
         if db is not None:
             self._style = pss.load_setting(db, _STYLE_KEY, {})
         self._style_panel.set_style(self._style)
+        self._style = self._style_panel.style()
         self._apply_marker_style(self._style)
 
     def _on_style_changed(self, style: dict) -> None:
@@ -1008,7 +1041,9 @@ class CollectionMapView(BaseView):
 
     def _update_marker_preview(self, style: dict) -> None:
         """把当前样式画成一个小预览记号。"""
-        from PyQt6.QtGui import QColor, QPainter, QPen, QPixmap
+        import math
+        from PyQt6.QtCore import QPointF, QRectF
+        from PyQt6.QtGui import QColor, QPainter, QPainterPath, QPen, QPixmap
         prev = getattr(self, "_marker_preview", None)
         if prev is None:
             return
@@ -1022,10 +1057,55 @@ class CollectionMapView(BaseView):
             edge = QColor(style.get("edge", "#ffffff"))
         except Exception:
             fill, edge = QColor("#29b9ab"), QColor("#ffffff")
-        r = max(6, min(12, int(8 * (style.get("size", 80) / 80.0) ** 0.5)))
+        if not fill.isValid():
+            fill = QColor("#29b9ab")
+        if not edge.isValid():
+            edge = QColor("#ffffff")
+        try:
+            alpha = max(0.05, min(1.0, float(style.get("alpha", 0.9))))
+        except (TypeError, ValueError):
+            alpha = 0.9
+        fill.setAlphaF(alpha)
+        edge.setAlphaF(alpha)
+        try:
+            edge_width = max(0.0, float(style.get("edge_width", 1.2)))
+        except (TypeError, ValueError):
+            edge_width = 1.2
+        try:
+            size = float(style.get("size", 80))
+        except (TypeError, ValueError):
+            size = 80.0
+        r = max(6, min(12, int(8 * (size / 80.0) ** 0.5)))
+        cx, cy = w // 2, h // 2
+        shape = str(style.get("shape", "圆"))
+        path = QPainterPath()
+        if shape in ("方", "s", "square"):
+            path.addRoundedRect(QRectF(cx - r, cy - r, 2 * r, 2 * r), 2, 2)
+        elif shape in ("三角", "^", "triangle"):
+            path.moveTo(QPointF(cx, cy - r))
+            path.lineTo(QPointF(cx + r, cy + r))
+            path.lineTo(QPointF(cx - r, cy + r))
+            path.closeSubpath()
+        elif shape in ("倒三角", "v", "triangle_down"):
+            path.moveTo(QPointF(cx, cy + r))
+            path.lineTo(QPointF(cx + r, cy - r))
+            path.lineTo(QPointF(cx - r, cy - r))
+            path.closeSubpath()
+        elif shape in ("星", "*", "star"):
+            for i in range(10):
+                ang = -math.pi / 2 + i * math.pi / 5
+                rr = r if i % 2 == 0 else r * 0.45
+                pt = QPointF(cx + math.cos(ang) * rr, cy + math.sin(ang) * rr)
+                if i == 0:
+                    path.moveTo(pt)
+                else:
+                    path.lineTo(pt)
+            path.closeSubpath()
+        else:
+            path.addEllipse(QPointF(cx, cy), r, r)
         p.setBrush(fill)
-        p.setPen(QPen(edge, 1.5))
-        p.drawEllipse(w // 2 - r, h // 2 - r, 2 * r, 2 * r)
+        p.setPen(QPen(edge, edge_width))
+        p.drawPath(path)
         p.end()
         prev.setPixmap(pm)
 

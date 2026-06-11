@@ -169,6 +169,8 @@ class _TaxonTableModel(QAbstractTableModel):
       N+2 — 操作 (action placeholder — delegate renders buttons)
     """
 
+    checked_changed = pyqtSignal()   # emitted whenever the checkbox set changes
+
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self._records: list[dict[str, Any]] = []
@@ -219,9 +221,9 @@ class _TaxonTableModel(QAbstractTableModel):
         self.beginResetModel()
         self._records = list(records)
         self._page_offset = page_offset
-        # Clear checked state for rows not in new page
-        rec_ids = {r.get("recordId", "") for r in self._records}
-        self._checked &= rec_ids
+        # NOTE: checked state persists across pages — selecting entries on page 1,
+        # paging away, and clicking "WoRMS 更新所选" must still target page-1 rows.
+        # The set is keyed by recordId (globally unique); 取消选择 clears it.
         self.endResetModel()
 
     def record_at(self, row: int) -> Optional[dict[str, Any]]:
@@ -241,6 +243,7 @@ class _TaxonTableModel(QAbstractTableModel):
             self.index(0, _COL_CHECK),
             self.index(max(0, len(self._records) - 1), _COL_CHECK),
         )
+        self.checked_changed.emit()
 
     def set_all_page_checked(self, checked: bool) -> None:
         if checked:
@@ -255,6 +258,7 @@ class _TaxonTableModel(QAbstractTableModel):
             self.index(0, _COL_CHECK),
             self.index(max(0, len(self._records) - 1), _COL_CHECK),
         )
+        self.checked_changed.emit()
 
     def is_page_all_checked(self) -> bool:
         if not self._records:
@@ -375,6 +379,7 @@ class _TaxonTableModel(QAbstractTableModel):
             else:
                 self._checked.discard(rec_id)
             self.dataChanged.emit(index, index, [role])
+            self.checked_changed.emit()
             return True
         return False
 
@@ -694,6 +699,57 @@ class _WormsSearchWorker(QThread):
             self.error_occurred.emit(str(exc))
 
 
+class _WormsJobWorker(QThread):
+    """Drive a WoRMS batch-validation job to completion off the UI thread.
+
+    Mirrors oracle ``runWormsJob``: for each record at the cursor, resolve it,
+    match it against WoRMS, record the result, repeat until the job is no
+    longer ``running`` (completed / paused / cancelled).  All progress is
+    delivered via Qt signals — the worker never touches widgets.  Pausing is
+    cooperative: the main thread flips the job status to ``paused`` and the
+    worker exits at the next loop boundary.
+    """
+
+    progress = pyqtSignal(int, int, dict)   # cursor, total, counts
+    finished_job = pyqtSignal(dict)         # final/last-seen job dict
+    failed = pyqtSignal(str)
+
+    def __init__(self, worms_svc: "WormsService", job_id: str, resolver, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._svc = worms_svc
+        self._job_id = job_id
+        self._resolve = resolver   # record_id -> Optional[dict]
+
+    def run(self) -> None:
+        try:
+            while True:
+                job = self._svc.get_job(self._job_id)
+                if not job or job.get("status") != "running":
+                    if job:
+                        self.finished_job.emit(job)
+                    return
+                record_ids = job.get("record_ids") or []
+                cursor = job.get("cursor", 0)
+                if cursor >= len(record_ids):
+                    done = self._svc.update_job_status(self._job_id, "completed") or job
+                    self.finished_job.emit(done)
+                    return
+                record = self._resolve(record_ids[cursor])
+                # Unresolvable recordId → "stale" (oracle runWormsJob fallback).
+                status = self._svc.match_one(record) if record else "stale"
+                updated = self._svc.record_job_result(self._job_id, status) or job
+                self.progress.emit(
+                    updated.get("cursor", cursor + 1),
+                    len(record_ids),
+                    updated.get("counts", {}),
+                )
+                if updated.get("status") == "completed":
+                    self.finished_job.emit(updated)
+                    return
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 # ── WoRMS match dialog (mirrors renderWormsMatchModal in app.js) ──────────────
 
 class _WormsMatchDialog(QDialog):
@@ -1010,6 +1066,7 @@ class TaxonomyView(BaseView):
         self._svc: Optional[TaxonomyService] = None
         # New state for facet/sort/WoRMS
         self._worms_svc: Optional[WormsService] = None
+        self._job_worker: Optional["_WormsJobWorker"] = None
         self._chart_dialog: Optional[QDialog] = None
         self._col_filters: dict[str, Optional[dict[str, Any]]] = {}
         self._sort_col: str = ""
@@ -1358,6 +1415,9 @@ class TaxonomyView(BaseView):
         self._table.verticalHeader().setVisible(False)
         self._table.doubleClicked.connect(self._on_row_double_click)
         self._table.selectionModel().selectionChanged.connect(self._on_selection_changed)
+        # Checkbox toggles update the "已选 N 条" note + enable WoRMS-update button,
+        # independent of row selection (clicking a checkbox does not select a full row).
+        self._model.checked_changed.connect(self._update_selection_note)
         # Row height (default 32px, scales with font size)
         self._table.verticalHeader().setDefaultSectionSize(32)
 
@@ -1453,6 +1513,9 @@ class TaxonomyView(BaseView):
         self._btn_job_retry.hide()
         _jpanel_layout.addWidget(self._btn_job_retry)
         _jpanel_layout.addStretch()
+        self._btn_job_pause.clicked.connect(self._on_job_pause)
+        self._btn_job_resume.clicked.connect(self._on_job_resume)
+        self._btn_job_retry.clicked.connect(self._on_job_retry)
         self._job_panel_frame.hide()
         root.addWidget(self._job_panel_frame)
 
@@ -1855,6 +1918,10 @@ class TaxonomyView(BaseView):
         page_offset = (self._page - 1) * _PAGE_SIZE
         records = all_recs[page_offset : page_offset + _PAGE_SIZE]
 
+        # Back-fill WoRMS mapping status onto the visible rows so review entries
+        # surface in the row context menu (mirrors web per-row mappingStatus).
+        records = self._annotate_mappings(records)
+
         self._model.set_records(records, page_offset=page_offset)
 
         # Re-attach action delegate after model reset (column count may change)
@@ -1892,11 +1959,9 @@ class TaxonomyView(BaseView):
         if self._select_all_filtered:
             note = f"已选择全部筛选结果（{self._total} 条）"
         else:
-            n = len(checked_ids) or len(self._selected_ids)
-            note = f"已选 {n} 条"
+            note = f"已选 {len(checked_ids)} 条"
         self._selection_note.setText(note)
-        has_sel = bool(checked_ids or self._selected_ids) or self._select_all_filtered
-        self._btn_worms_sel.setEnabled(has_sel)
+        self._btn_worms_sel.setEnabled(bool(checked_ids) or self._select_all_filtered)
 
     # ── Selection ─────────────────────────────────────────────────────────────
 
@@ -2011,21 +2076,135 @@ class TaxonomyView(BaseView):
     # ── WoRMS update (mirrors startTaxonomyWormsJob in app.js) ───────────────
 
     def _on_worms_update(self, selected_only: bool) -> None:
+        if self._job_worker is not None and self._job_worker.isRunning():
+            QMessageBox.information(self, "WoRMS 更新", "已有 WoRMS 任务在运行，请等待完成或在进度区暂停。")
+            return
         record_ids = self._worms_update_record_ids(selected_only)
-        if not record_ids: QMessageBox.information(self, "WoRMS 更新", "没有可更新的分类条目。"); return
+        if not record_ids:
+            QMessageBox.information(self, "WoRMS 更新", "没有可更新的分类条目。")
+            return
+        source = "selected" if selected_only and not self._select_all_filtered else "filtered"
+        scope = f"已选 {len(record_ids)} 条" if source == "selected" else f"筛选结果 {len(record_ids)} 条"
+        confirm = QMessageBox.question(
+            self, "WoRMS 更新",
+            f"即将对{scope}发起 WoRMS 校验更新。\n"
+            "将逐条访问 WoRMS（约每条 0.6 秒），结果记录为校验状态供审核，"
+            "不会改写原始条目；可在进度条处随时暂停。\n\n是否继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
         service = self._ensure_worms_svc()
-        if service is None: return
+        if service is None:
+            QMessageBox.warning(self, "WoRMS 更新", "WoRMS 服务不可用。")
+            return
         try:
-            job = service.create_job(record_ids, source="selected" if selected_only and not self._select_all_filtered else "filtered")
-        except Exception as exc: QMessageBox.warning(self, "WoRMS 更新", f"创建任务失败：{exc}"); return
+            job = service.create_job(record_ids, source=source)
+        except Exception as exc:
+            QMessageBox.warning(self, "WoRMS 更新", f"创建任务失败：{exc}")
+            return
         setattr(self.ctx, "pending_worms_job_id", job.id)
-        self._navigate_to_worms()
-        QMessageBox.information(self, "WoRMS 更新", f"已创建 WoRMS 批量任务 {job.id[:8]}…，共 {len(record_ids)} 条。")
+        self._start_job_worker(job.id)
+
+    def _build_record_resolver(self):
+        """Return a recordId→record lookup over the FULL library.
+
+        Selections may span pages, so the resolver must see every record, not
+        just the visible page.  Records without a recordId (seed rows) are not
+        checkbox-selectable and are simply absent → worker treats them as stale.
+        """
+        if self._svc is None:
+            return lambda rid: None
+        total = self._svc.seed_count() + self._svc.user_count()
+        rows, _ = self._svc.all_records(page=0, page_size=max(total, 1))
+        index = {r.get("recordId", ""): r for r in rows if r.get("recordId")}
+        return lambda rid: index.get(rid)
+
+    def _start_job_worker(self, job_id: str) -> None:
+        service = self._ensure_worms_svc()
+        if service is None:
+            return
+        worker = _WormsJobWorker(service, job_id, self._build_record_resolver(), parent=self)
+        worker.progress.connect(self._on_job_progress)
+        worker.finished_job.connect(self._on_job_finished)
+        worker.failed.connect(self._on_job_failed)
+        self._job_worker = worker
+        self._refresh_job_panel()   # show panel immediately at 0/N
+        worker.start()
+
+    def _on_job_progress(self, cursor: int, total: int, counts: dict) -> None:
+        self._refresh_job_panel()
+
+    def _on_job_finished(self, job: dict) -> None:
+        self._refresh_job_panel()
+        # Reload so per-row mapping status surfaces (审核 entry appears on review rows).
+        self._load_page()
+        if job.get("status") == "completed":
+            counts = job.get("counts") or {}
+            _CL = {"matched": "匹配", "renamed": "改名", "review": "待审",
+                   "not_found": "未找到", "error": "错误", "stale": "跳过"}
+            summary = " · ".join(f"{_CL.get(k, k)} {v}" for k, v in counts.items() if v) or "无变化"
+            QMessageBox.information(self, "WoRMS 更新", f"WoRMS 校验完成：{summary}")
+
+    def _on_job_failed(self, msg: str) -> None:
+        self._refresh_job_panel()
+        QMessageBox.warning(self, "WoRMS 更新", f"任务出错：{msg}")
+
+    def _on_job_pause(self) -> None:
+        service = self._ensure_worms_svc()
+        if service is None:
+            return
+        active = next((j for j in service.list_jobs() if j.get("status") == "running"), None)
+        if active:
+            service.update_job_status(active["id"], "paused")   # worker exits at next tick
+        self._refresh_job_panel()
+
+    def _on_job_resume(self) -> None:
+        service = self._ensure_worms_svc()
+        if service is None:
+            return
+        paused = next((j for j in service.list_jobs() if j.get("status") == "paused"), None)
+        if not paused:
+            return
+        service.update_job_status(paused["id"], "running")
+        self._start_job_worker(paused["id"])
+
+    def _on_job_retry(self) -> None:
+        service = self._ensure_worms_svc()
+        if service is None:
+            return
+        target = next((j for j in service.list_jobs() if (j.get("counts") or {}).get("error")), None)
+        if not target:
+            return
+        retried = service.retry_failed_job(target["id"])
+        if retried:
+            self._start_job_worker(retried["id"])
+
+    def _annotate_mappings(self, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        worms_svc = self._ensure_worms_svc()
+        if worms_svc is None:
+            return records
+        try:
+            mappings = worms_svc.list_mappings()
+        except Exception:
+            return records
+        if not mappings:
+            return records
+        out: list[dict[str, Any]] = []
+        for rec in records:
+            m = mappings.get(rec.get("recordId", ""))
+            if m:
+                rec = dict(rec)
+                rec["mappingStatus"] = m.get("status", "")
+                rec["mappingCandidates"] = m.get("candidates", [])
+            out.append(rec)
+        return out
 
     def _worms_update_record_ids(self, selected_only: bool) -> list[str]:
         if self._svc is None: return []
         if selected_only and not self._select_all_filtered:
-            return list(dict.fromkeys(rid for rid in (self._model.checked_ids() or self._selected_ids) if rid))
+            return list(dict.fromkeys(rid for rid in self._model.checked_ids() if rid))
         source_filter = "seed" if self._view == "worms" else None
         rows, total = self._svc.all_records(source_filter=source_filter, page=0, page_size=1_000_000)
         if len(rows) < total: rows, _ = self._svc.all_records(source_filter=source_filter, page=0, page_size=max(total, 1))

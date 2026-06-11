@@ -51,6 +51,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from app.config.i18n import tr
 from app.views.base_view import BaseView
 
 if TYPE_CHECKING:
@@ -105,26 +106,39 @@ _K_DEBUG_USE_REAL_COMPRESSION = "debug/use_real_compression"  # default False
 
 _THEME_CHOICES = ("classic_light", "lab_light", "graphite_focus")
 
-# Families we surface first in the 字体 picker (those that ship CJK glyphs),
-# when installed.  Everything else follows alphabetically.
+# Families we surface first in the 字体 picker.  Common Windows/macOS/Linux CJK
+# and Latin faces are always listed because Qt may not enumerate cross-platform
+# aliases (for example 宋体 vs SimSun) even when the host can resolve them.
 _PREFERRED_FONT_FAMILIES = (
+    "Microsoft YaHei", "微软雅黑", "SimSun", "宋体", "NSimSun", "新宋体",
+    "SimHei", "黑体", "KaiTi", "楷体", "FangSong", "仿宋",
     "Noto Sans CJK SC", "Noto Sans SC", "Source Han Sans SC",
-    "Microsoft YaHei", "微软雅黑", "PingFang SC", "Hiragino Sans GB",
-    "Heiti SC", "WenQuanYi Micro Hei", "Noto Serif CJK SC", "Songti SC",
+    "WenQuanYi Micro Hei", "PingFang SC", "Hiragino Sans GB", "Heiti SC",
+    "Noto Serif CJK SC", "Noto Serif SC", "Source Han Serif SC", "Songti SC",
+    "STSong", "Times New Roman", "Times", "Georgia", "Segoe UI", "Arial",
+    "Calibri", "Consolas", "Courier New",
 )
 
 
 def _installed_font_families() -> list:
-    """Installed font families, CJK-capable ones first, hidden faces dropped."""
+    """Font picker families: common choices first, installed faces after."""
     try:
         from PyQt6.QtGui import QFontDatabase
         fams = list(QFontDatabase.families())
     except Exception:
-        return []
+        fams = []
     installed = {f for f in fams if not f.startswith(("@", "."))}
-    preferred = [f for f in _PREFERRED_FONT_FAMILIES if f in installed]
-    rest = sorted(f for f in installed if f not in preferred)
-    return preferred + rest
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for fam in _PREFERRED_FONT_FAMILIES:
+        if fam and fam not in seen:
+            ordered.append(fam)
+            seen.add(fam)
+    for fam in sorted(installed):
+        if fam and fam not in seen:
+            ordered.append(fam)
+            seen.add(fam)
+    return ordered
 
 # ── Keyboard shortcuts (mirrors ensureShortcutsSettings) ─────────────────────
 
@@ -226,7 +240,12 @@ class SettingsView(BaseView):
     def _setup_ui(self) -> None:
         """Build the full widget tree."""
         _refresh_palette()  # bind _C_* to the active theme before building
-        root = QVBoxLayout(self)
+        existing = self.layout()
+        if existing is not None:
+            _clear_layout(existing)
+            root = existing
+        else:
+            root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
@@ -268,6 +287,13 @@ class SettingsView(BaseView):
     def on_activate(self) -> None:
         """Reload settings from QSettings each time the user opens this view."""
         self._load_all()
+
+    def retranslate_ui(self) -> None:
+        """Rebuild this settings page with the active language, preserving tab."""
+        current_tab = self._tabs.currentIndex() if hasattr(self, "_tabs") else 0
+        self._setup_ui()
+        self._load_all()
+        self._tabs.setCurrentIndex(min(current_tab, self._tabs.count() - 1))
 
     # ── Tab builders ──────────────────────────────────────────────────────
 
@@ -595,7 +621,7 @@ class SettingsView(BaseView):
         # Legacy status label alias (kept for _detect_helicon compat)
         self._helicon_status_label = self._detect_status_badge
 
-        self._tabs.addTab(tab, "Helicon")
+        self._tabs.addTab(tab, tr("Helicon"))
 
     def _build_tab_archive(self) -> None:
         """归档 tab — JXL effort + delete-JPG (default OFF, hard rule)."""
@@ -649,7 +675,7 @@ class SettingsView(BaseView):
 
         tab.body.addWidget(del_box)
         tab.body.addStretch()
-        self._tabs.addTab(tab, "归档")
+        self._tabs.addTab(tab, tr("归档"))
 
     def _build_tab_project(self) -> None:
         """项目 tab — directory, sub-dirs, recent projects."""
@@ -721,7 +747,7 @@ class SettingsView(BaseView):
         tab.body.addWidget(recent_box)
         tab.body.addStretch()
 
-        self._tabs.addTab(tab, "项目")
+        self._tabs.addTab(tab, tr("项目"))
 
     def _build_tab_workbench(self) -> None:
         """工作台 tab — auto-watch toggles (mirrors saveV4Settings / loadV4Settings).
@@ -791,7 +817,7 @@ class SettingsView(BaseView):
         tab.body.addWidget(mode_box)
         tab.body.addStretch()
 
-        self._tabs.addTab(tab, "工作台")
+        self._tabs.addTab(tab, tr("工作台"))
 
     def _build_tab_user(self) -> None:
         """操作人 tab — currentUser name used as modifiedBy in taxonomy edits."""
@@ -817,7 +843,7 @@ class SettingsView(BaseView):
 
         tab.body.addLayout(form)
         tab.body.addStretch()
-        self._tabs.addTab(tab, "操作人")
+        self._tabs.addTab(tab, tr("操作人"))
 
     def _build_tab_collab(self) -> None:
         """协作 tab — LAN collaboration: enable, group code, peers, share addr.
@@ -926,7 +952,7 @@ class SettingsView(BaseView):
 
         tab.body.addLayout(form)
         tab.body.addStretch()
-        self._tabs.addTab(tab, "协作")
+        self._tabs.addTab(tab, tr("协作"))
 
         # Live updates from the running service, if present.
         svc = getattr(self.ctx, "collab_service", None)
@@ -948,7 +974,7 @@ class SettingsView(BaseView):
         tab = _ScrollTab()
 
         # ── 界面风格 ──────────────────────────────────────────────────────────
-        theme_box = QGroupBox("界面风格")
+        theme_box = QGroupBox(tr("界面风格"))
         theme_form = QFormLayout(theme_box)
         theme_form.setHorizontalSpacing(16)
         theme_form.setVerticalSpacing(8)
@@ -956,24 +982,32 @@ class SettingsView(BaseView):
         self._theme_combo = QComboBox()
         from app.config.theme import THEME_NAMES
         for key in _THEME_CHOICES:
-            self._theme_combo.addItem(THEME_NAMES.get(key, key), key)
-        self._theme_combo.setToolTip("切换后立即生效，并在下次启动时保持")
+            self._theme_combo.addItem(tr(THEME_NAMES.get(key, key)), key)
+        self._theme_combo.setToolTip(tr("切换后立即生效，并在下次启动时保持"))
         self._theme_combo.currentIndexChanged.connect(self._on_theme_changed)
-        theme_form.addRow("风格", self._theme_combo)
+        theme_form.addRow(tr("风格"), self._theme_combo)
 
-        theme_note = QLabel("保留当前风格，同时提供两套新设计用于对比整体观感。")
+        # 界面语言 (UI language) — endonyms in the picker; applies immediately.
+        self._lang_combo = QComboBox()
+        self._lang_combo.addItem(tr("中文"), "zh")
+        self._lang_combo.addItem(tr("English"), "en")
+        self._lang_combo.setToolTip(tr("语言切换会立即生效。"))
+        self._lang_combo.currentIndexChanged.connect(self._on_language_changed)
+        theme_form.addRow(tr("界面语言"), self._lang_combo)
+
+        theme_note = QLabel(tr("保留当前风格，同时提供两套新设计用于对比整体观感。"))
         theme_note.setObjectName("MutedSmall")
         theme_note.setWordWrap(True)
         theme_form.addRow("", theme_note)
 
-        self._perf_mode_chk = QCheckBox("性能模式（关闭卡片阴影与背景渐变）")
+        self._perf_mode_chk = QCheckBox(tr("性能模式（关闭卡片阴影与背景渐变）"))
         self._perf_mode_chk.setToolTip(
-            "远程桌面/低性能环境下减少重绘，操作更顺滑；重启后生效。"
+            tr("远程桌面/低性能环境下减少重绘，操作更顺滑；重启后生效。")
         )
         self._perf_mode_chk.stateChanged.connect(self._on_perf_mode_changed)
-        theme_form.addRow("性能", self._perf_mode_chk)
+        theme_form.addRow(tr("性能"), self._perf_mode_chk)
 
-        perf_note = QLabel("远程控制 Linux 卡顿时建议开启；界面会变扁平，重启生效。")
+        perf_note = QLabel(tr("远程控制 Linux 卡顿时建议开启；界面会变扁平，重启生效。"))
         perf_note.setObjectName("MutedSmall")
         perf_note.setWordWrap(True)
         theme_form.addRow("", perf_note)
@@ -982,19 +1016,19 @@ class SettingsView(BaseView):
         tab.body.addSpacing(12)
 
         # ── 字体 ──────────────────────────────────────────────────────────────
-        font_box = QGroupBox("字体")
+        font_box = QGroupBox(tr("字体"))
         font_form = QFormLayout(font_box)
         font_form.setHorizontalSpacing(16)
         font_form.setVerticalSpacing(8)
 
-        # 字体族选择 — 系统默认 + 已安装字体列表（CJK 优先排前）
+        # 字体族选择 — 系统默认 + 常用字体 + 已安装字体列表
         self._font_family_combo = QComboBox()
-        self._font_family_combo.addItem("系统默认（自动）", "")
+        self._font_family_combo.addItem(tr("系统默认（自动）"), "")
         for fam in _installed_font_families():
             self._font_family_combo.addItem(fam, fam)
-        self._font_family_combo.setToolTip("选择全局字体，立即生效并在下次启动保持")
+        self._font_family_combo.setToolTip(tr("选择全局字体，立即生效并在下次启动保持；未安装字体会按系统回退"))
         self._font_family_combo.currentIndexChanged.connect(self._on_font_family_changed)
-        font_form.addRow("字体", self._font_family_combo)
+        font_form.addRow(tr("字体"), self._font_family_combo)
 
         # 字体大小 — 缩放倍率 + 百分比
         size_row = QHBoxLayout()
@@ -1007,18 +1041,18 @@ class SettingsView(BaseView):
         self._font_scale_spin.setDecimals(2)
         self._font_scale_spin.setValue(1.0)
         self._font_scale_spin.setFixedWidth(80)
-        self._font_scale_spin.setToolTip("全局字体大小倍率，0.7–1.5；立即生效")
+        self._font_scale_spin.setToolTip(tr("全局字体大小倍率，0.7–1.5；立即生效"))
         size_row.addWidget(self._font_scale_spin)
 
         self._font_scale_pct_label = QLabel("100%")
         self._font_scale_pct_label.setObjectName("Muted")
         size_row.addWidget(self._font_scale_pct_label)
         size_row.addStretch()
-        font_form.addRow("字体大小", size_row)
+        font_form.addRow(tr("字体大小"), size_row)
 
         self._font_scale_spin.valueChanged.connect(self._on_font_scale_changed)
 
-        note = QLabel("字体与字体大小修改后立即生效，并在下次启动保持。")
+        note = QLabel(tr("常用中文字体和 Times 等字体固定列在前面；未安装字体会自动回退。"))
         note.setObjectName("MutedSmall")
         note.setWordWrap(True)
         font_form.addRow("", note)
@@ -1027,7 +1061,7 @@ class SettingsView(BaseView):
         tab.body.addSpacing(12)
 
         # ── 图标自定义 ────────────────────────────────────────────────────────
-        icon_box = QGroupBox("图标自定义（emoji 替换）")
+        icon_box = QGroupBox(tr("图标自定义（emoji 替换）"))
         icon_form = QFormLayout(icon_box)
         icon_form.setHorizontalSpacing(16)
         icon_form.setVerticalSpacing(8)
@@ -1035,36 +1069,36 @@ class SettingsView(BaseView):
         self._icon_gps_edit = QLineEdit()
         self._icon_gps_edit.setPlaceholderText("📡")
         self._icon_gps_edit.setMaxLength(8)
-        self._icon_gps_edit.setToolTip("GPS / 定位 图标（默认 📡）")
+        self._icon_gps_edit.setToolTip(tr("GPS / 定位 图标（默认 📡）"))
         self._icon_gps_edit.editingFinished.connect(self._save_ui)
-        icon_form.addRow("GPS / 定位", self._icon_gps_edit)
+        icon_form.addRow(tr("GPS / 定位"), self._icon_gps_edit)
 
         self._icon_map_edit = QLineEdit()
         self._icon_map_edit.setPlaceholderText("📍")
         self._icon_map_edit.setMaxLength(8)
-        self._icon_map_edit.setToolTip("地图选点 图标（默认 📍）")
+        self._icon_map_edit.setToolTip(tr("地图选点 图标（默认 📍）"))
         self._icon_map_edit.editingFinished.connect(self._save_ui)
-        icon_form.addRow("地图选点", self._icon_map_edit)
+        icon_form.addRow(tr("地图选点"), self._icon_map_edit)
 
         self._icon_folder_edit = QLineEdit()
         self._icon_folder_edit.setPlaceholderText("📁")
         self._icon_folder_edit.setMaxLength(8)
-        self._icon_folder_edit.setToolTip("文件夹 图标（默认 📁）")
+        self._icon_folder_edit.setToolTip(tr("文件夹 图标（默认 📁）"))
         self._icon_folder_edit.editingFinished.connect(self._save_ui)
-        icon_form.addRow("文件夹", self._icon_folder_edit)
+        icon_form.addRow(tr("文件夹"), self._icon_folder_edit)
 
         self._icon_search_edit = QLineEdit()
         self._icon_search_edit.setPlaceholderText("🔍")
         self._icon_search_edit.setMaxLength(8)
-        self._icon_search_edit.setToolTip("搜索 图标（默认 🔍）")
+        self._icon_search_edit.setToolTip(tr("搜索 图标（默认 🔍）"))
         self._icon_search_edit.editingFinished.connect(self._save_ui)
-        icon_form.addRow("搜索", self._icon_search_edit)
+        icon_form.addRow(tr("搜索"), self._icon_search_edit)
 
         tab.body.addWidget(icon_box)
         tab.body.addSpacing(12)
 
         # ── 键盘快捷键 (mirrors ensureShortcutsSettings / renderShortcutScope) ──
-        shortcut_box = QGroupBox("键盘快捷键")
+        shortcut_box = QGroupBox(tr("键盘快捷键"))
         shortcut_form = QFormLayout(shortcut_box)
         shortcut_form.setHorizontalSpacing(16)
         shortcut_form.setVerticalSpacing(8)
@@ -1072,16 +1106,18 @@ class SettingsView(BaseView):
         # 截图（系统级全局，默认 Alt+A）
         self._sc_screenshot = QKeySequenceEdit()
         self._sc_screenshot.setToolTip(
-            "区域截图快捷键，默认 Alt+A；改动立即生效，系统级全局（后台也可触发）"
+            tr("区域截图快捷键，默认 Alt+A；改动立即生效，系统级全局（后台也可触发）")
         )
         self._sc_screenshot.editingFinished.connect(self._on_screenshot_shortcut_changed)
-        shortcut_form.addRow("区域截图（全局）", self._sc_screenshot)
+        shortcut_form.addRow(tr("区域截图（全局）"), self._sc_screenshot)
 
         from app.utils.global_hotkey import available as _gh_available
         if not _gh_available():
             gh_note = QLabel(
-                "提示：未安装 pynput，截图快捷键仅在本软件窗口前台时可用；"
-                "安装 pynput 后支持系统级全局触发（pip install pynput）。"
+                tr(
+                    "提示：未安装 pynput，截图快捷键仅在本软件窗口前台时可用；"
+                    "安装 pynput 后支持系统级全局触发（pip install pynput）。"
+                )
             )
             gh_note.setObjectName("MutedSmall")
             gh_note.setWordWrap(True)
@@ -1089,27 +1125,27 @@ class SettingsView(BaseView):
 
         # monitor scope
         self._sc_monitor_activate = QKeySequenceEdit()
-        self._sc_monitor_activate.setToolTip("工作台：激活标本（monitor/activate）")
+        self._sc_monitor_activate.setToolTip(tr("工作台：激活标本（monitor/activate）"))
         self._sc_monitor_activate.editingFinished.connect(self._save_ui)
-        shortcut_form.addRow("激活标本（监控）", self._sc_monitor_activate)
+        shortcut_form.addRow(tr("激活标本（监控）"), self._sc_monitor_activate)
 
         self._sc_monitor_deactivate = QKeySequenceEdit()
-        self._sc_monitor_deactivate.setToolTip("工作台：去激活（monitor/deactivate）")
+        self._sc_monitor_deactivate.setToolTip(tr("工作台：去激活（monitor/deactivate）"))
         self._sc_monitor_deactivate.editingFinished.connect(self._save_ui)
-        shortcut_form.addRow("去激活（监控）", self._sc_monitor_deactivate)
+        shortcut_form.addRow(tr("去激活（监控）"), self._sc_monitor_deactivate)
 
         # labels scope
         self._sc_labels_print = QKeySequenceEdit()
-        self._sc_labels_print.setToolTip("标签打印：打印（labels/print）")
+        self._sc_labels_print.setToolTip(tr("标签打印：打印（labels/print）"))
         self._sc_labels_print.editingFinished.connect(self._save_ui)
-        shortcut_form.addRow("打印标签", self._sc_labels_print)
+        shortcut_form.addRow(tr("打印标签"), self._sc_labels_print)
 
         self._sc_labels_next = QKeySequenceEdit()
-        self._sc_labels_next.setToolTip("标签打印：下一个（labels/next）")
+        self._sc_labels_next.setToolTip(tr("标签打印：下一个（labels/next）"))
         self._sc_labels_next.editingFinished.connect(self._save_ui)
-        shortcut_form.addRow("下一个标签", self._sc_labels_next)
+        shortcut_form.addRow(tr("下一个标签"), self._sc_labels_next)
 
-        sc_note = QLabel("录制快捷键：点击输入框后按下组合键。留空使用默认值。")
+        sc_note = QLabel(tr("录制快捷键：点击输入框后按下组合键。留空使用默认值。"))
         sc_note.setObjectName("MutedSmall")
         sc_note.setWordWrap(True)
         shortcut_box.layout().addRow("", sc_note)  # type: ignore[union-attr]
@@ -1118,16 +1154,18 @@ class SettingsView(BaseView):
         tab.body.addSpacing(12)
 
         # ── 调试：真实压缩 ────────────────────────────────────────────────────
-        debug_box = QGroupBox("调试选项")
+        debug_box = QGroupBox(tr("调试选项"))
         debug_v = QVBoxLayout(debug_box)
 
         self._use_real_compression_chk = QCheckBox(
-            "使用后端真实压缩（文件需实际存在于项目目录）"
+            tr("使用后端真实压缩（文件需实际存在于项目目录）")
         )
         self._use_real_compression_chk.setChecked(False)
         self._use_real_compression_chk.setToolTip(
-            "对应 web useRealCompression 调试开关。"
-            "关闭时系统只模拟压缩结果状态，不调用 cjxl / archiver。"
+            tr(
+                "对应 web useRealCompression 调试开关。"
+                "关闭时系统只模拟压缩结果状态，不调用 cjxl / archiver。"
+            )
         )
         self._use_real_compression_chk.stateChanged.connect(self._save_ui)
         debug_v.addWidget(self._use_real_compression_chk)
@@ -1135,7 +1173,7 @@ class SettingsView(BaseView):
         tab.body.addWidget(debug_box)
         tab.body.addStretch()
 
-        self._tabs.addTab(tab, "界面")
+        self._tabs.addTab(tab, tr("界面"))
 
     def _build_tab_about(self) -> None:
         """关于 tab — version, log dir."""
@@ -1183,7 +1221,7 @@ class SettingsView(BaseView):
         tab.body.addWidget(about_text)
 
         tab.body.addStretch()
-        self._tabs.addTab(tab, "关于")
+        self._tabs.addTab(tab, tr("关于"))
 
     # ── Load / save helpers ───────────────────────────────────────────────
 
@@ -1199,7 +1237,7 @@ class SettingsView(BaseView):
         method_idx = int(qs.value(_K_HELICON_METHOD, 1))
         self._helicon_param_panel.set_params({
             "method": method_idx if 0 <= method_idx <= 2 else 1,
-            "radius": int(qs.value(_K_HELICON_RADIUS, 8)),
+            "radius": float(qs.value(_K_HELICON_RADIUS, 8.0)),
             "smoothing": int(qs.value(_K_HELICON_SMOOTHING, 4)),
         })
         self._quality_spin.setValue(int(qs.value(_K_HELICON_QUALITY, 95)))
@@ -1276,6 +1314,11 @@ class SettingsView(BaseView):
         self._theme_combo.setCurrentIndex(max(0, theme_idx))
         self._theme_combo.blockSignals(False)
 
+        lang_idx = self._lang_combo.findData(self.ctx.settings.current_language)
+        self._lang_combo.blockSignals(True)
+        self._lang_combo.setCurrentIndex(max(0, lang_idx))
+        self._lang_combo.blockSignals(False)
+
         self._perf_mode_chk.blockSignals(True)
         self._perf_mode_chk.setChecked(self.ctx.settings.performance_mode)
         self._perf_mode_chk.blockSignals(False)
@@ -1327,7 +1370,21 @@ class SettingsView(BaseView):
         from app.utils import ui
         ui.info(self, "性能模式", "已保存。重启软件后生效。")
 
+    def _on_language_changed(self) -> None:
+        lang = self._lang_combo.currentData() or "zh"
+        self.ctx.settings.current_language = str(lang)
+        self.ctx.settings.sync()
+        from app.config.i18n import set_language
+        set_language(str(lang))
+        win = self.window()
+        handler = getattr(win, "retranslate_ui", None)
+        if callable(handler):
+            handler()
+        else:
+            self.retranslate_ui()
+
     def _on_theme_changed(self) -> None:
+        current_tab = self._tabs.currentIndex()
         key = self._theme_combo.currentData() or "classic_light"
         self.ctx.settings.current_theme = str(key)
         self.ctx.settings.sync()
@@ -1337,6 +1394,9 @@ class SettingsView(BaseView):
         if app is not None:
             app.setStyleSheet(apply_theme(str(key)))
         _refresh_palette()
+        self._setup_ui()
+        self._tabs.setCurrentIndex(min(current_tab, self._tabs.count() - 1))
+        self._load_all()
 
     def _refresh_helicon_display(self) -> None:
         """Update auto-detected and effective path labels from stored/detected state."""
@@ -1749,7 +1809,7 @@ class SettingsView(BaseView):
         method_idx = max(0, min(method_idx, 2))
         self._helicon_param_panel.set_params({
             "method": method_idx,
-            "radius": int(params.get("radius", 8)),
+            "radius": float(params.get("radius", 8.0)),
             "smoothing": int(params.get("smoothing", 4)),
         })
         self._quality_spin.setValue(int(params.get("quality", 95)))
@@ -1913,6 +1973,18 @@ class SettingsView(BaseView):
 
 
 # ── Private helpers ───────────────────────────────────────────────────────────
+
+
+def _clear_layout(layout) -> None:
+    """Remove all widgets/layouts from an existing Qt layout."""
+    while layout.count():
+        item = layout.takeAt(0)
+        child_layout = item.layout()
+        if child_layout is not None:
+            _clear_layout(child_layout)
+        widget = item.widget()
+        if widget is not None:
+            widget.deleteLater()
 
 
 class _ConfigRow(QWidget):

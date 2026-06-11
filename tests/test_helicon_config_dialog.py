@@ -79,12 +79,12 @@ class TestCliPreview:
         with mock.patch("app.services.helicon_service.detect_helicon", return_value=None):
             dlg = HeliconConfigDialog(ctx)
         qtbot.addWidget(dlg)
-        dlg._params.set_params({"method": 1, "radius": 6.0, "smoothing": 3})
+        dlg._params.set_params({"method": 1, "radius": 22.5, "smoothing": 3})
         dlg._refresh_cli_preview()
         text = dlg._cli_preview.toPlainText() if hasattr(dlg._cli_preview, "toPlainText") \
             else dlg._cli_preview.text()
         assert "-mp:1" in text
-        assert "-rp:6" in text
+        assert "-rp:22.5" in text
         assert "-sp:3" in text
 
     def test_preview_has_no_forbidden_cjxl_flags(self, qtbot, tmp_path):
@@ -113,14 +113,14 @@ class TestPersistence:
         with mock.patch("app.services.helicon_service.detect_helicon", return_value=None):
             dlg = HeliconConfigDialog(ctx)
         qtbot.addWidget(dlg)
-        dlg._params.set_params({"method": 2, "radius": 7.0, "smoothing": 5})
+        dlg._params.set_params({"method": 2, "radius": 22.5, "smoothing": 5})
         dlg._on_save_defaults()
         qs = ctx.settings._qs
         assert int(qs.value(_K_HELICON_METHOD)) == 2
-        assert int(float(qs.value(_K_HELICON_RADIUS))) == 7
+        assert float(qs.value(_K_HELICON_RADIUS)) == 22.5
         assert int(qs.value(_K_HELICON_SMOOTHING)) == 5
 
-    def test_reset_restores_oracle_defaults(self, qtbot, tmp_path):
+    def test_reset_restores_helicon_defaults(self, qtbot, tmp_path):
         from app.widgets.helicon_config_dialog import HeliconConfigDialog
         ctx = _make_ctx(tmp_path)
         with mock.patch("app.services.helicon_service.detect_helicon", return_value=None):
@@ -129,7 +129,7 @@ class TestPersistence:
         dlg._params.set_params({"method": 0, "radius": 1.0, "smoothing": 1})
         dlg._on_reset()
         p = dlg._params.get_params()
-        # Oracle defaults: method B (1), radius 8, smoothing 4
+        # Helicon defaults: method B (1), radius 8, smoothing 4
         assert p["method"] == 1
         assert int(p["radius"]) == 8
         assert p["smoothing"] == 4

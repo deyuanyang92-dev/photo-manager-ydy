@@ -10,9 +10,9 @@ Dict-based, Chinese-source-as-key:
   * English (``en``) translations live in ``resources/i18n/en.json`` (a shipped
     data file — must be in git, like the WoRMS/taxonomy seed data).
 
-The current language is persisted in settings (``Settings.current_language``) and
-applied once at startup via :func:`set_language` (restart-to-apply — the
-imperative UI is built once with the active language).
+The current language is persisted in settings (``Settings.current_language``).
+Views that expose ``retranslate_ui()`` can rebuild or refresh themselves after
+``set_language`` so language changes apply immediately.
 
 Mirrors the live-theme pattern (``apply_theme`` / ``current_theme``) but for text.
 """

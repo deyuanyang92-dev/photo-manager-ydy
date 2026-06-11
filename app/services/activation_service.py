@@ -315,6 +315,24 @@ def get_collab_status(db: sqlite3.Connection, uid: str) -> Optional[str]:
         return None
 
 
+def resolve_phase(collab_svc, db, uid: str) -> Optional[str]:
+    """Resolve a specimen's confirmed phase: live collab task first, else DB.
+
+    Shared by the workbench batch bar and the sidebar phase dots so both read
+    the same source of truth.  *collab_svc* is duck-typed (any object with a
+    ``store.get(uid).status.value``); pass None when collab is off.
+    """
+    try:
+        task = collab_svc.store.get(uid) if collab_svc is not None else None
+        if task is not None:
+            return task.status.value if hasattr(task.status, "value") else str(task.status)
+    except Exception:
+        pass
+    if db is None:
+        return None
+    return get_collab_status(db, uid)
+
+
 # ── Internal helpers ───────────────────────────────────────────────────────────
 
 def _iso_now() -> str:

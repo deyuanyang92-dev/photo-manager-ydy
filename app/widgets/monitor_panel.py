@@ -943,12 +943,18 @@ class MonitorPanel(QWidget):
             QMessageBox.warning(self, "无激活标本", "请先激活一个标本")
             return
         self._add_jpg_to_grouping(db, active_uid, jpg_path)
+        # 主动归属 = 解除"取消归属"黑名单，否则取消后再归属会被 P0 永久卡住
+        # (oracle server.js:4216-4219：重新加入分组从 explicitUnassigns 移除)。
+        grouping_service.remove_explicit_unassign(db, jpg_path)
+        self.refresh_requested.emit()
 
     def _on_ctx_assign_uid(self, jpg_path: str, uid: str) -> None:
         db = self.ctx.get_db()
         if db is None:
             return
         self._add_jpg_to_grouping(db, uid, jpg_path)
+        grouping_service.remove_explicit_unassign(db, jpg_path)  # 解除黑名单
+        self.refresh_requested.emit()
 
     def _add_jpg_to_grouping(self, db, uid: str, jpg_path: str) -> None:
         """Add jpg_path to first group of uid's grouping, creating one if needed."""
@@ -962,9 +968,21 @@ class MonitorPanel(QWidget):
         grouping_service.save_grouping(db, uid, sg.groups, clean_phantoms=False)
 
     def _on_ctx_unassign(self, jpg_path: str) -> None:
+        """取消归属 = 让这张照片彻底"变无主"。
+
+        关键修复：原来只从分组(P1)里删，对拍摄期自动归属(P3 激活时间窗)的照片
+        无效——它们不在任何分组，点了没反应。现在写入 P0 黑名单
+        (add_explicit_unassign)，它在归属判定里最优先、打败一切来源
+        (oracle server.js:4281-4294)，所以任何来源归属的照片都能取消。
+        同时（用户选定行为，偏离 oracle 的"只写黑名单"）把它踢出合成组，
+        避免废片仍被合成。
+        """
         db = self.ctx.get_db()
         if db is None:
             return
+        # P0：加入黑名单（打败 P1 分组 / P2 手动 / P3 激活时间窗）
+        grouping_service.add_explicit_unassign(db, jpg_path)
+        # 同时从任何合成组移除
         grouping_service._ensure_grouping_table(db)
         rows = db.execute(
             "SELECT uid FROM grouping WHERE jpg_paths LIKE ?",
@@ -980,6 +998,7 @@ class MonitorPanel(QWidget):
                     changed = True
             if changed:
                 grouping_service.save_grouping(db, uid, sg.groups, clean_phantoms=False)
+        self.refresh_requested.emit()
 
     # ── Slots ─────────────────────────────────────────────────────────────────
 

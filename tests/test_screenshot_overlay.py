@@ -9,8 +9,8 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QColor, QPixmap
+from PyQt6.QtCore import QEvent, QPoint, QRect, Qt
+from PyQt6.QtGui import QColor, QKeyEvent, QPixmap
 from PyQt6.QtWidgets import QApplication, QWidget
 
 _APP = QApplication.instance() or QApplication([])
@@ -163,3 +163,49 @@ def test_redirects_to_app_screen_when_target_has_no_app_window(monkeypatch):
     assert captured["screen"] is overlay._app_screen()
     overlay.close()
     main.close()
+
+
+# ── Snipaste-style edit shortcuts ───────────────────────────────────────────
+
+def _primed_overlay():
+    from app.widgets.screenshot_overlay import ScreenshotOverlay
+
+    overlay = ScreenshotOverlay()
+    overlay._frozen = _solid(240, 160, QColor(120, 140, 160))
+    overlay._sel = QRect(20, 20, 80, 50)
+    return overlay
+
+
+def _key(key, modifiers=Qt.KeyboardModifier.NoModifier):
+    return QKeyEvent(QEvent.Type.KeyPress, key, modifiers)
+
+
+def test_enter_finishes_selection():
+    overlay = _primed_overlay()
+    delivered = []
+    overlay.actionDone.connect(lambda pix: delivered.append(pix))
+
+    overlay.keyPressEvent(_key(Qt.Key.Key_Return))
+
+    assert delivered and not delivered[0].isNull()
+
+
+def test_ctrl_s_saves_selection():
+    overlay = _primed_overlay()
+    delivered = []
+    overlay.actionSave.connect(lambda pix: delivered.append(pix))
+
+    overlay.keyPressEvent(_key(Qt.Key.Key_S, Qt.KeyboardModifier.ControlModifier))
+
+    assert delivered and not delivered[0].isNull()
+
+
+def test_p_pins_selection():
+    overlay = _primed_overlay()
+    delivered = []
+    overlay.actionPin.connect(lambda pix, pos: delivered.append((pix, pos)))
+
+    overlay.keyPressEvent(_key(Qt.Key.Key_P))
+
+    assert delivered and not delivered[0][0].isNull()
+    assert isinstance(delivered[0][1], QPoint)

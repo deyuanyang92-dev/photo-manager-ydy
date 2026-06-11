@@ -113,3 +113,86 @@ class TestWorkbenchAutofill:
         wb = WorkbenchView(ctx)
         wb._naming.set_location_keys("XX", "YY", "ZZ", "20990101")  # no record
         assert wb._metadata._collector.text() == ""
+
+
+# ── 场景1 修复2：坐标继承「两者都要」(项目默认 < 站位记录 < 手动) ──────────────
+
+
+class TestMetadataAutofillPrecedence:
+    """metadata 卡的自动/手动优先级机制（apply_autofill override_auto）。"""
+
+    def test_override_auto_replaces_project_default(self, qapp, ctx):
+        from app.widgets.metadata_panel import MetadataPanel
+        p = MetadataPanel(ctx)
+        # 项目默认（自动）填空
+        p.apply_autofill({"lon": "100.0", "geo_area": "默认区"})
+        assert p._lon.text() == "100.0"
+        assert "lon" in p.auto_fields()
+        # 站位采集记录覆盖（override_auto）
+        p.apply_autofill({"lon": "119.5", "geo_area": "三门湾"}, override_auto=True)
+        assert p._lon.text() == "119.5"
+        assert p._geo_area.text() == "三门湾"
+
+    def test_override_auto_keeps_manual(self, qapp, ctx):
+        from app.widgets.metadata_panel import MetadataPanel
+        p = MetadataPanel(ctx)
+        p._lon.setText("88.8"); p._on_field_edited("lon", "88.8")  # 用户手填
+        assert "lon" not in p.auto_fields()
+        p.apply_autofill({"lon": "119.5"}, override_auto=True)
+        assert p._lon.text() == "88.8"  # 手动值不被覆盖
+
+    def test_default_does_not_override_nonempty(self, qapp, ctx):
+        from app.widgets.metadata_panel import MetadataPanel
+        p = MetadataPanel(ctx)
+        p.apply_autofill({"lon": "100.0"})            # 自动填
+        p.apply_autofill({"lon": "119.5"})            # 默认(override_auto=False)
+        assert p._lon.text() == "100.0"               # 不覆盖非空
+
+
+class TestProjectDefaultCoordsPrefill:
+    """新建标本时，项目默认坐标进 metadata；选有记录站位后被采集记录覆盖。"""
+
+    def _set_capture_defaults(self, db, lon, lat, geo):
+        from app.services import project_settings_service as pss
+        pss.save_setting(db, "capture_defaults",
+                         {"lon": lon, "lat": lat, "geoArea": geo})
+
+    def test_new_specimen_inherits_project_default_coords(self, qapp, ctx):
+        db = ctx.get_db()
+        self._set_capture_defaults(db, "110.0", "20.0", "项目默认湾")
+        from app.views.workbench_view import WorkbenchView
+        wb = WorkbenchView(ctx)
+        wb._on_new_specimen()
+        assert wb._metadata._lon.text() == "110.0"
+        assert wb._metadata._lat.text() == "20.0"
+        assert wb._metadata._geo_area.text() == "项目默认湾"
+
+    def test_station_record_overrides_project_default(self, qapp, ctx):
+        db = ctx.get_db()
+        self._set_capture_defaults(db, "110.0", "20.0", "项目默认湾")
+        crs.upsert_record(db, {
+            "province": "ZJ", "site": "SMW", "station": "B2",
+            "collection_date": "20260518",
+            "lon": "121.764", "lat": "29.114", "geo_area": "三门湾",
+        })
+        from app.views.workbench_view import WorkbenchView
+        wb = WorkbenchView(ctx)
+        wb._on_new_specimen()                                   # 带项目默认坐标
+        assert wb._metadata._lon.text() == "110.0"
+        wb._naming.set_location_keys("ZJ", "SMW", "B2", "20260518")  # 选站位
+        assert wb._metadata._lon.text() == "121.764"            # 被站位记录覆盖
+        assert wb._metadata._geo_area.text() == "三门湾"
+
+    def test_manual_coords_survive_station_pick(self, qapp, ctx):
+        db = ctx.get_db()
+        self._set_capture_defaults(db, "110.0", "20.0", "项目默认湾")
+        crs.upsert_record(db, {
+            "province": "ZJ", "site": "SMW", "station": "B2",
+            "collection_date": "20260518", "lon": "121.764", "lat": "29.114",
+        })
+        from app.views.workbench_view import WorkbenchView
+        wb = WorkbenchView(ctx)
+        wb._on_new_specimen()
+        wb._metadata._lon.setText("66.6"); wb._metadata._on_field_edited("lon", "66.6")
+        wb._naming.set_location_keys("ZJ", "SMW", "B2", "20260518")
+        assert wb._metadata._lon.text() == "66.6"               # 手动坐标不被覆盖

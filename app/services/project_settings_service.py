@@ -47,6 +47,14 @@ DEFAULT_CODE_LABELS: dict[str, Any] = {
     "species": {},
 }
 
+DEFAULT_CAPTURE_DEFAULTS: dict[str, str] = {
+    # 项目级默认拍摄坐标/地理区（站位级数据的兜底）。新号自动带，选站位后由
+    # 采集记录覆盖。空 = 不预填。
+    "lon": "",
+    "lat": "",
+    "geoArea": "",
+}
+
 DEFAULT_PROJECT_META: dict[str, str] = {
     "project_code": "",
     "name": "",
@@ -199,10 +207,16 @@ def effective_new_specimen_prefill(
     Shape::
 
         {"province": str, "site": str, "stations": dict,
-         "collector": str, "photographer": str, "identifier": str}
+         "collector": str, "photographer": str, "identifier": str,
+         "lon": str, "lat": str, "geo_area": str}
+
+    经纬度/采集地理区是站位级数据，没有项目级"正确值"；这里返回的是
+    **项目默认坐标**（capture_defaults），仅作新号兜底。选定具体站位后，
+    采集记录会以更高优先级覆盖它（见 workbench._apply_collection_autofill）。
     """
     code_labels = get_effective(project_dir, "code_labels", DEFAULT_CODE_LABELS, root=root)
     personnel = get_effective(project_dir, "personnel", DEFAULT_PERSONNEL, root=root)
+    capture = get_effective(project_dir, "capture_defaults", DEFAULT_CAPTURE_DEFAULTS, root=root)
     return {
         "province": code_labels.get("province", "") or "",
         "site": code_labels.get("site", "") or "",
@@ -210,4 +224,7 @@ def effective_new_specimen_prefill(
         "collector": personnel.get("collector", "") or "",
         "photographer": personnel.get("photographer", "") or "",
         "identifier": personnel.get("identifier", "") or "",
+        "lon": str(capture.get("lon", "") or ""),
+        "lat": str(capture.get("lat", "") or ""),
+        "geo_area": capture.get("geoArea", "") or "",
     }

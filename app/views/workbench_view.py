@@ -384,6 +384,7 @@ class WorkbenchView(BaseView):
         self._sidebar.new_specimen_requested.connect(self._on_new_specimen)
         self._sidebar.collab_manager_requested.connect(self._on_open_collab_panel)
         self._sidebar.print_labels_requested.connect(self._on_print_labels)
+        self._sidebar.phase_mark_requested.connect(self._on_phase_mark)
         outer.addWidget(self._sidebar)
 
         # Wire collab service signals → sidebar strip refresh + collab card refresh
@@ -732,13 +733,34 @@ class WorkbenchView(BaseView):
 
     # ── Filesystem watcher helpers ──────────────────────────────────────────
 
+    def _resolve_capture_subdirs(self) -> tuple[str, str]:
+        """解析当前项目的 incoming / results 子目录名（监听+扫描共用）。
+
+        incoming 目录名不写死：优先用设置页配置（`project/incoming_subdir`，默认
+        incoming-jpg）；若配置的目录不存在但遗留的「新拍JPG」存在，则用「新拍JPG」
+        （复用 project_service.LEGACY_INCOMING_JPG_DIR）。results 同理（默认 results）。
+        """
+        s = getattr(self.ctx, "settings", None)
+        inc = getattr(s, "incoming_subdir", None)
+        res = getattr(s, "results_subdir", None)
+        inc = inc if isinstance(inc, str) and inc else "incoming-jpg"
+        res = res if isinstance(res, str) and res else "results"
+        project_dir = getattr(self.ctx, "current_project_dir", None)
+        if project_dir:
+            from app.services.project_service import LEGACY_INCOMING_JPG_DIR
+            if not os.path.isdir(os.path.join(project_dir, inc)) and \
+               os.path.isdir(os.path.join(project_dir, LEGACY_INCOMING_JPG_DIR)):
+                inc = LEGACY_INCOMING_JPG_DIR
+        return inc, res
+
     def _setup_fs_watcher(self) -> None:
-        """Watch incoming-jpg/ and results/ for OS-level change events."""
+        """Watch the resolved incoming + results dirs for OS-level change events."""
         self._fs_watcher.removePaths(self._fs_watcher.directories())
         project_dir = self.ctx.current_project_dir
         if not project_dir:
             return
-        for sub in ("incoming-jpg", "results"):
+        inc, res = self._resolve_capture_subdirs()
+        for sub in (inc, res):
             d = os.path.join(project_dir, sub)
             os.makedirs(d, exist_ok=True)
             self._fs_watcher.addPath(d)
@@ -780,43 +802,37 @@ class WorkbenchView(BaseView):
         """Return confirmed collab phase from memory first, then project DB."""
         svc = getattr(self.ctx, "collab_service", None)
         try:
-            task = svc.store.get(uid) if svc is not None else None
-            if task is not None:
-                return task.status.value
-        except Exception:
-            pass
-        db = self.ctx.get_db()
-        if not db:
-            return None
-        try:
-            from app.services.activation_service import get_collab_status
-            return get_collab_status(db, uid)
+            from app.services.activation_service import resolve_phase
+            return resolve_phase(svc, self.ctx.get_db(), uid)
         except Exception:
             return None
 
-    def _on_phase_clicked(self, status: str) -> None:
-        """Persist a monitor phase-pill click to collab state and project DB."""
-        uid = self._get_active_uid()
+    def _set_phase(self, uid: str, status: str) -> bool:
+        """Mark *uid* to phase *status* — manual human marking, any uid, any jump.
+
+        Writes the project DB and (when collab is running) syncs peers with
+        ``force=True`` so out-of-order / backward marks are honoured, mirroring
+        the oracle's free assignment (app.js:3303).  Does NOT require *uid* to
+        be the active specimen, so the sidebar phase dots can mark any 编号.
+        Returns True on success.
+        """
         if not uid:
-            self._monitor.set_phase(None)
-            self._status_message("请先激活一个编号，再标记拍摄阶段")
-            return
-
+            return False
         allowed = set(getattr(self._monitor, "_phase_pills", {}).keys())
         if status not in allowed:
             self._status_message(f"未知阶段：{status}")
-            self._refresh_batch_header()
-            return
+            return False
 
         db = self.ctx.get_db()
         seed_status = self._collab_phase_for(uid)
         svc = getattr(self.ctx, "collab_service", None)
         if svc is not None:
-            ok, msg = svc.update_task_status(uid, status, seed_status=seed_status)
+            ok, msg = svc.update_task_status(
+                uid, status, seed_status=seed_status, force=True
+            )
             if not ok:
                 self._status_message(f"阶段未变更：{msg}")
-                self._refresh_batch_header()
-                return
+                return False
 
         if db is not None:
             try:
@@ -824,17 +840,33 @@ class WorkbenchView(BaseView):
                 set_collab_status(db, uid, status)
             except Exception as exc:
                 self._status_message(f"阶段保存失败：{exc}")
-                self._refresh_batch_header()
-                return
+                return False
 
-        self._monitor.set_phase(status)
         self._status_message("阶段已更新")
         self._refresh_batch_header()
         try:
             self._sidebar.update_collab_status(svc)
+            self._sidebar.refresh_phases()
             self._refresh_collab_card()
         except Exception:
             pass
+        return True
+
+    def _on_phase_clicked(self, status: str) -> None:
+        """Batch-bar phase pill: marks the *active* specimen's phase."""
+        uid = self._get_active_uid()
+        if not uid:
+            self._monitor.set_phase(None)
+            self._status_message("请先激活一个编号，再标记拍摄阶段")
+            return
+        if self._set_phase(uid, status):
+            self._monitor.set_phase(status)
+        else:
+            self._refresh_batch_header()
+
+    def _on_phase_mark(self, uid: str, status: str) -> None:
+        """Sidebar phase-dot click: mark any 编号's phase (no activation needed)."""
+        self._set_phase(uid, status)
 
     def _on_new_specimen(self) -> None:
         """Start a fresh blank UID draft in the naming/metadata panels.
@@ -852,10 +884,13 @@ class WorkbenchView(BaseView):
         try:
             self._metadata.clear()
             self._taxon_card.clear()
-            # apply_autofill is non-destructive; clear() ran first so all empty.
+            # 项目级预填（自动，非手动）：人员三项 + 默认坐标/地理区。clear() 先
+            # 清空，故都填进空字段并标记为「自动」。选定具体站位后，采集记录会以
+            # override_auto 覆盖这里的项目默认坐标（见 _apply_collection_autofill）。
             self._metadata.apply_autofill({
                 k: prefill[k]
-                for k in ("collector", "photographer", "identifier")
+                for k in ("collector", "photographer", "identifier",
+                          "lon", "lat", "geo_area")
                 if prefill.get(k)
             })
         except Exception:
@@ -864,7 +899,8 @@ class WorkbenchView(BaseView):
     def _effective_prefill(self) -> dict:
         """Inherited new-specimen defaults for the current project, or empties."""
         empty = {"province": "", "site": "", "stations": {},
-                 "collector": "", "photographer": "", "identifier": ""}
+                 "collector": "", "photographer": "", "identifier": "",
+                 "lon": "", "lat": "", "geo_area": ""}
         project_dir = getattr(self.ctx, "current_project_dir", None)
         if not project_dir:
             return empty
@@ -1020,9 +1056,21 @@ class WorkbenchView(BaseView):
                 ),
             )
             db.commit()
+            # 命名行已建/更新 → 标记为当前标本，再 flush 右栏三卡。
+            # 关键修复（场景1 疑点1+2）：新草稿 _current_uid 原为 None，metadata
+            # autosave 整段被 _schedule_rail_save 跳过；保存只写命名段 → 用户在
+            # metadata 卡填的 采集人/经纬度/地理区/分类 会静默丢失。这里先设
+            # _current_uid（行已存在），再调 _on_save_metadata 把右栏一并入库，
+            # 使「保存」= 存全部。
             self._current_uid = uid
+            self._on_save_metadata(uid, reload=False)
             self._sidebar.refresh()
             self._sidebar.select_uid(uid)
+            # 「新建编号后自动激活」开关（默认关，复刻 oracle
+            # autoActivateOnNewSpecimen app.js:9396-9397）：开则保存即把此号设为
+            # 当前激活标本，省去手动点激活；关则不动激活（守 oracle 默认）。
+            if bool(getattr(self.ctx.settings, "auto_activate_on_new_specimen", False)):
+                self._on_sidebar_activate(uid)
         except Exception as exc:
             QMessageBox.warning(self, "保存失败", str(exc))
 
@@ -1166,14 +1214,23 @@ class WorkbenchView(BaseView):
         rec = crs.lookup_record(db, province, site, station, col_date)
         if not rec:
             return
-        current = self._metadata.current_values()
+        # 优先级 项目默认 < 站位记录 < 手动/已存：把「自动填」字段当作空看待，让站位
+        # 采集记录能覆盖项目默认坐标；受保护字段（用户手填/加载已存的非空值）保留真实
+        # 值 → autofill_values 视为已填、不再返回，从而不被覆盖。
+        auto = self._metadata.auto_fields()
+        current = {
+            k: ("" if (k in auto or not v.strip()) else v)
+            for k, v in self._metadata.current_values().items()
+        }
         current["photo_date"] = self._naming._photo_date.text()
         vals = crs.autofill_values(rec, current)
         if not vals:
             return
         if "photo_date" in vals and not self._naming._photo_date.text().strip():
             self._naming._photo_date.setText(str(vals["photo_date"]))
-        self._metadata.apply_autofill(vals)
+        # override_auto=True：覆盖项目默认（自动）坐标，但 apply_autofill 内部仍
+        # 跳过手动字段。
+        self._metadata.apply_autofill(vals, override_auto=True)
         # Persist for an already-saved specimen; a brand-new draft persists when
         # the user hits 保存 (fields are read straight off the panels then).
         if self._current_uid:
@@ -1230,7 +1287,11 @@ class WorkbenchView(BaseView):
             except Exception:
                 pass
 
-            result = scan_project(project_dir, db, attr=attr)
+            inc, res = self._resolve_capture_subdirs()
+            result = scan_project(
+                project_dir, db, attr=attr,
+                incoming_subdir=inc, results_subdir=res,
+            )
             self._monitor.load_scan(result)
         except FileNotFoundError:
             self._monitor.clear()
@@ -1248,13 +1309,31 @@ class WorkbenchView(BaseView):
             return
         try:
             from app.services.activation_service import activate as svc_activate
-            svc_activate(project_dir, db, uid)
+            result = svc_activate(project_dir, db, uid)
+            prev_uid = result.get("previous_uid") if isinstance(result, dict) else None
             self._sidebar.refresh()
             self._refresh_monitor()
             # Select and load the newly activated specimen
             self._sidebar.select_uid(uid)
             self._load_specimen(uid)
-            self._refresh_batch_header()
+            # 激活即置「拍摄中」：仅当此号尚无阶段（None/空/created）时默认 shooting，
+            # 已有更高阶段（已拍完/整理中/完成）保留不动 —— 对齐 oracle
+            # activateSpecimen 的 status: existing!=="created" ? existing : "shooting"
+            # (app.js:3531-3534) + collabUpdateTaskStatus(uid, status||shooting) (:3556)。
+            phase = self._collab_phase_for(uid)
+            if phase in (None, "", "created"):
+                self._set_phase(uid, "shooting")
+            else:
+                self._refresh_batch_header()
+            # 切换激活号提醒：旧号在其激活期间到达的照片仍归旧号，不会改归新号
+            # (oracle app.js:3517-3520)。用状态栏提示（非阻塞 toast 等价）。
+            if prev_uid and prev_uid != uid:
+                segs = prev_uid.split("-")
+                short = segs[3] if len(segs) > 3 else prev_uid
+                self._status_message(
+                    f"已切到新号。提醒：旧号「{short}」此前拍的照片仍归旧号"
+                    "（不推荐频繁切换）", 6000,
+                )
         except Exception as exc:
             QMessageBox.warning(self, "激活失败", str(exc))
 
@@ -1309,6 +1388,13 @@ class WorkbenchView(BaseView):
 
         try:
             manual_assign(project_dir, active_uid, [path])
+            # 主动归属 → 解除"取消归属"黑名单(P0)，否则取消后归不回
+            # (oracle server.js:4216-4219)。
+            try:
+                from app.services.grouping_service import remove_explicit_unassign
+                remove_explicit_unassign(db, path)
+            except Exception:
+                pass
             self._refresh_monitor()
         except Exception as exc:
             QMessageBox.warning(self, "手动归属失败", str(exc))

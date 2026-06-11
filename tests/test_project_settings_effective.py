@@ -96,7 +96,8 @@ def test_prefill_empty_when_no_settings(tmp_path):
     leaf = tmp_path / "blank"
     pf = effective_new_specimen_prefill(str(leaf))
     assert pf == {"province": "", "site": "", "stations": {},
-                  "collector": "", "photographer": "", "identifier": ""}
+                  "collector": "", "photographer": "", "identifier": "",
+                  "lon": "", "lat": "", "geo_area": ""}
 
 
 def test_stops_at_root(tmp_path):

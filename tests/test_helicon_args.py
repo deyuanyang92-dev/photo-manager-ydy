@@ -55,6 +55,10 @@ class TestFlagNaming:
         assert rp_args[0] == "-rp:8"
         assert not any(a.startswith("-r:") for a in args)
 
+    def test_radius_flag_preserves_high_fractional_values(self):
+        args = build_helicon_args([], "/out/r.tif", radius="22.5")
+        assert "-rp:22.5" in args
+
     def test_smoothing_flag_uses_sp_colon(self):
         """CRITICAL: flag is -sp:<value>, NOT -s: or --smoothing."""
         args = build_helicon_args([], "/out/r.tif", smoothing="4")

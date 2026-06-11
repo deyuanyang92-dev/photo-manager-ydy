@@ -306,6 +306,13 @@ class TestLeftPaneScroll:
                 return sa
         return None
 
+    def _body_splitter(self, v):
+        from PyQt6.QtWidgets import QSplitter
+        for sp in v.findChildren(QSplitter):
+            if sp.objectName() == "MapBodySplitter":
+                return sp
+        return None
+
     def test_left_scroll_exists_and_configured(self):
         from PyQt6.QtCore import Qt
         v = self._shown(700)
@@ -313,6 +320,16 @@ class TestLeftPaneScroll:
         assert ls is not None, "左栏缺少 LeftScroll 滚动容器"
         assert ls.widgetResizable() is True
         assert ls.verticalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAsNeeded
+
+    def test_left_and_map_are_horizontally_resizable(self):
+        v = self._shown(700)
+        splitter = self._body_splitter(v)
+        ls = self._left_scroll(v)
+        assert splitter is not None, "采集地图主体缺少横向 QSplitter"
+        assert splitter.count() == 2
+        assert splitter.widget(0) is ls
+        assert splitter.handleWidth() >= 10
+        assert ls.minimumWidth() < ls.maximumWidth()
 
     def test_style_scroll_exists_and_configured(self):
         from PyQt6.QtCore import Qt

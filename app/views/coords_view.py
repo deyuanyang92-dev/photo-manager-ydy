@@ -1404,6 +1404,10 @@ class CoordsView(BaseView):
         def _close() -> None:
             self._map_open = False
             self._map_selected_wgs = None
+            # Stop in-flight network threads (locate/search) BEFORE the widget is
+            # deleted, or a finishing worker calls back into freed C++ → crash.
+            if self._tile_map is not None:
+                self._tile_map.stop_threads()
             overlay.close()
             overlay.deleteLater()
             self._map_overlay = None
@@ -1459,12 +1463,20 @@ class CoordsView(BaseView):
 
         self._map_overlay = overlay
 
-        # Move marker if we already have parsed coords
+        # Modal is a child of an already-visible overlay → Qt won't auto-show it.
+        # Must show explicitly, or only the dimmed scrim appears (no map).
+        modal.show()
+        modal.raise_()
+
+        # Move marker if we already have parsed coords; otherwise IP-locate the
+        # current position so the map opens centred on where the user is.
+        from PyQt6.QtCore import QTimer
         if self._parsed:
             _lon = self._parsed["lon"]
             _lat = self._parsed["lat"]
-            from PyQt6.QtCore import QTimer
             QTimer.singleShot(100, lambda: self._tile_map and self._tile_map.set_marker(_lon, _lat))
+        else:
+            QTimer.singleShot(100, lambda: self._tile_map and self._tile_map.locate_current())
 
     def _reposition_modal(self, overlay: QWidget, modal: QFrame) -> None:
         ow, oh = overlay.width(), overlay.height()

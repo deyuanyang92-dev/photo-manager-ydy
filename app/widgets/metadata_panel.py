@@ -62,6 +62,11 @@ class MetadataPanel(QWidget):
         self.ctx = ctx
         self._uid: Optional[str] = None
         self._dirty = False
+        # 跟踪「由自动来源填入」的字段（项目默认/采集记录/反查地名）。
+        # 优先级：项目默认 < 站位采集记录 < 用户手动/已存。只有 _auto_fields 里的
+        # 字段才允许被更高优先级的自动来源覆盖；其余（用户手填、加载已存、空）一律
+        # 受保护或按空处理。见 apply_autofill。
+        self._auto_fields: set[str] = set()
         self._setup_ui()
 
     # ── UI ────────────────────────────────────────────────────────────────────
@@ -266,10 +271,14 @@ class MetadataPanel(QWidget):
         _set(self._geo_area, specimen.geo_area)
         _set(self._lon, str(specimen.lon) if specimen.lon is not None else "")
         _set(self._lat, str(specimen.lat) if specimen.lat is not None else "")
+        # 加载已存标本：这些是已确认/已入库的值，不属于「自动」，受保护——后续
+        # 选站位的采集记录不得覆盖（override_auto 只覆盖 _auto_fields 里的值）。
+        self._auto_fields = set()
 
     def clear(self) -> None:
         """Reset all fields; called when no specimen is selected."""
         self._uid = None
+        self._auto_fields = set()
         for edit in self._all_edits():
             edit.blockSignals(True)
             edit.clear()
@@ -290,13 +299,21 @@ class MetadataPanel(QWidget):
         }
         return {k: e.text() for k, e in edits.items()}
 
-    def apply_autofill(self, values: dict) -> None:
-        """Fill fields from a collection record, never overwriting non-empty ones.
+    def auto_fields(self) -> set:
+        """Fields whose current value came from an automatic source (overridable)."""
+        return set(self._auto_fields)
 
-        *values* is the subset returned by
-        ``collection_record_service.autofill_values`` (already filtered to empty
-        targets). Each filled field emits ``metadata_changed`` so the workbench
-        persists it through the normal autosave path.
+    def apply_autofill(self, values: dict, *, override_auto: bool = False) -> None:
+        """Auto-fill fields from a default/record source. Never clobbers a protected value.
+
+        优先级：项目默认 < 站位采集记录 < 用户手动/已存。
+        - ``override_auto=False``（默认，向后兼容旧行为）：只填**空**字段；任何非空
+          值（含此前自动值）都不动 —— 用于项目默认预填、首次采集记录填空。
+        - ``override_auto=True``：可覆盖空字段，**或**此前由自动来源填入（在
+          ``_auto_fields`` 中）的非空字段；用户手填/加载已存的值仍受保护 —— 用于
+          选定站位后用该站采集记录覆盖项目默认坐标。
+
+        被填的字段加入 ``_auto_fields``，并发 ``metadata_changed`` 让工作台 autosave。
         """
         edits = {
             "collector": self._collector, "photographer": self._photographer,
@@ -308,13 +325,16 @@ class MetadataPanel(QWidget):
                 continue
             edit = edits[key]
             if edit.text().strip():
-                continue  # double-guard: never clobber a user value
+                # 非空：仅当 override_auto 且该值本就是自动填的，才允许覆盖。
+                if not (override_auto and key in self._auto_fields):
+                    continue
             val = values[key]
             text = "" if val is None else str(val)
             edit.blockSignals(True)
             edit.setText(text)
             edit.blockSignals(False)
-            self._on_field_edited(key, text)
+            self._auto_fields.add(key)  # 程序填入 = 自动（可被更高优先级覆盖）
+            self._emit_change(key, text)
 
     # ── Internal ──────────────────────────────────────────────────────────────
 
@@ -425,8 +445,14 @@ class MetadataPanel(QWidget):
         ))
 
     def _on_field_edited(self, field: str, value: str) -> None:
-        # No save button: edits autosave via the metadata_changed signal
-        # (web scheduleRightPanelPersist, app.js:9098).
+        # 用户手动编辑路径（textEdited 只在人工输入时触发，setText 不触发）。
+        # 用户一动手 → 该字段不再是「自动」，此后任何自动来源都不得覆盖它。
+        self._auto_fields.discard(field)
+        self._emit_change(field, value)
+
+    def _emit_change(self, field: str, value: str) -> None:
+        # 仅发出变更信号触发 autosave（web scheduleRightPanelPersist app.js:9098），
+        # 不改手动/自动标记 —— 供自动填路径复用。
         self._dirty = True
         if self._uid:
             self.metadata_changed.emit(self._uid, field, value)

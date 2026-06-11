@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import (
     QDoubleSpinBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QPushButton,
     QSpinBox,
     QVBoxLayout,
@@ -87,15 +88,11 @@ class MarkerStylePanel(QWidget):
         self._size.valueChanged.connect(self._on_change)
         row("大小", self._size, help_text="站位点直径（地图像素）")
 
-        self._fill_btn = QPushButton()
-        self._fill_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._fill_btn.clicked.connect(lambda: self._pick_color("fill", self._fill_btn))
-        row("填充", self._fill_btn)
+        fill_color, self._fill_edit, self._fill_btn = self._color_input("fill")
+        row("填充", fill_color)
 
-        self._edge_btn = QPushButton()
-        self._edge_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._edge_btn.clicked.connect(lambda: self._pick_color("edge", self._edge_btn))
-        row("描边", self._edge_btn)
+        edge_color, self._edge_edit, self._edge_btn = self._color_input("edge")
+        row("描边", edge_color)
 
         self._edge_w = QDoubleSpinBox()
         self._edge_w.setRange(0.0, 6.0)
@@ -126,6 +123,44 @@ class MarkerStylePanel(QWidget):
         self._label_size.valueChanged.connect(self._on_change)
         self._row_label_size = row("字号", self._label_size)
 
+        footer = QHBoxLayout()
+        footer.setContentsMargins(0, 2, 0, 0)
+        footer.addStretch(1)
+        self._reset_btn = QPushButton("恢复默认")
+        self._reset_btn.setObjectName("Ghost")
+        self._reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._reset_btn.setToolTip("恢复默认站位标识样式")
+        self._reset_btn.clicked.connect(self.reset_style)
+        footer.addWidget(self._reset_btn)
+        v.addLayout(footer)
+
+    def _color_input(self, key: str) -> tuple[QWidget, QLineEdit, QPushButton]:
+        """Hex input + swatch button. Editing the text is faster than opening a dialog."""
+        wrap = QWidget()
+        h = QHBoxLayout(wrap)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(6)
+
+        edit = QLineEdit()
+        edit.setFixedHeight(30)
+        edit.setClearButtonEnabled(True)
+        edit.setPlaceholderText("#29b9ab" if key == "fill" else "#ffffff")
+        edit.setToolTip("输入颜色，例如 #29b9ab；也可以点右侧色块选择")
+        edit.editingFinished.connect(lambda k=key: self._on_color_edited(k))
+        h.addWidget(edit, 1)
+
+        btn = QPushButton()
+        btn.setFixedSize(36, 30)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setToolTip("选择颜色")
+        btn.clicked.connect(lambda _=False, k=key: self._pick_color(k))
+        h.addWidget(btn)
+
+        # Keep the widget visually flat inside form_row; the line edit and swatch
+        # provide the actual controls.
+        wrap.setObjectName(f"{key.title()}ColorInput")
+        return wrap, edit, btn
+
     # ── 状态同步 ──────────────────────────────────────────────────────────────
 
     def _load_into_controls(self) -> None:
@@ -139,8 +174,8 @@ class MarkerStylePanel(QWidget):
         idx = self._label_source.findData(s["label_source"])
         self._label_source.setCurrentIndex(idx if idx >= 0 else 0)
         self._label_size.setValue(int(s["label_size"]))
-        self._paint_btn(self._fill_btn, s["fill"])
-        self._paint_btn(self._edge_btn, s["edge"])
+        self._paint_color("fill", s["fill"])
+        self._paint_color("edge", s["edge"])
         self._block(False)
         self._sync_label_enabled()
 
@@ -152,25 +187,32 @@ class MarkerStylePanel(QWidget):
 
     def _block(self, on: bool) -> None:
         for w in (self._shape, self._size, self._edge_w, self._alpha,
-                  self._show_label, self._label_source, self._label_size):
+                  self._show_label, self._label_source, self._label_size,
+                  self._fill_edit, self._edge_edit):
             w.blockSignals(on)
 
-    def _paint_btn(self, btn: QPushButton, color: str) -> None:
-        btn.setText(color)
+    def _paint_color(self, key: str, color: str) -> None:
+        edit = self._fill_edit if key == "fill" else self._edge_edit
+        btn = self._fill_btn if key == "fill" else self._edge_btn
+        color = self._normal_color(color, _DEFAULT[key])
+        edit.setText(color)
+        edit.setProperty("invalid", False)
+        edit.style().unpolish(edit)
+        edit.style().polish(edit)
+        btn.setText("")
         btn.setStyleSheet(
-            f"background:{color};color:{self._contrast(color)};"
-            f"border:1px solid rgba(0,0,0,0.2);border-radius:4px;padding:3px 8px;"
+            f"background:{color};"
+            f"border:1px solid rgba(0,0,0,0.25);border-radius:4px;padding:0;"
         )
 
     @staticmethod
-    def _contrast(hex_color: str) -> str:
-        c = QColor(hex_color)
-        lum = 0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue()
-        return "#000000" if lum > 140 else "#ffffff"
+    def _normal_color(value: str, fallback: str) -> str:
+        col = QColor((value or "").strip())
+        return col.name() if col.isValid() else fallback
 
     # ── 事件 ──────────────────────────────────────────────────────────────────
 
-    def _pick_color(self, key: str, btn: QPushButton) -> None:
+    def _pick_color(self, key: str) -> None:
         cur = QColor(self._style.get(key, "#000000"))
         col = QColorDialog.getColor(
             cur, self, "选择颜色",
@@ -178,8 +220,21 @@ class MarkerStylePanel(QWidget):
         )
         if col.isValid():
             self._style[key] = col.name()
-            self._paint_btn(btn, col.name())
+            self._paint_color(key, col.name())
             self._emit()
+
+    def _on_color_edited(self, key: str) -> None:
+        edit = self._fill_edit if key == "fill" else self._edge_edit
+        raw = edit.text().strip()
+        col = QColor(raw)
+        if not col.isValid():
+            edit.setProperty("invalid", True)
+            edit.style().unpolish(edit)
+            edit.style().polish(edit)
+            return
+        self._style[key] = col.name()
+        self._paint_color(key, col.name())
+        self._emit()
 
     def _on_change(self, *_a) -> None:
         self._collect()
@@ -190,6 +245,12 @@ class MarkerStylePanel(QWidget):
         self._style.update({
             "shape": self._shape.currentText(),
             "size": self._size.value(),
+            "fill": self._normal_color(
+                self._fill_edit.text(), self._style.get("fill", _DEFAULT["fill"])
+            ),
+            "edge": self._normal_color(
+                self._edge_edit.text(), self._style.get("edge", _DEFAULT["edge"])
+            ),
             "edge_width": self._edge_w.value(),
             "alpha": self._alpha.value(),
             "show_label": self._show_label.isChecked(),
@@ -209,3 +270,7 @@ class MarkerStylePanel(QWidget):
     def set_style(self, style: dict) -> None:
         self._style = {**_DEFAULT, **(style or {})}
         self._load_into_controls()
+
+    def reset_style(self) -> None:
+        self.set_style(dict(_DEFAULT))
+        self._emit()

@@ -22,9 +22,10 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 
-from PyQt6.QtWidgets import QApplication, QPushButton
+from PyQt6.QtWidgets import QApplication, QMenu, QPushButton
 
 from app.app_context import AppContext
+from app.config.i18n import set_language
 from app.main_window import MainWindow
 from app.views.base_view import BaseView
 from app.views.registry import ALL_VIEWS
@@ -55,7 +56,9 @@ class _DummyView(BaseView):
 
 
 def _fresh_window() -> MainWindow:
+    set_language("zh")
     ctx = AppContext()
+    ctx.settings._qs.remove("ui/topbar_pinned_views")
     return MainWindow(ctx)
 
 
@@ -97,6 +100,64 @@ def test_nav_segments_are_exclusive():
     assert win._nav_buttons[1].isChecked()
 
 
+def test_default_nav_pins_keep_topbar_focused():
+    win = _fresh_window()
+    for cls in ALL_VIEWS:
+        win.register_view(cls)
+
+    visible = [btn.property("view_id") for btn in win._nav_buttons if not btn.isHidden()]
+    assert visible == [
+        "workbench",
+        "project_tree",
+        "collection_records",
+    ]
+
+
+def test_function_menu_groups_all_registered_views():
+    win = _fresh_window()
+    for cls in ALL_VIEWS:
+        win.register_view(cls)
+
+    menu = win._nav_menu_btn.menu()
+    assert isinstance(menu, QMenu)
+    assert [a.text() for a in menu.actions() if a.menu()] == [
+        "项目",
+        "分类",
+        "采集",
+        "工具",
+        "系统",
+        "固定到顶栏",
+    ]
+    project_menu = win._nav_group_menus["project"]
+    assert [a.text() for a in project_menu.actions()] == [
+        "照片工作区",
+        "最近工作区",
+        "项目树",
+        "项目汇总",
+    ]
+    tools_menu = win._nav_group_menus["tools"]
+    assert [a.text() for a in tools_menu.actions()] == [
+        "标签打印",
+        "采集地图",
+        "截图",
+    ]
+
+
+def test_nav_pin_menu_toggles_topbar_segments():
+    win = _fresh_window()
+    for cls in ALL_VIEWS:
+        win.register_view(cls)
+
+    overview_idx = next(i for i, cls in enumerate(win._view_classes) if cls.view_id == "overview")
+    assert win._nav_buttons[overview_idx].isHidden()
+
+    win._nav_pin_actions["overview"].setChecked(True)
+    assert not win._nav_buttons[overview_idx].isHidden()
+
+    win._nav_pin_actions["overview"].setChecked(False)
+    assert win._nav_buttons[overview_idx].isHidden()
+
+
 def test_navigate_to_shows_page_and_activates():
     win = _fresh_window()
     win.register_view(_DummyView)
@@ -126,6 +187,59 @@ def test_context_bar_with_project(tmp_path):
     assert "FJ-YGLZ-2026" in win._project_switcher.text()
     assert win._btn_compress.isEnabled()
     assert win._btn_helicon.isEnabled()
+
+
+# ── Screenshot lives in the grouped tools menu, Settings only configures it ─
+
+def test_screenshot_tool_lives_in_tools_menu():
+    win = _fresh_window()
+    for cls in ALL_VIEWS:
+        win.register_view(cls)
+
+    assert not hasattr(win, "_shot_btn")
+    assert win._shot_menu.title() == "截图"
+    assert [a.text() for a in win._shot_menu.actions()] == [
+        "区域截图    Alt+A",
+        "全屏截图",
+        "当前窗口",
+        "当前页面",
+    ]
+    assert win._settings_btn.toolTip() == "配置"
+
+
+def test_screenshot_not_duplicated_as_nav_segment():
+    win = _fresh_window()
+    for cls in ALL_VIEWS:
+        win.register_view(cls)
+
+    assert "截图" not in [btn.text() for btn in win._nav_buttons]
+    assert win._shot_menu.title() == "截图"
+
+
+def test_rebind_screenshot_shortcut_updates_tooltip():
+    win = _fresh_window()
+    win.rebind_screenshot_shortcut("Ctrl+Alt+S")
+    assert "Ctrl+Alt+S" in win._shot_actions["region"].text()
+
+
+def test_retranslate_ui_updates_shell_and_grouped_menu():
+    win = _fresh_window()
+    for cls in ALL_VIEWS:
+        win.register_view(cls)
+
+    set_language("en")
+    win.retranslate_ui()
+
+    assert win.windowTitle() == "Specimen Imaging"
+    assert win._brand.text() == "Specimen Imaging Manager"
+    assert win._nav_menu_btn.text() == "Toolbox"
+    assert win._nav_buttons[0].text() == "Photo Workspace"
+    assert [a.text() for a in win._nav_group_menus["tools"].actions()] == [
+        "Label Printing",
+        "Collection Map",
+        "Screenshot",
+    ]
+    assert win._shot_actions["region"].text() == "Region capture    Alt+A"
 
 
 # ── restore_state selects a default segment ────────────────────────────────

@@ -32,3 +32,15 @@ def default_screenshot_name(dt: datetime) -> str:
 def default_screenshot_path(project_dir: str | Path, dt: datetime) -> Path:
     """Full target path for a screenshot auto-saved into *project_dir*."""
     return screenshot_dir(project_dir) / default_screenshot_name(dt)
+
+
+def recent_screenshots(project_dir: str | Path, limit: int = 24) -> list[Path]:
+    """Return recent PNG screenshots for *project_dir*, newest first."""
+    if limit <= 0:
+        return []
+    directory = screenshot_dir(project_dir)
+    if not directory.exists():
+        return []
+    shots = [p for p in directory.iterdir() if p.is_file() and p.suffix.lower() == ".png"]
+    shots.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return shots[:limit]

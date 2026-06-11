@@ -234,13 +234,20 @@ class TaskStore:
             return task
 
     def update_status(self, uid: str, to_status: TaskStatus,
-                      assignee: Optional[str] = None) -> TaskRecord:
-        """Update task status.  Raises ValueError on invalid transition or unknown UID."""
+                      assignee: Optional[str] = None,
+                      force: bool = False) -> TaskRecord:
+        """Update task status.  Raises ValueError on invalid transition or unknown UID.
+
+        ``force=True`` bypasses the state machine — for explicit human marking
+        (sidebar phase dots / batch-bar pills), which mirrors the web oracle's
+        free assignment (app.js:3303).  Programmatic/auto callers keep the
+        default strict transition checking.
+        """
         with self._lock:
             task = self._tasks.get(uid)
             if task is None:
                 raise ValueError(f"Unknown UID: {uid}")
-            if not is_valid_transition(task.status, to_status):
+            if not force and not is_valid_transition(task.status, to_status):
                 raise ValueError(
                     f"Invalid transition: {task.status} → {to_status}"
                 )
@@ -1415,7 +1422,8 @@ class CollabService(QObject):
             logger.warning("assign_task failed uid=%s: %s", uid, exc)
 
     def update_task_status(self, uid: str, status: str,
-                           seed_status: Optional[str] = None) -> tuple[bool, str]:
+                           seed_status: Optional[str] = None,
+                           force: bool = False) -> tuple[bool, str]:
         """Set task *uid* to *status* — UI entry for the workbench phase pills.
 
         Mirrors oracle ensureCollabTask + /api/collab/tasks/update-status
@@ -1424,9 +1432,12 @@ class CollabService(QObject):
         restarts), then transitioned.  Never raises: returns (ok, message)
         so the caller can surface failures in the status bar.
 
-        Deliberate deviation from oracle: the local state machine
-        (is_valid_transition) stays enforced — out-of-order jumps return
-        (False, msg) instead of being applied.
+        ``force=True`` bypasses the local state machine so explicit human
+        marking (sidebar phase dots / batch-bar pills) can jump or step back
+        freely — this realigns with the oracle, which never restricts manual
+        status assignment (app.js:3303).  The default (force=False) keeps the
+        strict transition machine for programmatic/auto callers, so an
+        out-of-order jump returns (False, msg) instead of being applied.
         """
         if self.store.get(uid) is None:
             self.store.merge_from_peer([{
@@ -1442,7 +1453,7 @@ class CollabService(QObject):
         if task is not None and task.status is to_status:
             return (True, "ok")  # idempotent re-set, oracle allows it
         try:
-            self.store.update_status(uid, to_status)
+            self.store.update_status(uid, to_status, force=force)
         except ValueError as exc:
             return (False, str(exc))
         self.tasks_changed.emit()
