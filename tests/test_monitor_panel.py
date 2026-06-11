@@ -437,6 +437,46 @@ def _tiff_entry(name="FJ-XM-B2-DLC001-1-T95E-20260601.tif",
                      has_zip=has_zip, detail=detail)
 
 
+class TestTiffDelete:
+    """用户主权：TIFF 可手动删除（带确认框），覆盖旧「TIFF 永不删」UI 封锁。
+    自动整理/归档仍绝不删 TIFF（见 test_archive_service.test_tiff_never_deleted）。"""
+
+    def test_tiff_card_has_delete_action(self, qtbot):
+        card = _FileCard(_tiff_entry(path="/fake/r.tif"))
+        qtbot.addWidget(card)
+        seen = []
+
+        def fake_exec(self_menu, *a, **k):
+            seen.extend(x.text() for x in self_menu.actions())
+            return None
+
+        with patch.object(QMenu, "exec", fake_exec):
+            card._show_context_menu(QPoint(0, 0))
+        assert "删除此文件" in seen
+
+    def test_tiff_delete_confirmed_unlinks(self, qtbot, ctx, tmp_path, monkeypatch):
+        from PyQt6.QtWidgets import QMessageBox
+        tif = tmp_path / "r.tif"
+        tif.write_bytes(b"II*\x00")
+        panel = MonitorPanel(ctx)
+        qtbot.addWidget(panel)
+        monkeypatch.setattr(QMessageBox, "question",
+                            lambda *a, **k: QMessageBox.StandardButton.Yes)
+        panel._delete_paths([str(tif)], clear_selection=False)
+        assert not tif.exists()                       # 确认→真删
+
+    def test_tiff_delete_cancelled_keeps_file(self, qtbot, ctx, tmp_path, monkeypatch):
+        from PyQt6.QtWidgets import QMessageBox
+        tif = tmp_path / "r.tif"
+        tif.write_bytes(b"II*\x00")
+        panel = MonitorPanel(ctx)
+        qtbot.addWidget(panel)
+        monkeypatch.setattr(QMessageBox, "question",
+                            lambda *a, **k: QMessageBox.StandardButton.No)
+        panel._delete_paths([str(tif)], clear_selection=False)
+        assert tif.exists()                           # 取消→保留
+
+
 class TestSelectionAccessors:
     def test_selected_tiff_paths_returns_only_tiffs(self, panel):
         panel.load_scan(_scan(

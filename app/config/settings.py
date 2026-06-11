@@ -89,6 +89,20 @@ class AppSettings:
         )
 
     @property
+    def auto_organize_after_compose(self) -> bool:
+        # 「合成后自动整理归档」开关（默认关）。开 → 手动合成出 TIFF 后，自动把
+        # 源 JPG 打包压缩+命名+移 results。合成本身仍手动。
+        return str(
+            self._qs.value("workbench/auto_organize_after_compose", "false")
+        ).lower() == "true"
+
+    @auto_organize_after_compose.setter
+    def auto_organize_after_compose(self, val: bool) -> None:
+        self._qs.setValue(
+            "workbench/auto_organize_after_compose", "true" if val else "false"
+        )
+
+    @property
     def incoming_subdir(self) -> str:
         # 与 settings_view 的 _K_INCOMING_SUBDIR 同 key；用户可在设置页改 incoming
         # 目录名（不一定是 incoming-jpg）。监控的监听+扫描都应读这里。

@@ -49,8 +49,9 @@ def _make_ctx(project_dir: str | None = None, db: sqlite3.Connection | None = No
     ctx.current_project_dir = project_dir
     ctx.get_db.return_value = db
     ctx.settings = MagicMock()
-    # Default OFF so a bare MagicMock's truthiness doesn't auto-activate.
+    # Default OFF so a bare MagicMock's truthiness doesn't auto-trigger.
     ctx.settings.auto_activate_on_new_specimen = False
+    ctx.settings.auto_organize_after_compose = False
     return ctx
 
 
@@ -730,14 +731,17 @@ class TestDeleteWithTiffWarning:
             w._on_delete_clicked()
         assert not os.path.exists(jpg_path), "JPG must be deleted after confirm"
 
-    def test_tiff_selection_blocked(self, tmp_path):
-        """_on_delete_clicked must show warning and abort when TIFFs are selected."""
+    def test_tiff_delete_asks_confirm_then_deletes(self, tmp_path):
+        """TIFF 可删（用户推翻旧「TIFF 永不删」UI 封锁）：删前弹确认框，确认才删。"""
         from app.widgets.monitor_panel import MonitorPanel, _FileCard
         ctx = _make_ctx()
         w = MonitorPanel(ctx)
 
+        tif = tmp_path / "result.tif"
+        tif.write_bytes(b"II*\x00")
+
         class _Entry:
-            path = str(tmp_path / "result.tif")
+            path = str(tif)
             kind = "tiff"
             name = "result.tif"
             attributed_specimen_id = None
@@ -750,9 +754,11 @@ class TestDeleteWithTiffWarning:
 
         from unittest.mock import patch
         from PyQt6.QtWidgets import QMessageBox
-        with patch.object(QMessageBox, 'warning') as mock_warn:
+        with patch.object(QMessageBox, "question",
+                          return_value=QMessageBox.StandardButton.Yes) as mq:
             w._on_delete_clicked()
-            mock_warn.assert_called_once()  # must warn about TIFF
+            mq.assert_called_once()      # 弹了确认框
+        assert not tif.exists()          # 确认 → 真删
 
     def _make_fake_entry(self, path: str, kind: str = "jpg"):
         """Return a minimal fake FileEntry-like object."""
@@ -2174,6 +2180,41 @@ class TestFileSystemWatcher:
         w, _, db = self._make_view(tmp_path)
         assert not hasattr(w, "_auto_refresh_timer")
         db.close()
+
+
+# ── 场景6/7：合成后自动整理归档（开关，默认关；合成仍手动） ────────────────────
+
+
+class TestAutoOrganizeAfterCompose:
+    """合成永远手动；开关「合成后自动整理归档」打开时，合成成功后自动把源 JPG
+    打包压缩+命名+移 results（= 自动跑整理）。默认关。"""
+
+    def _make_view(self, tmp_path):
+        from app.views.workbench_view import WorkbenchView
+        project_dir = str(tmp_path / "proj")
+        Path(project_dir, "_data").mkdir(parents=True)
+        db = _make_db(str(tmp_path / "proj" / "_data" / "project.db"))
+        ctx = _make_ctx(project_dir=project_dir, db=db)
+        ctx.collab_service = None
+        return WorkbenchView(ctx), ctx, db
+
+    def test_auto_organize_runs_when_toggle_on(self, tmp_path, monkeypatch):
+        w, ctx, db = self._make_view(tmp_path)
+        ctx.settings.auto_organize_after_compose = True
+        called = []
+        monkeypatch.setattr(w, "_on_organise_requested",
+                            lambda u, g: called.append((u, g)))
+        w._maybe_auto_organize("U1", 0)
+        assert called == [("U1", 0)]
+
+    def test_no_auto_organize_when_toggle_off(self, tmp_path, monkeypatch):
+        w, ctx, db = self._make_view(tmp_path)
+        ctx.settings.auto_organize_after_compose = False
+        called = []
+        monkeypatch.setattr(w, "_on_organise_requested",
+                            lambda u, g: called.append((u, g)))
+        w._maybe_auto_organize("U1", 0)
+        assert called == []
 
 
 # ── 场景3：incoming/results 子目录可配置 + 新拍JPG 遗留兼容 ────────────────────

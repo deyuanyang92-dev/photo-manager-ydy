@@ -271,6 +271,8 @@ class _FileCard(QFrame):
             else:
                 unassign_action.setEnabled(False)
 
+        # 删除此文件：JPG 和 TIFF 都给（TIFF 删除带确认框，见 _delete_paths）。
+        if kind in ("jpg", "tiff"):
             menu.addSeparator()
             delete_action = menu.addAction("删除此文件")
             delete_action.triggered.connect(lambda: self.delete_requested.emit(path))
@@ -862,34 +864,40 @@ class MonitorPanel(QWidget):
         tiff_paths = [p for p in paths if p.lower().endswith((".tif", ".tiff"))]
         jpg_paths  = [p for p in paths if p and not p.lower().endswith((".tif", ".tiff"))]
 
-        # Hard rule: TIFF 永远保留 — abort with warning
+        if not tiff_paths and not jpg_paths:
+            QMessageBox.information(self, "删除", "请先选中要删除的文件。")
+            return
+
+        # TIFF 可删（用户主权，覆盖旧「TIFF 永不删」红线），但因 TIFF 是无损母片、
+        # 删除不可恢复 → 单独弹确认框；JPG 同样确认。各自确认、删各自确认通过的。
+        to_delete: list[str] = []
         if tiff_paths:
-            QMessageBox.warning(
-                self, "无法删除 TIFF",
-                f"选中包含 {len(tiff_paths)} 个 TIFF 成片。\n"
-                "TIFF 永远保留，只有 JPG 原片可以删除。\n"
-                "请取消选择 TIFF 后再操作。"
+            reply = QMessageBox.question(
+                self, "确认删除 TIFF",
+                f"确认删除 {len(tiff_paths)} 个 TIFF 成片？\n"
+                "TIFF 是无损母片，删除后不可恢复。",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
             )
-            return
-
-        if not jpg_paths:
-            QMessageBox.information(self, "删除", "请先选中要删除的 JPG。")
-            return
-
-        reply = QMessageBox.question(
-            self, "确认删除",
-            f"确认删除 {len(jpg_paths)} 张 JPG？\n"
-            "此操作直接从磁盘删除原片，不可恢复。",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
+            if reply == QMessageBox.StandardButton.Yes:
+                to_delete += tiff_paths
+        if jpg_paths:
+            reply = QMessageBox.question(
+                self, "确认删除",
+                f"确认删除 {len(jpg_paths)} 张 JPG？\n"
+                "此操作直接从磁盘删除原片，不可恢复。",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                to_delete += jpg_paths
+        if not to_delete:
             return
 
         import os as _os
         errors: list[str] = []
         deleted: list[str] = []
-        for p in jpg_paths:
+        for p in to_delete:
             try:
                 if _os.path.isfile(p):
                     _os.unlink(p)

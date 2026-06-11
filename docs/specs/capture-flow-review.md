@@ -115,5 +115,42 @@
 - `app/views/workbench_view.py`：`_on_assign_jpg`(解除黑名单)。
 - `tests/test_monitor_panel.py`：`TestContextMenuUnassign` 新增 4 例。
 
-## 场景 6-13：待核对
+## 场景6/7：分组 + 合成后自动整理 ✔（部分）
+
+### 裁决
+- ✅ 手动分组（建组/加照片/改角度标签/删组/合成）可用。
+- ⚠️ **`groupingAutoWatch` 死设置**：设置页有「JPG 入库后自动分组处理」勾+模式，但全软件
+  无人读 → 开=没开（oracle `app.js:3702,6175` 会自动加组+按模式处理）。**未动**（用户把
+  "自动"重新定义为下方「合成后自动整理」）；保留为待办（要么按 oracle 接，要么删）。
+- ➕ **合成后自动整理归档（新开关，默认关）**：用户需求——合成永远手动（软件无法判断哪些
+  JPG 该合成）；开关开时，手动合成出 TIFF 后**自动**把源 JPG 打包压缩(JXL+ZIP)+命名+移
+  results（= 自动跑 `_on_organise_requested`）。**绝不自动删 TIFF**。
+  - `settings.py` `auto_organize_after_compose` 属性 + `settings_view` 复选框。
+  - `workbench_view._maybe_auto_organize`，合成成功后调用。
+  - 测试 `TestAutoOrganizeAfterCompose`（开/关 2 例）。
+
+## TIFF 手动删除 ✔（用户推翻「TIFF 永不删」红线）
+
+- 旧：TIFF 卡右键无删除项（写死 `monitor_panel.py if kind=="jpg"`）+ `_delete_paths` 选中 TIFF
+  即警告中止 → 删不掉。
+- 新：TIFF 卡加「删除此文件」；`_delete_paths` 对 TIFF 单独弹确认框（无损母片不可恢复）后删。
+  **仅手动 + 确认**；归档/整理等自动流程仍绝不删 TIFF（`test_archive_service.test_tiff_never_deleted`
+  保留）。CLAUDE.md 红线 #1 已改措辞。测试 `TestTiffDelete`（菜单/确认删/取消保留 3 例）。
+
+## 场景8：无号合成 ✔（已核对 + 已修写死）
+
+### 裁决
+- ✅ 选中 JPG → Helicon 堆叠 → 输出到 incoming + 自动命名（自由合成-N）—— 忠实 oracle
+  `freeComposeSelected`（`app.js:7982-8010`，toIncoming）。
+- ❌→✔ **incoming/results 写死（写入/移动侧）**：之前只修了监控"看"的那半；workbench 里
+  添加照片/无号合成/有号合成/整理移动 共 ~8 处仍写死 `incoming-jpg`/`results`。最伤的是整理
+  移动用 `"incoming-jpg" in path` 判断 → 项目用 `新拍JPG` 时 TIFF/ZIP **移不到 results**。
+  **修**：全部改用 `_resolve_capture_subdirs()`；移动判断改 `inc in normpath(p).split(sep)`
+  （路径组件匹配，认 incoming-jpg / 新拍JPG / 自定义）。
+
+### 改动
+- `app/views/workbench_view.py`：`_on_add_jpg_files` / `_on_free_compose` / `_on_compose_requested`
+  / `_on_organise_requested`（含 `_in_incoming` 辅助 + 同名 ZIP 检查 + archive_zip 路径）。
+
+## 场景 9-13：待核对
 （逐个进行；每场景核对→注释→报告疑点→确认→修复→回填本表。）

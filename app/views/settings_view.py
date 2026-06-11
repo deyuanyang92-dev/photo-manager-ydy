@@ -92,6 +92,7 @@ _K_WB_AUTO_WATCH = "workbench/auto_watch"
 _K_WB_AUTO_ACTIVATE_NEW = "workbench/auto_activate_new"
 _K_WB_GROUPING_AUTO_WATCH = "workbench/grouping_auto_watch"
 _K_WB_GROUPING_AUTO_WATCH_MODE = "workbench/grouping_auto_watch_mode"
+_K_WB_AUTO_ORGANIZE = "workbench/auto_organize_after_compose"
 _K_WB_FILE_VIEW_MODE = "workbench/file_view_mode"
 
 # ── Global UI settings (mirrors renderGlobalSettings) ────────────────────────
@@ -780,6 +781,16 @@ class SettingsView(BaseView):
         self._grouping_auto_watch_chk.stateChanged.connect(self._save_workbench)
         watch_v.addWidget(self._grouping_auto_watch_chk)
 
+        # 合成后自动整理归档：手动合成出 TIFF 后，自动把源 JPG 打包压缩+命名+移
+        # results。合成本身仍手动（软件无法判断哪些 JPG 该合成）。默认关。
+        self._auto_organize_chk = QCheckBox("合成后自动整理归档（源 JPG 打包压缩→命名→移 results）")
+        self._auto_organize_chk.setChecked(False)
+        self._auto_organize_chk.setToolTip(
+            "打开后：你手动合成出 TIFF，软件自动整理归档（不自动删 TIFF）。"
+        )
+        self._auto_organize_chk.stateChanged.connect(self._save_workbench)
+        watch_v.addWidget(self._auto_organize_chk)
+
         tab.body.addWidget(watch_box)
         tab.body.addSpacing(12)
 
@@ -1298,6 +1309,9 @@ class SettingsView(BaseView):
         self._grouping_auto_watch_chk.setChecked(
             str(qs.value(_K_WB_GROUPING_AUTO_WATCH, "false")).lower() == "true"
         )
+        self._auto_organize_chk.setChecked(
+            str(qs.value(_K_WB_AUTO_ORGANIZE, "false")).lower() == "true"
+        )
         mode_map = {"compose": 0, "organize": 1, "compose+organize": 2}
         mode_val = str(qs.value(_K_WB_GROUPING_AUTO_WATCH_MODE, "compose+organize"))
         self._grouping_mode_combo.setCurrentIndex(mode_map.get(mode_val, 2))
@@ -1490,6 +1504,10 @@ class SettingsView(BaseView):
         qs.setValue(
             _K_WB_GROUPING_AUTO_WATCH,
             "true" if self._grouping_auto_watch_chk.isChecked() else "false",
+        )
+        qs.setValue(
+            _K_WB_AUTO_ORGANIZE,
+            "true" if self._auto_organize_chk.isChecked() else "false",
         )
         mode_vals = ["compose", "organize", "compose+organize"]
         idx = self._grouping_mode_combo.currentIndex()

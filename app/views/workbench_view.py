@@ -1454,7 +1454,8 @@ class WorkbenchView(BaseView):
         if not paths:
             return
 
-        incoming_dir = os.path.join(project_dir, "incoming-jpg")
+        inc, _res = self._resolve_capture_subdirs()
+        incoming_dir = os.path.join(project_dir, inc)
         os.makedirs(incoming_dir, exist_ok=True)
         import shutil
         errors = []
@@ -1500,7 +1501,8 @@ class WorkbenchView(BaseView):
         if not ok:
             return
 
-        incoming_dir = os.path.join(project_dir, "incoming-jpg")
+        inc, _res = self._resolve_capture_subdirs()
+        incoming_dir = os.path.join(project_dir, inc)
         os.makedirs(incoming_dir, exist_ok=True)
         output_name = _free_compose_output_name(incoming_dir, user_name.strip() or None)
         output_path = os.path.join(incoming_dir, output_name)
@@ -1513,7 +1515,7 @@ class WorkbenchView(BaseView):
         def _on_finished(tiff_path):
             if os.path.isfile(output_path):
                 QMessageBox.information(self, "无号合成完成",
-                                        f"TIFF 已保存到 incoming-jpg/：\n{output_name}")
+                                        f"TIFF 已保存到 {inc}/：\n{output_name}")
                 self._refresh_monitor()
             else:
                 QMessageBox.warning(self, "无号合成失败", "Helicon 执行后未生成输出文件。")
@@ -1640,10 +1642,12 @@ class WorkbenchView(BaseView):
                 )
                 return
 
-            # Determine output path — TIFF lands in incoming-jpg/ first;
+            # Determine output path — TIFF lands in incoming first;
             # organize step moves it to results/ (oracle app.js:4336,8867).
-            results_dir = os.path.join(project_dir, "results")
-            incoming_dir = os.path.join(project_dir, "incoming-jpg")
+            # 用项目配置的 incoming/results 子目录，而非写死（用户可改目录名）。
+            inc, res = self._resolve_capture_subdirs()
+            results_dir = os.path.join(project_dir, res)
+            incoming_dir = os.path.join(project_dir, inc)
             os.makedirs(incoming_dir, exist_ok=True)
 
             preview = organize_preview(db, uid, results_dir, incoming_dir)
@@ -1705,6 +1709,9 @@ class WorkbenchView(BaseView):
                     self._refresh_results_column(uid, grouping)
                     self._on_helicon_finished(uid)
                     QMessageBox.information(self, "合成完成", f"TIFF 已生成：{output_name}")
+                    # 合成永远手动；但若「合成后自动整理」开关开 → 自动把源 JPG
+                    # 打包压缩+命名+移 results（省掉手动点[整理]）。开关默认关。
+                    self._maybe_auto_organize(uid, group.group_index)
 
                 def _on_failed(msg: str):
                     if msg != "用户取消":
@@ -1823,6 +1830,18 @@ class WorkbenchView(BaseView):
         worker.start()
         self._helicon_progress = progress  # keep reference alive
 
+    def _maybe_auto_organize(self, uid: str, group_index: int) -> None:
+        """合成成功后的自动整理钩子。
+
+        「合成后自动整理归档」开关（`auto_organize_after_compose`，默认关）打开时，
+        直接复用手动整理入口 `_on_organise_requested`：把这组源 JPG 打包压缩
+        (JPG→JXL+ZIP) + 命名 + 移到 results/。合成本身仍是手动（软件无法判断哪些
+        JPG 该合成）。整理的安全闸（整理门 / 同名 ZIP 覆盖确认）照常生效；常见情况
+        （标本激活、无同名冲突）会直通无弹窗。绝不在此自动删 TIFF。
+        """
+        if bool(getattr(self.ctx.settings, "auto_organize_after_compose", False)):
+            self._on_organise_requested(uid, group_index)
+
     def _on_organise_requested(self, uid: str, group_index: int) -> None:
         """Organise (archive) the composed group.
 
@@ -1890,10 +1909,13 @@ class WorkbenchView(BaseView):
             except Exception:
                 pass
 
+            # 用项目配置的 incoming/results 子目录（用户可改目录名 / 遗留 新拍JPG）。
+            inc, res = self._resolve_capture_subdirs()
+
             # ── Collision guard: if ZIP already exists at the target path,  #cursor
             #    warn and let user choose overwrite / skip. ──────────────
             tiff_stem = Path(group.composed_tiff_path).stem
-            results_dir_for_check = str(Path(project_dir) / "results")
+            results_dir_for_check = str(Path(project_dir) / res)
             existing_zip = os.path.join(results_dir_for_check, tiff_stem + ".zip")
             if os.path.isfile(existing_zip):
                 reply_col = QMessageBox.question(
@@ -1916,15 +1938,22 @@ class WorkbenchView(BaseView):
             )
 
             if result.ok:
-                # ── Move TIFF + ZIP from incoming-jpg/ to results/ (oracle app.js:4336)
+                # ── Move TIFF + ZIP from incoming → results/ (oracle app.js:4336)
                 import shutil
-                _results_dir = os.path.join(project_dir, "results")
+                _results_dir = os.path.join(project_dir, res)
                 os.makedirs(_results_dir, exist_ok=True)
                 _tiff_src = group.composed_tiff_path
                 _zip_src = result.zip_path
                 _moved_tiff = _tiff_src
+
+                def _in_incoming(p: str) -> bool:
+                    # 路径里出现解析后的 incoming 子目录名（incoming-jpg / 新拍JPG /
+                    # 自定义）即视为在 incoming，需移到 results。比写死 "incoming-jpg"
+                    # 子串更稳（项目改了目录名也认）。
+                    return bool(p) and inc in os.path.normpath(p).split(os.sep)
+
                 for _src in [_tiff_src, _zip_src]:
-                    if _src and os.path.isfile(_src) and "incoming-jpg" in _src:
+                    if _src and os.path.isfile(_src) and _in_incoming(_src):
                         _dst = os.path.join(_results_dir, os.path.basename(_src))
                         if not os.path.exists(_dst):
                             shutil.move(_src, _dst)
@@ -1938,7 +1967,7 @@ class WorkbenchView(BaseView):
                 group.composed_tiff_path = _moved_tiff  # update to results/ path
                 group.archive_zip = (
                     os.path.join(_results_dir, os.path.basename(result.zip_path))
-                    if "incoming-jpg" in result.zip_path
+                    if _in_incoming(result.zip_path)
                     else result.zip_path
                 )
                 group.updated_at = now
