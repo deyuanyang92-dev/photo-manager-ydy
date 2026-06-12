@@ -2783,6 +2783,19 @@ class TestAdhocGrouping:
         assert not w._grouping._toolbar_widget.isHidden()
         db.close()
 
+    def test_open_grouping_without_project_guides_to_open_project(self, tmp_path):
+        """无项目(db=None):不绑定临时编号,控件仍隐藏,提示语指向『项目树』,
+        不再误导成『先填编号』。"""
+        from app.views.workbench_view import WorkbenchView
+        ctx = _make_ctx(project_dir=None, db=None)
+        w = WorkbenchView(ctx)
+        w._current_uid = None
+        w._on_open_grouping()
+        assert w._grouping._uid is None
+        assert w._grouping._add_btn.isHidden()
+        assert w._grouping._toolbar_widget.isHidden()
+        assert "项目" in w._grouping._empty_lbl.text()
+
     def test_resolve_output_name_adhoc_defaults_to_group_seq(self, tmp_path):
         from app.services.grouping_service import ADHOC_GROUPING_UID, Group
         w, ctx, db = self._build_adhoc(tmp_path)
@@ -2902,3 +2915,39 @@ class TestAdhocGrouping:
     def _patch_helicon_present(self, monkeypatch):
         import app.services.helicon_service as hs
         monkeypatch.setattr(hs, "detect_helicon", lambda: "/fake/HeliconFocus.exe")
+
+
+class TestRestoreLastProject:
+    """启动自动恢复上次项目 — 免得每次重启回到空项目。只恢复有效 workspace。"""
+
+    def test_restores_valid_workspace(self, tmp_path):
+        import main
+        (tmp_path / "_data").mkdir()
+        (tmp_path / "_data" / "project.db").write_bytes(b"x")
+        ctx = MagicMock()
+        ctx.settings.last_project_dir = str(tmp_path)
+        win = MagicMock()
+        assert main._restore_last_project(ctx, win) is True
+        assert ctx.current_project_dir == str(tmp_path)
+        win.refresh_context_bar.assert_called_once()
+
+    def test_skips_invalid_dir(self, tmp_path):
+        import main
+        ctx = MagicMock()
+        ctx.settings.last_project_dir = str(tmp_path / "nope")
+        win = MagicMock()
+        assert main._restore_last_project(ctx, win) is False
+
+    def test_skips_non_workspace_dir(self, tmp_path):
+        import main
+        ctx = MagicMock()
+        ctx.settings.last_project_dir = str(tmp_path)  # 无 _data/project.db
+        win = MagicMock()
+        assert main._restore_last_project(ctx, win) is False
+
+    def test_skips_when_no_last_project(self, tmp_path):
+        import main
+        ctx = MagicMock()
+        ctx.settings.last_project_dir = None
+        win = MagicMock()
+        assert main._restore_last_project(ctx, win) is False

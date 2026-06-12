@@ -14,6 +14,31 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+def _restore_last_project(ctx, win) -> bool:
+    """启动时恢复上次打开的项目。
+
+    只在 last_project_dir 仍是一个有效 workspace(目录存在 + 有 _data/project.db)
+    时恢复;否则原样空项目(不强行打开失效/被删的路径,免得启动卡死或报错)。
+    复刻手动打开项目的动作(main_window._open_project_dialog):设 current_project_dir
+    + 刷新顶栏。返回是否成功恢复。
+    """
+    try:
+        last = ctx.settings.last_project_dir
+    except Exception:
+        return False
+    if not last or not os.path.isdir(last):
+        return False
+    if not os.path.isfile(os.path.join(last, "_data", "project.db")):
+        return False  # 不是 workspace(没库)→ 不恢复
+    try:
+        ctx.current_project_dir = last
+        if hasattr(win, "refresh_context_bar"):
+            win.refresh_context_bar()
+        return True
+    except Exception:
+        return False
+
+
 def _writable_runtime_dir() -> Path:
     """A per-user runtime/cache dir that the *current* user can always write.
 
@@ -280,6 +305,9 @@ def main() -> int:
     # Register all 14 module views
     for view_cls in ALL_VIEWS:
         win.register_view(view_cls)
+
+    # 启动自动恢复上次项目——免得每次重启都回到 "(未选)" 空项目,用户得重选。
+    _restore_last_project(ctx, win)
 
     # Restore last window state + nav selection
     win.restore_state()

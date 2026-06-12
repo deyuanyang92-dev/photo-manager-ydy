@@ -1143,7 +1143,18 @@ class WorkbenchView(BaseView):
                 or ADHOC_GROUPING_UID  # 连编号都没有 → 临时分组,输出默认 组序.tif
             )
             db = self.ctx.get_db()
-            if uid and db:
+            if not db:
+                # 没开项目 → 照片/合成 TIFF/归档 ZIP 都没地方落,无法分组。
+                # 明确引导去『项目树』,别再误导成"先填编号"(填了也没用)。
+                try:
+                    self._grouping._empty_lbl.setText(
+                        "请先在顶部『项目树』打开一个项目。\n"
+                        "照片、合成 TIFF、归档 ZIP 都存放在项目目录里——"
+                        "没有项目就无处分组/合成。")
+                    self._grouping._empty_lbl.show()
+                except Exception:
+                    pass
+            elif uid:
                 try:
                     from app.services.grouping_service import load_grouping
                     self._grouping.load_grouping(uid, load_grouping(db, uid))
