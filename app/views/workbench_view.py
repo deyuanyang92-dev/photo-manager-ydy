@@ -1121,7 +1121,20 @@ class WorkbenchView(BaseView):
         return dlg
 
     def _on_open_grouping(self) -> None:
-        """Open (or re-focus) the grouping/compose popup — web 分组工具 toggle."""
+        """Open (or re-focus) the grouping/compose popup — web 分组工具 toggle.
+
+        智能：打开时若分组面板还没绑定标本，自动载入当前选中 / 激活的编号，这样
+        「新组」按钮立即可用、能直接添加组1/组2（无需先在左侧点一下）。
+        """
+        if not getattr(self._grouping, "_uid", None):
+            uid = self._current_uid or self._get_active_uid()
+            db = self.ctx.get_db()
+            if uid and db:
+                try:
+                    from app.services.grouping_service import load_grouping
+                    self._grouping.load_grouping(uid, load_grouping(db, uid))
+                except Exception:
+                    pass
         dlg = self._grouping_dialog
         dlg.show()
         dlg.raise_()

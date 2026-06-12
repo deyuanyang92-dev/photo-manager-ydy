@@ -732,12 +732,16 @@ class GroupingPanel(QWidget):
                 item.widget().deleteLater()
 
     def _add_group(self) -> None:
-        """Add a new empty draft group in memory and emit grouping_changed."""
+        """新增一个空草稿组，自动标「角度N」（web 同款 angleLabel:"角度"+n）。"""
         if not self._grouping or not self._uid:
             return
         from app.services.grouping_service import Group
         new_index = max((g.group_index for g in self._grouping.groups), default=-1) + 1
-        new_group = Group(group_index=new_index, angle_label="", jpg_paths=[])
+        new_group = Group(
+            group_index=new_index,
+            angle_label=f"角度{new_index + 1}",  # 角度1 / 角度2 …，省手敲
+            jpg_paths=[],
+        )
         self._grouping.groups.append(new_group)
         self._rebuild()
         self.grouping_changed.emit()

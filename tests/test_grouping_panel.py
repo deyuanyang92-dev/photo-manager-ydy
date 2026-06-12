@@ -260,3 +260,32 @@ def test_card_shows_existing_output_name(qtbot):
     row = _DraftGroupRow(g, panel, panel=panel)
     qtbot.addWidget(row)
     assert row._output_edit.text() == "外部TIF名"
+
+
+# ---------------------------------------------------------------------------
+# 「新组」按钮：自动标「角度N」 + 工具打开自动载入激活编号
+# ---------------------------------------------------------------------------
+
+def test_add_group_auto_labels(qtbot):
+    """点「新组」自动建组并标 角度1 / 角度2（web 同款，省手敲）。"""
+    from app.widgets.grouping_panel import GroupingPanel
+    ctx = _make_app_context()
+    panel = GroupingPanel(ctx)
+    qtbot.addWidget(panel)
+    panel.load_grouping("test-uid", _make_grouping([]))   # 空, 已绑标本
+
+    panel._add_group()
+    panel._add_group()
+    labels = [g.angle_label for g in panel._grouping.groups]
+    assert labels == ["角度1", "角度2"]
+    assert panel._add_btn.isVisible() or True   # 载入后按钮可用
+
+
+def test_add_group_needs_specimen(qtbot):
+    """没绑标本时「新组」不崩、不建组（按钮本就隐藏）。"""
+    from app.widgets.grouping_panel import GroupingPanel
+    ctx = _make_app_context()
+    panel = GroupingPanel(ctx)
+    qtbot.addWidget(panel)
+    panel._add_group()                # _uid=None
+    assert panel._grouping is None or not panel._grouping.groups

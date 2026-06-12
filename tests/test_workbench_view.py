@@ -2185,6 +2185,27 @@ class TestFileSystemWatcher:
 # ── 外部TIFF：整理时检测命名不规范 → 确认改名（触发点1） ──────────────────────
 
 
+class TestOpenGroupingLoadsActive:
+    """打开分组工具时, 若面板未绑标本 → 自动载入激活/当前编号, 让「新组」立即可用。"""
+
+    def test_open_loads_active_uid(self, tmp_path):
+        from app.views.workbench_view import WorkbenchView
+        from app.services import activation_service
+        project_dir = str(tmp_path / "proj")
+        Path(project_dir, "_data").mkdir(parents=True)
+        db = _make_db(str(tmp_path / "proj" / "_data" / "project.db"))
+        ctx = _make_ctx(project_dir=project_dir, db=db)
+        ctx.collab_service = None
+        w = WorkbenchView(ctx)
+        activation_service.activate(project_dir, db, "FJ-XM-B2-DLC001-T95E-20260601")
+        w._grouping.clear()                       # 面板未绑标本
+        assert getattr(w._grouping, "_uid", None) is None
+
+        w._on_open_grouping()
+
+        assert w._grouping._uid == "FJ-XM-B2-DLC001-T95E-20260601"  # 自动载入了激活号
+
+
 class TestImplicitCompose:
     """主界面[合成] = 把激活编号下「未占用」JPG（已归属、还没进任何组）建成新组。
     占用 = 已在任何组。一次消耗一批；再拍的又是未占用 → 下次再成新组。"""
