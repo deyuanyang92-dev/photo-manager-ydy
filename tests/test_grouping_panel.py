@@ -227,3 +227,36 @@ def test_cross_group_move_emits_grouping_changed(qtbot):
             dst_group_index=1,
             jpg_path="/p/a.jpg",
         )
+
+
+# ---------------------------------------------------------------------------
+# 每组「输出 TIF」可编辑命名（output_name）
+# ---------------------------------------------------------------------------
+
+def test_output_name_edit_updates_group(qtbot):
+    """编辑某组输出命名 → group.output_name 更新；空=回到自动(None)。"""
+    from app.widgets.grouping_panel import GroupingPanel
+    ctx = _make_app_context()
+    panel = GroupingPanel(ctx)
+    qtbot.addWidget(panel)
+    panel.load_grouping("test-uid", _make_grouping([{"index": 0, "jpgs": ["/p/a.jpg", "/p/b.jpg"]}]))
+
+    panel._on_output_name_changed(0, "我的输出名")
+    g = panel._grouping.groups[0]
+    assert g.output_name == "我的输出名"
+
+    panel._on_output_name_changed(0, "   ")          # 空白 → None(自动)
+    assert panel._grouping.groups[0].output_name is None
+
+
+def test_card_shows_existing_output_name(qtbot):
+    """已有 output_name 的组, 卡片输出框显示它。"""
+    from app.widgets.grouping_panel import GroupingPanel, _DraftGroupRow
+    from app.services.grouping_service import Group
+    ctx = _make_app_context()
+    panel = GroupingPanel(ctx)
+    qtbot.addWidget(panel)
+    g = Group(group_index=0, jpg_paths=["/p/a.jpg"], output_name="外部TIF名")
+    row = _DraftGroupRow(g, panel, panel=panel)
+    qtbot.addWidget(row)
+    assert row._output_edit.text() == "外部TIF名"

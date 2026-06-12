@@ -152,5 +152,35 @@
 - `app/views/workbench_view.py`：`_on_add_jpg_files` / `_on_free_compose` / `_on_compose_requested`
   / `_on_organise_requested`（含 `_in_incoming` 辅助 + 同名 ZIP 检查 + archive_zip 路径）。
 
-## 场景 9-13：待核对
-（逐个进行；每场景核对→注释→报告疑点→确认→修复→回填本表。）
+## 场景9：整理 + 归档（红线区）✅ 核对通过，无需改
+
+- cjxl `--distance 0 -e`（无损 bit-exact）+ delete_jpg 默认 False + 4 道闸（cjxl 可用 / ZIP>32B /
+  清单完整 / djxl 真能解回）+ TIFF 从不作删除对象 —— 严谨忠实 oracle archive.js。我加的"自动
+  整理"复用同一套闸，安全。
+
+## 场景10：撤销合成 ✔（已改：删TIFF + JPG解关联）
+
+### 核对 + 用户裁决
+- 拍照区核心数据模型 = **中间 JPG ↔ 对应 TIFF 的关联**。用户裁决：撤销合成 = **删除该 TIFF**
+  （不可恢复，带确认框）+ **关联 JPG 解组放回自由池**（TIFF 没了关联失去意义，可重新分组/重拍）。
+- 旧实现：把 TIFF 挪到 `_retired-tiff/`（退役不删）+ JPG 留组。**改为**：确认后 `os.unlink` 删
+  TIFF + 移除整组（JPG 回监控自由池）。取消则全保留。
+- `workbench_view._on_undo_compose` 重写；测试 `TestUndoComposeDeletesTiff`（确认删+解组 / 取消保留）。
+- 注：`_retired-tiff` 仍由合成预览的「取消」(_retire_tiff) 使用；该目录未列入 RESERVED_DIR_NAMES
+  （会被项目树当节点显示）= 待办小漏。
+
+## 场景11：还原归档 ✅ 核对通过，无需改
+
+- 从归档 ZIP 用 djxl 解码还原原始 JPG 到用户选的文件夹；只读 ZIP + 只写新 JPG（additive，删任何
+  东西都不删）；有 JXL 但无 djxl → 中止不留半成品；清单丢失降级；bit-exact。`restore_archive` +
+  `RestoreWorker` 离线程。忠实安全。
+
+## 场景12：补处理 / 存量整理 ✔（已修写死目录）
+
+- ✅ 存量整理 = 扫 results/ 下按编号命名的 TIF 批量整理；补充归档 = 无激活标本时从 TIFF 文件名
+  解析标本身份归档 JPG+TIFF 包（`supplementary_service` + `SuppCompressionWorker`）。逻辑忠实 oracle。
+- ❌→✔ **incoming/results 写死（延续场景8 清理）**：`_on_retroactive_scan` 没把配置子目录传给
+  `scan_project_retroactive`；`_run_supplementary` / `_on_supp_finished` / `_RetroactiveScanDialog`
+  写死 `results`。**修**：全部走 `_resolve_capture_subdirs()` / 传 `results_subdir`。
+
+## 场景13：批次条 + 监控统计 — 待核对

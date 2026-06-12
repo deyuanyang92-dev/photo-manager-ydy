@@ -187,6 +187,7 @@ class _DraftGroupRow(QFrame):
     clear_group_requested = pyqtSignal(int)   # group_index  #cursor
     delete_group_requested = pyqtSignal(int)  # group_index  #cursor
     import_tiff_requested = pyqtSignal(int)   # group_index  #cursor groupingImportTiff
+    output_name_changed = pyqtSignal(int, str)  # group_index, 用户编辑的输出命名
 
     def __init__(self, group: "Group", parent: Optional[QWidget] = None,
                  panel: Optional["GroupingPanel"] = None) -> None:
@@ -293,6 +294,35 @@ class _DraftGroupRow(QFrame):
         count_lbl = QLabel(f"{len(self._group.jpg_paths)} 张 JPG")
         count_lbl.setObjectName("MutedSmall")
         root.addWidget(count_lbl)
+
+        # ── 输出 TIF 命名（可见 + 可编辑）──────────────────────────────────────
+        #   空时自动派生：合成→编号-序号 / 导入TIF→TIF原名；用户也可手输覆盖。
+        out_row = QHBoxLayout()
+        out_row.setSpacing(6)
+        out_lbl = QLabel("输出 TIF")
+        out_lbl.setObjectName("MutedSmall")
+        out_row.addWidget(out_lbl)
+        self._output_edit = QLineEdit(self._effective_output_name())
+        self._output_edit.setPlaceholderText("自动：编号-序号 / 导入TIF原名（可手输）")
+        self._output_edit.setFixedHeight(28)
+        self._output_edit.setToolTip(
+            "本组合成/整理的输出文件名（不含路径与扩展名）。\n"
+            "留空 = 自动：有激活编号按 编号-序号，导入TIF则用TIF原名。"
+        )
+        self._output_edit.textEdited.connect(
+            lambda t: self.output_name_changed.emit(self._group.group_index, t)
+        )
+        out_row.addWidget(self._output_edit, 1)
+        root.addLayout(out_row)
+
+    def _effective_output_name(self) -> str:
+        """当前应显示的输出名：用户覆盖 > 已合成TIF名 > 空（占位提示自动派生）。"""
+        g = self._group
+        if g.output_name:
+            return g.output_name
+        if g.composed_tiff_path:
+            return Path(g.composed_tiff_path).stem
+        return ""
 
 
     def _on_jpg_context_menu(self, pos) -> None:
@@ -673,6 +703,7 @@ class GroupingPanel(QWidget):
                 row.clear_group_requested.connect(self._on_clear_group)      # #cursor
                 row.delete_group_requested.connect(self._on_delete_group)    # #cursor
                 row.import_tiff_requested.connect(self._on_import_tiff)      # #cursor
+                row.output_name_changed.connect(self._on_output_name_changed)
                 self._content_lay.addWidget(row)
 
         if composed:
@@ -768,6 +799,16 @@ class GroupingPanel(QWidget):
                 break
         self.grouping_changed.emit()
 
+    def _on_output_name_changed(self, group_index: int, name: str) -> None:
+        """用户编辑某组「输出 TIF」命名 → 写入 group.output_name（空=回到自动派生）。"""
+        if not self._grouping:
+            return
+        for g in self._grouping.groups:
+            if g.group_index == group_index:
+                g.output_name = name.strip() or None
+                break
+        self.grouping_changed.emit()
+
     def _on_add_selected_to_group(self, group_index: int) -> None:
         """Request workbench view to resolve monitor selection and add to group."""
         self.add_selection_to_group_requested.emit(group_index)
@@ -800,7 +841,17 @@ class GroupingPanel(QWidget):
             import os
             project_dir = getattr(self.ctx, "current_project_dir", None)
             if project_dir:
-                for sub in ("results", "incoming-jpg"):
+                # 用项目配置的 incoming/results 子目录（含遗留 新拍JPG），不写死。
+                s = getattr(self.ctx, "settings", None)
+                inc = getattr(s, "incoming_subdir", None)
+                res = getattr(s, "results_subdir", None)
+                inc = inc if isinstance(inc, str) and inc else "incoming-jpg"
+                res = res if isinstance(res, str) and res else "results"
+                subs = [res, inc]
+                if not os.path.isdir(os.path.join(project_dir, inc)) and \
+                   os.path.isdir(os.path.join(project_dir, "新拍JPG")):
+                    subs.append("新拍JPG")
+                for sub in subs:
                     d = os.path.join(project_dir, sub)
                     if os.path.isdir(d):
                         for f in sorted(os.listdir(d)):
@@ -837,9 +888,11 @@ class GroupingPanel(QWidget):
             if reply != QMessageBox.StandardButton.Yes:
                 return
 
-        # Apply
+        # Apply：导入外部 TIF → 用该 TIF 的名作输出命名（去 .tif/.tiff 后缀），
+        # 这样整理时 ZIP 与 TIF 同名。一键整理无需手敲（你的设计）。
         from datetime import datetime, timezone
         target.composed_tiff_path = tiff_path
+        target.output_name = Path(tiff_path).stem
         target.status = "composed"
         target.source = target.source or "external-tif"
         target.updated_at = datetime.now(tz=timezone.utc).isoformat()

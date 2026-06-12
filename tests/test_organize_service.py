@@ -17,10 +17,39 @@ from app.services.organize_service import (
     next_result_sequence,
     organize_preview,
     build_result_basename,
+    rename_tiff,
     OrganizeGateError,
     _check_organize_gate,
     _bump_seq_hint,
 )
+
+
+# ── rename_tiff：外部 TIFF 按编号成果名改名（同目录、冲突加序号、不覆盖） ─────────
+
+class TestRenameTiff:
+    def test_renames_in_same_dir(self, tmp_path):
+        src = tmp_path / "HeliconFocus.tif"
+        src.write_bytes(b"II*\x00")
+        new = rename_tiff(str(src), "FJ-XM-B2-DLC001-1-T95E-20260601.tif")
+        assert os.path.basename(new) == "FJ-XM-B2-DLC001-1-T95E-20260601.tif"
+        assert os.path.isfile(new)
+        assert not src.exists()
+
+    def test_collision_appends_suffix(self, tmp_path):
+        src = tmp_path / "ext.tif"; src.write_bytes(b"II*\x00")
+        occupied = tmp_path / "T.tif"; occupied.write_bytes(b"xx")  # 别的文件占名
+        new = rename_tiff(str(src), "T.tif")
+        assert os.path.basename(new) == "T_1.tif"      # 不覆盖, 加序号
+        assert occupied.read_bytes() == b"xx"          # 原占名文件没被动
+
+    def test_same_name_noop(self, tmp_path):
+        src = tmp_path / "keep.tif"; src.write_bytes(b"II*\x00")
+        new = rename_tiff(str(src), "keep.tif")
+        assert new == str(src) and src.exists()
+
+    def test_missing_source_raises(self, tmp_path):
+        with pytest.raises(FileNotFoundError):
+            rename_tiff(str(tmp_path / "nope.tif"), "x.tif")
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

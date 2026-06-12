@@ -146,6 +146,34 @@ def build_result_basename(uid: str, seq: int) -> str:
     return "-".join(parts)
 
 
+def rename_tiff(old_path: str, new_name: str) -> str:
+    """把磁盘上的 TIFF 改名为 *new_name*（同目录），返回新路径。
+
+    用于外部 Helicon 合成的 TIFF 按激活编号成果名重命名（拍照区核心：JPG↔TIFF 关联）。
+    - 源文件须存在，否则 FileNotFoundError。
+    - 目标名已被**别的**文件占用 → 追加 `_1/_2…` 序号，绝不覆盖他人。
+    - 新名 == 旧名（无变化）→ 原样返回，不动盘。
+    纯函数、无 Qt。
+    """
+    src = Path(old_path)
+    if not src.is_file():
+        raise FileNotFoundError(f"TIFF 不存在: {old_path}")
+    new_name = (new_name or "").strip()
+    if not new_name:
+        raise ValueError("新文件名不能为空")
+    dst = src.with_name(new_name)
+    if dst == src:
+        return str(src)
+    if dst.exists():
+        stem, suffix = Path(new_name).stem, Path(new_name).suffix
+        i = 1
+        while dst.exists():
+            dst = src.with_name(f"{stem}_{i}{suffix}")
+            i += 1
+    os.replace(str(src), str(dst))
+    return str(dst)
+
+
 # ── Preview ───────────────────────────────────────────────────────────────────
 
 @dataclass

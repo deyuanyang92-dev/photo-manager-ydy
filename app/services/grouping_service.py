@@ -41,6 +41,9 @@ class Group:
     result_sequence: Optional[int] = None
     archive_zip: Optional[str] = None
     retired_tiff_paths: list[str] = field(default_factory=list)
+    # 用户可编辑的「输出命名」覆盖值（分组工具每组下方那个框）。空=自动派生
+    # （合成→编号-组序；导入→TIF原名）。存进 raw_json，不动表结构。
+    output_name: Optional[str] = None
     raw_json: Optional[str] = None    # full JSON blob fallback
 
     def to_dict(self) -> dict:
@@ -56,6 +59,7 @@ class Group:
             "resultSequence": self.result_sequence,
             "archiveZip": self.archive_zip,
             "retiredTiffPaths": self.retired_tiff_paths,
+            "outputName": self.output_name,
         }
 
     @classmethod
@@ -72,6 +76,7 @@ class Group:
             result_sequence=d.get("resultSequence"),
             archive_zip=d.get("archiveZip"),
             retired_tiff_paths=list(d.get("retiredTiffPaths") or []),
+            output_name=d.get("outputName"),
             raw_json=json.dumps(d, ensure_ascii=False),
         )
 
@@ -128,6 +133,14 @@ def load_grouping(db: sqlite3.Connection, uid: str) -> SpecimenGrouping:
         # Decode JSON columns
         jpg_paths = json.loads(raw.get("jpg_paths") or "[]")
         retired = json.loads(raw.get("retired_tiff_paths") or "[]")
+        # output_name 没有独立列 → 从 raw_json 取（向后兼容旧行无此字段）。
+        output_name = None
+        try:
+            rj = raw.get("raw_json")
+            if rj:
+                output_name = (json.loads(rj) or {}).get("outputName")
+        except Exception:
+            output_name = None
         g = Group(
             group_index=raw.get("group_index", 0),
             angle_label=raw.get("angle_label", ""),
@@ -140,6 +153,7 @@ def load_grouping(db: sqlite3.Connection, uid: str) -> SpecimenGrouping:
             result_sequence=raw.get("result_sequence"),
             archive_zip=raw.get("archive_zip"),
             retired_tiff_paths=retired,
+            output_name=output_name,
             raw_json=raw.get("raw_json"),
         )
         groups.append(g)
@@ -182,6 +196,19 @@ def save_grouping(
         for g in groups:
             jpg_paths = _clean_jpg_paths(g.jpg_paths) if clean_phantoms else g.jpg_paths
             g.jpg_paths = jpg_paths
+            # raw_json 总是从 to_dict 重建（合并旧 raw_json 的未知字段），保证 output_name
+            # 等当前字段写入；否则旧 raw_json 会盖掉新改的 output_name。
+            merged: dict = {}
+            if g.raw_json:
+                try:
+                    parsed = json.loads(g.raw_json)
+                    if isinstance(parsed, dict):
+                        merged = parsed
+                except Exception:
+                    merged = {}
+            merged.update(g.to_dict())
+            merged["jpgPaths"] = jpg_paths
+            raw_json_str = json.dumps(merged, ensure_ascii=False)
             db.execute(
                 """
                 INSERT OR REPLACE INTO grouping
@@ -203,7 +230,7 @@ def save_grouping(
                     g.result_sequence,
                     g.archive_zip,
                     json.dumps(g.retired_tiff_paths or [], ensure_ascii=False),
-                    g.raw_json or json.dumps(g.to_dict(), ensure_ascii=False),
+                    raw_json_str,
                 ),
             )
 

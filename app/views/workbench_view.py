@@ -278,10 +278,11 @@ class _RetroactiveScanDialog(QDialog):
     the scan to results/<subdir>/.
     """
 
-    def __init__(self, project_dir: str, parent=None) -> None:
+    def __init__(self, project_dir: str, parent=None, results_subdir: str = "results") -> None:
         super().__init__(parent)
         self.setWindowTitle("存量整理 — 选择扫描范围")
         self._project_dir = project_dir
+        self._results_subdir = results_subdir or "results"
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -292,7 +293,7 @@ class _RetroactiveScanDialog(QDialog):
         lay.addWidget(QLabel("子目录："))
         self._subdir_combo = QComboBox()
         self._subdir_combo.addItem("全部", None)
-        results_dir = Path(self._project_dir) / "results"
+        results_dir = Path(self._project_dir) / self._results_subdir
         if results_dir.exists():
             for d in sorted(results_dir.iterdir()):
                 if d.is_dir():
@@ -416,6 +417,7 @@ class WorkbenchView(BaseView):
         self._monitor.unassign_requested.connect(self._on_unassign_jpg)
         self._monitor.add_jpg_requested.connect(self._on_add_jpg_files)
         self._monitor.grouping_requested.connect(self._on_open_grouping)
+        self._monitor.compose_implicit_requested.connect(self._on_compose_implicit)
         self._monitor.settings_requested.connect(self._on_open_settings)
         self._monitor.phase_clicked.connect(self._on_phase_clicked)
         centre.addWidget(self._monitor)
@@ -1537,14 +1539,20 @@ class WorkbenchView(BaseView):
             QMessageBox.information(self, "存量整理", "请先打开一个项目。")
             return
 
-        pre = _RetroactiveScanDialog(project_dir, parent=self)
+        _inc0, _res0 = self._resolve_capture_subdirs()
+        pre = _RetroactiveScanDialog(project_dir, parent=self, results_subdir=_res0)
         if pre.exec() != QDialog.DialogCode.Accepted:
             return
         selected_subdir = pre.selected_subdir()
 
         try:
             from app.services.retroactive_service import scan_project_retroactive
-            result = scan_project_retroactive(project_dir, db, subdir=selected_subdir)
+            # 存量整理也用项目配置的 incoming/results 子目录（与监控/合成一致）。
+            inc, res = self._resolve_capture_subdirs()
+            result = scan_project_retroactive(
+                project_dir, db, subdir=selected_subdir,
+                incoming_subdir=inc, results_subdir=res,
+            )
         except Exception as exc:
             QMessageBox.warning(self, "扫描失败", str(exc))
             return
@@ -1651,7 +1659,13 @@ class WorkbenchView(BaseView):
             os.makedirs(incoming_dir, exist_ok=True)
 
             preview = organize_preview(db, uid, results_dir, incoming_dir)
-            output_name = preview.suggested_tiff_name
+            # 输出名优先用该组「输出命名」覆盖值（分组工具里用户可编辑）；空则自动派生
+            # 编号-序号。统一了：合成→编号名 / 用户手输 / （导入则早已写入 output_name）。
+            if getattr(group, "output_name", None):
+                stem = Path(group.output_name).stem  # 去掉可能带的 .tif 后缀
+                output_name = stem + ".tif"
+            else:
+                output_name = preview.suggested_tiff_name
             output_path = os.path.join(incoming_dir, output_name)  # incoming, not results
             # Honor 输出格式 (tif/jpg); default tif keeps the lossless archival master.
             output_path = self._with_output_ext(output_path, self._helicon_output_opts()["format"])
@@ -1842,6 +1856,51 @@ class WorkbenchView(BaseView):
         if bool(getattr(self.ctx.settings, "auto_organize_after_compose", False)):
             self._on_organise_requested(uid, group_index)
 
+    def _maybe_rename_tiff_before_organize(self, db, uid, grouping, group, project_dir):
+        """整理前的 TIFF 命名网关。返回 None=无需改名 / True=已改名 / False=用户取消。
+
+        合成 TIFF 名不符成果规范时（导入的外部 Helicon TIFF），弹确认框按本组编号的下个
+        成果名建议改名（可改），确认则磁盘改名 + 更新 group.composed_tiff_path + 持久化。
+        """
+        from app.utils.naming import validate_uid
+        from app.services.organize_service import organize_preview, rename_tiff
+        from app.services.grouping_service import save_grouping
+        from app.widgets.tiff_rename_dialog import TiffRenameDialog
+
+        tiff_path = group.composed_tiff_path
+        current = Path(tiff_path).name
+        if validate_uid(Path(tiff_path).stem):
+            return None  # 已规范，无需改名
+
+        inc, res = self._resolve_capture_subdirs()
+        try:
+            preview = organize_preview(
+                db, uid,
+                os.path.join(project_dir, res),
+                os.path.join(project_dir, inc),
+            )
+            suggested = preview.suggested_tiff_name
+        except Exception:
+            suggested = current
+
+        dlg = TiffRenameDialog(current, suggested, parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return False  # 取消 → 中止整理
+        new_name = dlg.new_name()
+        if not new_name:
+            return False
+        try:
+            new_path = rename_tiff(tiff_path, new_name)
+        except Exception as exc:
+            QMessageBox.warning(self, "整理", f"TIFF 改名失败：{exc}")
+            return False
+        group.composed_tiff_path = new_path
+        try:
+            save_grouping(db, uid, grouping.groups, clean_phantoms=False)
+        except Exception:
+            pass
+        return True
+
     def _on_organise_requested(self, uid: str, group_index: int) -> None:
         """Organise (archive) the composed group.
 
@@ -1877,6 +1936,14 @@ class WorkbenchView(BaseView):
                 QMessageBox.warning(
                     self, "整理", "该组尚未合成，请先合成 TIFF 再整理。"
                 )
+                return
+
+            # 整理前：若合成 TIFF 名不符成果命名规范（多见于导入的外部 Helicon TIFF），
+            # 弹「TIFF 命名需确认」框，按本组编号成果名建议改名（守 S5：默认本组号、可改）。
+            # 取消则中止整理；in-app 合成的 TIFF 本就规范，此路不触发。
+            if self._maybe_rename_tiff_before_organize(
+                db, uid, grouping, group, project_dir
+            ) is False:
                 return
 
             # Gate check (uid must be active)
@@ -2035,7 +2102,8 @@ class WorkbenchView(BaseView):
             return
 
         # Collision guard: same-named result already in results/ (decision①: → results/).
-        results_dir = Path(project_dir) / "results"
+        _inc, res = self._resolve_capture_subdirs()
+        results_dir = Path(project_dir) / res
         tiff_stem = Path(grp.tiff_path).stem
         existing_zip = results_dir / f"{tiff_stem}.zip"
         existing_tiff = results_dir / Path(grp.tiff_path).name
@@ -2094,7 +2162,8 @@ class WorkbenchView(BaseView):
 
         import shutil
 
-        results_dir = Path(project_dir) / "results"
+        _inc, res = self._resolve_capture_subdirs()
+        results_dir = Path(project_dir) / res
         results_dir.mkdir(exist_ok=True)
 
         # Move the ZIP into results/ (zip is not a red-line artifact; replace OK).
@@ -2246,23 +2315,50 @@ class WorkbenchView(BaseView):
             QMessageBox.warning(self, "导入 TIFF", f"保存失败：{exc}")
 
     def _on_undo_compose(self, uid: str, group_index: int) -> None:
-        """Undo compose: clear composedTiffPath, move TIFF to _retired-tiff/."""
+        """撤销合成 = 删除这张合成 TIFF + 把关联 JPG 解组放回自由池。
+
+        用户选定语义（拍照区核心 = 中间 JPG ↔ 对应 TIFF 的关联）：TIFF 一旦删除，
+        关联失去意义 → 这组 JPG 退出分组、回到监控自由池（未分组，可重新分组/重拍）。
+        因删 TIFF 不可恢复 → 删前弹确认框（默认否）。取消则全保留、原样不动。
+        """
         db = self.ctx.get_db()
         if not db:
             return
+        from app.services.grouping_service import load_grouping, save_grouping
+        grouping = load_grouping(db, uid)
+        target = next(
+            (g for g in grouping.groups
+             if g.group_index == group_index and g.composed_tiff_path),
+            None,
+        )
+        if target is None:
+            return
+
+        reply = QMessageBox.question(
+            self, "撤销合成",
+            "撤销将删除这张合成 TIFF（不可恢复），并把关联的 JPG 放回自由池"
+            "（可重新分组/合成）。确认？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        # ① 删除 TIFF（用户主权；非自动流程，手动确认后删）。
         try:
-            from app.services.grouping_service import load_grouping, save_grouping
-            grouping = load_grouping(db, uid)
-            for g in grouping.groups:
-                if g.group_index == group_index and g.composed_tiff_path:
-                    # Move TIFF to _retired-tiff/ (TIFF never deleted — hard rule 3)
-                    self._retire_tiff(g.composed_tiff_path)
-                    g.retired_tiff_paths.append(g.composed_tiff_path)
-                    g.composed_tiff_path = None
-                    g.status = "pending"
-                    break
-            save_grouping(db, uid, grouping.groups)
+            if target.composed_tiff_path and os.path.isfile(target.composed_tiff_path):
+                os.unlink(target.composed_tiff_path)
+        except OSError as exc:
+            QMessageBox.warning(self, "撤销合成", f"TIFF 删除失败：{exc}")
+            return
+
+        # ② JPG 解关联：移除整组 → 这些 JPG 回到自由池（未分组）。
+        grouping.groups = [g for g in grouping.groups if g.group_index != group_index]
+        try:
+            save_grouping(db, uid, grouping.groups, clean_phantoms=False)
             self._grouping.load_grouping(uid, grouping)
+            self._refresh_monitor()
+            self._refresh_results_column(uid, grouping)
         except Exception:
             pass
 
@@ -2552,6 +2648,54 @@ class WorkbenchView(BaseView):
             ]
         except Exception:
             return []
+
+    def _build_implicit_group(self, uid: str) -> Optional[int]:
+        """隐式消耗模型：把激活编号下「未占用」JPG（已归属但还没进任何组）建成一个新组。
+
+        返回新组 group_index；无未占用 JPG（<2 张）则返回 None。占用 = 已在任何分组里
+        （草稿或已合成）。一次合成消耗一批；再拍的 JPG 又是未占用 → 下次再合成成新组。
+        镜像 web composeImplicitActiveBatch（app.js:5660）。
+        """
+        db = self.ctx.get_db()
+        if not db or not uid:
+            return None
+        from app.services.grouping_service import load_grouping, save_grouping, Group
+        attributed = self._get_attributed_jpg_paths(uid)
+        grouping = load_grouping(db, uid)
+        occupied: set[str] = set()
+        for g in grouping.groups:
+            for p in g.jpg_paths:
+                try:
+                    occupied.add(str(Path(p).resolve()))
+                except Exception:
+                    pass
+        un_occupied = [
+            p for p in attributed if str(Path(p).resolve()) not in occupied
+        ]
+        if len(un_occupied) < 2:
+            return None
+        next_idx = max([g.group_index for g in grouping.groups], default=-1) + 1
+        grouping.groups.append(
+            Group(group_index=next_idx, jpg_paths=un_occupied, status="pending")
+        )
+        save_grouping(db, uid, grouping.groups, clean_phantoms=False)
+        self._grouping.load_grouping(uid, grouping)
+        return next_idx
+
+    def _on_compose_implicit(self) -> None:
+        """主界面[合成]：隐式合成激活编号下未占用的新 JPG → 自动命名 编号-序号。
+
+        这是拍照主流程（拍→合成→拍→合成自动成组+命名），无需打开分组工具。
+        """
+        uid = self._get_active_uid()
+        if not uid:
+            self._status_message("请先激活一个编号，再合成")
+            return
+        idx = self._build_implicit_group(uid)
+        if idx is None:
+            self._status_message("没有可合成的未占用 JPG（至少 2 张）")
+            return
+        self._on_compose_requested(uid, idx)
 
     def _show_compose_preview(self, jpg_paths: list[str]) -> Optional[list[str]]:
         """Pre-compose JPG checklist dialog.

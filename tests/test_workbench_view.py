@@ -2182,6 +2182,185 @@ class TestFileSystemWatcher:
         db.close()
 
 
+# ── 外部TIFF：整理时检测命名不规范 → 确认改名（触发点1） ──────────────────────
+
+
+class TestImplicitCompose:
+    """主界面[合成] = 把激活编号下「未占用」JPG（已归属、还没进任何组）建成新组。
+    占用 = 已在任何组。一次消耗一批；再拍的又是未占用 → 下次再成新组。"""
+
+    UID = "FJ-XM-B2-DLC001-T95E-20260601"
+
+    def _make_view(self, tmp_path, attributed):
+        from app.views.workbench_view import WorkbenchView
+        project_dir = str(tmp_path / "proj")
+        Path(project_dir, "_data").mkdir(parents=True)
+        db = _make_db(str(tmp_path / "proj" / "_data" / "project.db"))
+        ctx = _make_ctx(project_dir=project_dir, db=db)
+        ctx.collab_service = None
+        w = WorkbenchView(ctx)
+        w._get_attributed_jpg_paths = lambda uid: list(attributed)  # stub 归属扫描
+        return w, ctx, db
+
+    def test_loose_jpgs_form_new_group(self, tmp_path):
+        from app.services.grouping_service import load_grouping
+        j = [str(tmp_path / f"{i}.jpg") for i in range(3)]
+        w, ctx, db = self._make_view(tmp_path, j)
+        idx = w._build_implicit_group(self.UID)
+        assert idx == 0
+        g = load_grouping(db, self.UID)
+        assert len(g.groups) == 1
+        assert set(g.groups[0].jpg_paths) == set(j)
+
+    def test_occupied_jpgs_excluded(self, tmp_path):
+        from app.services.grouping_service import Group, save_grouping, load_grouping
+        a = [str(tmp_path / f"a{i}.jpg") for i in range(2)]
+        b = [str(tmp_path / f"b{i}.jpg") for i in range(2)]
+        w, ctx, db = self._make_view(tmp_path, a + b)
+        save_grouping(db, self.UID, [Group(group_index=0, jpg_paths=a,
+                      composed_tiff_path=str(tmp_path / "t.tif"), status="composed")],
+                      clean_phantoms=False)
+        idx = w._build_implicit_group(self.UID)
+        assert idx == 1
+        g = load_grouping(db, self.UID)
+        new = next(x for x in g.groups if x.group_index == 1)
+        assert set(new.jpg_paths) == set(b)
+
+    def test_no_unoccupied_returns_none(self, tmp_path):
+        from app.services.grouping_service import Group, save_grouping
+        a = [str(tmp_path / f"a{i}.jpg") for i in range(2)]
+        w, ctx, db = self._make_view(tmp_path, a)
+        save_grouping(db, self.UID, [Group(group_index=0, jpg_paths=a,
+                      composed_tiff_path=str(tmp_path / "t.tif"), status="composed")],
+                      clean_phantoms=False)
+        assert w._build_implicit_group(self.UID) is None
+
+    def test_fewer_than_two_returns_none(self, tmp_path):
+        w, ctx, db = self._make_view(tmp_path, [str(tmp_path / "solo.jpg")])
+        assert w._build_implicit_group(self.UID) is None
+
+    def test_compose_implicit_no_active_is_noop(self, tmp_path):
+        w, ctx, db = self._make_view(tmp_path, [])
+        w._on_compose_implicit()  # 无激活编号, 不崩
+
+
+class TestOrganizeRenamesNonconformingTiff:
+    """整理一个名不符规范的 TIFF（如导入的 HeliconFocus.tif）→ 弹确认框按编号成果名
+    改名；确认则改名+更新 group+继续；取消则不改名、中止整理。"""
+
+    UID = "FJ-XM-B2-DLC001-T95E-20260601"
+
+    def _make_view(self, tmp_path):
+        from app.views.workbench_view import WorkbenchView
+        project_dir = str(tmp_path / "proj")
+        Path(project_dir, "_data").mkdir(parents=True)
+        Path(project_dir, "results").mkdir()
+        db = _make_db(str(tmp_path / "proj" / "_data" / "project.db"))
+        ctx = _make_ctx(project_dir=project_dir, db=db)
+        ctx.collab_service = None
+        return WorkbenchView(ctx), ctx, db, project_dir
+
+    def _setup(self, tmp_path, db, project_dir, tiff_name):
+        from app.services.grouping_service import Group, save_grouping, load_grouping
+        tiff = Path(project_dir) / "results" / tiff_name
+        tiff.write_bytes(b"II*\x00")
+        j1 = tmp_path / "a.jpg"; j1.write_bytes(b"\xff\xd8\xff")
+        j2 = tmp_path / "b.jpg"; j2.write_bytes(b"\xff\xd8\xff")
+        save_grouping(db, self.UID, [Group(
+            group_index=0, jpg_paths=[str(j1), str(j2)],
+            composed_tiff_path=str(tiff), status="composed")],
+            clean_phantoms=False)
+        grouping = load_grouping(db, self.UID)
+        return grouping, grouping.groups[0], str(tiff)
+
+    def test_rename_confirmed(self, tmp_path, monkeypatch):
+        from PyQt6.QtWidgets import QDialog
+        from app.widgets.tiff_rename_dialog import TiffRenameDialog
+        w, ctx, db, project_dir = self._make_view(tmp_path)
+        grouping, group, tiff = self._setup(tmp_path, db, project_dir, "HeliconFocus.tif")
+        monkeypatch.setattr(TiffRenameDialog, "exec",
+                            lambda self: QDialog.DialogCode.Accepted)
+        res = w._maybe_rename_tiff_before_organize(db, self.UID, grouping, group, project_dir)
+        assert res is True
+        assert not os.path.exists(tiff)                              # 旧名没了
+        assert Path(group.composed_tiff_path).name == "FJ-XM-B2-DLC001-1-T95E-20260601.tif"
+        assert os.path.isfile(group.composed_tiff_path)
+
+    def test_rename_cancelled_aborts(self, tmp_path, monkeypatch):
+        from PyQt6.QtWidgets import QDialog
+        from app.widgets.tiff_rename_dialog import TiffRenameDialog
+        w, ctx, db, project_dir = self._make_view(tmp_path)
+        grouping, group, tiff = self._setup(tmp_path, db, project_dir, "HeliconFocus.tif")
+        monkeypatch.setattr(TiffRenameDialog, "exec",
+                            lambda self: QDialog.DialogCode.Rejected)
+        res = w._maybe_rename_tiff_before_organize(db, self.UID, grouping, group, project_dir)
+        assert res is False
+        assert os.path.exists(tiff)                                  # 没改名
+
+    def test_conforming_name_noop(self, tmp_path):
+        w, ctx, db, project_dir = self._make_view(tmp_path)
+        grouping, group, tiff = self._setup(
+            tmp_path, db, project_dir, "FJ-XM-B2-DLC001-1-T95E-20260601.tif")
+        res = w._maybe_rename_tiff_before_organize(db, self.UID, grouping, group, project_dir)
+        assert res is None                                           # 已规范, 不弹框
+        assert os.path.exists(tiff)
+
+
+# ── 场景10：撤销合成 = 删TIFF + JPG解关联放回自由池（带确认） ────────────────────
+
+
+class TestUndoComposeDeletesTiff:
+    """撤销合成：删除这张合成 TIFF（不可恢复，带确认）+ 把关联 JPG 解组放回自由池
+    （TIFF 没了，关联失去意义）。取消则全保留。"""
+
+    def _make_view(self, tmp_path):
+        from app.views.workbench_view import WorkbenchView
+        project_dir = str(tmp_path / "proj")
+        Path(project_dir, "_data").mkdir(parents=True)
+        Path(project_dir, "results").mkdir()
+        db = _make_db(str(tmp_path / "proj" / "_data" / "project.db"))
+        ctx = _make_ctx(project_dir=project_dir, db=db)
+        ctx.collab_service = None
+        return WorkbenchView(ctx), ctx, db
+
+    def _setup_composed(self, tmp_path, db):
+        from app.services.grouping_service import Group, save_grouping
+        tiff = tmp_path / "proj" / "results" / "T.tif"
+        tiff.write_bytes(b"II*\x00")
+        j1 = tmp_path / "a.jpg"; j1.write_bytes(b"\xff\xd8\xff")
+        j2 = tmp_path / "b.jpg"; j2.write_bytes(b"\xff\xd8\xff")
+        g = Group(group_index=0, jpg_paths=[str(j1), str(j2)],
+                  composed_tiff_path=str(tiff), status="composed")
+        save_grouping(db, "U1", [g], clean_phantoms=False)
+        return str(tiff), [str(j1), str(j2)]
+
+    def test_undo_confirmed_deletes_tiff_and_ungroups(self, tmp_path, monkeypatch):
+        from PyQt6.QtWidgets import QMessageBox
+        from app.services.grouping_service import load_grouping
+        w, ctx, db = self._make_view(tmp_path)
+        tiff, jpgs = self._setup_composed(tmp_path, db)
+        monkeypatch.setattr(QMessageBox, "question",
+                            lambda *a, **k: QMessageBox.StandardButton.Yes)
+        w._on_undo_compose("U1", 0)
+        assert not os.path.exists(tiff)                       # TIFF 删除
+        g = load_grouping(db, "U1")
+        all_paths = [p for gr in g.groups for p in gr.jpg_paths]
+        assert jpgs[0] not in all_paths and jpgs[1] not in all_paths  # JPG 解关联
+        assert len(g.groups) == 0                             # 组消失
+
+    def test_undo_cancelled_keeps_everything(self, tmp_path, monkeypatch):
+        from PyQt6.QtWidgets import QMessageBox
+        from app.services.grouping_service import load_grouping
+        w, ctx, db = self._make_view(tmp_path)
+        tiff, jpgs = self._setup_composed(tmp_path, db)
+        monkeypatch.setattr(QMessageBox, "question",
+                            lambda *a, **k: QMessageBox.StandardButton.No)
+        w._on_undo_compose("U1", 0)
+        assert os.path.exists(tiff)                           # 取消→TIFF 保留
+        g = load_grouping(db, "U1")
+        assert len(g.groups) == 1                             # 组还在
+
+
 # ── 场景6/7：合成后自动整理归档（开关，默认关；合成仍手动） ────────────────────
 
 

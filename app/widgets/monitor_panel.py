@@ -4,7 +4,7 @@ Faithfully mirrors the web prototype's "目录监控 / 拍照工作台" centre c
 (app.js renderDirectoryMonitor):
 
   ┌ batch/status strip ─ UID + phase + compact JPG/TIFF stats ────────┐
-  ├ primary toolbar ─ 刷新 / 添加照片 / 分组 / 自动压缩 / 更多 ──────┤
+  ├ primary toolbar ─ 刷新 / 添加照片 / 合成 / 自动压缩 / 更多(含分组工具) ─┤
   ├ stream header ─ 待处理照片 · 右键处理文件 ───────────────────────┤
   ├ contextual selection bar ─ appears only after selecting files ─────┤
   ├ capture stream ─ compact file cards with row/right-click menus ────┤
@@ -314,6 +314,7 @@ class MonitorPanel(QWidget):
     refresh_requested = pyqtSignal()
     add_jpg_requested = pyqtSignal()   # emitted when user clicks "添加照片"
     grouping_requested = pyqtSignal()  # emitted when user clicks "分组工具" (opens popup)
+    compose_implicit_requested = pyqtSignal()  # 主界面[合成]：隐式合成未占用JPG
     settings_requested = pyqtSignal()  # emitted from the compact "更多" menu
     phase_clicked = pyqtSignal(str)    # status code: shooting/shot_done/organizing/done
 
@@ -422,14 +423,16 @@ class MonitorPanel(QWidget):
         add_btn.setToolTip("把已有照片添加进来（导入 incoming-jpg/）")
         add_btn.clicked.connect(self.add_jpg_requested.emit)
         controls.addWidget(add_btn)
-        self._grouping_btn = QPushButton("分组")
-        self._grouping_btn.setObjectName("Primary")
-        self._grouping_btn.setFixedHeight(28)
-        icons.set_button_icon(self._grouping_btn, "mdi6.layers-triple-outline",
-                              color=icons.TONE_ON_ACCENT, size=15)
-        self._grouping_btn.setToolTip("打开分组 / 合成工具")
-        self._grouping_btn.clicked.connect(self.grouping_requested.emit)
-        controls.addWidget(self._grouping_btn)
+        # 主流程一键合成（隐式消耗）：合成激活编号下未占用的新 JPG → 自动命名 编号-序号。
+        self._compose_btn = QPushButton("合成")
+        self._compose_btn.setObjectName("Primary")
+        self._compose_btn.setFixedHeight(28)
+        icons.set_button_icon(self._compose_btn, "fa5s.layer-group",
+                              color=icons.TONE_ON_ACCENT, size=13)
+        self._compose_btn.setToolTip("合成当前激活编号下未占用的新 JPG（自动命名 编号-序号）")
+        self._compose_btn.clicked.connect(self.compose_implicit_requested.emit)
+        controls.addWidget(self._compose_btn)
+
         self._auto_toggle = QPushButton("自动压缩")
         self._auto_toggle.setObjectName("Ghost")
         self._auto_toggle.setFixedHeight(28)
@@ -1020,7 +1023,17 @@ class MonitorPanel(QWidget):
         icons.set_button_icon(self._auto_toggle, glyph, color=tone, size=15)
 
     def _open_more_menu(self, global_pos) -> None:
+        self._build_more_menu().exec(global_pos)
+
+    def _build_more_menu(self) -> QMenu:
         menu = QMenu(self)
+
+        # 分组入口从工具栏移到这里（用户指令）；信号链路不变。
+        grouping_action = menu.addAction("分组工具")
+        grouping_action.setToolTip("打开分组 / 合成工具")
+        grouping_action.triggered.connect(self.grouping_requested.emit)
+
+        menu.addSeparator()
 
         settings_action = menu.addAction("项目设置")
         settings_action.triggered.connect(self.settings_requested.emit)
@@ -1047,7 +1060,7 @@ class MonitorPanel(QWidget):
         scan_action.setEnabled(False)
         scan_action.setToolTip("旧文件扫描在分组工具/批量整理流程中执行")
 
-        menu.exec(global_pos)
+        return menu
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

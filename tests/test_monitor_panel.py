@@ -586,3 +586,24 @@ class TestPhasePills:
         panel.set_phase("shooting")
         panel.set_batch("X", None)
         assert all(not b.isChecked() for b in panel._phase_pills.values())
+
+
+# ── 分组入口移入「更多」菜单（用户指令：工具栏不再显示分组按钮） ──────────────
+
+
+class TestGroupingInMoreMenu:
+    def test_toolbar_has_no_grouping_button(self, panel):
+        from PyQt6.QtWidgets import QPushButton
+        texts = [b.text() for b in panel.findChildren(QPushButton)]
+        assert "分组" not in texts
+
+    def test_more_menu_contains_grouping_action(self, panel):
+        menu = panel._build_more_menu()
+        labels = [a.text() for a in menu.actions() if not a.isSeparator()]
+        assert "分组工具" in labels
+
+    def test_grouping_action_emits_signal(self, panel, qtbot):
+        menu = panel._build_more_menu()
+        action = next(a for a in menu.actions() if a.text() == "分组工具")
+        with qtbot.waitSignal(panel.grouping_requested, timeout=1000):
+            action.trigger()
