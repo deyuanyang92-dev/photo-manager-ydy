@@ -316,12 +316,17 @@ class _DraftGroupRow(QFrame):
         root.addLayout(out_row)
 
     def _effective_output_name(self) -> str:
-        """当前应显示的输出名：用户覆盖 > 已合成TIF名 > 空（占位提示自动派生）。"""
+        """当前应显示的输出名：用户覆盖 > 已合成TIF名 > 临时分组默认组序 > 空。"""
         g = self._group
         if g.output_name:
             return g.output_name
         if g.composed_tiff_path:
             return Path(g.composed_tiff_path).stem
+        # 临时分组(无编号)：默认显示 组序(1/2/…)，让用户看到不填就用这个。
+        from app.services.grouping_service import ADHOC_GROUPING_UID
+        panel_uid = getattr(self._panel, "_uid", None) if self._panel else None
+        if panel_uid == ADHOC_GROUPING_UID:
+            return str(g.group_index + 1)
         return ""
 
 

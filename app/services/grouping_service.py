@@ -22,6 +22,12 @@ from pathlib import Path
 from typing import Any, Optional
 
 
+# 临时分组(ad-hoc)的占位编号:用户没填/没激活任何标本编号时,分组工具仍可用,
+# 组挂在这个 key 下,输出文件名默认按 组序(1.tif/2.tif)派生,而非 编号-序号。
+# grouping 表无 specimens 外键,任意 uid 都能落库,故安全。
+ADHOC_GROUPING_UID = "~未命名"
+
+
 # ── Data structures ───────────────────────────────────────────────────────────
 
 @dataclass

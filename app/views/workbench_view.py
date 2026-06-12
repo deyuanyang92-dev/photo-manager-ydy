@@ -1135,16 +1135,22 @@ class WorkbenchView(BaseView):
         直接点「新组」加组1/组2（web 同款 activeSpecimen || namingTargetSpecimen）。
         """
         if not getattr(self._grouping, "_uid", None):
+            from app.services.grouping_service import ADHOC_GROUPING_UID
             uid = (
                 self._current_uid
                 or self._get_active_uid()
                 or self._naming.current_uid()  # 命名表单实时编号 → 无需激活
+                or ADHOC_GROUPING_UID  # 连编号都没有 → 临时分组,输出默认 组序.tif
             )
             db = self.ctx.get_db()
             if uid and db:
                 try:
                     from app.services.grouping_service import load_grouping
                     self._grouping.load_grouping(uid, load_grouping(db, uid))
+                    if uid == ADHOC_GROUPING_UID:
+                        # 临时分组:标题友好化,免得显示 "~未命名" 这个内部 key。
+                        self._grouping._uid_label.setText("未命名（临时分组）")
+                        self._grouping._target_label.setText("临时")
                 except Exception:
                     pass
         dlg = self._grouping_dialog
@@ -1683,14 +1689,10 @@ class WorkbenchView(BaseView):
             incoming_dir = os.path.join(project_dir, inc)
             os.makedirs(incoming_dir, exist_ok=True)
 
-            preview = organize_preview(db, uid, results_dir, incoming_dir)
-            # 输出名优先用该组「输出命名」覆盖值（分组工具里用户可编辑）；空则自动派生
-            # 编号-序号。统一了：合成→编号名 / 用户手输 / （导入则早已写入 output_name）。
-            if getattr(group, "output_name", None):
-                stem = Path(group.output_name).stem  # 去掉可能带的 .tif 后缀
-                output_name = stem + ".tif"
-            else:
-                output_name = preview.suggested_tiff_name
+            # 输出名统一走 _resolve_compose_output_name:覆盖值 > 编号-序号 > 组序.tif。
+            # _seq:真编号=preview.next_seq;临时分组(ad-hoc)=组序。
+            output_name, _seq = self._resolve_compose_output_name(
+                db, uid, group, results_dir, incoming_dir)
             output_path = os.path.join(incoming_dir, output_name)  # incoming, not results
             # Honor 输出格式 (tif/jpg); default tif keeps the lossless archival master.
             output_path = self._with_output_ext(output_path, self._helicon_output_opts()["format"])
@@ -1735,12 +1737,13 @@ class WorkbenchView(BaseView):
                     group.composed_tiff_path = out_path
                     group.status = "composed"
                     group.updated_at = now
-                    group.result_sequence = preview.next_seq
+                    group.result_sequence = _seq
                     save_grouping(db, uid, grouping.groups)
 
                     try:
                         from app.services.organize_service import _bump_seq_hint
-                        _bump_seq_hint(db, uid, preview.next_seq)
+                        if _seq is not None:
+                            _bump_seq_hint(db, uid, _seq)
                     except Exception:
                         pass
 
@@ -1875,6 +1878,29 @@ class WorkbenchView(BaseView):
     # 故由 workbench 串行驱动:合成完成(异步回调)→ 同步整理该组 → 下一组。
     # 批量时走 `_compose_group_headless`(无预览/结果确认框),满足"一键直合"。
 
+    def _resolve_compose_output_name(self, db, uid, group, results_dir, incoming_dir):
+        """统一的「输出 TIF 名」解析(合成单组/批量共用)。返回 (name.tif, seq)。
+
+        优先级:
+          ① 用户在该组「输出 TIF」框手填的覆盖值(去后缀+.tif)
+          ② 有真编号 → organize_preview 建议成果名(编号-序号.tif)
+          ③ 无编号(临时分组 ad-hoc) → 组序.tif(组0→1.tif, 组1→2.tif)
+        seq:真编号取 preview.next_seq;ad-hoc 取 group_index+1。
+        """
+        from app.services.grouping_service import ADHOC_GROUPING_UID
+        is_adhoc = (uid == ADHOC_GROUPING_UID)
+        seq = (group.group_index + 1) if is_adhoc else None
+        if is_adhoc:
+            if getattr(group, "output_name", None):
+                return Path(group.output_name).stem + ".tif", seq
+            return f"{group.group_index + 1}.tif", seq
+        # 真编号:用 organize_preview 取建议名 + 序号
+        from app.services.organize_service import organize_preview
+        preview = organize_preview(db, uid, results_dir, incoming_dir)
+        if getattr(group, "output_name", None):
+            return Path(group.output_name).stem + ".tif", preview.next_seq
+        return preview.suggested_tiff_name, preview.next_seq
+
     def _start_compose_batch(self, uid: str, organise: bool) -> None:
         """启动批量合成队列。organise=True 时每组合成完后立即整理该组。"""
         db = self.ctx.get_db()
@@ -1921,7 +1947,9 @@ class WorkbenchView(BaseView):
         if self._batch is None:
             return
         if success and self._batch.get("organise"):
-            self._on_organise_requested(uid, group_index)  # 同步,复用全部安全闸
+            # 一条龙:批量整理走静默模式——跳过激活拦截/TIF改名框/同名确认/成功提示,
+            # 但 JPG删除四闸 + TIFF永不自动删 红线照常(都在 archive_group 内,未碰)。
+            self._on_organise_requested(uid, group_index, silent_batch=True)
         self._compose_next_in_batch()
 
     def _batch_status(self, msg: str) -> None:
@@ -1960,11 +1988,8 @@ class WorkbenchView(BaseView):
             incoming_dir = os.path.join(project_dir, inc)
             os.makedirs(incoming_dir, exist_ok=True)
 
-            preview = organize_preview(db, uid, results_dir, incoming_dir)
-            if getattr(group, "output_name", None):
-                output_name = Path(group.output_name).stem + ".tif"
-            else:
-                output_name = preview.suggested_tiff_name
+            output_name, _seq = self._resolve_compose_output_name(
+                db, uid, group, results_dir, incoming_dir)
             output_path = os.path.join(incoming_dir, output_name)
             output_path = self._with_output_ext(
                 output_path, self._helicon_output_opts()["format"]
@@ -1980,11 +2005,12 @@ class WorkbenchView(BaseView):
                 group.composed_tiff_path = output_path
                 group.status = "composed"
                 group.updated_at = now
-                group.result_sequence = preview.next_seq
+                group.result_sequence = _seq
                 save_grouping(db, uid, grouping.groups)
                 try:
                     from app.services.organize_service import _bump_seq_hint
-                    _bump_seq_hint(db, uid, preview.next_seq)
+                    if _seq is not None:
+                        _bump_seq_hint(db, uid, _seq)
                 except Exception:
                     pass
                 self._grouping.load_grouping(uid, grouping)
@@ -2070,8 +2096,14 @@ class WorkbenchView(BaseView):
             pass
         return True
 
-    def _on_organise_requested(self, uid: str, group_index: int) -> None:
+    def _on_organise_requested(self, uid: str, group_index: int,
+                               silent_batch: bool = False) -> None:
         """Organise (archive) the composed group.
+
+        silent_batch=True(批量[合成+整理]一条龙):跳过激活拦截框、TIF改名框、
+        同名ZIP确认框、成功提示框,失败静默返回——给"一键直跑"用。红线不变:
+        JPG删除四闸 + TIFF永不自动删 都在 archive_group 内,silent 不绕。
+
 
         Gate checks (via organize_service._check_organize_gate):
           - uid must be active (or user explicitly bypasses)
@@ -2102,26 +2134,31 @@ class WorkbenchView(BaseView):
                 return
 
             if not group.composed_tiff_path:
-                QMessageBox.warning(
-                    self, "整理", "该组尚未合成，请先合成 TIFF 再整理。"
-                )
+                if not silent_batch:
+                    QMessageBox.warning(
+                        self, "整理", "该组尚未合成，请先合成 TIFF 再整理。"
+                    )
                 return
 
             # 整理前：若合成 TIFF 名不符成果命名规范（多见于导入的外部 Helicon TIFF），
             # 弹「TIFF 命名需确认」框，按本组编号成果名建议改名（守 S5：默认本组号、可改）。
             # 取消则中止整理；in-app 合成的 TIFF 本就规范，此路不触发。
-            if self._maybe_rename_tiff_before_organize(
+            # silent_batch:批量时输出名是我们自己定的(编号-序号 / 组序.tif),不弹改名。
+            if not silent_batch and self._maybe_rename_tiff_before_organize(
                 db, uid, grouping, group, project_dir
             ) is False:
                 return
 
-            # Gate check (uid must be active)
+            # Gate check (uid must be active)。silent_batch=允许未激活(临时分组/一条龙)。
             try:
                 groups_as_dicts = [
                     {"jpgPaths": g.jpg_paths} for g in grouping.groups
                 ]
-                _check_organize_gate(db, uid, groups_as_dicts)
+                _check_organize_gate(db, uid, groups_as_dicts,
+                                     allow_inactive=silent_batch)
             except OrganizeGateError as e:
+                if silent_batch:
+                    return  # 静默跳过(如 JPG 不足),不弹框
                 reply = QMessageBox.question(
                     self,
                     "整理确认",
@@ -2133,7 +2170,8 @@ class WorkbenchView(BaseView):
                     return
 
             if not group.jpg_paths:
-                QMessageBox.warning(self, "整理", "该组无 JPG 原片，无法归档。")
+                if not silent_batch:
+                    QMessageBox.warning(self, "整理", "该组无 JPG 原片，无法归档。")
                 return
 
             # Read delete_jpg setting (default False — TIFF 永不删，JPG 也默认保留)
@@ -2154,6 +2192,8 @@ class WorkbenchView(BaseView):
             results_dir_for_check = str(Path(project_dir) / res)
             existing_zip = os.path.join(results_dir_for_check, tiff_stem + ".zip")
             if os.path.isfile(existing_zip):
+                if silent_batch:
+                    return  # 已有同名归档 → 视为已整理,静默跳过(不静默覆盖)
                 reply_col = QMessageBox.question(
                     self,
                     "归档文件已存在",
@@ -2221,14 +2261,18 @@ class WorkbenchView(BaseView):
                     msg += "JPG 原片已删除。"
                 elif result.requested_delete_jpg and not result.delete_jpg:
                     msg += f"JPG 保留（{result.deletion_skipped_reason}）。"
-                QMessageBox.information(self, "整理完成", msg)
+                if not silent_batch:
+                    QMessageBox.information(self, "整理完成", msg)
             else:
-                QMessageBox.warning(self, "整理失败", "归档过程出现错误。")
+                if not silent_batch:
+                    QMessageBox.warning(self, "整理失败", "归档过程出现错误。")
 
         except FileNotFoundError as exc:
-            QMessageBox.warning(self, "整理失败", f"文件不存在：{exc}")
+            if not silent_batch:
+                QMessageBox.warning(self, "整理失败", f"文件不存在：{exc}")
         except Exception as exc:
-            QMessageBox.warning(self, "整理失败", f"意外错误：{exc}")
+            if not silent_batch:
+                QMessageBox.warning(self, "整理失败", f"意外错误：{exc}")
 
     # ── 补处理 (supplementary archival) ────────────────────────────────────────
     #   Archive a selected JPG + TIFF bundle WITHOUT requiring an active specimen.

@@ -2605,7 +2605,7 @@ class TestBatchComposeOrganise:
             calls.append(("compose", idx))
             on_done(True)
 
-        def _fake_organise(u, idx):
+        def _fake_organise(u, idx, **kw):
             calls.append(("organise", idx))
 
         monkeypatch.setattr(w, "_compose_group_headless", _fake_headless)
@@ -2631,7 +2631,7 @@ class TestBatchComposeOrganise:
         )
         monkeypatch.setattr(
             w, "_on_organise_requested",
-            lambda u, idx: calls.append(("organise", idx)),
+            lambda u, idx, **kw: calls.append(("organise", idx)),
         )
 
         w._start_compose_batch(uid, organise=False)
@@ -2653,7 +2653,7 @@ class TestBatchComposeOrganise:
         monkeypatch.setattr(w, "_compose_group_headless", _fake_headless)
         monkeypatch.setattr(
             w, "_on_organise_requested",
-            lambda u, idx: calls.append(("organise", idx)),
+            lambda u, idx, **kw: calls.append(("organise", idx)),
         )
 
         w._start_compose_batch(uid, organise=True)
@@ -2735,3 +2735,170 @@ class TestBatchComposeOrganise:
         w._compose_group_headless(uid, 0, lambda ok: None)
         assert Path(captured["out"]).name == "我的标本X.tif"
         db.close()
+
+
+class TestAdhocGrouping:
+    """分组工具无需编号 — 临时分组(ad-hoc),输出默认 组序.tif,一条龙合成+整理。
+
+    用户设计:拍大量 JPG → 开分组工具(连编号都没有也能用)→ 建组 →
+    [合成+整理] 一键 合成→压缩打包→移results。有激活编号 → 编号命名;
+    无编号 → 每组输出默认 1.tif/2.tif(可手填覆盖)。
+    """
+
+    def _build_adhoc(self, tmp_path, n_groups=2):
+        from app.views.workbench_view import WorkbenchView
+        from app.services.grouping_service import (
+            Group, save_grouping, ADHOC_GROUPING_UID,
+        )
+        project_dir = str(tmp_path)
+        db = _make_db(str(tmp_path / "project.db"))
+        jdir = tmp_path / "incoming-jpg"
+        jdir.mkdir(parents=True, exist_ok=True)
+        jpgs = []
+        for i in range(1, n_groups * 2 + 1):
+            p = jdir / f"{i}.jpg"
+            p.write_bytes(b"\xff\xd8\xff\xe0jpg")
+            jpgs.append(str(p))
+        groups = [
+            Group(group_index=i, jpg_paths=jpgs[i * 2:i * 2 + 2])
+            for i in range(n_groups)
+        ]
+        save_grouping(db, ADHOC_GROUPING_UID, groups)
+        db.commit()
+        ctx = _make_ctx(project_dir=project_dir, db=db)
+        self._jpgs = jpgs
+        return WorkbenchView(ctx), ctx, db
+
+    def test_open_grouping_without_uid_binds_adhoc_and_shows_controls(self, tmp_path):
+        from app.views.workbench_view import WorkbenchView
+        from app.services.grouping_service import ADHOC_GROUPING_UID
+        db = _make_db(str(tmp_path / "project.db"))
+        ctx = _make_ctx(project_dir=str(tmp_path), db=db)
+        w = WorkbenchView(ctx)
+        w._current_uid = None
+        w._on_open_grouping()
+        # 无编号 → 绑定临时编号,新组 + 合成工具条都显示(不再空对话框)
+        assert w._grouping._uid == ADHOC_GROUPING_UID
+        assert not w._grouping._add_btn.isHidden()
+        assert not w._grouping._toolbar_widget.isHidden()
+        db.close()
+
+    def test_resolve_output_name_adhoc_defaults_to_group_seq(self, tmp_path):
+        from app.services.grouping_service import ADHOC_GROUPING_UID, Group
+        w, ctx, db = self._build_adhoc(tmp_path)
+        res = str(tmp_path / "results")
+        inc = str(tmp_path / "incoming-jpg")
+        n0, s0 = w._resolve_compose_output_name(
+            db, ADHOC_GROUPING_UID, Group(group_index=0), res, inc)
+        n1, s1 = w._resolve_compose_output_name(
+            db, ADHOC_GROUPING_UID, Group(group_index=1), res, inc)
+        assert (n0, s0) == ("1.tif", 1)
+        assert (n1, s1) == ("2.tif", 2)
+        db.close()
+
+    def test_resolve_output_name_override_wins(self, tmp_path):
+        from app.services.grouping_service import ADHOC_GROUPING_UID, Group
+        w, ctx, db = self._build_adhoc(tmp_path)
+        res = str(tmp_path / "results")
+        inc = str(tmp_path / "incoming-jpg")
+        n, _ = w._resolve_compose_output_name(
+            db, ADHOC_GROUPING_UID,
+            Group(group_index=0, output_name="我的X"), res, inc)
+        assert n == "我的X.tif"
+        db.close()
+
+    def test_resolve_output_name_real_uid_uses_suggested(self, tmp_path):
+        from app.services.grouping_service import Group
+        w, ctx, db = self._build_adhoc(tmp_path)
+        uid = "FJ-XM-B2-DLC001-T95E-20260601"
+        db.execute(
+            """INSERT INTO specimens
+               (uid, id, province, site, station, storage,
+                collection_date, photo_date, owner_project_dir)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
+            (uid, "DLC001", "FJ", "XM", "B2", "T95E",
+             "20260601", "20260601", str(tmp_path)),
+        )
+        db.commit()
+        res = str(tmp_path / "results")
+        inc = str(tmp_path / "incoming-jpg")
+        n, s = w._resolve_compose_output_name(
+            db, uid, Group(group_index=0), res, inc)
+        assert n.startswith("FJ-XM-B2-DLC001") and n.endswith(".tif")
+        assert isinstance(s, int) and s >= 1
+        db.close()
+
+    def test_headless_compose_adhoc_names_group_seq(self, tmp_path, monkeypatch):
+        from app.services.grouping_service import ADHOC_GROUPING_UID, load_grouping
+        w, ctx, db = self._build_adhoc(tmp_path)
+        captured = {}
+
+        def _fake_stack(jpgs, out_path, params, on_finished, on_failed):
+            captured["out"] = out_path
+            Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+            Path(out_path).write_bytes(b"II*\x00fake-tiff")
+            on_finished(out_path)
+
+        monkeypatch.setattr(w, "_run_helicon_stack", _fake_stack)
+        done = []
+        w._compose_group_headless(ADHOC_GROUPING_UID, 1, lambda ok: done.append(ok))
+        assert done == [True]
+        assert Path(captured["out"]).name == "2.tif"  # 组1 → 2.tif
+        db.close()
+
+    def test_batch_adhoc_one_shot_silent_no_prompts(self, tmp_path, monkeypatch):
+        """无编号 [合成+整理] 一条龙:两组都 合成→打包→移results,全程零确认框。"""
+        from app.services.grouping_service import (
+            ADHOC_GROUPING_UID, load_grouping,
+        )
+        from PyQt6.QtWidgets import QMessageBox
+        from app.services import archive_service
+        w, ctx, db = self._build_adhoc(tmp_path)
+        self._patch_helicon_present(monkeypatch)
+
+        def _fake_stack(jpgs, out_path, params, on_finished, on_failed):
+            Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+            Path(out_path).write_bytes(b"II*\x00fake-tiff")
+            on_finished(out_path)
+
+        monkeypatch.setattr(w, "_run_helicon_stack", _fake_stack)
+
+        class _R:
+            ok = True
+            saved_percent = 10
+            delete_jpg = False
+            requested_delete_jpg = False
+            deletion_skipped_reason = ""
+
+        def _fake_archive(jpg_paths, tiff_path, project_dir, delete_jpg):
+            z = str(Path(tiff_path).with_suffix(".zip"))
+            Path(z).write_bytes(b"zip")
+            r = _R()
+            r.zip_path = z
+            return r
+
+        monkeypatch.setattr(archive_service, "archive_group", _fake_archive)
+
+        prompts = []
+        monkeypatch.setattr(
+            QMessageBox, "question",
+            staticmethod(lambda *a, **k: prompts.append(a) or QMessageBox.StandardButton.No),
+        )
+        monkeypatch.setattr(QMessageBox, "information",
+                            staticmethod(lambda *a, **k: prompts.append(a)))
+        monkeypatch.setattr(QMessageBox, "warning",
+                            staticmethod(lambda *a, **k: prompts.append(a)))
+
+        w._start_compose_batch(ADHOC_GROUPING_UID, organise=True)
+
+        # 两组都已整理 → status organized
+        groups = {g.group_index: g for g in load_grouping(db, ADHOC_GROUPING_UID).groups}
+        assert groups[0].status == "organized"
+        assert groups[1].status == "organized"
+        # 全程零弹框(无激活拦截/无 1.tif 改名/无成功提示)
+        assert prompts == []
+        db.close()
+
+    def _patch_helicon_present(self, monkeypatch):
+        import app.services.helicon_service as hs
+        monkeypatch.setattr(hs, "detect_helicon", lambda: "/fake/HeliconFocus.exe")
