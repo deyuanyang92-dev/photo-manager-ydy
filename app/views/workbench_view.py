@@ -1123,11 +1123,16 @@ class WorkbenchView(BaseView):
     def _on_open_grouping(self) -> None:
         """Open (or re-focus) the grouping/compose popup — web 分组工具 toggle.
 
-        智能：打开时若分组面板还没绑定标本，自动载入当前选中 / 激活的编号，这样
-        「新组」按钮立即可用、能直接添加组1/组2（无需先在左侧点一下）。
+        智能：打开时若分组面板还没绑定标本，自动取一个编号（**无需激活**）：
+        当前选中 → 激活编号 → 右侧命名表单正在填的编号（实时预览）。这样不激活也能
+        直接点「新组」加组1/组2（web 同款 activeSpecimen || namingTargetSpecimen）。
         """
         if not getattr(self._grouping, "_uid", None):
-            uid = self._current_uid or self._get_active_uid()
+            uid = (
+                self._current_uid
+                or self._get_active_uid()
+                or self._naming.current_uid()  # 命名表单实时编号 → 无需激活
+            )
             db = self.ctx.get_db()
             if uid and db:
                 try:

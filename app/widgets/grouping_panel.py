@@ -538,9 +538,13 @@ class GroupingPanel(QWidget):
         scroll.setWidget(self._content)
         body_lay.addWidget(scroll, stretch=1)
 
-        # Empty state
-        self._empty_lbl = QLabel("在左侧选择一个标本后查看或编辑分组（无需激活，激活仅为建议）")
+        # Empty state（无任何编号时的引导；分组无需激活，有编号即可加组）
+        self._empty_lbl = QLabel(
+            "先在右侧填写标本编号（或选中/激活一个编号），即可点「新组」按角度分组。\n"
+            "分组无需激活——隐式主流程直接用监控区上方的[合成]按钮即可。"
+        )
         self._empty_lbl.setObjectName("Muted")
+        self._empty_lbl.setWordWrap(True)
         self._empty_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         body_lay.addWidget(self._empty_lbl)
 

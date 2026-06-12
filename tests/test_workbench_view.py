@@ -2205,6 +2205,33 @@ class TestOpenGroupingLoadsActive:
 
         assert w._grouping._uid == "FJ-XM-B2-DLC001-T95E-20260601"  # 自动载入了激活号
 
+    def test_open_uses_naming_draft_without_activation(self, tmp_path):
+        """不激活、不选中——只在右侧命名表单填了编号 → 开工具也能绑定它、可加组。"""
+        from app.views.workbench_view import WorkbenchView
+        from app.services import activation_service
+        project_dir = str(tmp_path / "proj")
+        Path(project_dir, "_data").mkdir(parents=True)
+        db = _make_db(str(tmp_path / "proj" / "_data" / "project.db"))
+        ctx = _make_ctx(project_dir=project_dir, db=db)
+        ctx.collab_service = None
+        w = WorkbenchView(ctx)
+        w._grouping.clear()
+        w._current_uid = None
+        assert activation_service.get_active_uid(db) is None      # 没激活
+        # 只填命名表单 → 实时预览编号
+        n = w._naming
+        n._province.setText("FJ"); n._site.setText("XM"); n._station.setText("B2")
+        n._species_id.setText("DLC001"); n._storage.setText("T95E")
+        n._collection_date.setText("20260601")
+        uid = n.current_uid()
+        assert uid
+
+        w._on_open_grouping()
+        assert w._grouping._uid == uid                            # 绑到命名草稿编号
+        # 且能加组
+        w._grouping._add_group()
+        assert len(w._grouping._grouping.groups) == 1
+
 
 class TestImplicitCompose:
     """主界面[合成] = 把激活编号下「未占用」JPG（已归属、还没进任何组）建成新组。

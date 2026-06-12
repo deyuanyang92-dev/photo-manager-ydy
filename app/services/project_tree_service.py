@@ -15,6 +15,7 @@ from pathlib import Path
 # 这些子目录是工作区内部结构，不当作"断面/子项目"节点展示。
 RESERVED_DIR_NAMES: frozenset[str] = frozenset({
     "_data", "incoming-jpg", "新拍JPG", "results", "freeform", "archive",
+    "_retired-tiff",  # 撤销合成/重合成退役的 TIF（工作区内部，不当树节点）
 })
 
 
