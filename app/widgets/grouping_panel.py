@@ -25,7 +25,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, QSize, pyqtSignal
 from PyQt6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
@@ -197,123 +197,145 @@ class _DraftGroupRow(QFrame):
         self._panel = panel
         self._setup_ui()
 
+    # 横向胶片条：每组一个固定宽度的窄竖卡片，卡内 = 角度名 / JPG缩略图网格 /
+    # 张数+输出名 / [合成] / 小动作按钮。多组并排横向滚动，一眼看完所有角度组。
+    CARD_W = 234
+
     def _setup_ui(self) -> None:
+        self.setFixedWidth(self.CARD_W)
         root = QVBoxLayout(self)
-        root.setContentsMargins(12, 12, 12, 12)
-        root.setSpacing(8)
+        root.setContentsMargins(10, 10, 10, 10)
+        root.setSpacing(6)
 
-        # Header row: group chip + angle label edit + compose button
-        header = QHBoxLayout()
-        header.setSpacing(8)
-
+        # Row1: 组chip + 角度label
+        top = QHBoxLayout()
+        top.setSpacing(6)
         chip = QLabel(f"组 {self._group.group_index}")
         chip.setObjectName("ChipArchived")
-        header.addWidget(chip)
-
+        top.addWidget(chip)
         self._label_edit = QLineEdit(self._group.angle_label or "")
-        self._label_edit.setPlaceholderText("角度标签（如：正面、背面）")
-        self._label_edit.setFixedHeight(30)
+        self._label_edit.setPlaceholderText("角度")
+        self._label_edit.setFixedHeight(26)
         self._label_edit.textEdited.connect(
             lambda t: self.label_changed.emit(self._group.group_index, t)
         )
-        header.addWidget(self._label_edit)
+        top.addWidget(self._label_edit, 1)
+        root.addLayout(top)
 
-        compose_btn = QPushButton("合成")
-        compose_btn.setObjectName("Primary")
-        compose_btn.setFixedHeight(30)
-        icons.set_button_icon(compose_btn, "fa5s.layer-group",
-                              color=icons.TONE_ON_ACCENT, size=13)
-        compose_btn.setToolTip("调用 Helicon Focus CLI 合成该组 JPG")
-        compose_btn.clicked.connect(lambda: self.compose_clicked.emit(self._group.group_index))
-        header.addWidget(compose_btn)
-
-        add_sel_btn = QPushButton("← 加入所选")
-        add_sel_btn.setObjectName("Ghost")
-        add_sel_btn.setFixedHeight(26)
-        add_sel_btn.setToolTip("将监控区选中的 JPG 加入此分组（其他组自动移除）")
-        add_sel_btn.clicked.connect(
-            lambda: self.add_selected_to_group.emit(self._group.group_index)
-        )
-        header.addWidget(add_sel_btn)
-
-        # ── 导入 TIFF / 清空 / 删组 按钮  #cursor ─────────────────────────
-        import_tiff_btn = QPushButton()
-        import_tiff_btn.setObjectName("Ghost")
-        import_tiff_btn.setFixedSize(26, 26)
-        icons.set_button_icon(import_tiff_btn, "mdi6.file-import-outline",
-                              color=icons.TONE_MUTED, size=13)
-        import_tiff_btn.setToolTip("导入已有 TIFF 关联到本组（跳过 Helicon 直接整理）")
-        import_tiff_btn.clicked.connect(
-            lambda: self.import_tiff_requested.emit(self._group.group_index)
-        )
-        header.addWidget(import_tiff_btn)
-
-        clear_btn = QPushButton()
-        clear_btn.setObjectName("Ghost")
-        clear_btn.setFixedSize(26, 26)
-        icons.set_button_icon(clear_btn, "mdi6.eraser", color=icons.TONE_MUTED, size=13)
-        clear_btn.setToolTip("清空此组所有 JPG（不删除文件）")
-        clear_btn.clicked.connect(lambda: self.clear_group_requested.emit(self._group.group_index))
-        header.addWidget(clear_btn)
-
-        del_btn = QPushButton()
-        del_btn.setObjectName("Ghost")
-        del_btn.setFixedSize(26, 26)
-        icons.set_button_icon(del_btn, "mdi6.delete-outline", color=icons.TONE_DANGER, size=13)
-        del_btn.setToolTip("删除此分组（仅删记录，不删文件）")
-        del_btn.clicked.connect(lambda: self.delete_group_requested.emit(self._group.group_index))
-        header.addWidget(del_btn)
-
-        root.addLayout(header)
-
-        # JPG list (drag-reorderable, supports cross-group drops)
+        # JPG 缩略图网格（IconMode，支持拖拽排序 + 组间拖动）
         self._jpg_list = _CrossGroupList(
             panel=self._panel,
             group_index=self._group.group_index,
             parent=self,
         )
-        self._jpg_list.setMaximumHeight(104)
-        self._jpg_list.setToolTip("拖拽可重新排序；右键 → 移除此 JPG")
+        self._jpg_list.setViewMode(QListWidget.ViewMode.IconMode)
+        self._jpg_list.setIconSize(QSize(58, 58))
+        self._jpg_list.setGridSize(QSize(68, 70))
+        self._jpg_list.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self._jpg_list.setMovement(QListWidget.Movement.Snap)
+        self._jpg_list.setWrapping(True)
+        self._jpg_list.setSpacing(3)
+        self._jpg_list.setUniformItemSizes(True)
+        self._jpg_list.setFixedHeight(150)  # 固定高，不 stretch —— 否则把下方按钮挤出视口
+        self._jpg_list.setToolTip("拖拽可重新排序；右键 → 移除此 JPG；可在组间拖动")
         for p in self._group.jpg_paths:
-            item = QListWidgetItem(Path(p).name)
+            item = QListWidgetItem(self._thumb_icon(p), "")
             item.setData(Qt.ItemDataRole.UserRole, p)
-            item.setToolTip(p)
+            item.setToolTip(Path(p).name)
             self._jpg_list.addItem(item)
-
         if not self._group.jpg_paths:
-            empty = QListWidgetItem("空组 — 从监控区拖入 JPG 或点「← 加入所选」")
+            empty = QListWidgetItem("空组\n从监控区拖入 JPG\n或点「← 加入所选」")
             empty.setFlags(Qt.ItemFlag.NoItemFlags)
+            empty.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self._jpg_list.addItem(empty)
-
-        # Context menu for right-click remove
         self._jpg_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._jpg_list.customContextMenuRequested.connect(self._on_jpg_context_menu)
         root.addWidget(self._jpg_list)
 
-        # JPG count line
-        count_lbl = QLabel(f"{len(self._group.jpg_paths)} 张 JPG")
+        # 张数 + 输出名（同一行，省高度）
+        meta = QHBoxLayout()
+        meta.setSpacing(4)
+        count_lbl = QLabel(f"{len(self._group.jpg_paths)} 张")
         count_lbl.setObjectName("MutedSmall")
-        root.addWidget(count_lbl)
-
-        # ── 输出 TIF 命名（可见 + 可编辑）──────────────────────────────────────
-        #   空时自动派生：合成→编号-序号 / 导入TIF→TIF原名；用户也可手输覆盖。
-        out_row = QHBoxLayout()
-        out_row.setSpacing(6)
-        out_lbl = QLabel("输出 TIF")
+        meta.addWidget(count_lbl)
+        out_lbl = QLabel("出")
         out_lbl.setObjectName("MutedSmall")
-        out_row.addWidget(out_lbl)
+        meta.addWidget(out_lbl)
         self._output_edit = QLineEdit(self._effective_output_name())
-        self._output_edit.setPlaceholderText("自动：编号-序号 / 导入TIF原名（可手输）")
-        self._output_edit.setFixedHeight(28)
+        self._output_edit.setPlaceholderText("自动")
+        self._output_edit.setFixedHeight(24)
         self._output_edit.setToolTip(
-            "本组合成/整理的输出文件名（不含路径与扩展名）。\n"
-            "留空 = 自动：有激活编号按 编号-序号，导入TIF则用TIF原名。"
+            "本组输出文件名（不含路径与扩展名）。\n"
+            "留空 = 自动：有编号→编号-序号；临时分组→组序(1/2…)；导入TIF→原名。"
         )
         self._output_edit.textEdited.connect(
             lambda t: self.output_name_changed.emit(self._group.group_index, t)
         )
-        out_row.addWidget(self._output_edit, 1)
-        root.addLayout(out_row)
+        meta.addWidget(self._output_edit, 1)
+        root.addLayout(meta)
+
+        # [合成] 整宽主按钮
+        compose_btn = QPushButton("⚡ 合成")
+        compose_btn.setObjectName("Primary")
+        compose_btn.setFixedHeight(28)
+        compose_btn.setToolTip("调用 Helicon Focus 合成该组 JPG")
+        compose_btn.clicked.connect(lambda: self.compose_clicked.emit(self._group.group_index))
+        root.addWidget(compose_btn)
+
+        # 小动作行：加入所选 / 导入TIF / 清空 / 删组
+        actions = QHBoxLayout()
+        actions.setSpacing(4)
+        add_sel_btn = QPushButton("← 加入所选")
+        add_sel_btn.setObjectName("Ghost")
+        add_sel_btn.setFixedHeight(24)
+        add_sel_btn.setToolTip("将监控区选中的 JPG 加入此分组（其他组自动移除）")
+        add_sel_btn.clicked.connect(
+            lambda: self.add_selected_to_group.emit(self._group.group_index)
+        )
+        actions.addWidget(add_sel_btn, 1)
+        import_tiff_btn = QPushButton()
+        import_tiff_btn.setObjectName("Ghost")
+        import_tiff_btn.setFixedSize(24, 24)
+        icons.set_button_icon(import_tiff_btn, "mdi6.file-import-outline",
+                              color=icons.TONE_MUTED, size=12)
+        import_tiff_btn.setToolTip("导入已有 TIFF 关联到本组（跳过 Helicon 直接整理）")
+        import_tiff_btn.clicked.connect(
+            lambda: self.import_tiff_requested.emit(self._group.group_index)
+        )
+        actions.addWidget(import_tiff_btn)
+        clear_btn = QPushButton()
+        clear_btn.setObjectName("Ghost")
+        clear_btn.setFixedSize(24, 24)
+        icons.set_button_icon(clear_btn, "mdi6.eraser", color=icons.TONE_MUTED, size=12)
+        clear_btn.setToolTip("清空此组所有 JPG（不删除文件）")
+        clear_btn.clicked.connect(lambda: self.clear_group_requested.emit(self._group.group_index))
+        actions.addWidget(clear_btn)
+        del_btn = QPushButton()
+        del_btn.setObjectName("Ghost")
+        del_btn.setFixedSize(24, 24)
+        icons.set_button_icon(del_btn, "mdi6.delete-outline", color=icons.TONE_DANGER, size=12)
+        del_btn.setToolTip("删除此分组（仅删记录，不删文件）")
+        del_btn.clicked.connect(lambda: self.delete_group_requested.emit(self._group.group_index))
+        actions.addWidget(del_btn)
+        root.addLayout(actions)
+
+    def _thumb_icon(self, path: str):
+        """生成 JPG 缩略图 QIcon（QImageReader 按比例缩放解码，快且不爆内存）。
+        失败/非图片 → 通用图片图标占位。"""
+        from PyQt6.QtGui import QImageReader, QIcon, QPixmap
+        try:
+            r = QImageReader(path)
+            r.setAutoTransform(True)
+            sz = r.size()
+            if sz.isValid() and sz.width() > 0 and sz.height() > 0:
+                sz.scale(58, 58, Qt.AspectRatioMode.KeepAspectRatio)
+                r.setScaledSize(sz)
+            img = r.read()
+            if not img.isNull():
+                return QIcon(QPixmap.fromImage(img))
+        except Exception:
+            pass
+        return icons.icon("mdi6.image-outline")
 
     def _effective_output_name(self) -> str:
         """当前应显示的输出名：用户覆盖 > 已合成TIF名 > 临时分组默认组序 > 空。"""
@@ -704,8 +726,20 @@ class GroupingPanel(QWidget):
             sec_lbl = QLabel("未合成组")
             sec_lbl.setObjectName("Section")
             self._content_lay.addWidget(sec_lbl)
+            # 横向胶片条：草稿卡片并排，横向滚动；多角度组也不挤。
+            hscroll = QScrollArea()
+            hscroll.setObjectName("GroupStrip")
+            hscroll.setWidgetResizable(True)
+            hscroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            hscroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            hscroll.setFixedHeight(316)  # 恰好一张卡片(≈296)+横向滚动条，下方按钮不被裁
+            strip = QWidget()
+            strip_lay = QHBoxLayout(strip)
+            strip_lay.setContentsMargins(0, 0, 0, 0)
+            strip_lay.setSpacing(10)
+            strip_lay.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
             for g in draft:
-                row = _DraftGroupRow(g, self, panel=self)
+                row = _DraftGroupRow(g, strip, panel=self)
                 row.compose_clicked.connect(self._on_compose)
                 row.label_changed.connect(self._on_label_changed)
                 row.add_selected_to_group.connect(self._on_add_selected_to_group)
@@ -714,7 +748,9 @@ class GroupingPanel(QWidget):
                 row.delete_group_requested.connect(self._on_delete_group)    # #cursor
                 row.import_tiff_requested.connect(self._on_import_tiff)      # #cursor
                 row.output_name_changed.connect(self._on_output_name_changed)
-                self._content_lay.addWidget(row)
+                strip_lay.addWidget(row)
+            hscroll.setWidget(strip)
+            self._content_lay.addWidget(hscroll)
 
         if composed:
             sep = QFrame()

@@ -168,12 +168,11 @@ def test_cross_group_move_updates_service(qtbot):
     ])
     panel.load_grouping("test-uid", grouping)
 
-    # Get the two _DraftGroupRow widgets from the content layout
-    draft_rows = [
-        panel._content_lay.itemAt(i).widget()
-        for i in range(panel._content_lay.count())
-        if isinstance(panel._content_lay.itemAt(i).widget(), _DraftGroupRow)
-    ]
+    # 横向胶片条改版后草稿卡片嵌在横向滚动区里，用 findChildren 递归取。
+    draft_rows = sorted(
+        panel.findChildren(_DraftGroupRow),
+        key=lambda r: r._group.group_index,
+    )
     assert len(draft_rows) == 2, f"Expected 2 draft rows, got {len(draft_rows)}"
 
     row0, row1 = draft_rows[0], draft_rows[1]

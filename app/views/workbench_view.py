@@ -1124,7 +1124,7 @@ class WorkbenchView(BaseView):
         helicon = getattr(self, "_helicon_params", None)
         if helicon is not None:
             lay.addWidget(helicon)
-        dlg.resize(660, 640)
+        dlg.resize(760, 720)  # 横向胶片条 + Helicon 参数都要竖向空间，给足
         return dlg
 
     def _on_open_grouping(self) -> None:
