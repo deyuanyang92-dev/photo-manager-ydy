@@ -14,29 +14,82 @@ _db_cache: dict[str, sqlite3.Connection] = {}
 
 # Load schema SQL once
 _SCHEMA_SQL_PATH = Path(__file__).parent / "schema.sql"
+# darwin_core 视图：原 12 术语逐字复刻 db-utils.js:75-97（仅加 s. 前缀消歧），
+# 在其后**附加**对齐 Darwin Core / Humboldt / OBIS 的标准术语——采集记录(collection_records)
+# 按四键(province/site/station/collection_date) LEFT JOIN 进来，外加导出期常量。
+#   - 采样努力: samplingProtocol / sampleSizeValue+Unit / samplingEffort（定量行有值，定性行空）
+#   - 位置: habitat / waterBody / min&maxDepthInMeters
+#   - 标本: basisOfRecord=PreservedSpecimen / preparations / geodeticDatum=WGS84 / countryCode=CN
+#           / occurrenceStatus=present
+#   - 环境量(盐度/水温/DO/pH/潮区…) + 采集性质 → dynamicProperties(JSON)，OBIS eMoF 的轻量替代
+# json_object 需 SQLite json1（Python 3.9+ 标准内置）。无匹配采集记录的标本：派生术语为 NULL，
+# 常量仍输出，dynamicProperties 为 NULL。
 _DARWIN_CORE_SQL = """
 DROP VIEW IF EXISTS darwin_core;
 CREATE VIEW darwin_core AS
 SELECT
-  uid              AS occurrenceID,
-  scientific_name  AS scientificName,
-  family           AS family,
-  genus            AS genus,
-  order_name       AS "order",
-  lon              AS decimalLongitude,
-  lat              AS decimalLatitude,
-  collection_date  AS eventDate,
-  collector        AS recordedBy,
-  identifier       AS identifiedBy,
+  s.uid              AS occurrenceID,
+  s.scientific_name  AS scientificName,
+  s.family           AS family,
+  s.genus            AS genus,
+  s.order_name       AS "order",
+  s.lon              AS decimalLongitude,
+  s.lat              AS decimalLatitude,
+  s.collection_date  AS eventDate,
+  s.collector        AS recordedBy,
+  s.identifier       AS identifiedBy,
   CASE
-    WHEN province IS NOT NULL AND province != ''
-    THEN province
-         || CASE WHEN site IS NOT NULL AND site != '' THEN '·' || site ELSE '' END
-         || CASE WHEN station IS NOT NULL AND station != '' THEN '·' || station ELSE '' END
+    WHEN s.province IS NOT NULL AND s.province != ''
+    THEN s.province
+         || CASE WHEN s.site IS NOT NULL AND s.site != '' THEN '·' || s.site ELSE '' END
+         || CASE WHEN s.station IS NOT NULL AND s.station != '' THEN '·' || s.station ELSE '' END
     ELSE ''
   END AS locality,
-  storage          AS verbatimPreservation
-FROM specimens;
+  s.storage          AS verbatimPreservation,
+  -- ── 附加标准术语（常量）──
+  'PreservedSpecimen' AS basisOfRecord,
+  s.storage           AS preparations,
+  'WGS84'             AS geodeticDatum,
+  'CN'                AS countryCode,
+  'present'           AS occurrenceStatus,
+  -- ── 附加标准术语（采集记录四键 JOIN）──
+  cr.habitat           AS habitat,
+  cr.water_body        AS waterBody,
+  NULLIF(cr.depth, '') AS minimumDepthInMeters,
+  NULLIF(cr.depth, '') AS maximumDepthInMeters,
+  NULLIF(cr.sample_no, '') AS recordNumber,
+  NULLIF(TRIM(
+      COALESCE(cr.method, '')
+      || CASE WHEN COALESCE(cr.sampler_model, '') != '' THEN ' · ' || cr.sampler_model ELSE '' END
+      || CASE WHEN COALESCE(cr.sampler_spec, '') != '' THEN ' · ' || cr.sampler_spec ELSE '' END
+      || CASE WHEN COALESCE(cr.sieve_mesh, '') != '' THEN ' · 网筛' || cr.sieve_mesh || 'mm' ELSE '' END
+  ), '') AS samplingProtocol,
+  NULLIF(cr.sample_area, '') AS sampleSizeValue,
+  CASE WHEN COALESCE(cr.sample_area, '') != '' THEN 'square metre' END AS sampleSizeUnit,
+  CASE WHEN COALESCE(cr.replicates, '') != '' THEN cr.replicates || ' 重复' END AS samplingEffort,
+  CASE WHEN cr.id IS NOT NULL THEN json_object(
+      '采集性质',     cr.sample_type,
+      '航次',         cr.cruise,
+      '船号',         cr.vessel,
+      '采泥器型号',   cr.sampler_model,
+      '潮区',         cr.tidal_zone,
+      '潮汐',         cr.tide,
+      '盐度',         cr.salinity,
+      '表层水温',     cr.water_temp,
+      '底层水温',     cr.bottom_temp,
+      '溶解氧',       cr.dissolved_oxygen,
+      'pH',           cr.ph,
+      '天气',         cr.weather,
+      '网筛mm',       cr.sieve_mesh,
+      '记录人',       cr.recorder,
+      '核对人',       cr.checker
+  ) END AS dynamicProperties
+FROM specimens s
+LEFT JOIN collection_records cr
+  ON s.province = cr.province
+ AND s.site = cr.site
+ AND s.station = cr.station
+ AND s.collection_date = cr.collection_date;
 """
 
 

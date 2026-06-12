@@ -27,18 +27,35 @@ IO_COLUMNS: list[tuple[str, str]] = [
     ("lon", "经度"),
     ("lat", "纬度"),
     ("geo_area", "采集地理区"),
+    ("water_body", "海区"),
+    ("cruise", "航次"),
+    ("vessel", "船号"),
+    ("tidal_zone", "潮区"),
+    ("depth", "水深(m)"),
     ("habitat", "生境"),
     ("tide", "潮水"),
     ("salinity", "盐度"),
-    ("water_temp", "水温"),
+    ("water_temp", "水温(表层)"),
+    ("bottom_temp", "底层水温"),
+    ("dissolved_oxygen", "溶解氧"),
+    ("ph", "pH"),
     ("weather", "天气"),
+    ("sample_type", "采集性质"),
+    ("method", "采样方法"),
+    ("sampler_model", "采泥器型号"),
+    ("sampler_spec", "采样器规格"),
+    ("sample_area", "取样面积(m²)"),
+    ("replicates", "取样次数"),
+    ("sieve_mesh", "网筛孔径(mm)"),
+    ("sample_no", "样品编号"),
     ("collector", "采集人"),
+    ("recorder", "记录人"),
+    ("checker", "核对人"),
     ("photographer", "拍摄人"),
     ("identifier", "鉴定人"),
     ("collection_time", "采集时刻"),
     ("photo_date", "拍摄日期"),
     ("photo_location", "拍摄地点"),
-    ("method", "采集方法"),
     ("remark", "备注"),
 ]
 
@@ -46,9 +63,16 @@ IO_COLUMNS: list[tuple[str, str]] = [
 _KEY_FIELDS: tuple[str, ...] = ("province", "site", "station", "collection_date")
 
 
+# 旧表头别名 → 字段 key：兼容字段优化前导出的模板（标签曾为 水温 / 采集方法）。
+_LEGACY_HEADER_ALIASES: dict[str, str] = {
+    "水温": "water_temp",
+    "采集方法": "method",
+}
+
+
 def _alias_map() -> dict[str, str]:
     """Build {header → field key}: accept 中文表头 / 英文 key（大小写不敏感）."""
-    amap: dict[str, str] = {}
+    amap: dict[str, str] = dict(_LEGACY_HEADER_ALIASES)
     for key, zh in IO_COLUMNS:
         amap[zh] = key
         amap[key] = key

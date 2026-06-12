@@ -133,6 +133,87 @@ class TestEnsureSchema:
         assert row["locality"] == "FJ·XM·B2"
         assert row["verbatimPreservation"] == "T95E"
 
+    def test_darwin_core_constants_present_without_record(self, tmp_project):
+        """标本无匹配采集记录：4 个常量术语仍输出，采集记录派生术语为 NULL。"""
+        conn = db_manager.open_project_db(tmp_project, create=True)
+        conn.execute("""
+            INSERT INTO specimens (uid, scientific_name, collection_date,
+                province, site, station, storage)
+            VALUES ('u-nocr','Aaa','20260601','FJ','XM','B2','T95E')
+        """)
+        conn.commit()
+        row = conn.execute("SELECT * FROM darwin_core WHERE occurrenceID='u-nocr'").fetchone()
+        assert row["basisOfRecord"] == "PreservedSpecimen"
+        assert row["occurrenceStatus"] == "present"
+        assert row["geodeticDatum"] == "WGS84"
+        assert row["countryCode"] == "CN"
+        assert row["preparations"] == "T95E"
+        assert row["habitat"] is None
+        assert row["sampleSizeValue"] is None
+        assert row["dynamicProperties"] is None
+
+    def test_darwin_core_joins_quantitative_collection_record(self, tmp_project):
+        """定量采集记录经四键 JOIN → 标准术语 + dynamicProperties(采集性质=定量)。"""
+        conn = db_manager.open_project_db(tmp_project, create=True)
+        conn.execute("""
+            INSERT INTO specimens (uid, scientific_name, collection_date,
+                province, site, station, storage)
+            VALUES ('u-quant','Bbb','20260601','FJ','XM','B2','T95E')
+        """)
+        from app.services import collection_record_service as crs
+        crs.upsert_record(conn, {
+            "province": "FJ", "site": "XM", "station": "B2",
+            "collection_date": "20260601",
+            "sample_type": "定量", "habitat": "泥滩", "water_body": "东海·三门湾",
+            "depth": "5", "method": "采泥器", "sampler_model": "大洋50型",
+            "sampler_spec": "0.1m²采泥器",
+            "sieve_mesh": "1.0", "sample_area": "0.2", "replicates": "4",
+            "salinity": "30", "sample_no": "B2-2026-007",
+            "cruise": "2026春季三门湾航次", "vessel": "科学三号",
+            "recorder": "李四", "checker": "王五",
+        })
+        row = conn.execute("SELECT * FROM darwin_core WHERE occurrenceID='u-quant'").fetchone()
+        assert row["habitat"] == "泥滩"
+        assert row["waterBody"] == "东海·三门湾"
+        assert row["minimumDepthInMeters"] == "5"
+        assert row["maximumDepthInMeters"] == "5"
+        assert row["sampleSizeValue"] == "0.2"
+        assert row["sampleSizeUnit"] == "square metre"
+        assert "采泥器" in row["samplingProtocol"]
+        assert "大洋50型" in row["samplingProtocol"]   # 采泥器型号 并入 samplingProtocol
+        assert "1.0" in row["samplingProtocol"]
+        assert "4" in row["samplingEffort"]
+        assert row["recordNumber"] == "B2-2026-007"    # 样品编号 → DwC recordNumber
+        assert row["basisOfRecord"] == "PreservedSpecimen"
+        assert row["occurrenceStatus"] == "present"
+        dp = row["dynamicProperties"]
+        assert '"采集性质":"定量"' in dp
+        assert '"盐度":"30"' in dp
+        assert '"航次":"2026春季三门湾航次"' in dp
+        assert '"船号":"科学三号"' in dp
+        assert '"记录人":"李四"' in dp
+        assert '"核对人":"王五"' in dp
+
+    def test_darwin_core_qualitative_has_no_sample_size(self, tmp_project):
+        """定性采集记录：无取样面积 → sampleSizeValue 空、性质=定性。"""
+        conn = db_manager.open_project_db(tmp_project, create=True)
+        conn.execute("""
+            INSERT INTO specimens (uid, scientific_name, collection_date,
+                province, site, station, storage)
+            VALUES ('u-qual','Ccc','20260602','FJ','XM','B3','T95E')
+        """)
+        from app.services import collection_record_service as crs
+        crs.upsert_record(conn, {
+            "province": "FJ", "site": "XM", "station": "B3",
+            "collection_date": "20260602",
+            "sample_type": "定性", "habitat": "岩礁", "method": "手拣定性",
+        })
+        row = conn.execute("SELECT * FROM darwin_core WHERE occurrenceID='u-qual'").fetchone()
+        assert row["sampleSizeValue"] is None
+        assert row["sampleSizeUnit"] is None
+        assert "手拣定性" in row["samplingProtocol"]
+        assert '"采集性质":"定性"' in row["dynamicProperties"]
+
 
 class TestSchemaMigrationAddsColumns:
     """Opening a project.db created by an OLDER schema (e.g. the web prototype's

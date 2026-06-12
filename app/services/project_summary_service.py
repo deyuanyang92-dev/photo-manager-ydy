@@ -36,11 +36,16 @@ from app.services.project_tree_service import scan_tree
 # 采集站位汇总的列（断面在前，由调用处单独前置）。与 schema.sql 的真实列对齐。
 _COLLECTION_COLUMNS: tuple[str, ...] = (
     "province", "site", "station", "collection_date",
-    "station_label", "lon", "lat", "geo_area",
-    "habitat", "tide", "salinity", "water_temp", "weather",
-    "collector", "photographer", "identifier",
+    "station_label", "lon", "lat", "geo_area", "water_body",
+    "cruise", "vessel",
+    "tidal_zone", "depth",
+    "habitat", "tide", "salinity", "water_temp", "bottom_temp",
+    "dissolved_oxygen", "ph", "weather",
+    "sample_type", "method", "sampler_model", "sampler_spec", "sample_area",
+    "replicates", "sieve_mesh", "sample_no",
+    "collector", "recorder", "checker", "photographer", "identifier",
     "collection_time", "photo_date", "photo_location",
-    "method", "remark",
+    "remark",
 )
 
 _GROUPING_COMPOSED_STATUSES: tuple[str, ...] = ("composed", "organized")

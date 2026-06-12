@@ -23,9 +23,14 @@ from typing import Any, Optional
 # Real columns on collection_records (id / raw_json handled separately).
 _COLUMNS: tuple[str, ...] = (
     "province", "site", "station", "collection_date",
-    "station_label", "lon", "lat", "geo_area",
-    "habitat", "tide", "salinity", "water_temp", "weather",
-    "collector", "photographer", "identifier",
+    "station_label", "lon", "lat", "geo_area", "water_body",
+    "cruise", "vessel",
+    "habitat", "tidal_zone", "depth",
+    "tide", "salinity", "water_temp", "bottom_temp",
+    "dissolved_oxygen", "ph", "weather",
+    "sample_type", "sampler_model", "sampler_spec", "sample_area",
+    "replicates", "sieve_mesh", "sample_no",
+    "collector", "recorder", "checker", "photographer", "identifier",
     "collection_time", "photo_date", "photo_location",
     "method", "remark",
 )

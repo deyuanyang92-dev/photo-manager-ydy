@@ -540,10 +540,17 @@ def export_annotated_csv(
 def export_darwin_core(db: sqlite3.Connection, path: str | Path) -> Path:
     """Export the darwin_core VIEW to a CSV file.
 
-    Reads directly from the SQLite darwin_core view (created by db_manager).
-    DwC columns: occurrenceID, scientificName, family, genus, order,
-                 decimalLongitude, decimalLatitude, eventDate, recordedBy,
-                 identifiedBy, locality, verbatimPreservation.
+    Reads directly from the SQLite darwin_core view (created by db_manager);
+    column set is taken dynamically from the view, so view changes flow through
+    here automatically. The view exposes the original 12 oracle terms
+    (occurrenceID, scientificName, family, genus, order, decimalLongitude,
+    decimalLatitude, eventDate, recordedBy, identifiedBy, locality,
+    verbatimPreservation) plus standards-aligned terms joined from
+    collection_records / constants: basisOfRecord, preparations, geodeticDatum,
+    countryCode, occurrenceStatus, habitat, waterBody,
+    minimum/maximumDepthInMeters, samplingProtocol, sampleSizeValue,
+    sampleSizeUnit, samplingEffort, and dynamicProperties (JSON of 采集性质 +
+    environmental measurements). See db_manager._DARWIN_CORE_SQL.
 
     Parameters
     ----------

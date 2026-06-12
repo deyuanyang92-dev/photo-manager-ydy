@@ -120,6 +120,22 @@ class TestInvariants:
         assert rec["salinity_extra"] == "30‰"
         assert rec["weird_field"] == "x"
 
+    def test_macrobenthos_quant_fields_roundtrip(self, db):
+        """大型底栖定量调查新字段作为真列持久化 + 读回（非 raw_json 兜底）。"""
+        extra = {
+            "sample_type": "定量", "water_body": "东海·三门湾",
+            "cruise": "2026春季三门湾航次", "vessel": "科学三号",
+            "sampler_model": "大洋50型", "sample_no": "B2-2026-007",
+            "recorder": "李四", "checker": "王五",
+            "tidal_zone": "中潮区", "depth": "5", "bottom_temp": "14",
+            "dissolved_oxygen": "7.2", "ph": "8.1", "sampler_spec": "0.1m²采泥器",
+            "sample_area": "0.2", "replicates": "4", "sieve_mesh": "1.0",
+        }
+        crs.upsert_record(db, _sample(**extra))
+        rec = crs.lookup_record(db, "ZJ", "SMW", "B2", "20260518")
+        for k, v in extra.items():
+            assert rec[k] == v, f"{k} 未持久化: {rec.get(k)!r}"
+
     def test_upsert_returns_stable_id_on_update(self, db):
         """Re-upserting the same 4-key keeps the same row id."""
         rid1 = crs.upsert_record(db, _sample(collector="A"))

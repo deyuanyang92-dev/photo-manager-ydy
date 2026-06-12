@@ -66,18 +66,35 @@ CREATE TABLE IF NOT EXISTS collection_records (
   lon             REAL,
   lat             REAL,
   geo_area        TEXT,            -- 采集地理区
+  water_body      TEXT,            -- 海区 / 水体（DwC waterBody，如 东海·三门湾）
+  cruise          TEXT,            -- 航次（潮下带船基，如 2026春季三门湾航次）
+  vessel          TEXT,            -- 船号 / 船名（潮下带，如 科学三号）
   habitat         TEXT,            -- 生境 / 底质（泥滩/沙滩/岩相…）
-  tide            TEXT,            -- 潮位 / 潮时
+  tidal_zone      TEXT,            -- 潮区（高潮区/中潮区/低潮区）— 潮间带分带
+  depth           TEXT,            -- 水深 m（潮下带）
+  tide            TEXT,            -- 潮位 / 潮时 / 大小潮
   salinity        TEXT,            -- 盐度（选填）
-  water_temp      TEXT,            -- 水温（选填）
+  water_temp      TEXT,            -- 水温·表层（选填）
+  bottom_temp     TEXT,            -- 底层水温（选填）
+  dissolved_oxygen TEXT,           -- 溶解氧 DO（选填）
+  ph              TEXT,            -- pH（选填）
   weather         TEXT,            -- 天气（选填）
+  sample_type     TEXT,            -- 采集性质：定量/半定量/定性（DwC 定量↔sampleSize 主轴）
+  sampler_model   TEXT,            -- 采泥器型号（大洋50型/Van Veen/箱式…）—型号，区别于规格
+  sampler_spec    TEXT,            -- 采样器规格 / 尺寸（25×25cm框 / 0.1m²采泥器…）
+  sample_area     TEXT,            -- 取样面积 m²（标准化 个体数·m⁻² 的关键）
+  replicates      TEXT,            -- 取样次数 / 重复数
+  sieve_mesh      TEXT,            -- 网筛孔径 mm（大型底栖常 1.0）
+  sample_no       TEXT,            -- 样品编号（现场样品袋编号，DwC recordNumber）
   collector       TEXT,
+  recorder        TEXT,            -- 记录人（填表人，责任链）
+  checker         TEXT,            -- 核对人（复核人，责任链）
   photographer    TEXT,
   identifier      TEXT,
   collection_time TEXT,            -- 采集时刻（选填）
   photo_date      TEXT,
   photo_location  TEXT,            -- 拍摄地点
-  method          TEXT,            -- 采集方法
+  method          TEXT,            -- 采样方法（定量框/采泥器/拖网/手拣定性）
   remark          TEXT,
   raw_json        TEXT,            -- 兜底：零字段丢失 + 扩展字段
   UNIQUE(province, site, station, collection_date)
