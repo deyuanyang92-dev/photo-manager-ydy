@@ -776,10 +776,8 @@ class SettingsView(BaseView):
         self._auto_activate_new_chk.stateChanged.connect(self._save_workbench)
         watch_v.addWidget(self._auto_activate_new_chk)
 
-        self._grouping_auto_watch_chk = QCheckBox("JPG 入库后自动分组处理（groupingAutoWatch）")
-        self._grouping_auto_watch_chk.setChecked(False)  # web default = false
-        self._grouping_auto_watch_chk.stateChanged.connect(self._save_workbench)
-        watch_v.addWidget(self._grouping_auto_watch_chk)
+        # （已移除「JPG 入库后自动分组处理」死开关：重设计后合成永远手动，自动只保留
+        #   下面的「合成后自动整理归档」。）
 
         # 合成后自动整理归档：手动合成出 TIFF 后，自动把源 JPG 打包压缩+命名+移
         # results。合成本身仍手动（软件无法判断哪些 JPG 该合成）。默认关。
@@ -794,23 +792,11 @@ class SettingsView(BaseView):
         tab.body.addWidget(watch_box)
         tab.body.addSpacing(12)
 
-        mode_box = QGroupBox("分组自动处理模式")
+        mode_box = QGroupBox("文件视图")
         mode_v = QVBoxLayout(mode_box)
         mode_form = QFormLayout()
         mode_form.setHorizontalSpacing(16)
         mode_form.setVerticalSpacing(8)
-
-        # groupingAutoWatchMode: compose | organize | compose+organize
-        self._grouping_mode_combo = QComboBox()
-        self._grouping_mode_combo.addItems([
-            "合成 (compose)",
-            "整理 (organize)",
-            "合成+整理 (compose+organize)",
-        ])
-        self._grouping_mode_combo.setCurrentIndex(2)  # default: compose+organize
-        self._grouping_mode_combo.setToolTip("触发 groupingAutoWatch 时的处理模式")
-        self._grouping_mode_combo.currentIndexChanged.connect(self._save_workbench)
-        mode_form.addRow("自动处理模式", self._grouping_mode_combo)
 
         # fileViewMode: jpg-tif | with-zip | all
         self._file_view_mode_combo = QComboBox()
@@ -1306,15 +1292,9 @@ class SettingsView(BaseView):
         self._auto_activate_new_chk.setChecked(
             str(qs.value(_K_WB_AUTO_ACTIVATE_NEW, "false")).lower() == "true"
         )
-        self._grouping_auto_watch_chk.setChecked(
-            str(qs.value(_K_WB_GROUPING_AUTO_WATCH, "false")).lower() == "true"
-        )
         self._auto_organize_chk.setChecked(
             str(qs.value(_K_WB_AUTO_ORGANIZE, "false")).lower() == "true"
         )
-        mode_map = {"compose": 0, "organize": 1, "compose+organize": 2}
-        mode_val = str(qs.value(_K_WB_GROUPING_AUTO_WATCH_MODE, "compose+organize"))
-        self._grouping_mode_combo.setCurrentIndex(mode_map.get(mode_val, 2))
         fv_map = {"jpg-tif": 0, "with-zip": 1, "all": 2}
         fv_val = str(qs.value(_K_WB_FILE_VIEW_MODE, "jpg-tif"))
         self._file_view_mode_combo.setCurrentIndex(fv_map.get(fv_val, 0))
@@ -1502,18 +1482,8 @@ class SettingsView(BaseView):
             "true" if self._auto_activate_new_chk.isChecked() else "false",
         )
         qs.setValue(
-            _K_WB_GROUPING_AUTO_WATCH,
-            "true" if self._grouping_auto_watch_chk.isChecked() else "false",
-        )
-        qs.setValue(
             _K_WB_AUTO_ORGANIZE,
             "true" if self._auto_organize_chk.isChecked() else "false",
-        )
-        mode_vals = ["compose", "organize", "compose+organize"]
-        idx = self._grouping_mode_combo.currentIndex()
-        qs.setValue(
-            _K_WB_GROUPING_AUTO_WATCH_MODE,
-            mode_vals[idx] if 0 <= idx < len(mode_vals) else "compose+organize",
         )
         fv_vals = ["jpg-tif", "with-zip", "all"]
         fv_idx = self._file_view_mode_combo.currentIndex()

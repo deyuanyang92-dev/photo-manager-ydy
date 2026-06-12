@@ -582,14 +582,7 @@ class TestWorkbenchToggles:
         """autoActivateOnNewSpecimen web default = false."""
         assert view._auto_activate_new_chk.isChecked() is False
 
-    def test_grouping_auto_watch_default_false(self, view: SettingsView) -> None:
-        assert view._grouping_auto_watch_chk.isChecked() is False
-
-    def test_grouping_mode_default_compose_organize(
-        self, view: SettingsView
-    ) -> None:
-        """web default groupingAutoWatchMode = 'compose+organize' (index 2)."""
-        assert view._grouping_mode_combo.currentIndex() == 2
+    # （已移除 groupingAutoWatch 开关/模式 → 对应默认值测试随之删除。）
 
     def test_file_view_mode_default_jpg_tif(self, view: SettingsView) -> None:
         """web default fileViewMode = 'jpg-tif' (index 0)."""
@@ -606,26 +599,6 @@ class TestWorkbenchToggles:
         view._save_workbench()
         view.on_activate()
         assert view._auto_activate_new_chk.isChecked() is True
-
-    def test_grouping_auto_watch_round_trip_true(
-        self, view: SettingsView
-    ) -> None:
-        view._grouping_auto_watch_chk.setChecked(True)
-        view._save_workbench()
-        view.on_activate()
-        assert view._grouping_auto_watch_chk.isChecked() is True
-
-    def test_grouping_mode_round_trip_compose(self, view: SettingsView) -> None:
-        view._grouping_mode_combo.setCurrentIndex(0)  # compose
-        view._save_workbench()
-        view.on_activate()
-        assert view._grouping_mode_combo.currentIndex() == 0
-
-    def test_grouping_mode_round_trip_organize(self, view: SettingsView) -> None:
-        view._grouping_mode_combo.setCurrentIndex(1)  # organize
-        view._save_workbench()
-        view.on_activate()
-        assert view._grouping_mode_combo.currentIndex() == 1
 
     def test_file_view_mode_round_trip_with_zip(self, view: SettingsView) -> None:
         view._file_view_mode_combo.setCurrentIndex(1)  # with-zip
@@ -644,16 +617,6 @@ class TestWorkbenchToggles:
         view._save_workbench()
         stored = view.ctx.settings._qs.value(_K_WB_AUTO_WATCH, "true")
         assert stored == "false"
-
-    def test_qsettings_stores_grouping_mode_string(
-        self, view: SettingsView
-    ) -> None:
-        view._grouping_mode_combo.setCurrentIndex(0)  # compose
-        view._save_workbench()
-        stored = view.ctx.settings._qs.value(
-            _K_WB_GROUPING_AUTO_WATCH_MODE, "compose+organize"
-        )
-        assert stored == "compose"
 
     def test_qsettings_stores_file_view_mode_all(
         self, view: SettingsView
