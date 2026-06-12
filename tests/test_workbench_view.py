@@ -2549,3 +2549,189 @@ class TestConfigurableIncomingDir:
         names = [r[0] for r in db.execute("SELECT name FROM seen_files").fetchall()]
         assert "a.jpg" in names   # 写死 incoming-jpg 时为空 → 红
         db.close()
+
+
+class TestBatchComposeOrganise:
+    """批量[合成]/[合成+整理] 顺序队列 — 修复异步链路断裂。
+
+    旧 bug:`_on_compose_and_organise_all` 异步发起合成后立刻读 composed 列表 →
+    刚合成的组拿不到 composed_tiff_path → 整理空跑。新设计:workbench 顺序队列,
+    每组合成完成(异步回调)→ 同步整理该组 → 下一组。批量不弹确认框。
+    """
+
+    def _build(self, tmp_path):
+        from app.views.workbench_view import WorkbenchView
+        from app.services.grouping_service import Group, save_grouping
+        project_dir = str(tmp_path)
+        db = _make_db(str(tmp_path / "project.db"))
+        uid = "FJ-XM-B2-DLC001-T95E-20260601"
+        db.execute(
+            """INSERT INTO specimens
+               (uid, id, province, site, station, storage,
+                collection_date, photo_date, owner_project_dir)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
+            (uid, "DLC001", "FJ", "XM", "B2", "T95E",
+             "20260601", "20260601", project_dir),
+        )
+        # 真实 JPG 文件 — save_grouping 默认 clean_phantoms 会剔除不存在的路径。
+        jdir = tmp_path / "incoming-jpg"
+        jdir.mkdir(parents=True, exist_ok=True)
+        jpgs = []
+        for i in range(1, 5):
+            p = jdir / f"{i}.jpg"
+            p.write_bytes(b"\xff\xd8\xff\xe0jpg")
+            jpgs.append(str(p))
+        # 两个未合成(draft)组,各 2 JPG
+        save_grouping(db, uid, [
+            Group(group_index=0, angle_label="正面", jpg_paths=jpgs[0:2]),
+            Group(group_index=1, angle_label="背面", jpg_paths=jpgs[2:4]),
+        ])
+        db.commit()
+        ctx = _make_ctx(project_dir=project_dir, db=db)
+        self._jpgs = jpgs
+        return WorkbenchView(ctx), ctx, uid, db
+
+    def _patch_helicon_present(self, monkeypatch):
+        import app.services.helicon_service as hs
+        monkeypatch.setattr(hs, "detect_helicon", lambda: "/fake/HeliconFocus.exe")
+
+    def test_compose_and_organise_chains_each_composed_group(self, tmp_path, monkeypatch):
+        """核心回归:两组都被合成 + 整理,顺序交替。证明整理读到的是合成后状态。"""
+        w, ctx, uid, db = self._build(tmp_path)
+        self._patch_helicon_present(monkeypatch)
+        calls = []
+
+        def _fake_headless(u, idx, on_done):
+            calls.append(("compose", idx))
+            on_done(True)
+
+        def _fake_organise(u, idx):
+            calls.append(("organise", idx))
+
+        monkeypatch.setattr(w, "_compose_group_headless", _fake_headless)
+        monkeypatch.setattr(w, "_on_organise_requested", _fake_organise)
+
+        w._start_compose_batch(uid, organise=True)
+
+        assert calls == [
+            ("compose", 0), ("organise", 0),
+            ("compose", 1), ("organise", 1),
+        ]
+        assert w._batch is None  # 队列耗尽 → 状态清空
+        db.close()
+
+    def test_compose_only_never_organises(self, tmp_path, monkeypatch):
+        """[⚡合成] 批量:只合成,绝不整理。"""
+        w, ctx, uid, db = self._build(tmp_path)
+        self._patch_helicon_present(monkeypatch)
+        calls = []
+        monkeypatch.setattr(
+            w, "_compose_group_headless",
+            lambda u, idx, on_done: (calls.append(("compose", idx)), on_done(True)),
+        )
+        monkeypatch.setattr(
+            w, "_on_organise_requested",
+            lambda u, idx: calls.append(("organise", idx)),
+        )
+
+        w._start_compose_batch(uid, organise=False)
+
+        assert ("organise", 0) not in calls and ("organise", 1) not in calls
+        assert calls == [("compose", 0), ("compose", 1)]
+        db.close()
+
+    def test_failed_group_not_organised_but_batch_continues(self, tmp_path, monkeypatch):
+        """某组合成失败(on_done False)→ 该组不整理,但队列继续下一组。"""
+        w, ctx, uid, db = self._build(tmp_path)
+        self._patch_helicon_present(monkeypatch)
+        calls = []
+
+        def _fake_headless(u, idx, on_done):
+            calls.append(("compose", idx))
+            on_done(idx != 0)  # 组0失败,组1成功
+
+        monkeypatch.setattr(w, "_compose_group_headless", _fake_headless)
+        monkeypatch.setattr(
+            w, "_on_organise_requested",
+            lambda u, idx: calls.append(("organise", idx)),
+        )
+
+        w._start_compose_batch(uid, organise=True)
+
+        assert calls == [
+            ("compose", 0),           # 组0 合成失败 → 不整理
+            ("compose", 1), ("organise", 1),
+        ]
+        assert w._batch is None
+        db.close()
+
+    def test_no_helicon_aborts_batch(self, tmp_path, monkeypatch):
+        """无 Helicon → 整批中止,不合成任何组。"""
+        from PyQt6.QtWidgets import QMessageBox
+        w, ctx, uid, db = self._build(tmp_path)
+        import app.services.helicon_service as hs
+        monkeypatch.setattr(hs, "detect_helicon", lambda: None)
+        monkeypatch.setattr(QMessageBox, "warning",
+                            staticmethod(lambda *a, **k: None))
+        called = []
+        monkeypatch.setattr(
+            w, "_compose_group_headless",
+            lambda u, idx, on_done: called.append(idx),
+        )
+        w._start_compose_batch(uid, organise=True)
+        assert called == []
+        assert w._batch is None
+        db.close()
+
+    def test_headless_compose_uses_suggested_name_and_saves(self, tmp_path, monkeypatch):
+        """_compose_group_headless:无 output_name 覆盖 → 用 suggested_tiff_name,
+        合成完成持久化 status='composed' + composed_tiff_path。无确认框。"""
+        from app.services.grouping_service import load_grouping
+        w, ctx, uid, db = self._build(tmp_path)
+
+        captured = {}
+
+        def _fake_stack(jpgs, out_path, params, on_finished, on_failed):
+            captured["out"] = out_path
+            captured["jpgs"] = list(jpgs)
+            Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+            Path(out_path).write_bytes(b"II*\x00fake-tiff")
+            on_finished(out_path)
+
+        monkeypatch.setattr(w, "_run_helicon_stack", _fake_stack)
+
+        done = []
+        w._compose_group_headless(uid, 0, lambda ok: done.append(ok))
+
+        assert done == [True]
+        # 产出名 = 建议成果名(编号-序号.tif),非弹框选择
+        assert Path(captured["out"]).name.startswith("FJ-XM-B2-DLC001")
+        assert captured["jpgs"] == self._jpgs[0:2]
+        g0 = next(g for g in load_grouping(db, uid).groups if g.group_index == 0)
+        assert g0.status == "composed"
+        assert g0.composed_tiff_path == captured["out"]
+        db.close()
+
+    def test_headless_compose_honours_output_name_override(self, tmp_path, monkeypatch):
+        """每组 output_name 覆盖值优先于建议名(去 .tif 后缀再加 .tif)。"""
+        from app.services.grouping_service import Group, save_grouping
+        w, ctx, uid, db = self._build(tmp_path)
+        # 给组0 设输出命名覆盖(用真实 JPG 路径,免被 clean_phantoms 剔除)
+        save_grouping(db, uid, [
+            Group(group_index=0, jpg_paths=self._jpgs[0:2],
+                  output_name="我的标本X"),
+            Group(group_index=1, jpg_paths=self._jpgs[2:4]),
+        ])
+        db.commit()
+        captured = {}
+
+        def _fake_stack(jpgs, out_path, params, on_finished, on_failed):
+            captured["out"] = out_path
+            Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+            Path(out_path).write_bytes(b"II*\x00fake-tiff")
+            on_finished(out_path)
+
+        monkeypatch.setattr(w, "_run_helicon_stack", _fake_stack)
+        w._compose_group_headless(uid, 0, lambda ok: None)
+        assert Path(captured["out"]).name == "我的标本X.tif"
+        db.close()

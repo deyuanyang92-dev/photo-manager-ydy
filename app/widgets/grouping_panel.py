@@ -400,6 +400,7 @@ class GroupingPanel(QWidget):
     grouping_changed = pyqtSignal()
     # Bulk-action signals (capture-main-actions row)
     compose_all_requested = pyqtSignal(str)    # uid — compose all pending groups
+    compose_and_organise_all_requested = pyqtSignal(str)  # uid — 合成全部 + 逐组整理
     organise_all_requested = pyqtSignal(str)   # uid — organise all composed groups
     # Add-to-group / free-compose / retroactive signals
     add_selection_to_group_requested = pyqtSignal(int)  # group_index
@@ -758,33 +759,25 @@ class GroupingPanel(QWidget):
         self._group_toggle_btn.setText("▾ 分组工具" if checked else "▸ 分组工具")
 
     def _on_compose_all(self) -> None:
-        """Compose all draft groups for the current specimen."""
-        if not self._uid or not self._grouping:
+        """[⚡合成] 批量:发单信号,由 workbench 驱动顺序队列(异步合成需串行,
+        不能在面板里紧循环 emit——会同时启动多个 HeliconWorker 互相覆盖)。"""
+        if not self._uid:
             return
-        draft = [g for g in self._grouping.groups if not g.composed_tiff_path]
-        for g in draft:
-            self.compose_requested.emit(self._uid, g.group_index)
+        self.compose_all_requested.emit(self._uid)
 
     def _on_organise_all(self) -> None:
-        """Organise all composed groups for the current specimen."""
-        if not self._uid or not self._grouping:
+        """[🗜整理] 批量:发单信号,workbench 逐组同步整理已合成组。"""
+        if not self._uid:
             return
-        composed = [g for g in self._grouping.groups if g.composed_tiff_path]
-        for g in composed:
-            self.organise_requested.emit(self._uid, g.group_index)
+        self.organise_all_requested.emit(self._uid)
 
     def _on_compose_and_organise_all(self) -> None:
-        """Compose all draft groups then organise — sequential per group."""
-        if not self._uid or not self._grouping:
+        """[合成+整理] 批量:发单信号,workbench 顺序队列——每组合成完成(异步回调)
+        后再同步整理该组,然后下一组。旧紧循环 emit 在合成完成前就读 composed →
+        刚合成的组整理空跑,故移除。"""
+        if not self._uid:
             return
-        # Compose all pending first (each emits compose_requested)
-        draft = [g for g in self._grouping.groups if not g.composed_tiff_path]
-        for g in draft:
-            self.compose_requested.emit(self._uid, g.group_index)
-        # Then organise already-composed ones
-        composed = [g for g in self._grouping.groups if g.composed_tiff_path]
-        for g in composed:
-            self.organise_requested.emit(self._uid, g.group_index)
+        self.compose_and_organise_all_requested.emit(self._uid)
 
     def _on_compose(self, group_index: int) -> None:
         if self._uid:

@@ -439,6 +439,13 @@ class WorkbenchView(BaseView):
         self._grouping.import_tiff_requested.connect(self._on_import_tiff)  # #cursor
         self._grouping.supp_process_requested.connect(self._on_supplementary_process)
         self._grouping.supp_files_dropped.connect(self._on_supplementary_dropped)
+        # 批量[合成]/[合成+整理]/[整理] — workbench 驱动顺序队列(合成异步,需串行)。
+        self._batch = None  # {"uid","queue":[group_index...],"organise":bool}
+        self._grouping.compose_all_requested.connect(
+            lambda uid: self._start_compose_batch(uid, organise=False))
+        self._grouping.compose_and_organise_all_requested.connect(
+            lambda uid: self._start_compose_batch(uid, organise=True))
+        self._grouping.organise_all_requested.connect(self._organise_all_batch)
         # Helicon 合成参数 — web 把参数放合成流程（app.js:6698/6881），不在右栏。
         # 移入分组工具弹窗（compose 触发处）。compose 仍读 get_params()，逻辑不变。
         self._helicon_params = HeliconParamsPanel()
@@ -1861,6 +1868,150 @@ class WorkbenchView(BaseView):
         progress.show()
         worker.start()
         self._helicon_progress = progress  # keep reference alive
+
+    # ── 批量[合成]/[合成+整理] 顺序队列 ────────────────────────────────────────
+    # 合成是异步(HeliconWorker QThread,回调完成),整理是同步。批量绝不能紧循环
+    # emit——会同时启动多个 worker 互相覆盖,且整理会在合成完成前读到空 composed。
+    # 故由 workbench 串行驱动:合成完成(异步回调)→ 同步整理该组 → 下一组。
+    # 批量时走 `_compose_group_headless`(无预览/结果确认框),满足"一键直合"。
+
+    def _start_compose_batch(self, uid: str, organise: bool) -> None:
+        """启动批量合成队列。organise=True 时每组合成完后立即整理该组。"""
+        db = self.ctx.get_db()
+        if not db or not uid:
+            return
+        from app.services.helicon_service import detect_helicon
+        from app.services.grouping_service import load_grouping
+        if not detect_helicon():
+            QMessageBox.warning(
+                self, "未检测到 Helicon Focus",
+                "未找到 Helicon Focus，无法批量合成。请安装并设置 "
+                "HELICON_FOCUS_PATH 环境变量。",
+            )
+            return
+        grouping = load_grouping(db, uid)
+        queue = [g.group_index for g in grouping.groups if not g.composed_tiff_path]
+        if not queue:
+            # 无待合成组:合成+整理 → 退而整理已合成组;纯合成 → 状态栏提示。
+            if organise:
+                self._organise_all_batch(uid)
+            else:
+                self._batch_status("无待合成组。")
+            return
+        self._batch = {"uid": uid, "queue": queue, "organise": organise}
+        self._compose_next_in_batch()
+
+    def _compose_next_in_batch(self) -> None:
+        """取队首组合成;队列空 → 清状态 + 状态栏提示完成。"""
+        b = self._batch
+        if not b:
+            return
+        if not b["queue"]:
+            self._batch = None
+            self._batch_status("批量合成完成。")
+            return
+        uid = b["uid"]
+        idx = b["queue"].pop(0)
+        self._compose_group_headless(
+            uid, idx, lambda ok: self._batch_group_done(ok, uid, idx)
+        )
+
+    def _batch_group_done(self, success: bool, uid: str, group_index: int) -> None:
+        """单组合成回调:成功且需整理 → 同步整理该组,然后链到下一组。"""
+        if self._batch is None:
+            return
+        if success and self._batch.get("organise"):
+            self._on_organise_requested(uid, group_index)  # 同步,复用全部安全闸
+        self._compose_next_in_batch()
+
+    def _batch_status(self, msg: str) -> None:
+        """非阻塞反馈(状态栏);批量回调里绝不用模态框——会卡死且打断链路。"""
+        try:
+            self.window().statusBar().showMessage(msg, 4000)
+        except Exception:
+            pass
+
+    def _compose_group_headless(self, uid: str, group_index: int, on_done) -> None:
+        """批量用:无确认框合成单组。完成调 on_done(success: bool)。
+
+        复刻 `_on_compose_requested` 成功路径的保存块,但剥掉预览框/结果框
+        (满足"一键直合不弹框")。组 JPG < 2 直接 on_done(False) 跳过。
+        产出名:每组 output_name 覆盖 > 否则 organize_preview 的建议成果名。
+        """
+        db = self.ctx.get_db()
+        project_dir = self.ctx.current_project_dir
+        if not db or not project_dir or not uid:
+            on_done(False)
+            return
+        try:
+            from app.services.grouping_service import load_grouping, save_grouping
+            from app.services.organize_service import organize_preview
+
+            grouping = load_grouping(db, uid)
+            group = next(
+                (g for g in grouping.groups if g.group_index == group_index), None
+            )
+            if group is None or len(group.jpg_paths) < 2:
+                on_done(False)  # 批量不弹隐式兜底问句,JPG 不足直接跳过
+                return
+
+            inc, res = self._resolve_capture_subdirs()
+            results_dir = os.path.join(project_dir, res)
+            incoming_dir = os.path.join(project_dir, inc)
+            os.makedirs(incoming_dir, exist_ok=True)
+
+            preview = organize_preview(db, uid, results_dir, incoming_dir)
+            if getattr(group, "output_name", None):
+                output_name = Path(group.output_name).stem + ".tif"
+            else:
+                output_name = preview.suggested_tiff_name
+            output_path = os.path.join(incoming_dir, output_name)
+            output_path = self._with_output_ext(
+                output_path, self._helicon_output_opts()["format"]
+            )
+            params = self._helicon_params.get_params()
+
+            def _ok(tiff_path):
+                if not os.path.isfile(output_path):
+                    on_done(False)
+                    return
+                from datetime import datetime, timezone
+                now = datetime.now(tz=timezone.utc).isoformat()
+                group.composed_tiff_path = output_path
+                group.status = "composed"
+                group.updated_at = now
+                group.result_sequence = preview.next_seq
+                save_grouping(db, uid, grouping.groups)
+                try:
+                    from app.services.organize_service import _bump_seq_hint
+                    _bump_seq_hint(db, uid, preview.next_seq)
+                except Exception:
+                    pass
+                self._grouping.load_grouping(uid, grouping)
+                self._refresh_results_column(uid, grouping)
+                self._on_helicon_finished(uid)
+                on_done(True)
+
+            def _fail(msg: str):
+                on_done(False)
+
+            self._run_helicon_stack(group.jpg_paths, output_path, params, _ok, _fail)
+        except Exception:
+            on_done(False)
+
+    def _organise_all_batch(self, uid: str) -> None:
+        """[🗜整理] 批量:逐组同步整理「已合成未归档」组(整理本身是同步阻塞)。"""
+        db = self.ctx.get_db()
+        if not db or not uid:
+            return
+        from app.services.grouping_service import load_grouping
+        grouping = load_grouping(db, uid)
+        targets = [
+            g.group_index for g in grouping.groups
+            if g.composed_tiff_path and g.status != "organized"
+        ]
+        for idx in targets:
+            self._on_organise_requested(uid, idx)
 
     def _maybe_auto_organize(self, uid: str, group_index: int) -> None:
         """合成成功后的自动整理钩子。
