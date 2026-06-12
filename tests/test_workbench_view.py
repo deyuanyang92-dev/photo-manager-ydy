@@ -2185,6 +2185,57 @@ class TestFileSystemWatcher:
 # ── 外部TIFF：整理时检测命名不规范 → 确认改名（触发点1） ──────────────────────
 
 
+class TestSuppAutonameByActive:
+    """补处理兜底：外部名 TIF + 有激活编号 → 自动按激活编号成果名改名再归档。"""
+
+    UID = "FJ-XM-B2-DLC001-T95E-20260601"
+
+    def _make_view(self, tmp_path):
+        from app.views.workbench_view import WorkbenchView
+        project_dir = str(tmp_path / "proj")
+        Path(project_dir, "_data").mkdir(parents=True)
+        Path(project_dir, "results").mkdir()
+        db = _make_db(str(tmp_path / "proj" / "_data" / "project.db"))
+        ctx = _make_ctx(project_dir=project_dir, db=db)
+        ctx.collab_service = None
+        return WorkbenchView(ctx), ctx, db, project_dir
+
+    def _jpg(self, tmp_path):
+        j = tmp_path / "a.jpg"; j.write_bytes(b"\xff\xd8\xff")
+        return str(j)
+
+    def test_external_tif_renamed_by_active(self, tmp_path):
+        from app.services import activation_service
+        w, ctx, db, project_dir = self._make_view(tmp_path)
+        activation_service.activate(project_dir, db, self.UID)
+        tif = Path(project_dir) / "results" / "HeliconFocus.tif"
+        tif.write_bytes(b"II*\x00")
+        out = w._supp_autoname_tiff_by_active(db, project_dir, [self._jpg(tmp_path), str(tif)])
+        tif_out = [p for p in out if p.lower().endswith((".tif", ".tiff"))][0]
+        assert Path(tif_out).name == "FJ-XM-B2-DLC001-1-T95E-20260601.tif"  # 按激活编号
+        assert not tif.exists()
+
+    def test_no_active_keeps_external_name(self, tmp_path):
+        w, ctx, db, project_dir = self._make_view(tmp_path)
+        tif = Path(project_dir) / "results" / "HeliconFocus.tif"
+        tif.write_bytes(b"II*\x00")
+        out = w._supp_autoname_tiff_by_active(db, project_dir, [self._jpg(tmp_path), str(tif)])
+        assert any("HeliconFocus" in p for p in out)        # 无激活→不改名
+        assert tif.exists()
+
+    def test_conforming_tif_unchanged(self, tmp_path):
+        from app.services import activation_service
+        w, ctx, db, project_dir = self._make_view(tmp_path)
+        db.execute("INSERT INTO specimens(uid, owner_project_dir) VALUES(?,?)",
+                   (self.UID, project_dir)); db.commit()
+        activation_service.activate(project_dir, db, self.UID)
+        tif = Path(project_dir) / "results" / "FJ-XM-B2-DLC001-1-T95E-20260601.tif"
+        tif.write_bytes(b"II*\x00")                          # 名已规范且标本在库
+        out = w._supp_autoname_tiff_by_active(db, project_dir, [self._jpg(tmp_path), str(tif)])
+        assert any(p == str(tif) for p in out)               # 反查到→原样不动
+        assert tif.exists()
+
+
 class TestOpenGroupingLoadsActive:
     """打开分组工具时, 若面板未绑标本 → 自动载入激活/当前编号, 让「新组」立即可用。"""
 

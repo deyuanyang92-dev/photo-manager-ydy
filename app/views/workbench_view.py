@@ -2098,6 +2098,41 @@ class WorkbenchView(BaseView):
         if paths:
             self._run_supplementary(list(paths))
 
+    def _supp_autoname_tiff_by_active(self, db, project_dir, paths: list) -> list:
+        """补处理前的兜底：外部名 TIF + 有激活编号 → 自动按激活编号成果名改名。
+
+        只在「TIF 文件名反查不到标本」且「有激活编号」时改名；TIF 名本就规范则原样。
+        返回（可能已把 TIF 路径替换为新名后的）路径列表。
+        """
+        try:
+            from app.services.supplementary_service import resolve_specimen_for_tiff
+            from app.services.organize_service import organize_preview, rename_tiff
+        except Exception:
+            return paths
+        tiffs = [p for p in paths if str(p).lower().endswith((".tif", ".tiff"))]
+        if len(tiffs) != 1:
+            return paths
+        tiff = tiffs[0]
+        try:
+            if resolve_specimen_for_tiff(db, Path(tiff).name) is not None:
+                return paths  # 名能反查 → 不动
+        except Exception:
+            return paths
+        active = self._get_active_uid()
+        if not active:
+            return paths  # 无激活编号 → 维持原状(会在 validate 报命名不规范)
+        try:
+            inc, res = self._resolve_capture_subdirs()
+            preview = organize_preview(
+                db, active,
+                os.path.join(project_dir, res),
+                os.path.join(project_dir, inc),
+            )
+            new_path = rename_tiff(tiff, preview.suggested_tiff_name)
+        except Exception:
+            return paths
+        return [new_path if p == tiff else p for p in paths]
+
     def _run_supplementary(self, paths: list) -> None:
         from app.services.supplementary_service import (
             validate_supp_group,
@@ -2112,7 +2147,12 @@ class WorkbenchView(BaseView):
             ui.info(self, "补处理", "请先打开一个项目。")
             return
 
-        # Validate selection → resolve specimen from TIFF name (no activation needed).
+        # 激活编号兜底命名：补处理本来只从 TIF 文件名反查标本；若 TIF 是外部名(反查
+        # 不到)但当前有激活编号 → 自动按激活编号的成果名给 TIF 改名，再走补处理。
+        # 落地"激活 → 自动命名"（用户设计），免得外部 Helicon 的 TIF 因名不规范被卡。
+        paths = self._supp_autoname_tiff_by_active(db, project_dir, list(paths))
+
+        # Validate selection → resolve specimen from TIFF name.
         try:
             grp = validate_supp_group(db, paths)
         except SuppGroupError as exc:
