@@ -74,6 +74,7 @@ _STORAGE_SENTINEL_CUSTOM = "__custom__"   # "其他… 打开项目设置"
 _SECTION_DEFS = [
     ("采集位置", "geo",      lambda p: p._geo_group),
     ("编号规则", "identity", lambda p: p._identity_group),
+    ("日期",     "date",     lambda p: p._date_group),
     ("拍照备注", "notes",    lambda p: p._notes_frame),
 ]
 
@@ -437,10 +438,10 @@ class NamingPanel(QWidget):
 
         root.addStretch()
 
-        # Restore section visibility from QSettings
+        # Restore section visibility from QSettings（日期段现在默认可见——用户要手填
+        # 采集/拍摄日期，喂 UID 日期段 + 标本记录；之前被永久隐藏是错的）。
         for _, key, getter in _SECTION_DEFS:
             getter(self).setVisible(self._load_section_vis(key))
-        self._date_group.hide()  # permanently hidden; widgets remain wired for save/UID logic
 
         # Wire all edits to live-preview
         for widget in (

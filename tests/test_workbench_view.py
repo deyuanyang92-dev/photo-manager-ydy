@@ -2917,6 +2917,40 @@ class TestAdhocGrouping:
         monkeypatch.setattr(hs, "detect_helicon", lambda: "/fake/HeliconFocus.exe")
 
 
+class TestMissingMetaReminder:
+    """激活下一个编号时，上一个若缺 保存方式/采集日期/拍摄日期 → 提醒回填。"""
+
+    def _seed(self, tmp_path, storage, cdate, pdate):
+        from app.views.workbench_view import WorkbenchView
+        db = _make_db(str(tmp_path / "project.db"))
+        uid = "FJ-XM-B2-DLC001-T95E-20260601"
+        db.execute(
+            """INSERT INTO specimens
+               (uid, id, province, site, station, storage,
+                collection_date, photo_date, owner_project_dir)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
+            (uid, "DLC001", "FJ", "XM", "B2", storage, cdate, pdate, str(tmp_path)),
+        )
+        db.commit()
+        ctx = _make_ctx(project_dir=str(tmp_path), db=db)
+        return WorkbenchView(ctx), uid, db
+
+    def test_missing_dates_listed(self, tmp_path):
+        w, uid, db = self._seed(tmp_path, "T95E", "", "")
+        assert w._missing_meta_fields(uid) == ["采集日期", "拍摄日期"]
+        db.close()
+
+    def test_complete_specimen_lists_nothing(self, tmp_path):
+        w, uid, db = self._seed(tmp_path, "T95E", "20260601", "20260601")
+        assert w._missing_meta_fields(uid) == []
+        db.close()
+
+    def test_missing_storage_listed(self, tmp_path):
+        w, uid, db = self._seed(tmp_path, "", "20260601", "")
+        assert w._missing_meta_fields(uid) == ["保存方式", "拍摄日期"]
+        db.close()
+
+
 class TestRestoreLastProject:
     """启动自动恢复上次项目 — 免得每次重启回到空项目。只恢复有效 workspace。"""
 

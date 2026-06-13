@@ -1342,6 +1342,33 @@ class WorkbenchView(BaseView):
         except Exception:
             self._monitor.clear()
 
+    def _missing_meta_fields(self, uid: str) -> list:
+        """返回该编号缺失的关键字段标签：保存方式 / 采集日期 / 拍摄日期。
+
+        拍摄当时可能还不知道怎么处理标本（保存方式/日期没填），切到下一个号时用来
+        提醒回填，免得遗漏。左侧点该号即可随时编辑补填。
+        """
+        db = self.ctx.get_db()
+        if not db or not uid:
+            return []
+        try:
+            row = db.execute(
+                "SELECT storage, collection_date, photo_date FROM specimens WHERE uid = ?",
+                (uid,),
+            ).fetchone()
+        except Exception:
+            return []
+        if not row:
+            return []
+        missing = []
+        if not (row[0] and str(row[0]).strip()):
+            missing.append("保存方式")
+        if not (row[1] and str(row[1]).strip()):
+            missing.append("采集日期")
+        if not (row[2] and str(row[2]).strip()):
+            missing.append("拍摄日期")
+        return missing
+
     def _on_sidebar_activate(self, uid: str) -> None:
         """Activate *uid* via activation_service and refresh the sidebar + monitor.
 
@@ -1378,6 +1405,15 @@ class WorkbenchView(BaseView):
                     f"已切到新号。提醒：旧号「{short}」此前拍的照片仍归旧号"
                     "（不推荐频繁切换）", 6000,
                 )
+                # 资料未填完提醒：离开旧号时若它缺 保存方式/采集日期/拍摄日期 → 弹提醒，
+                # 免得拍完忘了回填（拍摄当时可能还没决定怎么处理标本）。
+                missing = self._missing_meta_fields(prev_uid)
+                if missing:
+                    QMessageBox.information(
+                        self, "上一个编号资料未填完",
+                        f"编号「{short}」还缺：{'、'.join(missing)}。\n"
+                        "已激活下一个；左侧点该编号可随时回填编辑。",
+                    )
         except Exception as exc:
             QMessageBox.warning(self, "激活失败", str(exc))
 

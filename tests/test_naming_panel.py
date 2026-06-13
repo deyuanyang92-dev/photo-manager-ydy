@@ -184,3 +184,13 @@ class TestStorageComboDisplay:
         panel._on_storage_btn("R95E")
         assert panel._storage.text() == "R95E"
         assert "R95E" in panel.current_uid()
+
+
+def test_date_section_visible_for_input(panel):
+    """采集日期/拍摄日期字段必须可见 —— 用户手填，喂 UID 日期段 + 标本记录。
+
+    曾被 `_date_group.hide()` 永久隐藏（错误），现改为默认可见的分区。
+    """
+    assert hasattr(panel, "_collection_date")
+    assert hasattr(panel, "_photo_date")
+    assert not panel._date_group.isHidden()
