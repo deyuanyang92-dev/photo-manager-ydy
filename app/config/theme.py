@@ -1412,9 +1412,10 @@ QPushButton#PhasePill:checked, QPushButton#PhasePillActive:checked, QPushButton#
    蓝 info=shooting · 青 accent=shot_done · 橙 warn=organizing · 绿 success=done. */
 QPushButton#PhaseDotShooting, QPushButton#PhaseDotShotDone,
 QPushButton#PhaseDotOrganizing, QPushButton#PhaseDotDone {{
-    min-width: 12px; max-width: 12px;
-    min-height: 12px; max-height: 12px;
-    border-radius: 6px;
+    min-width: 13px; max-width: 13px;
+    min-height: 13px; max-height: 13px;
+    padding: 0px;
+    border-radius: 7px;
     background-color: transparent;
 }}
 QPushButton#PhaseDotShooting   {{ border: 2px solid {t["info"]}; }}

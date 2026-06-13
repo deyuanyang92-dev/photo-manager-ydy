@@ -67,11 +67,11 @@ class TestSectionTitles:
         titles = _labels_with_name(frame, "NamingGroupTitle")
         assert titles == [], "编号规则 frame should have no NamingGroupTitle"
 
-    def test_date_group_retains_title_label(self, panel):
+    def test_date_group_has_no_title_label(self, panel):
+        # 紧凑化：日期段去掉「日期」段标题以省空间（字段仍在，整段可在 ☰ 菜单隐藏）。
         frame = panel._date_group
         titles = _labels_with_name(frame, "NamingGroupTitle")
-        assert len(titles) == 1, "日期 frame should keep its NamingGroupTitle"
-        assert titles[0].text() == "日期"
+        assert titles == [], "日期 frame should have no NamingGroupTitle (compact)"
 
 
 # ── Adaptive field widths ──────────────────────────────────────────────────

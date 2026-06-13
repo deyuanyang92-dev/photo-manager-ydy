@@ -338,14 +338,15 @@ class NamingPanel(QWidget):
         identity_grid.addWidget(pres_cell, 1, 2)
         form.addWidget(self._identity_group)
 
-        # 采集日期 / 拍摄日期
-        self._date_group, date_grid = _section("日期")
+        # 采集日期 / 拍摄日期 —— 紧凑：无段标题（省一行），两字段一行；
+        # 整段还可在 ☰ 分区菜单里隐藏（太占空间时关掉）。
+        self._date_group, date_grid = _section("日期", show_title=False)
         date_grid.setColumnStretch(0, 1)
         date_grid.setColumnStretch(1, 1)
-        self._collection_date = _mk("YYYYMMDD")
+        self._collection_date = _mk("采集 YYYYMMDD")
         date_grid.addWidget(_field("采集日期", self._collection_date,
                                    help_text="采集日期 YYYYMMDD"), 0, 0)
-        self._photo_date = _mk("YYYYMMDD（选填）")
+        self._photo_date = _mk("拍摄 YYYYMMDD（选填）")
         date_grid.addWidget(_field("拍摄日期", self._photo_date,
                                    help_text="拍摄日期 YYYYMMDD，选填"), 0, 1)
         form.addWidget(self._date_group)

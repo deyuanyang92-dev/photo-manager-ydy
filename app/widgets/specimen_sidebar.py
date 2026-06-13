@@ -357,6 +357,9 @@ class SpecimenSidebar(QWidget):
         for code, obj_name, tip in self._PHASE_DOTS:
             dot = QPushButton()
             dot.setObjectName(obj_name)
+            # 强制正方固定尺寸 —— 仅靠 QSS max-width 拗不过按钮默认 padding，会被撑成
+            # 矩形；setFixedSize 锁死，配 QSS border-radius=半径 → 真·小圆点。
+            dot.setFixedSize(13, 13)
             dot.setCheckable(True)
             dot.setChecked(code == current)
             dot.setCursor(Qt.CursorShape.PointingHandCursor)
