@@ -1015,6 +1015,19 @@ class WorkbenchView(BaseView):
             QMessageBox.information(self, "保存", "编号尚未填写完整。")
             return
 
+        # 采集日期软必填：它是编号核心字段、会写入 UID 日期段。空着强提醒，但允许继续
+        # （兼容采集日期确实未知的标本——编号自动少一段）。默认「返回填写」。
+        if not self._naming._collection_date.text().strip():
+            reply = QMessageBox.question(
+                self, "采集日期未填",
+                "采集日期是编号核心字段，会写入唯一编号。\n\n"
+                "未知可留空继续（编号自动少日期段），或返回填写。",
+                QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if reply != QMessageBox.StandardButton.Save:
+                return
+
         # ── Collaboration UID claim ───────────────────────────────────────
         # When collaboration is active (running + a group code), claim a NEW
         # UID across the LAN so no teammate can reuse it.  Re-saving a UID that

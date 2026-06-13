@@ -194,3 +194,14 @@ def test_date_section_visible_for_input(panel):
     assert hasattr(panel, "_collection_date")
     assert hasattr(panel, "_photo_date")
     assert not panel._date_group.isHidden()
+
+
+def test_collection_date_marked_required(panel):
+    """采集日期=编号核心字段(写入UID)→ 必填红*；拍摄日期保持选填(无*)。"""
+    labels = _labels_with_name(panel, "CompactFieldLabel")
+    col = [l for l in labels if "采集日期" in l.text()]
+    assert col, "采集日期 field label not found"
+    assert "*" in col[0].text(), "采集日期 should carry required (*) marker"
+    photo = [l for l in labels if "拍摄日期" in l.text()]
+    assert photo, "拍摄日期 field label not found"
+    assert "*" not in photo[0].text(), "拍摄日期 should stay optional (no *)"

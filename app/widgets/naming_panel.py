@@ -344,8 +344,8 @@ class NamingPanel(QWidget):
         date_grid.setColumnStretch(0, 1)
         date_grid.setColumnStretch(1, 1)
         self._collection_date = _mk("采集 YYYYMMDD")
-        date_grid.addWidget(_field("采集日期", self._collection_date,
-                                   help_text="采集日期 YYYYMMDD"), 0, 0)
+        date_grid.addWidget(_field("采集日期", self._collection_date, required=True,
+                                   help_text="采集日期 YYYYMMDD —— 核心字段，写入唯一编号"), 0, 0)
         self._photo_date = _mk("拍摄 YYYYMMDD（选填）")
         date_grid.addWidget(_field("拍摄日期", self._photo_date,
                                    help_text="拍摄日期 YYYYMMDD，选填"), 0, 1)

@@ -2951,6 +2951,72 @@ class TestMissingMetaReminder:
         db.close()
 
 
+class TestCollectionDateSoftRequired:
+    """采集日期=核心字段写入UID；保存时空值强提醒但允许继续(兼容未知日期)。"""
+
+    def _wb(self, tmp_path):
+        from app.views.workbench_view import WorkbenchView
+        db = _make_db(str(tmp_path / "project.db"))
+        ctx = _make_ctx(project_dir=str(tmp_path), db=db)
+        ctx.collab_service = None  # 跳过协作 UID 占用分支
+        w = WorkbenchView(ctx)
+        n = w._naming
+        n._province.setText("FJ")
+        n._site.setText("XM")
+        n._station.setText("B2")
+        n._species_id.setText("DLC001")
+        n._storage.setText("T95E")
+        n._update_preview()
+        return w, n, db
+
+    def test_empty_date_back_cancels_save(self, tmp_path, monkeypatch):
+        from PyQt6.QtWidgets import QMessageBox
+        w, n, db = self._wb(tmp_path)
+        n._collection_date.setText("")
+        n._update_preview()
+        monkeypatch.setattr(
+            QMessageBox, "question",
+            staticmethod(lambda *a, **k: QMessageBox.StandardButton.Cancel),
+        )
+        w._on_naming_save()
+        assert db.execute("SELECT count(*) FROM specimens").fetchone()[0] == 0
+        db.close()
+
+    def test_empty_date_proceed_saves_dateless_uid(self, tmp_path, monkeypatch):
+        from PyQt6.QtWidgets import QMessageBox
+        w, n, db = self._wb(tmp_path)
+        n._collection_date.setText("")
+        n._update_preview()
+        monkeypatch.setattr(
+            QMessageBox, "question",
+            staticmethod(lambda *a, **k: QMessageBox.StandardButton.Save),
+        )
+        w._on_naming_save()
+        rows = db.execute("SELECT uid FROM specimens").fetchall()
+        assert len(rows) == 1
+        assert rows[0][0] == "FJ-XM-B2-DLC001-T95E"  # 无日期段(兼容)
+        db.close()
+
+    def test_filled_date_no_prompt_uid_has_date(self, tmp_path, monkeypatch):
+        from PyQt6.QtWidgets import QMessageBox
+        w, n, db = self._wb(tmp_path)
+        n._collection_date.setText("20260613")
+        n._update_preview()
+        calls = {"q": 0}
+
+        def _q(*a, **k):
+            calls["q"] += 1
+            return QMessageBox.StandardButton.Yes
+
+        monkeypatch.setattr(QMessageBox, "question", staticmethod(_q))
+        w._on_naming_save()
+        rows = db.execute("SELECT uid FROM specimens").fetchall()
+        assert len(rows) == 1
+        assert rows[0][0].endswith("-20260613")  # 日期写入编号
+        assert calls["q"] == 0  # 填了不弹问
+        db.close()
+
+
 class TestRestoreLastProject:
     """启动自动恢复上次项目 — 免得每次重启回到空项目。只恢复有效 workspace。"""
 
