@@ -275,9 +275,11 @@ class _DraftGroupRow(QFrame):
         root.addLayout(meta)
 
         # [合成] 整宽主按钮
-        compose_btn = QPushButton("⚡ 合成")
+        compose_btn = QPushButton("合成")
         compose_btn.setObjectName("Primary")
         compose_btn.setFixedHeight(28)
+        icons.set_button_icon(compose_btn, "fa5s.layer-group",
+                              color=icons.TONE_ON_ACCENT, size=12)
         compose_btn.setToolTip("调用 Helicon Focus 合成该组 JPG")
         compose_btn.clicked.connect(lambda: self.compose_clicked.emit(self._group.group_index))
         root.addWidget(compose_btn)
@@ -466,7 +468,7 @@ class GroupingPanel(QWidget):
         main_actions = QHBoxLayout(self._toolbar_widget)
         main_actions.setContentsMargins(0, 0, 0, 0)
         main_actions.setSpacing(8)
-        compose_btn = QPushButton("⚡ 合成")
+        compose_btn = QPushButton("合成")
         compose_btn.setObjectName("Primary")
         compose_btn.setFixedHeight(30)
         icons.set_button_icon(compose_btn, "fa5s.layer-group",
@@ -478,11 +480,13 @@ class GroupingPanel(QWidget):
         compose_org_btn = QPushButton("合成+整理")
         compose_org_btn.setObjectName("Primary")
         compose_org_btn.setFixedHeight(30)
-        compose_org_btn.setToolTip("合成后立即整理归档")
+        icons.set_button_icon(compose_org_btn, "mdi6.layers-plus",
+                              color=icons.TONE_ON_ACCENT, size=14)
+        compose_org_btn.setToolTip("合成后立即整理归档（一条龙）")
         compose_org_btn.clicked.connect(self._on_compose_and_organise_all)
         main_actions.addWidget(compose_org_btn)
 
-        org_btn = QPushButton("🗜 整理")
+        org_btn = QPushButton("整理")
         org_btn.setObjectName("Outline")
         org_btn.setFixedHeight(30)
         icons.set_button_icon(org_btn, "mdi6.archive-arrow-down-outline",
