@@ -744,6 +744,153 @@ class TestImposition:
         assert diffs > 5, "cut marks must visibly change the sheet preview"
 
 
+class TestImpositionDesigner:
+    """排版设计 — designer dialog wiring, per-bucket state, persistence."""
+
+    def test_design_button_present_in_imposition_box(self, qt_app):
+        v = _studio(qt_app, [_sp()], paper="a4")
+        assert hasattr(v, "_btn_imposition_design")
+        assert "排版设计" in v._btn_imposition_design.text()
+
+    def test_grid_opts_passes_new_keys(self, qt_app):
+        v = _studio(qt_app, [_sp()], paper="a4")
+        v._imposition = {
+            "marginLeftMm": 4.0, "marginTopMm": 6.0, "gapXMm": 1.0,
+            "gapYMm": 0.0, "shrinkToFit": True, "orientation": "landscape",
+            "startSlot": 3, "forceCols": 5, "cutMarks": True,
+        }
+        opts = v._grid_opts()
+        for k in ("marginLeftMm", "marginTopMm", "gapXMm", "gapYMm",
+                  "shrinkToFit", "orientation", "startSlot", "forceCols"):
+            assert opts[k] == v._imposition[k]
+        assert "cutMarks" not in opts          # print flag, not grid math
+
+    def test_build_job_attaches_grid_opts(self, qt_app):
+        v = _studio(qt_app, [_sp()], paper="a4")
+        v._imposition = {"forceCols": 2, "orientation": "landscape"}
+        job = v._build_job("sample")
+        assert job["gridOpts"] == v._grid_opts()
+        v2 = _studio(qt_app, [_sp()], paper="label")
+        assert "gridOpts" not in v2._build_job("sample")
+
+    def test_grid_for_honours_orientation(self, qt_app):
+        v = _studio(qt_app, [_sp()], paper="a4")
+        v._imposition = {"orientation": "landscape"}
+        assert v._grid_for("sample")["cols"] == 5   # 50mm labels on 297mm width
+
+    def test_open_dialog_applies_and_persists_on_accept(self, qt_app, monkeypatch):
+        from PyQt6.QtWidgets import QDialog
+        from app.services.label_service import persisted_imposition
+        from app.widgets.label_imposition_dialog import LabelImpositionDialog
+
+        def fake_exec(dlg):
+            dlg._imp = {"marginMm": 3.0, "forceCols": 4}
+            return QDialog.DialogCode.Accepted
+
+        monkeypatch.setattr(LabelImpositionDialog, "exec", fake_exec)
+        v = _studio(qt_app, [_sp()], paper="a4")
+        v._open_imposition_designer()
+        assert v._imposition == {"marginMm": 3.0, "forceCols": 4}
+        assert persisted_imposition("sample") == {"marginMm": 3.0, "forceCols": 4}
+        # panel spins follow
+        assert v._imp_margin.value() == 3.0
+        assert v._imp_cols.value() == 4
+
+    def test_cancel_restores_snapshot(self, qt_app, monkeypatch):
+        from PyQt6.QtWidgets import QDialog
+        from app.widgets.label_imposition_dialog import LabelImpositionDialog
+
+        def fake_exec(dlg):
+            dlg.imposition_changed.emit({"marginMm": 1.0})   # live mid-dialog
+            return QDialog.DialogCode.Rejected
+
+        monkeypatch.setattr(LabelImpositionDialog, "exec", fake_exec)
+        v = _studio(qt_app, [_sp()], paper="a4")
+        v._on_imposition_replaced({"marginMm": 5.0})
+        v._open_imposition_designer()
+        assert v._imposition == {"marginMm": 5.0}            # rolled back
+        assert v._imp_margin.value() == 5.0
+
+    def test_dialog_change_syncs_panel_spins(self, qt_app):
+        v = _studio(qt_app, [_sp()], paper="a4")
+        v._on_imposition_replaced({"marginMm": 3.0, "gapMm": 0.0,
+                                   "forceCols": 4, "cutMarks": True})
+        assert v._imp_margin.value() == 3.0
+        assert v._imp_gap.value() == 0.0
+        assert v._imp_cols.value() == 4
+        assert v._imp_cutmarks.isChecked()
+
+    def test_panel_margin_edit_drops_per_side_keys(self, qt_app):
+        v = _studio(qt_app, [_sp()], paper="a4")
+        v._on_imposition_replaced({"marginLeftMm": 12.0, "marginTopMm": 4.0})
+        v._imp_margin.setValue(6.0)
+        assert v._imposition.get("marginMm") == 6.0
+        assert "marginLeftMm" not in v._imposition
+        assert "marginTopMm" not in v._imposition
+
+    def test_panel_gap_edit_drops_axis_keys(self, qt_app):
+        v = _studio(qt_app, [_sp()], paper="a4")
+        v._on_imposition_replaced({"gapXMm": 1.0, "gapYMm": 3.0})
+        v._imp_gap.setValue(1.5)
+        assert v._imposition.get("gapMm") == 1.5
+        assert "gapXMm" not in v._imposition and "gapYMm" not in v._imposition
+
+    def test_bucket_switch_swaps_imposition(self, qt_app):
+        # RNA specimen keeps the tissue bucket non-empty (else the studio
+        # auto-falls back to sample and the switch cannot stick)
+        v = _studio(qt_app, [_sp(), _rna_sp()], paper="a4")
+        v._on_imposition_replaced({"forceCols": 2})
+        v._set_bucket("tissue")
+        assert v._imposition == {}                  # tissue has its own dict
+        v._on_imposition_replaced({"marginMm": 3.0})
+        v._set_bucket("sample")
+        assert v._imposition == {"forceCols": 2}
+        assert v._imp_cols.value() == 2             # panel resynced
+        v._set_bucket("tissue")
+        assert v._imposition == {"marginMm": 3.0}
+
+    def test_imposition_restored_on_new_view(self, qt_app):
+        from app.services.label_service import persist_imposition
+        persist_imposition("sample", {"forceCols": 2, "cutMarks": True})
+        v = _studio(qt_app, [_sp()], paper="a4")
+        assert v._imposition == {"forceCols": 2, "cutMarks": True}
+        assert v._imp_cols.value() == 2
+        assert v._imp_cutmarks.isChecked()
+
+    def test_panel_edit_persists(self, qt_app):
+        from app.services.label_service import persisted_imposition
+        v = _studio(qt_app, [_sp()], paper="a4")
+        v._imp_margin.setValue(5.0)
+        assert persisted_imposition("sample") == {"marginMm": 5.0}
+
+    def test_print_dialog_passes_grid_opts_to_build_printer(self, qt_app, monkeypatch):
+        import app.views.labels_view as lv
+
+        captured = {}
+        real_build = lv.build_printer
+
+        def _fake_build(job, grid_opts=None):
+            captured["grid_opts"] = grid_opts
+            return real_build(job, grid_opts)
+
+        _Code = lv.QPrintDialog.DialogCode
+
+        class _FakeDialog:
+            DialogCode = _Code
+            def __init__(self, *a, **k): pass
+            def setOption(self, *a, **k): pass
+            def exec(self): return _Code.Accepted
+
+        monkeypatch.setattr(lv, "build_printer", _fake_build)
+        monkeypatch.setattr(lv, "QPrintDialog", _FakeDialog)
+        monkeypatch.setattr(lv, "paint_jobs", lambda p, jobs, **k: True)
+
+        v = _studio(qt_app, [_sp()], paper="a4")
+        v._on_imposition_replaced({"orientation": "landscape"})
+        v._print("sample")
+        assert captured["grid_opts"].get("orientation") == "landscape"
+
+
 class TestFieldToggleSurfacing:
     """留白方式 + per-field print toggles live in the settings panel and are the
     single source of truth for _hidden_fields / _blank_style."""

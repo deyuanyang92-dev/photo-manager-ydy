@@ -262,6 +262,54 @@ def test_card_shows_existing_output_name(qtbot):
 
 
 # ---------------------------------------------------------------------------
+# Group selection: checked groups constrain bulk actions; empty selection = all
+# ---------------------------------------------------------------------------
+
+def test_group_selection_defaults_empty_means_all(qtbot):
+    from app.widgets.grouping_panel import GroupingPanel
+    ctx = _make_app_context()
+    panel = GroupingPanel(ctx)
+    qtbot.addWidget(panel)
+    panel.load_grouping("test-uid", _make_grouping([
+        {"index": 0, "jpgs": ["/p/a.jpg"]},
+        {"index": 1, "jpgs": ["/p/b.jpg"]},
+    ]))
+
+    assert panel.selected_group_indexes() == []
+
+
+def test_select_all_and_clear_group_selection(qtbot):
+    from app.widgets.grouping_panel import GroupingPanel
+    ctx = _make_app_context()
+    panel = GroupingPanel(ctx)
+    qtbot.addWidget(panel)
+    panel.load_grouping("test-uid", _make_grouping([
+        {"index": 0, "jpgs": ["/p/a.jpg"]},
+        {"index": 2, "jpgs": ["/p/b.jpg"]},
+    ]))
+
+    panel.select_all_groups()
+    assert panel.selected_group_indexes() == [0, 2]
+    panel.clear_group_selection()
+    assert panel.selected_group_indexes() == []
+
+
+def test_group_row_checkbox_updates_selection(qtbot):
+    from app.widgets.grouping_panel import GroupingPanel
+    ctx = _make_app_context()
+    panel = GroupingPanel(ctx)
+    qtbot.addWidget(panel)
+    panel.load_grouping("test-uid", _make_grouping([
+        {"index": 0, "jpgs": ["/p/a.jpg"]},
+    ]))
+
+    panel._on_group_selected_changed(0, True)
+    assert panel.selected_group_indexes() == [0]
+    panel._on_group_selected_changed(0, False)
+    assert panel.selected_group_indexes() == []
+
+
+# ---------------------------------------------------------------------------
 # 「新组」按钮：自动标「角度N」 + 工具打开自动载入激活编号
 # ---------------------------------------------------------------------------
 
@@ -288,3 +336,28 @@ def test_add_group_needs_specimen(qtbot):
     qtbot.addWidget(panel)
     panel._add_group()                # _uid=None
     assert panel._grouping is None or not panel._grouping.groups
+
+
+def test_register_existing_zip_updates_composed_group(qtbot, tmp_path, monkeypatch):
+    """已合成组可注册已有 ZIP，不重新压缩。"""
+    from app.widgets.grouping_panel import GroupingPanel
+    from app.services.grouping_service import Group, SpecimenGrouping
+    import app.utils.ui as ui
+
+    zip_path = tmp_path / "result.zip"
+    zip_path.write_bytes(b"zipdata")
+    ctx = _make_app_context()
+    panel = GroupingPanel(ctx)
+    qtbot.addWidget(panel)
+    grouping = SpecimenGrouping(uid="test-uid", groups=[
+        Group(group_index=0, composed_tiff_path=str(tmp_path / "result.tif")),
+    ])
+    panel.load_grouping("test-uid", grouping)
+    monkeypatch.setattr(ui, "get_open_file_name", lambda *a, **k: str(zip_path))
+
+    with qtbot.waitSignal(panel.archive_zip_registered, timeout=1000):
+        panel._on_register_zip(0)
+
+    group = panel._grouping.groups[0]
+    assert group.archive_zip == str(zip_path)
+    assert group.status == "organized"

@@ -35,6 +35,15 @@ External CLIs are detected at runtime, never bundled-by-default: `cjxl`/`djxl` (
 brew jpeg-xl), Helicon Focus (detected only, never distributed). Their absence must degrade
 gracefully, never crash.
 
+Windows desktop double-click launch: `launch_windows.cmd` → `wsl.exe` into the project dir →
+`python main.py`; on failure it keeps the error window + writes
+`/tmp/specimen-photo-workbench-launch.log`.
+
+`pytest.ini` pins `qt_api = pyqt6` on purpose: the dev box has PySide6 + PyQt6 co-installed, and
+pytest-qt auto-loads PySide6 first — its older `libQt6Core` then gets reused by PyQt6 → missing
+`Qt_6.11` symbols → whole-suite collection error. Do not delete that line. No linter/formatter is
+configured; the **test suite is the only quality gate** (TDD red→green→commit per convention).
+
 ## Architecture
 
 **DI + view registry shell.** `main.py` builds one `AppContext` (the single dependency-injection
@@ -109,6 +118,18 @@ hosted by `LabelDesignerDialog` (`label_designer_dialog.py`). The `app/widgets/_
 labeled form rows. `app/services/label_design_schema.py` is the Qt-free declarative schema
 (element tools + bindable field options) shared by the template picker, designer, and renderer
 tests — edit it there, not inline in widgets.
+
+**排版设计 (imposition designer).** A4/A5 拼版 freedom lives in three places:
+`label_core.calculate_grid`/`plan_label_pages` accept opt-in `grid_opts` keys (per-side
+`margin*Mm`, axis `gapX/YMm`, `forceCols/Rows` + `shrinkToFit` label scaling, `orientation`,
+`startSlot` 残张续打) — **absent keys must stay byte-identical to the legacy formulas** (printer
+geometry red line, gated by `TestCalculateGridLegacyParity` / `test_legacy_placements_byte_identical`);
+`app/utils/label_sheet.py` is the shared sheet painter (true-mm cells + per-cell px rects) used by
+the labels-view thumbnail, the 排版预览 dialog and `app/widgets/label_imposition_dialog.py`
+(`LabelImpositionDialog` — live canvas with draggable margin/gap guides, click-to-set 起始格,
+presets). Imposition persists per bucket via `label_service.persist_imposition` (whitelist
+`sanitize_imposition`); jobs carry `job["gridOpts"]` so 一键双打 buckets print with their own
+layout. Workbench quick print passes no grid_opts — intentionally legacy.
 
 A template also carries an optional **free-form `elements` layer** (`normalize_elements` in
 `label_core.py`): text / specimen-bound field / line / rect / ellipse / image (base64 inline) /
@@ -187,7 +208,11 @@ gates stay in `archive_service.py`. `supp_compression_worker.py` runs it off the
 
 ## Hard red lines (never violate — these are the reason the project exists)
 
-1. **TIFF is never deleted.**
+1. **TIFF is never *auto*-deleted.** Archive / organize / compose / any background flow must
+   never delete a TIFF (it is the lossless master). **Manual deletion IS allowed** — the project
+   owner overrode the old absolute "never delete" rule: a TIFF can be deleted through a deliberate,
+   user-initiated action behind a confirmation dialog (monitor card right-click → 删除此文件, with
+   an irreversible-loss confirm). Do not re-block manual TIFF deletion; do not parrot "TIFF 永不删".
 2. **JPG deletion requires all four preconditions** (`app/services/archive_service.py`, oracle
    `archive.js:28-61`): cjxl available + ZIP exists (>32 B) + `verify_manifest_complete` +
    `verify_jxl_recoverable` (djxl actually re-decodes each JXL). **Default delete_jpg=False.**

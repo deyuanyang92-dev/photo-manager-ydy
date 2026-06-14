@@ -58,15 +58,24 @@ from app.services.label_service import (
     LabelTemplateLibrary,
     key_from_id,
     load_specimen_dicts,
+    persist_imposition,
+    persisted_imposition,
     resolve_template,
+    sanitize_imposition,
 )
 from app.utils.label_core import (
     apply_field_visibility,
     calculate_grid,
+    effective_page_mm,
     has_rna_tissue,
     unique_id,
 )
 from app.utils.label_print import build_printer, paint_jobs
+from app.utils.label_sheet import (
+    compute_sheet_geometry,
+    draw_crop_marks,
+    paint_sheet_page,
+)
 from app.utils.label_render import (
     render_label_onto,
     render_label_pixmap as _render_label_pixmap,   # noqa: F401  (back-compat re-export)
@@ -188,9 +197,15 @@ class LabelsView(BaseView):
         # sheet-level 空白手写标签：A4/A5 排版时在末尾追加 N 张空白标签供手写。
         self._blank_cells: int = 0
         # A4/A5 拼版参数（空 = 自动：边距 8mm / 间距 2mm / 自动行列）。
-        # 键：marginMm, gapMm, forceCols, forceRows, cutMarks(bool)
-        self._imposition: dict = {}
+        # 键：marginMm, gapMm, forceCols, forceRows, cutMarks(bool) + 排版设计
+        # 扩展键（marginTop/Bottom/Left/RightMm, gapX/YMm, shrinkToFit,
+        # orientation, startSlot）。按 bucket 各存一份并跨会话持久化。
+        self._impositions: dict = {
+            b: persisted_imposition(b) for b in ("sample", "tissue")
+        }
+        self._imposition: dict = self._impositions["sample"]
         self._sheet_page: int = 0      # 当前预览页（多页拼版翻页）
+        self._sheet_info: dict = {}    # 最近一次整页绘制的元数据（total_pages 等）
         self._field_checks: dict = {}  # {field_key: QCheckBox} in settings panel
         super().__init__(ctx)
         # 拖动预览分隔线后防抖重绘（预览图按 widget 当前尺寸渲染，须重绘避免发虚/裁切）。
@@ -860,7 +875,12 @@ QPushButton#PrintBtn:disabled {{
         self._refresh_print_studio()
 
     def _set_bucket(self, bucket: str) -> None:
+        # 拼版参数按 bucket 各存一份（样品瓶/组织管标签纸通常不同）
+        self._impositions[self._active_bucket] = self._imposition
         self._active_bucket = bucket
+        self._imposition = self._impositions.setdefault(bucket, {})
+        if hasattr(self, "_imp_margin"):
+            self._sync_imposition_panel()
         self._btn_sample_bucket.setChecked(bucket == "sample")
         self._btn_tissue_bucket.setChecked(bucket == "tissue")
         self._refresh_print_studio()
@@ -975,7 +995,11 @@ QPushButton#PrintBtn:disabled {{
         )
         self._btn_tissue_bucket.setEnabled(tissue_n > 0)
         if self._active_bucket == "tissue" and tissue_n <= 0:
+            # 自动回落到样品瓶桶时拼版参数也要跟着换（按 bucket 各存一份）
+            self._impositions["tissue"] = self._imposition
             self._active_bucket = "sample"
+            self._imposition = self._impositions.setdefault("sample", {})
+            self._sync_imposition_panel()
         self._btn_sample_bucket.setChecked(self._active_bucket == "sample")
         self._btn_tissue_bucket.setChecked(self._active_bucket == "tissue")
         self._btn_print_sample.setEnabled(sample_n > 0)
@@ -1008,16 +1032,9 @@ QPushButton#PrintBtn:disabled {{
     @staticmethod
     def _draw_crop_marks(painter: QPainter, x: int, y: int, w: int, h: int,
                          arm: int = 4, gap: int = 2) -> None:
-        """Draw printer crop/cut marks at the four corners of a label box."""
-        painter.save()
-        painter.setPen(QPen(QColor("#111827"), 1))
-        for cx, cy, sx, sy in (
-            (x, y, -1, -1), (x + w, y, 1, -1),
-            (x, y + h, -1, 1), (x + w, y + h, 1, 1),
-        ):
-            painter.drawLine(cx + sx * gap, cy, cx + sx * (gap + arm), cy)
-            painter.drawLine(cx, cy + sy * gap, cx, cy + sy * (gap + arm))
-        painter.restore()
+        """Crop/cut marks — delegates to the shared label_sheet painter
+        (kept as a method because the print path passes it as a callback)."""
+        draw_crop_marks(painter, x, y, w, h, arm=arm, gap=gap)
 
     def _open_sheet_preview(self) -> None:
         """双击底部缩略图 → 弹出大窗，高清预览整页排版。
@@ -1067,18 +1084,20 @@ QPushButton#PrintBtn:disabled {{
         def _redraw() -> None:
             job_now = self._build_job(self._active_bucket)
             ph = int(fit_h * state["zoom"])
-            pw = int(ph * 0.74) + 60        # A4 竖版纵横比 + 两侧留边
-            canvas.setPixmap(self._paint_sheet(job_now, pw, ph, dpr))
-            canvas.setFixedSize(pw, ph)
-            items = job_now.get("items") or []
             paper = job_now.get("paperType") or "label"
             if paper in ("a4", "a5"):
-                grid = calculate_grid(
-                    float(job_now["dims"]["w"]), float(job_now["dims"]["h"]),
-                    float(PAPER_SIZES[paper]["w"]), float(PAPER_SIZES[paper]["h"]),
-                    opts=self._grid_opts())
-                per = max(1, grid["cols"] * grid["rows"])
-                total = max(1, (len(items) + per - 1) // per) if items else 1
+                # 纸张可能横放（排版设计），画布纵横比跟随有效页面
+                pw_mm, ph_mm = effective_page_mm(
+                    PAPER_SIZES[paper], paper, self._grid_opts())
+                aspect = pw_mm / max(1.0, ph_mm)
+            else:
+                aspect = 0.74               # 小标签纸沿用旧画布比例
+            pw = int(ph * aspect) + 60
+            canvas.setPixmap(self._paint_sheet(job_now, pw, ph, dpr))
+            canvas.setFixedSize(pw, ph)
+            if paper in ("a4", "a5"):
+                # 总页数读共享画家结果（已含起始格偏移）
+                total = (self._sheet_info or {}).get("total_pages", 1)
             else:
                 total = 1
             page_lbl.setText(
@@ -1160,74 +1179,25 @@ QPushButton#PrintBtn:disabled {{
             painter.drawText(18, h - 12, f"小标签纸 · 每页 1 张 · {dims.get('w')}×{dims.get('h')} mm")
         else:
             paper = PAPER_SIZES.get(paper_type, PAPER_SIZES["a4"])
-            grid = calculate_grid(float(dims["w"]), float(dims["h"]),
-                                  float(paper["w"]), float(paper["h"]),
-                                  opts=self._grid_opts())
-            cols, rows = grid["cols"], grid["rows"]
-            cut_marks = bool(self._imposition.get("cutMarks"))
-            usable_w, usable_h = w - 42, h - 48
-            page_aspect = float(paper["w"]) / max(1.0, float(paper["h"]))
-            page_w = min(usable_w, usable_h * page_aspect)
-            page_h = page_w / page_aspect
-            page_x = (w - page_w) / 2
-            page_y = 16
-            painter.drawRect(int(page_x), int(page_y), int(page_w), int(page_h))
-            cell_w = page_w / max(1, cols)
-            cell_h = page_h / max(1, rows)
-            per_page = cols * rows
-            total_pages = max(1, (len(items) + per_page - 1) // per_page) if items else 1
+            grid_opts = self._grid_opts()
+            # 共享画家：真实 mm 几何（边距/间距/缩放按比例呈现），与打印同源。
+            geom = compute_sheet_geometry(dims, paper_type, paper, grid_opts, w, h)
+            info = paint_sheet_page(
+                painter, job, grid_opts, self._sheet_page, geom,
+                cut_marks=bool(self._imposition.get("cutMarks")),
+                demo_data=specimen_to_label_data(_DEMO_SPECIMEN),
+            )
+            cols, rows = geom["grid"]["cols"], geom["grid"]["rows"]
+            per_page, total_pages = info["per_page"], info["total_pages"]
+            page_count = info["page_count"]
             self._sheet_page = max(0, min(self._sheet_page, total_pages - 1))
-            base = self._sheet_page * per_page          # first item index on this page
-            page_count = min(per_page, max(0, len(items) - base))   # filled cells here
-            w_mm = float(dims.get("w", 50)) or 50.0
-            h_mm = float(dims.get("h", 30)) or 30.0
-            # 性能护栏：格子过多（如 25×10mm 近 200 格）逐格渲染真实标签会卡，
-            # 回退到彩色占位方块。否则在格子里渲染真实标签（所见即所得排版）。
-            wysiwyg = per_page <= 48
-            note_suffix = "" if wysiwyg else " · 格子过多，省略内容预览"
-            # 预览铺满整页：每个格子都画标签，看清排版铺满情况。i < page_count 的格
-            # 子是本次真正会打印的；超出的格子用半透明"幽灵"——仅排版示意，不会打印
-            # （实际打印仍按 job items）。选中不足时循环重复，无选中时用示例数据。
-            for i in range(per_page):
-                c, r = i % cols, i // cols
-                x = int(page_x + c * cell_w + 3)
-                y = int(page_y + r * cell_h + 3)
-                rw, rh = max(6, int(cell_w - 6)), max(6, int(cell_h - 6))
-                real = i < page_count
-                if wysiwyg:
-                    if page_count > 0:
-                        src = items[base + (i % page_count)]
-                        data = (src.get("data")
-                                if isinstance(src, dict) and "data" in src else src)
-                    else:
-                        data = specimen_to_label_data(_DEMO_SPECIMEN)
-                    if job.get("_previewDemoWhenBlank") and not data:
-                        data = specimen_to_label_data(_DEMO_SPECIMEN)
-                    painter.save()
-                    painter.fillRect(x, y, rw, rh, QColor("#ffffff"))
-                    painter.setClipRect(x, y, rw, rh)
-                    ppm = min(rw / w_mm, rh / h_mm)
-                    render_label_onto(
-                        painter, tmpl, dims, data or {},
-                        px_per_mm=ppm, x_off=float(x), y_off=float(y),
-                        placeholder=True, fill_bg=False,
-                    )
-                    painter.restore()
-                    painter.setPen(QPen(QColor("#7b8794"), 1))
-                else:
-                    painter.fillRect(x, y, rw, rh,
-                                     QColor("#e8f4f2") if real else QColor("#f8fafc"))
-                if is_circle:
-                    painter.drawEllipse(x, y, rw, rh)
-                else:
-                    painter.drawRect(x, y, rw, rh)
-                if cut_marks:
-                    self._draw_crop_marks(painter, x, y, rw, rh)
+            self._sheet_info = info     # 排版预览弹窗读取 total_pages（含起始格）
+            note_suffix = "" if info["wysiwyg"] else " · 格子过多，省略内容预览"
             painter.setPen(QColor("#4b5563"))
             page_note = f" · 第 {self._sheet_page + 1}/{total_pages} 页" if total_pages > 1 else ""
             ghost_note = (
                 f" · 重复内容为排版示意（实印 {page_count} 张）"
-                if wysiwyg and 0 < page_count < per_page else "")
+                if info["wysiwyg"] and 0 < page_count < per_page else "")
             painter.drawText(
                 18, h - 12,
                 f"{paper['name']} · {cols}列 × {rows}行 · 本页最多 {per_page} 张"
@@ -1296,6 +1266,9 @@ QPushButton#PrintBtn:disabled {{
         self._imp_cutmarks.toggled.connect(
             lambda on: self._on_imposition_changed("cutMarks", on or None))
         r3.addWidget(self._imp_cutmarks)
+        self._btn_imposition_design = QPushButton("排版设计…")
+        self._btn_imposition_design.clicked.connect(self._open_imposition_designer)
+        r3.addWidget(self._btn_imposition_design)
         self._btn_prev_page = QPushButton("◀ 上一页")
         self._btn_next_page = QPushButton("下一页 ▶")
         self._btn_prev_page.clicked.connect(lambda: self._change_sheet_page(-1))
@@ -1304,15 +1277,64 @@ QPushButton#PrintBtn:disabled {{
         r3.addWidget(self._btn_prev_page)
         r3.addWidget(self._btn_next_page)
         v.addLayout(r3)
+        self._sync_imposition_panel()      # 恢复持久化的拼版参数到面板
         return box
 
     def _on_imposition_changed(self, key: str, value) -> None:
+        if getattr(self, "_imposition_syncing", False):
+            return
         if value is None:
             self._imposition.pop(key, None)
         else:
             self._imposition[key] = value
+        # 面板上的单值控件仍是权威：写统一边距/间距时清掉排版设计的分边/分轴键
+        if key == "marginMm":
+            for k in ("marginTopMm", "marginBottomMm",
+                      "marginLeftMm", "marginRightMm"):
+                self._imposition.pop(k, None)
+        elif key == "gapMm":
+            self._imposition.pop("gapXMm", None)
+            self._imposition.pop("gapYMm", None)
+        persist_imposition(self._active_bucket, self._imposition)
         self._sheet_page = 0
         self._refresh_print_studio()
+
+    def _sync_imposition_panel(self) -> None:
+        """Reflect self._imposition into the 拼版 panel controls (no signals)."""
+        self._imposition_syncing = True
+        try:
+            imp = self._imposition
+            self._imp_margin.setValue(float(imp.get("marginMm", 8.0)))
+            self._imp_gap.setValue(float(imp.get("gapMm", 2.0)))
+            self._imp_cols.setValue(int(imp.get("forceCols", 0)))
+            self._imp_rows.setValue(int(imp.get("forceRows", 0)))
+            self._imp_cutmarks.setChecked(bool(imp.get("cutMarks")))
+        finally:
+            self._imposition_syncing = False
+
+    def _on_imposition_replaced(self, imposition: dict) -> None:
+        """Adopt a whole new imposition dict (排版设计 dialog live/accept)."""
+        self._imposition = sanitize_imposition(imposition or {})
+        self._impositions[self._active_bucket] = self._imposition
+        self._sheet_page = 0
+        self._sync_imposition_panel()
+        self._refresh_print_studio()
+
+    def _open_imposition_designer(self) -> None:
+        """打开排版设计对话框：实时预览＋拖拽参考线；取消则回滚。"""
+        from app.widgets.label_imposition_dialog import LabelImpositionDialog
+
+        job = self._build_job(self._active_bucket)
+        snapshot = dict(self._imposition)
+        dlg = LabelImpositionDialog(
+            job, dict(self._imposition), self,
+            demo_data=specimen_to_label_data(_DEMO_SPECIMEN))
+        dlg.imposition_changed.connect(self._on_imposition_replaced)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._on_imposition_replaced(dlg.imposition())
+            persist_imposition(self._active_bucket, self._imposition)
+        else:
+            self._on_imposition_replaced(snapshot)
 
     def _change_sheet_page(self, delta: int) -> None:
         self._sheet_page = max(0, self._sheet_page + delta)
@@ -1470,11 +1492,26 @@ QPushButton#PrintBtn:disabled {{
 
     # ── Print-job construction (behavior unchanged from web oracle) ──────────
 
-    def _grid_opts(self) -> dict:
-        """calculate_grid opts from the current imposition settings (auto = {})."""
+    # cutMarks 是打印旗标不参与网格数学，其余键全部透传给 calculate_grid
+    _GRID_OPT_KEYS = (
+        "marginMm", "gapMm", "forceCols", "forceRows",
+        "marginTopMm", "marginBottomMm", "marginLeftMm", "marginRightMm",
+        "gapXMm", "gapYMm", "shrinkToFit", "orientation", "startSlot",
+    )
+
+    def _grid_opts(self, bucket: Optional[str] = None) -> dict:
+        """calculate_grid opts from the imposition settings (auto = {}).
+
+        Default = active bucket; pass *bucket* for 一键双打 so each job carries
+        its own 排版设计 parameters.
+        """
+        if bucket is None or bucket == self._active_bucket:
+            imp = self._imposition
+        else:
+            imp = self._impositions.get(bucket) or {}
         out = {}
-        for k in ("marginMm", "gapMm", "forceCols", "forceRows"):
-            v = self._imposition.get(k)
+        for k in self._GRID_OPT_KEYS:
+            v = imp.get(k)
             if v is not None:
                 out[k] = v
         return out
@@ -1483,10 +1520,12 @@ QPushButton#PrintBtn:disabled {{
         """Imposition grid (cols/rows/perPage) for *bucket* on its A4/A5 paper."""
         dims = self._step3.dims(bucket)
         paper_type = self._step3.paper_type(bucket)
-        paper = PAPER_SIZES.get(paper_type, PAPER_SIZES["a4"])
+        opts = self._grid_opts(bucket)
+        page_w, page_h = effective_page_mm(
+            PAPER_SIZES.get(paper_type, PAPER_SIZES["a4"]),
+            paper_type if paper_type in ("a4", "a5") else "a4", opts)
         return calculate_grid(float(dims["w"]), float(dims["h"]),
-                              float(paper["w"]), float(paper["h"]),
-                              opts=self._grid_opts())
+                              page_w, page_h, opts=opts)
 
     def _build_job(self, bucket: str) -> dict:
         indices = self._step1.selected_indices()
@@ -1523,6 +1562,9 @@ QPushButton#PrintBtn:disabled {{
             blanks = [{"idx": -1, "data": {}} for _ in range(self._blank_cells)]
             job["items"] = list(job.get("items") or []) + blanks
             job["labels"] = list(job.get("labels") or []) + [{} for _ in range(self._blank_cells)]
+        # 排版设计参数随 job 走（一键双打时各 bucket 各自的拼版、纸向生效）
+        if paper_type in ("a4", "a5"):
+            job["gridOpts"] = self._grid_opts(bucket)
         return job
 
     # ── Printing (delegates to the shared label_print adapter) ──────────────
@@ -1554,7 +1596,8 @@ QPushButton#PrintBtn:disabled {{
         Paper is configured from the first job; subsequent jobs are appended
         after a page break (see :func:`label_print.paint_jobs`).
         """
-        printer = build_printer(jobs[0])
+        printer = build_printer(
+            jobs[0], jobs[0].get("gridOpts") or self._grid_opts())
         printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
         with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
             tmp_path = f.name

@@ -47,6 +47,7 @@ from app.views.settings_view import (
     _K_WB_AUTO_ACTIVATE_NEW,
     _K_WB_GROUPING_AUTO_WATCH,
     _K_WB_GROUPING_AUTO_WATCH_MODE,
+    _K_WB_SILENT_COMPOSE,
     _K_WB_FILE_VIEW_MODE,
     _K_UI_FONT_FAMILY,
     _K_UI_FONT_SCALE,
@@ -574,6 +575,9 @@ class TestWorkbenchToggles:
     def test_wb_file_view_mode_key(self) -> None:
         assert _K_WB_FILE_VIEW_MODE == "workbench/file_view_mode"
 
+    def test_wb_silent_compose_key(self) -> None:
+        assert _K_WB_SILENT_COMPOSE == "workbench/silent_compose"
+
     def test_auto_watch_default_true(self, view: SettingsView) -> None:
         """autoWatch web default = true."""
         assert view._auto_watch_chk.isChecked() is True
@@ -581,6 +585,9 @@ class TestWorkbenchToggles:
     def test_auto_activate_new_default_false(self, view: SettingsView) -> None:
         """autoActivateOnNewSpecimen web default = false."""
         assert view._auto_activate_new_chk.isChecked() is False
+
+    def test_silent_compose_default_false(self, view: SettingsView) -> None:
+        assert view._silent_compose_chk.isChecked() is False
 
     # （已移除 groupingAutoWatch 开关/模式 → 对应默认值测试随之删除。）
 
@@ -599,6 +606,12 @@ class TestWorkbenchToggles:
         view._save_workbench()
         view.on_activate()
         assert view._auto_activate_new_chk.isChecked() is True
+
+    def test_silent_compose_round_trip_true(self, view: SettingsView) -> None:
+        view._silent_compose_chk.setChecked(True)
+        view._save_workbench()
+        view.on_activate()
+        assert view._silent_compose_chk.isChecked() is True
 
     def test_file_view_mode_round_trip_with_zip(self, view: SettingsView) -> None:
         view._file_view_mode_combo.setCurrentIndex(1)  # with-zip
@@ -625,6 +638,12 @@ class TestWorkbenchToggles:
         view._save_workbench()
         stored = view.ctx.settings._qs.value(_K_WB_FILE_VIEW_MODE, "jpg-tif")
         assert stored == "all"
+
+    def test_qsettings_stores_silent_compose_true(self, view: SettingsView) -> None:
+        view._silent_compose_chk.setChecked(True)
+        view._save_workbench()
+        stored = view.ctx.settings._qs.value(_K_WB_SILENT_COMPOSE, "false")
+        assert stored == "true"
 
 
 # ── 界面 tab: Global UI settings ─────────────────────────────────────────────

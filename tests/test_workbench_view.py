@@ -52,6 +52,7 @@ def _make_ctx(project_dir: str | None = None, db: sqlite3.Connection | None = No
     # Default OFF so a bare MagicMock's truthiness doesn't auto-trigger.
     ctx.settings.auto_activate_on_new_specimen = False
     ctx.settings.auto_organize_after_compose = False
+    ctx.settings.silent_compose = False
     return ctx
 
 
@@ -249,6 +250,48 @@ class TestOnActivate:
         db.close()
 
 
+# ── 新增编号: 日期沿用上一号 (同断面连拍日期不变) ────────────────────────────
+
+class TestNewSpecimenDateCarryOver:
+    def _make_workbench(self, tmp_path):
+        from app.views.workbench_view import WorkbenchView
+        project_dir = str(tmp_path / "proj")
+        Path(project_dir).mkdir(parents=True)
+        (Path(project_dir) / "incoming-jpg").mkdir()
+        (Path(project_dir) / "results").mkdir()
+        (Path(project_dir) / "_data").mkdir()
+        db = _make_db(str(Path(project_dir) / "_data" / "project.db"))
+        ctx = _make_ctx(project_dir=project_dir, db=db)
+        w = WorkbenchView(ctx)
+        w.on_activate()
+        return w, db
+
+    def test_new_specimen_carries_over_dates(self, tmp_path):
+        """新增编号沿用上一号的采集/拍摄日期(同断面连拍,日期不变)。"""
+        w, db = self._make_workbench(tmp_path)
+        try:
+            # 模拟上一个激活标本已填日期
+            w._naming._collection_date.setText("20260613")
+            w._naming._photo_date.setText("20260613")
+            # 新增编号
+            w._on_new_specimen()
+            # 日期沿用, 非留空
+            assert w._naming._collection_date.text() == "20260613"
+            assert w._naming._photo_date.text() == "20260613"
+        finally:
+            db.close()
+
+    def test_new_specimen_dates_blank_when_no_previous(self, tmp_path):
+        """无上一号(首次新增)时日期留空, 不报错。"""
+        w, db = self._make_workbench(tmp_path)
+        try:
+            w._on_new_specimen()
+            assert w._naming._collection_date.text() == ""
+            assert w._naming._photo_date.text() == ""
+        finally:
+            db.close()
+
+
 # ── NamingPanel live-preview ──────────────────────────────────────────────────
 
 class TestNamingPanel:
@@ -399,6 +442,31 @@ class TestSpecimenSidebar:
         w.refresh()
         w.select_uid(uid)
         assert w.print_current_labels() is True
+        assert received == [uid]
+        db.close()
+
+    def test_row_print_button_signal(self, tmp_path):
+        from PyQt6.QtWidgets import QPushButton
+        from app.widgets.specimen_sidebar import SpecimenSidebar
+        project_dir = str(tmp_path)
+        db = _make_db(str(tmp_path / "project.db"))
+        uid = "FJ-XM-B2-DLC001-T95E-20260601"
+        db.execute(
+            "INSERT INTO specimens (uid, owner_project_dir) VALUES (?, ?)",
+            (uid, project_dir),
+        )
+        db.commit()
+        ctx = _make_ctx(project_dir=project_dir, db=db)
+        w = SpecimenSidebar(ctx)
+        received = []
+        w.print_labels_requested.connect(received.append)
+        w.refresh()
+        row = w._list.itemWidget(w._list.item(0))
+        print_btn = next(
+            b for b in row.findChildren(QPushButton)
+            if b.toolTip() == "按默认模板打印该编号标签"
+        )
+        print_btn.click()
         assert received == [uid]
         db.close()
 
@@ -2342,6 +2410,245 @@ class TestImplicitCompose:
         w, ctx, db = self._make_view(tmp_path, [])
         w._on_compose_implicit()  # 无激活编号, 不崩
 
+    def test_selected_jpgs_take_priority_for_implicit_group(self, tmp_path):
+        from app.services.grouping_service import load_grouping
+        attributed = [str(tmp_path / f"a{i}.jpg") for i in range(4)]
+        selected = attributed[1:3]
+        w, ctx, db = self._make_view(tmp_path, attributed)
+        idx = w._build_implicit_group(self.UID, selected)
+        assert idx == 0
+        g = load_grouping(db, self.UID)
+        assert g.groups[0].jpg_paths == selected
+
+    def test_silent_compose_implicit_uses_headless_path(self, tmp_path, monkeypatch):
+        w, ctx, db = self._make_view(tmp_path, [str(tmp_path / "a.jpg"), str(tmp_path / "b.jpg")])
+        ctx.settings.silent_compose = True
+        monkeypatch.setattr(w, "_get_active_uid", lambda: self.UID)
+        monkeypatch.setattr(w._monitor, "selected_jpg_paths", lambda: [])
+        calls = []
+        monkeypatch.setattr(
+            w,
+            "_compose_group_headless",
+            lambda uid, idx, done: (calls.append((uid, idx)), done(True)),
+        )
+        w._on_compose_implicit()
+        assert calls == [(self.UID, 0)]
+
+    def test_compose_implicit_organise_runs_after_headless_success(self, tmp_path, monkeypatch):
+        w, ctx, db = self._make_view(tmp_path, [str(tmp_path / "a.jpg"), str(tmp_path / "b.jpg")])
+        monkeypatch.setattr(w, "_get_active_uid", lambda: self.UID)
+        monkeypatch.setattr(w._monitor, "selected_jpg_paths", lambda: [])
+        calls = []
+        monkeypatch.setattr(
+            w,
+            "_compose_group_headless",
+            lambda uid, idx, done: (calls.append(("compose", idx)), done(True)),
+        )
+        monkeypatch.setattr(
+            w,
+            "_on_organise_requested",
+            lambda uid, idx, **kw: calls.append(("organise", idx, kw.get("silent_batch"))),
+        )
+        w._on_compose_implicit(organise=True)
+        assert calls == [("compose", 0), ("organise", 0, True)]
+
+    def test_selected_organise_without_active_keeps_tiff_name(self, tmp_path, monkeypatch):
+        from app.services.grouping_service import ADHOC_GROUPING_UID, load_grouping
+        w, ctx, db = self._make_view(tmp_path, [])
+        jpg = tmp_path / "a.jpg"; jpg.write_bytes(b"\xff\xd8\xff")
+        tiff = tmp_path / "HeliconFocus.tif"; tiff.write_bytes(b"II*\x00")
+        monkeypatch.setattr(w, "_get_active_uid", lambda: None)
+        monkeypatch.setattr(w._monitor, "selected_jpg_paths", lambda: [str(jpg)])
+        monkeypatch.setattr(w._monitor, "selected_tiff_paths", lambda: [str(tiff)])
+        calls = []
+        monkeypatch.setattr(
+            w,
+            "_on_organise_requested",
+            lambda uid, idx, **kw: calls.append((uid, idx, kw)),
+        )
+
+        w._on_organise_selected()
+
+        grouping = load_grouping(db, ADHOC_GROUPING_UID)
+        assert grouping.groups[0].composed_tiff_path == str(tiff)
+        assert calls[0][0] == ADHOC_GROUPING_UID
+        assert calls[0][2]["allow_single_jpg"] is True
+
+    def test_selected_organise_with_active_renames_tiff_to_uid(self, tmp_path, monkeypatch):
+        from app.services.grouping_service import load_grouping
+        w, ctx, db = self._make_view(tmp_path, [])
+        project_dir = Path(ctx.current_project_dir)
+        (project_dir / "results").mkdir(exist_ok=True)
+        (project_dir / "incoming-jpg").mkdir(exist_ok=True)
+        jpg = tmp_path / "a.jpg"; jpg.write_bytes(b"\xff\xd8\xff")
+        tiff = tmp_path / "HeliconFocus.tif"; tiff.write_bytes(b"II*\x00")
+        monkeypatch.setattr(w, "_get_active_uid", lambda: self.UID)
+        monkeypatch.setattr(w._monitor, "selected_jpg_paths", lambda: [str(jpg)])
+        monkeypatch.setattr(w._monitor, "selected_tiff_paths", lambda: [str(tiff)])
+        calls = []
+        monkeypatch.setattr(
+            w,
+            "_on_organise_requested",
+            lambda uid, idx, **kw: calls.append((uid, idx, kw)),
+        )
+
+        w._on_organise_selected()
+
+        expected = tmp_path / "FJ-XM-B2-DLC001-1-T95E-20260601.tif"
+        assert expected.is_file()
+        assert not tiff.exists()
+        grouping = load_grouping(db, self.UID)
+        assert grouping.groups[0].composed_tiff_path == str(expected)
+        assert calls[0][0] == self.UID
+        assert calls[0][2]["allow_single_jpg"] is True
+
+    def test_auto_compress_toggle_seeds_existing_tiffs(self, tmp_path):
+        from app.services.monitor_service import FileEntry, ScanResult
+        w, ctx, db = self._make_view(tmp_path, [])
+        tiff = tmp_path / "old.tif"
+        tiff.write_bytes(b"II*\x00")
+        w._last_scan_result = ScanResult(
+            project_dir=str(tmp_path),
+            tiff_files=[FileEntry(
+                name="old.tif", path=str(tiff), kind="tiff", size=4,
+                mtime="2026-06-13T00:00:00+00:00", has_zip=False,
+            )],
+        )
+
+        w._on_auto_compress_toggled(True)
+
+        assert str(tiff.resolve()) in w._auto_known_tiffs
+
+    def test_auto_compress_new_tiff_uses_active_uid_jpgs(self, tmp_path, monkeypatch):
+        from app.services.monitor_service import FileEntry, ScanResult
+        jpgs = [str(tmp_path / "a.jpg"), str(tmp_path / "b.jpg")]
+        w, ctx, db = self._make_view(tmp_path, jpgs)
+        new_tiff = tmp_path / "new.tif"
+        new_tiff.write_bytes(b"II*\x00")
+        monkeypatch.setattr(w._monitor, "auto_compress_enabled", lambda: True)
+        monkeypatch.setattr(w, "_get_active_uid", lambda: self.UID)
+        calls = []
+        monkeypatch.setattr(
+            w,
+            "_organise_jpgs_with_tiff",
+            lambda paths, tiff, **kw: calls.append((paths, tiff, kw)) or True,
+        )
+        result = ScanResult(
+            project_dir=str(tmp_path),
+            tiff_files=[FileEntry(
+                name="new.tif", path=str(new_tiff), kind="tiff", size=4,
+                mtime="2026-06-13T00:00:00+00:00", has_zip=False,
+            )],
+        )
+
+        w._maybe_auto_process_new_tiff(result)
+
+        assert calls == [(jpgs, str(new_tiff.resolve()), {"silent": True})]
+
+    def test_auto_compress_without_active_does_not_mark_tiff_seen(self, tmp_path, monkeypatch):
+        from app.services.monitor_service import FileEntry, ScanResult
+        w, ctx, db = self._make_view(tmp_path, [])
+        new_tiff = tmp_path / "new.tif"
+        new_tiff.write_bytes(b"II*\x00")
+        monkeypatch.setattr(w._monitor, "auto_compress_enabled", lambda: True)
+        monkeypatch.setattr(w, "_get_active_uid", lambda: None)
+        result = ScanResult(
+            project_dir=str(tmp_path),
+            tiff_files=[FileEntry(
+                name="new.tif", path=str(new_tiff), kind="tiff", size=4,
+                mtime="2026-06-13T00:00:00+00:00", has_zip=False,
+            )],
+        )
+
+        w._maybe_auto_process_new_tiff(result)
+
+        assert str(new_tiff.resolve()) not in w._auto_known_tiffs
+
+    def test_auto_compress_multiple_new_tiffs_processes_one_per_refresh(self, tmp_path, monkeypatch):
+        from app.services.monitor_service import FileEntry, ScanResult
+        jpgs = [str(tmp_path / "a.jpg"), str(tmp_path / "b.jpg")]
+        w, ctx, db = self._make_view(tmp_path, jpgs)
+        tiffs = [tmp_path / "a.tif", tmp_path / "b.tif"]
+        for tiff in tiffs:
+            tiff.write_bytes(b"II*\x00")
+        monkeypatch.setattr(w._monitor, "auto_compress_enabled", lambda: True)
+        monkeypatch.setattr(w, "_get_active_uid", lambda: self.UID)
+        calls = []
+        monkeypatch.setattr(
+            w,
+            "_organise_jpgs_with_tiff",
+            lambda paths, tiff, **kw: calls.append(tiff) or True,
+        )
+        result = ScanResult(
+            project_dir=str(tmp_path),
+            tiff_files=[
+                FileEntry(
+                    name=tiff.name, path=str(tiff), kind="tiff", size=4,
+                    mtime="2026-06-13T00:00:00+00:00", has_zip=False,
+                )
+                for tiff in tiffs
+            ],
+        )
+
+        w._maybe_auto_process_new_tiff(result)
+
+        assert calls == [str(tiffs[0].resolve())]
+        assert str(tiffs[0].resolve()) in w._auto_known_tiffs
+        assert str(tiffs[1].resolve()) not in w._auto_known_tiffs
+
+    def test_auto_compress_uses_only_unoccupied_attributed_jpgs(self, tmp_path, monkeypatch):
+        from app.services.grouping_service import Group, save_grouping
+        from app.services.monitor_service import FileEntry, ScanResult
+        occupied = [str(tmp_path / "old1.jpg"), str(tmp_path / "old2.jpg")]
+        fresh = [str(tmp_path / "new1.jpg"), str(tmp_path / "new2.jpg")]
+        w, ctx, db = self._make_view(tmp_path, occupied + fresh)
+        save_grouping(
+            db,
+            self.UID,
+            [Group(group_index=0, jpg_paths=occupied, status="organized")],
+            clean_phantoms=False,
+        )
+        tiff = tmp_path / "new.tif"
+        tiff.write_bytes(b"II*\x00")
+        monkeypatch.setattr(w._monitor, "auto_compress_enabled", lambda: True)
+        monkeypatch.setattr(w, "_get_active_uid", lambda: self.UID)
+        calls = []
+        monkeypatch.setattr(
+            w,
+            "_organise_jpgs_with_tiff",
+            lambda paths, tiff_path, **kw: calls.append(paths) or True,
+        )
+
+        w._maybe_auto_process_new_tiff(ScanResult(
+            project_dir=str(tmp_path),
+            tiff_files=[FileEntry(
+                name="new.tif", path=str(tiff), kind="tiff", size=4,
+                mtime="2026-06-13T00:00:00+00:00", has_zip=False,
+            )],
+        ))
+
+        assert calls == [fresh]
+
+    def test_auto_compress_failed_organise_does_not_mark_tiff_seen(self, tmp_path, monkeypatch):
+        from app.services.monitor_service import FileEntry, ScanResult
+        jpgs = [str(tmp_path / "a.jpg"), str(tmp_path / "b.jpg")]
+        w, ctx, db = self._make_view(tmp_path, jpgs)
+        tiff = tmp_path / "new.tif"
+        tiff.write_bytes(b"II*\x00")
+        monkeypatch.setattr(w._monitor, "auto_compress_enabled", lambda: True)
+        monkeypatch.setattr(w, "_get_active_uid", lambda: self.UID)
+        monkeypatch.setattr(w, "_organise_jpgs_with_tiff", lambda *a, **k: False)
+
+        w._maybe_auto_process_new_tiff(ScanResult(
+            project_dir=str(tmp_path),
+            tiff_files=[FileEntry(
+                name="new.tif", path=str(tiff), kind="tiff", size=4,
+                mtime="2026-06-13T00:00:00+00:00", has_zip=False,
+            )],
+        ))
+
+        assert str(tiff.resolve()) not in w._auto_known_tiffs
+
 
 class TestOrganizeRenamesNonconformingTiff:
     """整理一个名不符规范的 TIFF（如导入的 HeliconFocus.tif）→ 弹确认框按编号成果名
@@ -2638,6 +2945,66 @@ class TestBatchComposeOrganise:
 
         assert ("organise", 0) not in calls and ("organise", 1) not in calls
         assert calls == [("compose", 0), ("compose", 1)]
+        db.close()
+
+    def test_compose_batch_only_runs_checked_groups(self, tmp_path, monkeypatch):
+        """勾选组后，顶部[合成]只处理勾选组；不勾选时才处理全部。"""
+        from app.services.grouping_service import load_grouping
+        w, ctx, uid, db = self._build(tmp_path)
+        self._patch_helicon_present(monkeypatch)
+        w._grouping.load_grouping(uid, load_grouping(db, uid))
+        w._grouping._on_group_selected_changed(1, True)
+        calls = []
+        monkeypatch.setattr(
+            w, "_compose_group_headless",
+            lambda u, idx, on_done: (calls.append(idx), on_done(True)),
+        )
+
+        w._start_compose_batch(uid, organise=False)
+
+        assert calls == [1]
+        db.close()
+
+    def test_compose_batch_reports_progress(self, tmp_path, monkeypatch):
+        """批量合成期间状态栏显示当前组序号和总数。"""
+        w, ctx, uid, db = self._build(tmp_path)
+        self._patch_helicon_present(monkeypatch)
+        messages = []
+        monkeypatch.setattr(w, "_batch_status", messages.append)
+        monkeypatch.setattr(
+            w, "_compose_group_headless",
+            lambda u, idx, on_done: on_done(True),
+        )
+
+        w._start_compose_batch(uid, organise=False)
+
+        assert "批量合成 1/2：组 0" in messages
+        assert "批量合成 2/2：组 1" in messages
+        assert messages[-1] == "批量合成完成。"
+        db.close()
+
+    def test_organise_batch_only_runs_checked_composed_groups(self, tmp_path, monkeypatch):
+        """勾选组后，顶部[整理]只处理勾选的已合成组。"""
+        from app.services.grouping_service import Group, save_grouping, load_grouping
+        w, ctx, uid, db = self._build(tmp_path)
+        save_grouping(db, uid, [
+            Group(group_index=0, jpg_paths=self._jpgs[0:2],
+                  composed_tiff_path=str(tmp_path / "a.tif"), status="composed"),
+            Group(group_index=1, jpg_paths=self._jpgs[2:4],
+                  composed_tiff_path=str(tmp_path / "b.tif"), status="composed"),
+        ])
+        db.commit()
+        w._grouping.load_grouping(uid, load_grouping(db, uid))
+        w._grouping._on_group_selected_changed(1, True)
+        calls = []
+        monkeypatch.setattr(
+            w, "_on_organise_requested",
+            lambda u, idx, **kw: calls.append(idx),
+        )
+
+        w._organise_all_batch(uid)
+
+        assert calls == [1]
         db.close()
 
     def test_failed_group_not_organised_but_batch_continues(self, tmp_path, monkeypatch):

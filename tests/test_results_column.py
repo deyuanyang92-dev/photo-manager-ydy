@@ -85,6 +85,36 @@ def test_lightbox_keyboard_navigation(qtbot, tiff_paths):
     assert dlg._index == 0
 
 
+def test_lightbox_has_zoom_and_pan_controls(qtbot, tiff_paths):
+    """TIFF lightbox exposes scroll/pan area and zoom controls."""
+    from app.widgets.results_column import _PanImageLabel, _TiffLightboxDialog
+
+    dlg = _TiffLightboxDialog(tiff_paths, initial_index=0)
+    qtbot.addWidget(dlg)
+
+    assert hasattr(dlg, "_scroll")
+    assert hasattr(dlg, "_zoom_slider")
+    assert isinstance(dlg._image_label, _PanImageLabel)
+    assert dlg._image_label._scroll_area is dlg._scroll
+
+
+def test_lightbox_zoom_slider_switches_out_of_fit_mode(qtbot, tmp_path):
+    """Manual zoom leaves fit-to-window mode and records the chosen percentage."""
+    from PIL import Image
+    from app.widgets.results_column import _TiffLightboxDialog
+
+    tif = tmp_path / "real.tif"
+    Image.new("RGB", (200, 100), "white").save(tif)
+    dlg = _TiffLightboxDialog([tif], initial_index=0)
+    qtbot.addWidget(dlg)
+
+    dlg._zoom_slider.setValue(150)
+
+    assert dlg._fit_to_window is False
+    assert dlg._zoom_value.text() == "150%"
+    assert dlg._image_label.pixmap() is not None
+
+
 def test_tiff_card_double_click_opens_lightbox(qtbot, tmp_path, monkeypatch):
     """Double-clicking a _TiffCard triggers the lightbox dialog (exec mocked)."""
     from app.widgets.results_column import ResultsColumn

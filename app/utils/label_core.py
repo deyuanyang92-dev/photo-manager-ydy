@@ -514,25 +514,54 @@ def calculate_grid(
     ----------
     label_w, label_h : label dimensions in mm.
     page_w, page_h   : page dimensions in mm.
-    opts             : optional overrides ``{marginMm, gapMm}``.
+    opts             : optional overrides ``{marginMm, gapMm, forceCols,
+                       forceRows, marginLeftMm, marginRightMm, marginTopMm,
+                       marginBottomMm, gapXMm, gapYMm, shrinkToFit}``.
 
     Returns
     -------
-    dict with keys: cols, rows, perPage, margin, gap, usableW, usableH.
+    dict with keys: cols, rows, perPage, margin, gap, usableW, usableH,
+    marginLeft, marginRight, marginTop, marginBottom, gapX, gapY, scale,
+    labelW, labelH.
+
+    Without any of the new (per-side / axis / shrink) keys, the legacy seven
+    keys are byte-identical to the historical formulas — the printer consumes
+    this geometry, so that parity is a red line (see TestCalculateGridLegacyParity).
     """
     opts = opts or {}
     margin = SHEET_MARGIN_MM if opts.get("marginMm") is None else opts["marginMm"]
     gap = GRID_GAP_MM if opts.get("gapMm") is None else opts["gapMm"]
-    usable_w = max(0.0, page_w - 2 * margin)
-    usable_h = max(0.0, page_h - 2 * margin)
-    cols = max(1, int((usable_w + gap) // (label_w + gap)))
-    rows = max(1, int((usable_h + gap) // (label_h + gap)))
+    sides = [opts.get(k) for k in ("marginLeftMm", "marginRightMm",
+                                   "marginTopMm", "marginBottomMm")]
+    ml = margin if sides[0] is None else float(sides[0])
+    mr = margin if sides[1] is None else float(sides[1])
+    mt = margin if sides[2] is None else float(sides[2])
+    mb = margin if sides[3] is None else float(sides[3])
+    if all(s is None for s in sides):
+        # legacy fast path — keep the exact historical expression so float
+        # results stay bit-identical (page_w - ml - mr can differ in the last
+        # ulp and flip the floor at exact-fit boundaries)
+        usable_w = max(0.0, page_w - 2 * margin)
+        usable_h = max(0.0, page_h - 2 * margin)
+    else:
+        usable_w = max(0.0, page_w - ml - mr)
+        usable_h = max(0.0, page_h - mt - mb)
+    gx = gap if opts.get("gapXMm") is None else float(opts["gapXMm"])
+    gy = gap if opts.get("gapYMm") is None else float(opts["gapYMm"])
+    cols = max(1, int((usable_w + gx) // (label_w + gx)))
+    rows = max(1, int((usable_h + gy) // (label_h + gy)))
     # explicit forced grid overrides the auto fit (non-positive forces ignored)
     fc, fr = opts.get("forceCols"), opts.get("forceRows")
     if fc is not None and int(fc) > 0:
         cols = int(fc)
     if fr is not None and int(fr) > 0:
         rows = int(fr)
+    scale = 1.0
+    if opts.get("shrinkToFit"):
+        need_w = cols * label_w + (cols - 1) * gx
+        need_h = rows * label_h + (rows - 1) * gy
+        if need_w > 0 and need_h > 0:
+            scale = min(1.0, usable_w / need_w, usable_h / need_h)
     return {
         "cols": cols,
         "rows": rows,
@@ -541,10 +570,53 @@ def calculate_grid(
         "gap": gap,
         "usableW": usable_w,
         "usableH": usable_h,
+        "marginLeft": ml,
+        "marginRight": mr,
+        "marginTop": mt,
+        "marginBottom": mb,
+        "gapX": gx,
+        "gapY": gy,
+        "scale": scale,
+        "labelW": label_w,
+        "labelH": label_h,
     }
 
 
 _DEFAULT_PAGE_MM = {"a4": {"w": 210, "h": 297}, "a5": {"w": 148, "h": 210}}
+
+
+def effective_page_mm(
+    paper: Optional[dict],
+    paper_type: str,
+    grid_opts: Optional[dict] = None,
+) -> tuple[float, float]:
+    """Resolve the physical page size in mm, honouring ``orientation``.
+
+    ``paper`` overrides the per-type default; ``grid_opts["orientation"] ==
+    "landscape"`` swaps width/height. Single source of truth for the page
+    rectangle used by planning, preview painting and the designer dialog.
+    """
+    pp = paper or _DEFAULT_PAGE_MM.get(paper_type) or {"w": 210, "h": 297}
+    w, h = float(pp["w"]), float(pp["h"])
+    if (grid_opts or {}).get("orientation") == "landscape":
+        w, h = h, w
+    return w, h
+
+
+def slot_origin_mm(grid: dict, slot: int) -> tuple[float, float]:
+    """Top-left mm of grid *slot* (0-based, row-major) from a
+    :func:`calculate_grid` dict.
+
+    With ``scale == 1.0`` and legacy opts this reduces to the historical
+    ``margin + col * (label + gap)`` bit-for-bit (``x * 1.0`` is IEEE-exact).
+    """
+    cols = grid["cols"]
+    col = slot % cols
+    row = slot // cols
+    sc = grid.get("scale", 1.0)
+    x = grid["marginLeft"] + col * (grid["labelW"] + grid["gapX"]) * sc
+    y = grid["marginTop"] + row * (grid["labelH"] + grid["gapY"]) * sc
+    return x, y
 
 
 def plan_label_pages(
@@ -567,7 +639,17 @@ def plan_label_pages(
         the slot offset uses the grid's own ``margin``/``gap``. Blank items keep
         their slot (the painter skips drawing them, leaving a gap).
 
-    Each placement: ``{"page": int, "x_mm": float, "y_mm": float, "data": dict}``.
+    排版设计 extensions (all opt-in via ``grid_opts``; absent keys keep the
+    legacy output byte-identical, including the placement key set):
+
+      - ``orientation: "landscape"`` swaps the page rectangle.
+      - ``startSlot`` skips N slots on the FIRST page only (残张续打);
+        taken modulo perPage.
+      - ``shrinkToFit`` (with forced rows/cols that overflow) scales labels
+        down; each placement then carries an extra ``"scale"`` key.
+
+    Each placement: ``{"page": int, "x_mm": float, "y_mm": float, "data": dict}``
+    (+ ``"scale": float`` only when shrunk).
     """
     w_mm = float(dims.get("w", 60))
     h_mm = float(dims.get("h", 40))
@@ -576,24 +658,25 @@ def plan_label_pages(
         return item.get("data") if isinstance(item, dict) and "data" in item else item
 
     if paper_type in ("a4", "a5"):
-        pp = paper or _DEFAULT_PAGE_MM[paper_type]
-        grid = calculate_grid(w_mm, h_mm, float(pp["w"]), float(pp["h"]),
-                              opts=grid_opts or {})
-        margin = grid.get("margin", SHEET_MARGIN_MM)
-        gap = grid.get("gap", GRID_GAP_MM)
-        cols = grid["cols"]
+        opts = grid_opts or {}
+        page_w, page_h = effective_page_mm(paper, paper_type, opts)
+        grid = calculate_grid(w_mm, h_mm, page_w, page_h, opts=opts)
         per_page = grid["perPage"]
+        scale = grid["scale"]
+        start = max(0, int(opts.get("startSlot") or 0)) % per_page
         out = []
         for i, item in enumerate(items):
-            slot = i % per_page
-            col = slot % cols
-            row = slot // cols
-            out.append({
-                "page": i // per_page,
-                "x_mm": margin + col * (w_mm + gap),
-                "y_mm": margin + row * (h_mm + gap),
+            eff = i + start
+            x_mm, y_mm = slot_origin_mm(grid, eff % per_page)
+            placement = {
+                "page": eff // per_page,
+                "x_mm": x_mm,
+                "y_mm": y_mm,
                 "data": _data(item),
-            })
+            }
+            if scale != 1.0:
+                placement["scale"] = scale
+            out.append(placement)
         return out
 
     return [

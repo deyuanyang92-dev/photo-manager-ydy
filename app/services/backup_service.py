@@ -23,6 +23,7 @@ import os
 import shutil
 import sqlite3
 import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -34,8 +35,31 @@ def user_backup_root() -> Path:
     """Stable, always-local directory holding all snapshots."""
     if sys.platform == "win32":
         base = Path(os.environ.get("APPDATA", str(Path.home())))
-        return base / "SpecimenPhotoWorkbench" / "backups"
-    return Path.home() / ".specimen_workbench" / "backups"
+        candidates = [base / "SpecimenPhotoWorkbench" / "backups"]
+    else:
+        candidates = []
+        xdg_data = os.environ.get("XDG_DATA_HOME")
+        if xdg_data:
+            candidates.append(Path(xdg_data) / "specimen_workbench" / "backups")
+        candidates.append(Path.home() / ".specimen_workbench" / "backups")
+    candidates.append(Path(tempfile.gettempdir()) / "specimen_workbench" / "backups")
+    for candidate in candidates:
+        if _can_use_backup_root(candidate):
+            return candidate
+    return candidates[-1]
+
+
+def _can_use_backup_root(path: Path) -> bool:
+    try:
+        probe_dir = path / ".probe"
+        probe_dir.mkdir(parents=True, exist_ok=True)
+        probe = probe_dir / "write-test"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+        probe_dir.rmdir()
+        return True
+    except OSError:
+        return False
 
 
 def _project_slot(project_dir: str) -> Path:

@@ -103,6 +103,15 @@ class AppSettings:
         )
 
     @property
+    def silent_compose(self) -> bool:
+        # 跳过合成前 JPG 勾选框和合成后确认框，直接按当前分组/选中 JPG 运行 Helicon。
+        return str(self._qs.value("workbench/silent_compose", "false")).lower() == "true"
+
+    @silent_compose.setter
+    def silent_compose(self, val: bool) -> None:
+        self._qs.setValue("workbench/silent_compose", "true" if val else "false")
+
+    @property
     def incoming_subdir(self) -> str:
         # 与 settings_view 的 _K_INCOMING_SUBDIR 同 key；用户可在设置页改 incoming
         # 目录名（不一定是 incoming-jpg）。监控的监听+扫描都应读这里。

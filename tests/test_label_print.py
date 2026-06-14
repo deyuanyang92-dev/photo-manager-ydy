@@ -98,3 +98,61 @@ class TestPaintJobs:
     def test_mixed_label_then_grid(self, qapp):
         # label job (2 pages) + a4 grid job (1 page) + seam → 3 pages.
         assert _pdf_page_count([_job("label", 2), _job("a4", 2)]) == 3
+
+
+class TestImpositionExtensions:
+    """排版设计: orientation / per-job gridOpts / shrink scale at print time."""
+
+    def test_build_printer_one_arg_unchanged(self, qapp):
+        from PyQt6.QtGui import QPageLayout
+        printer = build_printer(_job("a4", 1))
+        assert printer.pageLayout().orientation() == QPageLayout.Orientation.Portrait
+
+    def test_build_printer_landscape_sets_orientation(self, qapp):
+        from PyQt6.QtGui import QPageLayout
+        printer = build_printer(_job("a4", 1), {"orientation": "landscape"})
+        assert printer.pageLayout().orientation() == QPageLayout.Orientation.Landscape
+
+    def test_build_printer_landscape_from_job_grid_opts(self, qapp):
+        from PyQt6.QtGui import QPageLayout
+        job = _job("a4", 1)
+        job["gridOpts"] = {"orientation": "landscape"}
+        printer = build_printer(job)
+        assert printer.pageLayout().orientation() == QPageLayout.Orientation.Landscape
+
+    def test_paint_jobs_prefers_job_grid_opts(self, qapp):
+        # 1×1 forced grid via job["gridOpts"] → one label per page.
+        job = _job("a4", 3)
+        job["gridOpts"] = {"forceCols": 1, "forceRows": 1}
+        assert _pdf_page_count([job]) == 3
+
+    def test_paint_jobs_start_slot_paginates(self, qapp):
+        from app.utils.label_core import calculate_grid
+        per_page = calculate_grid(50, 30, 210, 297)["perPage"]
+        job = _job("a4", per_page)        # exactly one page without offset
+        job["gridOpts"] = {"startSlot": 1}
+        assert _pdf_page_count([job]) == 2
+
+    def test_paint_jobs_scale_shrinks_crop_marks(self, qapp):
+        # recording fake: crop marks must receive scaled label w/h
+        received = []
+
+        def fake_marks(painter, x, y, w, h, arm=0, gap=0):
+            received.append((w, h))
+
+        job = _job("a4", 2)
+        job["gridOpts"] = {"forceCols": 5, "shrinkToFit": True}
+        fd, path = tempfile.mkstemp(suffix=".pdf")
+        os.close(fd)
+        try:
+            printer = build_printer(job)
+            printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
+            printer.setOutputFileName(path)
+            paint_jobs(printer, [job], cut_marks=True, draw_crop_marks=fake_marks)
+        finally:
+            os.remove(path)
+        mm_to_dot = printer.resolution() / 25.4
+        sc = 194 / 258
+        assert received
+        assert all(w == int(50 * sc * mm_to_dot) and h == int(30 * sc * mm_to_dot)
+                   for w, h in received)

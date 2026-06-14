@@ -29,6 +29,7 @@ from PyQt6.QtCore import Qt, QSize, pyqtSignal
 from PyQt6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
+    QCheckBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -122,17 +123,34 @@ class _ComposedRow(QFrame):
 
     organise_clicked = pyqtSignal(int)   # group_index
     undo_clicked = pyqtSignal(int)       # group_index
+    selected_changed = pyqtSignal(int, bool)  # group_index, checked
+    register_zip_clicked = pyqtSignal(int)  # group_index
 
-    def __init__(self, group: "Group", parent: Optional[QWidget] = None) -> None:
+    def __init__(
+        self,
+        group: "Group",
+        parent: Optional[QWidget] = None,
+        *,
+        selected: bool = False,
+    ) -> None:
         super().__init__(parent)
         self.setObjectName("Card")
         self._group = group
+        self._selected = selected
         self._setup_ui()
 
     def _setup_ui(self) -> None:
         lay = QHBoxLayout(self)
         lay.setContentsMargins(12, 8, 12, 8)
         lay.setSpacing(10)
+
+        sel = QCheckBox()
+        sel.setToolTip("勾选后，顶部合成/整理只处理勾选组；未勾选任何组时处理全部。")
+        sel.setChecked(self._selected)
+        sel.toggled.connect(
+            lambda checked: self.selected_changed.emit(self._group.group_index, checked)
+        )
+        lay.addWidget(sel)
 
         # Composed-state chip + angle label
         chip = QLabel(self._group.angle_label or f"组 {self._group.group_index}")
@@ -164,6 +182,17 @@ class _ComposedRow(QFrame):
         org_btn.clicked.connect(lambda: self.organise_clicked.emit(self._group.group_index))
         lay.addWidget(org_btn)
 
+        zip_btn = QPushButton()
+        zip_btn.setObjectName("Ghost")
+        zip_btn.setFixedSize(30, 28)
+        icons.set_button_icon(zip_btn, "mdi6.folder-zip-outline",
+                              color=icons.TONE_MUTED, size=15)
+        zip_btn.setToolTip("注册已有 ZIP 归档（不重新压缩）")
+        zip_btn.clicked.connect(
+            lambda: self.register_zip_clicked.emit(self._group.group_index)
+        )
+        lay.addWidget(zip_btn)
+
         # Undo button
         undo_btn = QPushButton()
         undo_btn.setObjectName("Ghost")
@@ -188,13 +217,16 @@ class _DraftGroupRow(QFrame):
     delete_group_requested = pyqtSignal(int)  # group_index  #cursor
     import_tiff_requested = pyqtSignal(int)   # group_index  #cursor groupingImportTiff
     output_name_changed = pyqtSignal(int, str)  # group_index, 用户编辑的输出命名
+    selected_changed = pyqtSignal(int, bool)  # group_index, checked
 
     def __init__(self, group: "Group", parent: Optional[QWidget] = None,
-                 panel: Optional["GroupingPanel"] = None) -> None:
+                 panel: Optional["GroupingPanel"] = None,
+                 selected: bool = False) -> None:
         super().__init__(parent)
         self.setObjectName("Panel")
         self._group = group
         self._panel = panel
+        self._selected = selected
         self._setup_ui()
 
     # 横向胶片条：每组一个固定宽度的窄竖卡片，卡内 = 角度名 / JPG缩略图网格 /
@@ -210,6 +242,13 @@ class _DraftGroupRow(QFrame):
         # Row1: 组chip + 角度label
         top = QHBoxLayout()
         top.setSpacing(6)
+        sel = QCheckBox()
+        sel.setToolTip("勾选后，顶部合成/整理只处理勾选组；未勾选任何组时处理全部。")
+        sel.setChecked(self._selected)
+        sel.toggled.connect(
+            lambda checked: self.selected_changed.emit(self._group.group_index, checked)
+        )
+        top.addWidget(sel)
         chip = QLabel(f"组 {self._group.group_index}")
         chip.setObjectName("ChipArchived")
         top.addWidget(chip)
@@ -436,6 +475,7 @@ class GroupingPanel(QWidget):
     free_compose_requested = pyqtSignal()
     retroactive_requested = pyqtSignal()
     import_tiff_requested = pyqtSignal(str, int)  # uid, group_index  #cursor groupingImportTiff
+    archive_zip_registered = pyqtSignal(str, int)  # uid, group_index
     # 补处理 (supplementary archival) — independent of the active-specimen gate.
     supp_process_requested = pyqtSignal()       # click → consume monitor selection
     supp_files_dropped = pyqtSignal(list)       # OS drop → list[str] of local paths
@@ -445,6 +485,7 @@ class GroupingPanel(QWidget):
         self.ctx = ctx
         self._uid: Optional[str] = None
         self._grouping: Optional["SpecimenGrouping"] = None
+        self._selected_group_indexes: set[int] = set()
         self._setup_ui()
 
     # ── UI ────────────────────────────────────────────────────────────────────
@@ -468,6 +509,21 @@ class GroupingPanel(QWidget):
         main_actions = QHBoxLayout(self._toolbar_widget)
         main_actions.setContentsMargins(0, 0, 0, 0)
         main_actions.setSpacing(8)
+
+        self._select_all_btn = QPushButton("全选组")
+        self._select_all_btn.setObjectName("Ghost")
+        self._select_all_btn.setFixedHeight(30)
+        self._select_all_btn.setToolTip("勾选所有分组；顶部合成/整理只处理勾选组")
+        self._select_all_btn.clicked.connect(self.select_all_groups)
+        main_actions.addWidget(self._select_all_btn)
+
+        self._clear_selection_btn = QPushButton("清除选择")
+        self._clear_selection_btn.setObjectName("Ghost")
+        self._clear_selection_btn.setFixedHeight(30)
+        self._clear_selection_btn.setToolTip("清除分组勾选；未勾选任何组时顶部操作处理全部")
+        self._clear_selection_btn.clicked.connect(self.clear_group_selection)
+        main_actions.addWidget(self._clear_selection_btn)
+
         compose_btn = QPushButton("合成")
         compose_btn.setObjectName("Primary")
         compose_btn.setFixedHeight(30)
@@ -588,6 +644,8 @@ class GroupingPanel(QWidget):
         """Display all groups for *uid*."""
         self._uid = uid
         self._grouping = grouping
+        valid = {g.group_index for g in grouping.groups}
+        self._selected_group_indexes &= valid
         short = uid[:30] + ("…" if len(uid) > 30 else "")
         self._uid_label.setText(short)
         self._target_label.setText(short)
@@ -598,12 +656,31 @@ class GroupingPanel(QWidget):
     def clear(self) -> None:
         self._uid = None
         self._grouping = None
+        self._selected_group_indexes.clear()
         self._uid_label.setText("— 未选择标本 —")
         self._target_label.setText("—")
         self._toolbar_widget.hide()
         self._add_btn.hide()
         self._clear_content()
         self._empty_lbl.show()
+
+    def selected_group_indexes(self) -> list[int]:
+        """Return checked group indexes. Empty means bulk actions should use all."""
+        return sorted(self._selected_group_indexes)
+
+    def select_all_groups(self) -> None:
+        """Check every current group."""
+        if not self._grouping:
+            return
+        self._selected_group_indexes = {g.group_index for g in self._grouping.groups}
+        self._rebuild()
+
+    def clear_group_selection(self) -> None:
+        """Clear all group checks; bulk actions fall back to all groups."""
+        if not self._selected_group_indexes:
+            return
+        self._selected_group_indexes.clear()
+        self._rebuild()
 
     def add_jpgs_to_group(self, group_index: int, jpg_paths: list[str]) -> None:
         """Add *jpg_paths* to the group at *group_index* (mutual exclusion).
@@ -670,6 +747,7 @@ class GroupingPanel(QWidget):
         if target.composed_tiff_path:
             return  # composed groups: caller must undo-compose first
         self._grouping.groups = [g for g in self._grouping.groups if g.group_index != group_index]
+        self._selected_group_indexes.discard(group_index)
         self._rebuild()
         self.grouping_changed.emit()
 
@@ -743,7 +821,12 @@ class GroupingPanel(QWidget):
             strip_lay.setSpacing(10)
             strip_lay.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
             for g in draft:
-                row = _DraftGroupRow(g, strip, panel=self)
+                row = _DraftGroupRow(
+                    g,
+                    strip,
+                    panel=self,
+                    selected=g.group_index in self._selected_group_indexes,
+                )
                 row.compose_clicked.connect(self._on_compose)
                 row.label_changed.connect(self._on_label_changed)
                 row.add_selected_to_group.connect(self._on_add_selected_to_group)
@@ -752,6 +835,7 @@ class GroupingPanel(QWidget):
                 row.delete_group_requested.connect(self._on_delete_group)    # #cursor
                 row.import_tiff_requested.connect(self._on_import_tiff)      # #cursor
                 row.output_name_changed.connect(self._on_output_name_changed)
+                row.selected_changed.connect(self._on_group_selected_changed)
                 strip_lay.addWidget(row)
             hscroll.setWidget(strip)
             self._content_lay.addWidget(hscroll)
@@ -765,9 +849,15 @@ class GroupingPanel(QWidget):
             sec_lbl2.setObjectName("Section")
             self._content_lay.addWidget(sec_lbl2)
             for g in composed:
-                row2 = _ComposedRow(g, self)
+                row2 = _ComposedRow(
+                    g,
+                    self,
+                    selected=g.group_index in self._selected_group_indexes,
+                )
                 row2.organise_clicked.connect(self._on_organise)
                 row2.undo_clicked.connect(self._on_undo)
+                row2.selected_changed.connect(self._on_group_selected_changed)
+                row2.register_zip_clicked.connect(self._on_register_zip)
                 self._content_lay.addWidget(row2)
 
         if not groups:
@@ -854,6 +944,12 @@ class GroupingPanel(QWidget):
                 g.output_name = name.strip() or None
                 break
         self.grouping_changed.emit()
+
+    def _on_group_selected_changed(self, group_index: int, checked: bool) -> None:
+        if checked:
+            self._selected_group_indexes.add(group_index)
+        else:
+            self._selected_group_indexes.discard(group_index)
 
     def _on_add_selected_to_group(self, group_index: int) -> None:
         """Request workbench view to resolve monitor selection and add to group."""
@@ -948,6 +1044,50 @@ class GroupingPanel(QWidget):
         # Propagate to workbench view as well
         if self._uid:
             self.import_tiff_requested.emit(self._uid, group_index)
+
+    def _on_register_zip(self, group_index: int) -> None:
+        """Associate an existing ZIP archive with a composed group."""
+        if not self._uid or not self._grouping:
+            return
+        target = next(
+            (g for g in self._grouping.groups if g.group_index == group_index), None
+        )
+        if target is None:
+            return
+
+        from app.utils.ui import get_open_file_name
+        zip_path = get_open_file_name(
+            self,
+            "选择 ZIP 归档",
+            filter="ZIP 归档 (*.zip *.ZIP)",
+        )
+        if not zip_path:
+            return
+        if not zip_path.lower().endswith(".zip"):
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "注册 ZIP", "请选择 .zip 文件。")
+            return
+
+        if target.archive_zip and target.archive_zip != zip_path:
+            from PyQt6.QtWidgets import QMessageBox
+            reply = QMessageBox.question(
+                self,
+                "替换 ZIP？",
+                f"本组已有 ZIP：{Path(target.archive_zip).name}\n\n"
+                f"是否替换为：{Path(zip_path).name}？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+        from datetime import datetime, timezone
+        target.archive_zip = zip_path
+        target.status = "organized"
+        target.updated_at = datetime.now(tz=timezone.utc).isoformat()
+        self._rebuild()
+        self.grouping_changed.emit()
+        self.archive_zip_registered.emit(self._uid, group_index)
 
 
 # ── TIFF Import Dialog ────────────────────────────────────────────────────────

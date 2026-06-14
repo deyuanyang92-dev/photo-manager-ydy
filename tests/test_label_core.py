@@ -1311,3 +1311,190 @@ class TestRenderShape:
     def test_cornerRadius_rect_no_crash(self, qt_app):
         self._render(qt_app, {"cornerRadius": 3.0, "rows": [], "lineHeight": 1.0},
                      {"w": 50, "h": 30})
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 排版设计 (imposition designer) extensions — per-side margins, axis gaps,
+# shrink-to-fit, orientation, startSlot. HARD requirement: grid_opts WITHOUT
+# any new key must produce byte-identical output to the legacy formulas
+# (the renderer drives the printer — this is a print red line).
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestCalculateGridLegacyParity:
+    """Legacy opts must hit the exact old formulas (no per-side code path)."""
+
+    CASES = [
+        (60, 40, 210, 297, None),
+        (50, 30, 210, 297, {}),
+        (50, 30, 210, 297, {"marginMm": 0}),
+        (50, 30, 210, 297, {"marginMm": 8.0, "gapMm": 2.0}),
+        (50, 30, 148, 210, {"gapMm": 0}),
+        (50, 30, 210, 297, {"forceCols": 2, "forceRows": 5}),
+        (33.3, 21.7, 210, 297, {"marginMm": 7.7, "gapMm": 1.3}),
+    ]
+
+    def test_legacy_opts_exact_values(self):
+        for lw, lh, pw, ph, opts in self.CASES:
+            g = calculate_grid(lw, lh, pw, ph, opts=opts)
+            o = opts or {}
+            margin = SHEET_MARGIN_MM if o.get("marginMm") is None else o["marginMm"]
+            gap = GRID_GAP_MM if o.get("gapMm") is None else o["gapMm"]
+            usable_w = max(0.0, pw - 2 * margin)
+            usable_h = max(0.0, ph - 2 * margin)
+            cols = max(1, int((usable_w + gap) // (lw + gap)))
+            rows = max(1, int((usable_h + gap) // (lh + gap)))
+            fc, fr = o.get("forceCols"), o.get("forceRows")
+            if fc is not None and int(fc) > 0:
+                cols = int(fc)
+            if fr is not None and int(fr) > 0:
+                rows = int(fr)
+            assert g["cols"] == cols and g["rows"] == rows, (lw, lh, opts)
+            assert g["perPage"] == cols * rows
+            assert g["margin"] == margin and g["gap"] == gap
+            assert g["usableW"] == usable_w and g["usableH"] == usable_h
+            assert g["scale"] == 1.0
+
+    def test_legacy_grid_carries_resolved_new_keys(self):
+        g = calculate_grid(50, 30, 210, 297)
+        assert g["marginLeft"] == g["marginRight"] == g["marginTop"] \
+            == g["marginBottom"] == SHEET_MARGIN_MM
+        assert g["gapX"] == g["gapY"] == GRID_GAP_MM
+        assert g["labelW"] == 50 and g["labelH"] == 30
+
+
+class TestCalculateGridPerSide:
+    def test_fallback_chain_per_side_then_uniform_then_default(self):
+        # per-side wins over uniform, uniform wins over SHEET_MARGIN_MM
+        g = calculate_grid(50, 30, 210, 297,
+                           opts={"marginMm": 5, "marginLeftMm": 12})
+        assert g["marginLeft"] == 12
+        assert g["marginRight"] == 5 and g["marginTop"] == 5
+        g2 = calculate_grid(50, 30, 210, 297, opts={"marginTopMm": 3})
+        assert g2["marginTop"] == 3
+        assert g2["marginLeft"] == SHEET_MARGIN_MM
+
+    def test_left_right_margins_change_cols_only(self):
+        base = calculate_grid(50, 30, 210, 297)
+        g = calculate_grid(50, 30, 210, 297,
+                           opts={"marginLeftMm": 40, "marginRightMm": 40})
+        # usableW = 210-80 = 130 → cols floor((130+2)/52)=2
+        assert g["cols"] == 2 and g["cols"] < base["cols"]
+        assert g["rows"] == base["rows"]
+        assert g["usableW"] == 130 and g["usableH"] == base["usableH"]
+
+    def test_gap_axis_split(self):
+        g = calculate_grid(50, 30, 210, 297, opts={"gapXMm": 20, "gapYMm": 0})
+        # cols: floor((194+20)/70)=3 ; rows: floor(281/30)=9
+        assert g["gapX"] == 20 and g["gapY"] == 0
+        assert g["cols"] == 3 and g["rows"] == 9
+
+    def test_zero_gap_allowed(self):
+        g = calculate_grid(50, 30, 210, 297,
+                           opts={"marginMm": 0, "gapMm": 0})
+        assert g["cols"] == 4 and g["rows"] == 9   # 210//50=4, 297//30=9
+
+
+class TestCalculateGridShrink:
+    def test_forced_overflow_scale(self):
+        g = calculate_grid(50, 30, 210, 297,
+                           opts={"forceCols": 5, "shrinkToFit": True})
+        # usableW=194, needW=5*50+4*2=258 ; usableH=281, rows auto=8,
+        # needH=8*30+7*2=254 → scale=min(1, 194/258, 281/254)=194/258
+        assert g["scale"] == pytest.approx(194 / 258)
+
+    def test_auto_grid_scale_is_one(self):
+        g = calculate_grid(50, 30, 210, 297, opts={"shrinkToFit": True})
+        assert g["scale"] == 1.0
+
+    def test_overflow_without_flag_keeps_scale_one(self):
+        g = calculate_grid(50, 30, 210, 297, opts={"forceCols": 5})
+        assert g["scale"] == 1.0
+
+
+class TestPlanLabelPagesNew:
+    def _items(self, n):
+        return [{"idx": i, "data": {"uniqueId": f"X{i}"}} for i in range(n)]
+
+    def test_legacy_placements_byte_identical(self):
+        # regression gate: no new keys, exact legacy values/key-set
+        dims = {"w": 50, "h": 30}
+        paper = {"w": 210, "h": 297}
+        g = calculate_grid(50, 30, 210, 297)
+        items = self._items(g["perPage"] + 2)
+        plan = plan_label_pages(items, dims, "a4", paper, None)
+        for i, p in enumerate(plan):
+            assert set(p.keys()) == {"page", "x_mm", "y_mm", "data"}
+            slot = i % g["perPage"]
+            col, row = slot % g["cols"], slot // g["cols"]
+            assert p["page"] == i // g["perPage"]
+            assert p["x_mm"] == g["margin"] + col * (50 + g["gap"])
+            assert p["y_mm"] == g["margin"] + row * (30 + g["gap"])
+
+    def test_orientation_landscape_swaps_page_mm(self):
+        from app.utils.label_core import effective_page_mm
+        assert effective_page_mm(None, "a4", {"orientation": "landscape"}) == (297.0, 210.0)
+        assert effective_page_mm(None, "a4", {}) == (210.0, 297.0)
+        assert effective_page_mm({"w": 148, "h": 210}, "a4",
+                                 {"orientation": "landscape"}) == (210.0, 148.0)
+        # plan uses the swapped page: A4 landscape fits 5 cols of 50mm labels
+        plan = plan_label_pages(self._items(6), {"w": 50, "h": 30}, "a4",
+                                None, {"orientation": "landscape"})
+        g = calculate_grid(50, 30, 297, 210)
+        assert g["cols"] == 5
+        assert plan[4]["x_mm"] == g["margin"] + 4 * (50 + g["gap"])
+        assert plan[5]["x_mm"] == g["margin"] and plan[5]["y_mm"] > g["margin"]
+
+    def test_start_slot_skips_first_page_only(self):
+        dims = {"w": 50, "h": 30}
+        g = calculate_grid(50, 30, 210, 297)        # 3×8 = 24/page
+        items = self._items(g["perPage"] + 1)        # 25 items
+        plan = plan_label_pages(items, dims, "a4", None, {"startSlot": 3})
+        # item 0 → slot 3 (col 0, row 1)
+        assert plan[0]["page"] == 0
+        assert plan[0]["x_mm"] == g["margin"]
+        assert plan[0]["y_mm"] == g["margin"] + 1 * (30 + g["gap"])
+        # item 20 → slot 23, still page 0 ; item 21 → page 1 slot 0
+        assert plan[20]["page"] == 0
+        assert plan[21]["page"] == 1
+        assert plan[21]["x_mm"] == g["margin"] and plan[21]["y_mm"] == g["margin"]
+        # page 1 has NO offset: item 21+k sits at slot k
+        assert plan[24]["page"] == 1
+
+    def test_start_slot_modulo_per_page(self):
+        dims = {"w": 50, "h": 30}
+        a = plan_label_pages(self._items(4), dims, "a4", None, {"startSlot": 3})
+        b = plan_label_pages(self._items(4), dims, "a4", None, {"startSlot": 27})
+        assert a == b
+
+    def test_start_slot_ignored_on_label_paper(self):
+        plan = plan_label_pages(self._items(3), {"w": 50, "h": 30}, "label",
+                                None, {"startSlot": 5})
+        assert [p["page"] for p in plan] == [0, 1, 2]
+        assert all(p["x_mm"] == 0 and p["y_mm"] == 0 for p in plan)
+
+    def test_scale_key_only_when_shrunk(self):
+        dims = {"w": 50, "h": 30}
+        plain = plan_label_pages(self._items(2), dims, "a4", None,
+                                 {"shrinkToFit": True})
+        assert all("scale" not in p for p in plain)   # fits → scale 1 → no key
+        shrunk = plan_label_pages(self._items(6), dims, "a4", None,
+                                  {"forceCols": 5, "shrinkToFit": True})
+        sc = 194 / 258
+        assert shrunk[0]["scale"] == pytest.approx(sc)
+        assert shrunk[1]["x_mm"] == pytest.approx(8 + 1 * (50 + 2) * sc)
+        assert shrunk[0]["x_mm"] == 8                 # margin NOT scaled
+
+    def test_slot_origin_mm_matches_plan(self):
+        from app.utils.label_core import slot_origin_mm
+        g = calculate_grid(50, 30, 210, 297,
+                           opts={"marginLeftMm": 10, "marginTopMm": 4,
+                                 "gapXMm": 1, "gapYMm": 3})
+        plan = plan_label_pages(self._items(g["perPage"]), {"w": 50, "h": 30},
+                                "a4", None,
+                                {"marginLeftMm": 10, "marginTopMm": 4,
+                                 "gapXMm": 1, "gapYMm": 3})
+        for slot, p in enumerate(plan):
+            x, y = slot_origin_mm(g, slot)
+            assert p["x_mm"] == x and p["y_mm"] == y
+        assert plan[1]["x_mm"] == 10 + (50 + 1)
+        assert plan[g["cols"]]["y_mm"] == 4 + (30 + 3)

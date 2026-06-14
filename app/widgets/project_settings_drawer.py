@@ -233,6 +233,13 @@ class ProjectSettingsDrawer(QWidget):
         self._auto_activate_cb.toggled.connect(self._on_auto_activate_changed)
         lay.addWidget(self._auto_activate_cb)
 
+        self._silent_compose_cb = QCheckBox("静默合成（跳过预览确认）")
+        self._silent_compose_cb.setToolTip(
+            "打开后：选中 JPG 点合成会直接运行 Helicon，成果先生成在 incoming。"
+        )
+        self._silent_compose_cb.toggled.connect(self._on_silent_compose_changed)
+        lay.addWidget(self._silent_compose_cb)
+
         lay.addWidget(_divider())
 
         # Helicon section (Qt-specific, web oracle uses separate modal)
@@ -547,6 +554,11 @@ class ProjectSettingsDrawer(QWidget):
             self._auto_activate_cb.setChecked(val)
         except Exception:
             pass
+        try:
+            val = bool(getattr(self.ctx.settings, "silent_compose", False))
+            self._silent_compose_cb.setChecked(val)
+        except Exception:
+            pass
 
         db = self.ctx.get_db()
         if db is None:
@@ -744,6 +756,7 @@ class ProjectSettingsDrawer(QWidget):
             cb.setEnabled(enabled)
         self._new_code_edit.setEnabled(enabled)
         self._new_detail_edit.setEnabled(enabled)
+        self._silent_compose_cb.setEnabled(True)
 
     # ── Slots ─────────────────────────────────────────────────────────────────
 
@@ -762,6 +775,13 @@ class ProjectSettingsDrawer(QWidget):
     def _on_auto_activate_changed(self, checked: bool) -> None:
         try:
             self.ctx.settings.auto_activate_on_new_specimen = checked
+        except Exception:
+            pass
+
+    def _on_silent_compose_changed(self, checked: bool) -> None:
+        try:
+            self.ctx.settings.silent_compose = checked
+            self.ctx.settings.sync()
         except Exception:
             pass
 

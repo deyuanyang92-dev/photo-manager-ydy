@@ -29,7 +29,7 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import QPoint, Qt, pyqtSignal
 from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import (
     QDialog,
@@ -50,6 +50,46 @@ from app.config import icons
 
 # ── TIFF Lightbox Dialog ───────────────────────────────────────────────────────
 
+class _PanImageLabel(QLabel):
+    """Image label that drags its parent scroll area for pan navigation."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._scroll_area: Optional[QScrollArea] = None
+        self._last_pos: Optional[QPoint] = None
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+
+    def set_scroll_area(self, scroll_area: QScrollArea) -> None:
+        self._scroll_area = scroll_area
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._last_pos = event.pos()
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._scroll_area is not None and self._last_pos is not None:
+            delta = event.pos() - self._last_pos
+            hbar = self._scroll_area.horizontalScrollBar()
+            vbar = self._scroll_area.verticalScrollBar()
+            hbar.setValue(hbar.value() - delta.x())
+            vbar.setValue(vbar.value() - delta.y())
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._last_pos = None
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+
 class _TiffLightboxDialog(QDialog):
     """Fullscreen-ish lightbox for browsing composed TIFF files."""
 
@@ -60,16 +100,43 @@ class _TiffLightboxDialog(QDialog):
         self.resize(900, 700)
         self._paths = paths
         self._index = initial_index
+        self._base_pixmap = QPixmap()
+        self._fit_to_window = True
 
         layout = QVBoxLayout(self)
 
         self._info_label = QLabel()
         layout.addWidget(self._info_label)
 
-        self._image_label = QLabel(alignment=Qt.AlignmentFlag.AlignCenter)
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(False)
+        self._scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._image_label = _PanImageLabel()
+        self._image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._image_label.setMinimumSize(800, 550)
         self._image_label.setScaledContents(False)
-        layout.addWidget(self._image_label)
+        self._image_label.set_scroll_area(self._scroll)
+        self._scroll.setWidget(self._image_label)
+        layout.addWidget(self._scroll, stretch=1)
+
+        zoom_row = QHBoxLayout()
+        zoom_lbl = QLabel("缩放")
+        zoom_lbl.setObjectName("MutedSmall")
+        zoom_row.addWidget(zoom_lbl)
+        self._zoom_slider = QSlider(Qt.Orientation.Horizontal)
+        self._zoom_slider.setMinimum(25)
+        self._zoom_slider.setMaximum(400)
+        self._zoom_slider.setValue(100)
+        self._zoom_slider.setToolTip("缩放 TIFF 预览")
+        self._zoom_slider.valueChanged.connect(self._on_zoom_changed)
+        zoom_row.addWidget(self._zoom_slider, stretch=1)
+        self._zoom_value = QLabel("适合窗口")
+        self._zoom_value.setObjectName("MutedSmall")
+        zoom_row.addWidget(self._zoom_value)
+        fit_btn = QPushButton("适合窗口")
+        fit_btn.clicked.connect(self._fit_current)
+        zoom_row.addWidget(fit_btn)
+        layout.addLayout(zoom_row)
 
         nav_row = QHBoxLayout()
 
@@ -105,7 +172,7 @@ class _TiffLightboxDialog(QDialog):
                 from PIL import Image
                 import tempfile
                 img = Image.open(str(path))
-                img.thumbnail((1600, 1200))
+                img.thumbnail((2400, 1800))
                 tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
                 img.save(tmp.name)
                 pixmap = QPixmap(tmp.name)
@@ -114,17 +181,57 @@ class _TiffLightboxDialog(QDialog):
                 pass
 
         if not pixmap.isNull():
-            scaled = pixmap.scaled(
-                self._image_label.size(),
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            self._image_label.setPixmap(scaled)
+            self._base_pixmap = pixmap
+            self._fit_to_window = True
+            self._render_current()
         else:
+            self._base_pixmap = QPixmap()
             self._image_label.setText(f"无法预览: {path.name}")
 
         self._prev_btn.setEnabled(self._index > 0)
         self._next_btn.setEnabled(self._index < len(self._paths) - 1)
+
+    def _render_current(self) -> None:
+        if self._base_pixmap.isNull():
+            return
+        if self._fit_to_window:
+            viewport = self._scroll.viewport().size()
+            scaled = self._base_pixmap.scaled(
+                max(120, viewport.width() - 24),
+                max(120, viewport.height() - 24),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            ratio = int((scaled.width() / max(1, self._base_pixmap.width())) * 100)
+            self._zoom_slider.blockSignals(True)
+            self._zoom_slider.setValue(max(25, min(400, ratio)))
+            self._zoom_slider.blockSignals(False)
+            self._zoom_value.setText("适合窗口")
+        else:
+            pct = self._zoom_slider.value()
+            scaled = self._base_pixmap.scaled(
+                max(1, int(self._base_pixmap.width() * pct / 100)),
+                max(1, int(self._base_pixmap.height() * pct / 100)),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            self._zoom_value.setText(f"{pct}%")
+        self._image_label.setText("")
+        self._image_label.setPixmap(scaled)
+        self._image_label.resize(scaled.size())
+
+    def _on_zoom_changed(self, _value: int) -> None:
+        self._fit_to_window = False
+        self._render_current()
+
+    def _fit_current(self) -> None:
+        self._fit_to_window = True
+        self._render_current()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if self._fit_to_window:
+            self._render_current()
 
     def _go_prev(self) -> None:
         self._index -= 1

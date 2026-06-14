@@ -93,6 +93,7 @@ _K_WB_AUTO_ACTIVATE_NEW = "workbench/auto_activate_new"
 _K_WB_GROUPING_AUTO_WATCH = "workbench/grouping_auto_watch"
 _K_WB_GROUPING_AUTO_WATCH_MODE = "workbench/grouping_auto_watch_mode"
 _K_WB_AUTO_ORGANIZE = "workbench/auto_organize_after_compose"
+_K_WB_SILENT_COMPOSE = "workbench/silent_compose"
 _K_WB_FILE_VIEW_MODE = "workbench/file_view_mode"
 
 # ── Global UI settings (mirrors renderGlobalSettings) ────────────────────────
@@ -758,6 +759,7 @@ class SettingsView(BaseView):
           autoActivateOnNewSpecimen  → workbench/auto_activate_new
           groupingAutoWatch          → workbench/grouping_auto_watch
           groupingAutoWatchMode      → workbench/grouping_auto_watch_mode
+          silentCompose              → workbench/silent_compose
           fileViewMode               → workbench/file_view_mode
         """
         tab = _ScrollTab()
@@ -788,6 +790,14 @@ class SettingsView(BaseView):
         )
         self._auto_organize_chk.stateChanged.connect(self._save_workbench)
         watch_v.addWidget(self._auto_organize_chk)
+
+        self._silent_compose_chk = QCheckBox("静默合成（跳过 JPG 预览和结果确认）")
+        self._silent_compose_chk.setChecked(False)
+        self._silent_compose_chk.setToolTip(
+            "打开后：选中 JPG 点合成会直接运行 Helicon；合成+整理会继续归档并移 results。"
+        )
+        self._silent_compose_chk.stateChanged.connect(self._save_workbench)
+        watch_v.addWidget(self._silent_compose_chk)
 
         tab.body.addWidget(watch_box)
         tab.body.addSpacing(12)
@@ -1295,6 +1305,9 @@ class SettingsView(BaseView):
         self._auto_organize_chk.setChecked(
             str(qs.value(_K_WB_AUTO_ORGANIZE, "false")).lower() == "true"
         )
+        self._silent_compose_chk.setChecked(
+            str(qs.value(_K_WB_SILENT_COMPOSE, "false")).lower() == "true"
+        )
         fv_map = {"jpg-tif": 0, "with-zip": 1, "all": 2}
         fv_val = str(qs.value(_K_WB_FILE_VIEW_MODE, "jpg-tif"))
         self._file_view_mode_combo.setCurrentIndex(fv_map.get(fv_val, 0))
@@ -1484,6 +1497,10 @@ class SettingsView(BaseView):
         qs.setValue(
             _K_WB_AUTO_ORGANIZE,
             "true" if self._auto_organize_chk.isChecked() else "false",
+        )
+        qs.setValue(
+            _K_WB_SILENT_COMPOSE,
+            "true" if self._silent_compose_chk.isChecked() else "false",
         )
         fv_vals = ["jpg-tif", "with-zip", "all"]
         fv_idx = self._file_view_mode_combo.currentIndex()

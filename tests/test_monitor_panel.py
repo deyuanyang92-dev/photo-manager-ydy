@@ -607,3 +607,14 @@ class TestGroupingInMoreMenu:
         action = next(a for a in menu.actions() if a.text() == "分组工具")
         with qtbot.waitSignal(panel.grouping_requested, timeout=1000):
             action.trigger()
+
+
+class TestAutoCompressToggle:
+    def test_auto_toggle_emits_state_and_tracks_enabled(self, panel, qtbot):
+        states = []
+        panel.auto_compress_toggled.connect(states.append)
+
+        qtbot.mouseClick(panel._auto_toggle, Qt.MouseButton.LeftButton)
+
+        assert states == [True]
+        assert panel.auto_compress_enabled() is True

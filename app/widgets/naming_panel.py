@@ -107,6 +107,7 @@ class NamingPanel(QWidget):
         self.ctx = ctx
         self._persisted_uid: Optional[str] = None  # UID of the currently loaded saved specimen
         self._storage_syncing = False  # re-entrancy guard between combo ↔ _storage
+        self._section_visibility_cache: dict[str, bool] = {}
         self._setup_ui()
 
     # ── Collapse ────────────────────────────────────────────────────────────
@@ -587,11 +588,17 @@ class NamingPanel(QWidget):
         ))
 
     def _toggle_section(self, key: str, frame: "QFrame", visible: bool) -> None:
+        visible = bool(visible)
         frame.setVisible(visible)
+        self._section_visibility_cache[key] = visible
         from PyQt6.QtCore import QSettings
-        QSettings().setValue(f"naming_panel/section_visible/{key}", visible)
+        settings = QSettings()
+        settings.setValue(f"naming_panel/section_visible/{key}", visible)
+        settings.sync()
 
     def _load_section_vis(self, key: str, default: bool = True) -> bool:
+        if key in self._section_visibility_cache:
+            return self._section_visibility_cache[key]
         from PyQt6.QtCore import QSettings
         val = QSettings().value(f"naming_panel/section_visible/{key}", default)
         if isinstance(val, bool):

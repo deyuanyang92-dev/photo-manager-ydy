@@ -1230,6 +1230,9 @@ QFrame#Panel, QFrame#WorkbenchSection, QFrame#PanelCard {{
     border: 1px solid {t["border"]};
     border-radius: {t["radius_lg"]};
 }}
+QFrame#WorkbenchSection {{
+    border-color: {t["border_medium"]};
+}}
 QFrame#Card {{
     background: {t["panel_2"]};
     border: 1px solid {t["border"]};
@@ -1272,6 +1275,7 @@ QFrame#BatchIdentBar {{
     border: 1px solid {t["border_medium"]};
     border-top: 1px solid {t["edge_highlight"]};
     border-radius: {t["radius"]};
+    min-height: 36px;
 }}
 QFrame#Divider {{ background-color: {t["border"]}; max-height: 1px; min-height: 1px; border: none; }}
 
@@ -1295,6 +1299,15 @@ QLabel#Section, QLabel#CardTitle {{
     letter-spacing: 0.1em;
 }}
 QLabel#Placeholder {{ color: {t["muted"]}; font-size: {t["font_md"]}; }}
+QLabel#EmptyState {{
+    color: {t["muted"]};
+    background-color: {t["panel_2"]};
+    border: 1px dashed {t["border_medium"]};
+    border-radius: {t["radius"]};
+    padding: 26px 28px;
+    font-size: {t["font_sm"]};
+    line-height: 1.5;
+}}
 
 QLabel#BatchUid {{
     font-family: {mono};
@@ -1412,10 +1425,10 @@ QPushButton#PhasePill:checked, QPushButton#PhasePillActive:checked, QPushButton#
    蓝 info=shooting · 青 accent=shot_done · 橙 warn=organizing · 绿 success=done. */
 QPushButton#PhaseDotShooting, QPushButton#PhaseDotShotDone,
 QPushButton#PhaseDotOrganizing, QPushButton#PhaseDotDone {{
-    min-width: 13px; max-width: 13px;
-    min-height: 13px; max-height: 13px;
+    min-width: 12px; max-width: 12px;
+    min-height: 12px; max-height: 12px;
     padding: 0px;
-    border-radius: 7px;
+    border-radius: 6px;
     background-color: transparent;
 }}
 QPushButton#PhaseDotShooting   {{ border: 2px solid {t["info"]}; }}
@@ -1627,25 +1640,53 @@ QTabWidget#RightRailTabs QTabBar::tab:selected {{
 
 /* ── Specimen list ───────────────────────────────────────────────── */
 QListWidget#SpecimenList {{
-    background-color: transparent;
+    background-color: {t["panel_2"]};
     border: 1px solid {t["border"]};
     border-radius: {t["radius"]};
     alternate-background-color: transparent;
     outline: none;
-    padding: 5px;
+    padding: 6px;
 }}
 QListWidget#SpecimenList::item {{
     color: {t["text_soft"]};
     border: 1px solid transparent;
     border-radius: {t["radius_sm"]};
-    padding: 9px 11px;
-    margin: 2px 0;
+    padding: 0px;
+    margin: 3px 0;
 }}
-QListWidget#SpecimenList::item:hover {{ background-color: {t["bg_raised"]}; }}
+QListWidget#SpecimenList::item:hover {{ background-color: transparent; }}
 QListWidget#SpecimenList::item:selected {{
-    background-color: {t["nav_selected_bg"]};
-    border: 1px solid {t["accent_glow"]};
+    background-color: transparent;
+    border: 1px solid transparent;
     color: {t["text"]};
+}}
+QFrame#SpecimenRow {{
+    background-color: {t["panel"]};
+    border: 1px solid {t["border"]};
+    border-radius: {t["radius_sm"]};
+}}
+QFrame#SpecimenRow:hover {{
+    background-color: {t["modal_surface"]};
+    border-color: {t["accent_glow"]};
+}}
+QLabel#SpecimenUid {{
+    font-family: {mono};
+    color: {t["text"]};
+    font-size: {t["font_sm"]};
+    font-weight: 700;
+}}
+QLabel#SpecimenSubtext {{
+    color: {t["muted_dim"]};
+    font-size: {t["font_xs"]};
+}}
+QLabel#SpecimenBadge {{
+    color: {t["accent_hover"]};
+    background-color: {t["accent_soft"]};
+    border: 1px solid {t["accent_glow"]};
+    border-radius: {t["radius_pill"]};
+    padding: 1px 7px;
+    font-size: {t["font_xs"]};
+    font-weight: 600;
 }}
 
 /* ── Generic list ────────────────────────────────────────────────── */

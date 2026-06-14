@@ -315,6 +315,9 @@ class MonitorPanel(QWidget):
     add_jpg_requested = pyqtSignal()   # emitted when user clicks "添加照片"
     grouping_requested = pyqtSignal()  # emitted when user clicks "分组工具" (opens popup)
     compose_implicit_requested = pyqtSignal()  # 主界面[合成]：隐式合成未占用JPG
+    organise_selected_requested = pyqtSignal()  # 主界面[整理]：选中 JPG+TIFF 直接归档
+    compose_implicit_organise_requested = pyqtSignal()  # 主界面[合成+整理]
+    auto_compress_toggled = pyqtSignal(bool)  # 新 TIFF 自动压缩开关
     settings_requested = pyqtSignal()  # emitted from the compact "更多" menu
     phase_clicked = pyqtSignal(str)    # status code: shooting/shot_done/organizing/done
 
@@ -355,9 +358,6 @@ class MonitorPanel(QWidget):
         b_lay = QHBoxLayout(batch)
         b_lay.setContentsMargins(12, 8, 12, 8)
         b_lay.setSpacing(8)
-        b_title = QLabel("批次")
-        b_title.setObjectName("Section")
-        b_lay.addWidget(b_title)
         self._batch_uid = QLabel("—")
         self._batch_uid.setObjectName("BatchUid")
         b_lay.addWidget(self._batch_uid)
@@ -383,6 +383,7 @@ class MonitorPanel(QWidget):
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.clicked.connect(lambda _=False, c=code: self._on_phase_pill_clicked(c))
             b_lay.addWidget(btn)
+            btn.setVisible(False)  # only the current phase is shown (sidebar has the full set)
             self._phase_pills[code] = btn
 
         b_lay.addStretch()
@@ -432,6 +433,26 @@ class MonitorPanel(QWidget):
         self._compose_btn.setToolTip("合成当前激活编号下未占用的新 JPG（自动命名 编号-序号）")
         self._compose_btn.clicked.connect(self.compose_implicit_requested.emit)
         controls.addWidget(self._compose_btn)
+
+        self._organise_btn = QPushButton("整理")
+        self._organise_btn.setObjectName("Outline")
+        self._organise_btn.setFixedHeight(28)
+        icons.set_button_icon(self._organise_btn, "mdi6.archive-arrow-down-outline",
+                              color=icons.TONE_MUTED, size=14)
+        self._organise_btn.setToolTip("整理选中的 JPG + 1 个 TIFF，生成同名 ZIP 并移入 results")
+        self._organise_btn.clicked.connect(self.organise_selected_requested.emit)
+        controls.addWidget(self._organise_btn)
+
+        self._compose_org_btn = QPushButton("合成+整理")
+        self._compose_org_btn.setObjectName("Outline")
+        self._compose_org_btn.setFixedHeight(28)
+        icons.set_button_icon(self._compose_org_btn, "mdi6.layers-plus",
+                              color=icons.TONE_MUTED, size=14)
+        self._compose_org_btn.setToolTip("合成当前批次后立即归档并移入 results")
+        self._compose_org_btn.clicked.connect(
+            self.compose_implicit_organise_requested.emit
+        )
+        controls.addWidget(self._compose_org_btn)
 
         self._auto_toggle = QPushButton("自动压缩")
         self._auto_toggle.setObjectName("Ghost")
@@ -539,11 +560,12 @@ class MonitorPanel(QWidget):
 
         # ── Empty state ──
         self._empty_label = QLabel(
-            "等待目录中新照片 — 已处理文件不再留在未整理区；TIFF 出现前不会关联原片。"
+            "等待目录中新照片\n已处理文件不再留在未整理区；TIFF 出现前不会关联原片。"
         )
-        self._empty_label.setObjectName("Muted")
+        self._empty_label.setObjectName("EmptyState")
         self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._empty_label.setWordWrap(True)
+        self._empty_label.setMinimumHeight(160)
         self._empty_label.hide()
         sec.addWidget(self._empty_label)
 
@@ -572,18 +594,17 @@ class MonitorPanel(QWidget):
         """Set the current-batch UID + activation state shown in the header."""
         self._active_uid = active_uid
         self._batch_uid.setText(uid or "—")
+        # The active phase is shown by the single visible phase pill right after
+        # the UID (see set_phase). Only the "未激活" hint shows when nothing is
+        # active — the old "激活：<uid> · 自 HH:MM" banner duplicated the UID.
         if active_uid:
-            txt = f"激活：{active_uid}"
-            if activated_at:
-                txt += f" · 自 {str(activated_at)[11:19]}"
-            self._activate_state.setText(txt)
-            self._activate_state.setObjectName("ActivateStateOn")
+            self._activate_state.hide()
         else:
             self._activate_state.setText("未激活")
             self._activate_state.setObjectName("ActivateState")
-        # re-polish to apply object-name-driven style
-        self._activate_state.style().unpolish(self._activate_state)
-        self._activate_state.style().polish(self._activate_state)
+            self._activate_state.style().unpolish(self._activate_state)
+            self._activate_state.style().polish(self._activate_state)
+            self._activate_state.show()
 
         if not active_uid:
             self.set_phase(None)
@@ -592,7 +613,9 @@ class MonitorPanel(QWidget):
         """Reflect the confirmed task status on the phase pills (exclusive)."""
         self._current_phase = status if status in self._phase_pills else None
         for code, btn in self._phase_pills.items():
-            btn.setChecked(code == self._current_phase)
+            is_cur = code == self._current_phase
+            btn.setChecked(is_cur)
+            btn.setVisible(is_cur)  # show only the current phase; sidebar has the full clickable set
 
     def _on_phase_pill_clicked(self, code: str) -> None:
         # Roll back Qt's automatic toggle; the workbench confirms via set_phase.
@@ -1021,6 +1044,10 @@ class MonitorPanel(QWidget):
         glyph = "mdi6.checkbox-marked" if on else "mdi6.checkbox-blank-outline"
         tone = icons.TONE_ACCENT if on else icons.TONE_MUTED
         icons.set_button_icon(self._auto_toggle, glyph, color=tone, size=15)
+        self.auto_compress_toggled.emit(on)
+
+    def auto_compress_enabled(self) -> bool:
+        return self._auto_toggle.isChecked()
 
     def _open_more_menu(self, global_pos) -> None:
         self._build_more_menu().exec(global_pos)

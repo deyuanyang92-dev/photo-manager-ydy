@@ -237,6 +237,9 @@ QFrame#Panel, QFrame#WorkbenchSection, QFrame#PanelCard {
     border: 1px solid rgba(15,23,42,0.08);
     border-radius: 10px;
 }
+QFrame#WorkbenchSection {
+    border-color: rgba(15,23,42,0.13);
+}
 QFrame#Card {
     background: #f8fafc;
     border: 1px solid rgba(15,23,42,0.08);
@@ -279,6 +282,7 @@ QFrame#BatchIdentBar {
     border: 1px solid rgba(15,23,42,0.13);
     border-top: 1px solid rgba(255,255,255,0.72);
     border-radius: 8px;
+    min-height: 36px;
 }
 QFrame#Divider { background-color: rgba(15,23,42,0.08); max-height: 1px; min-height: 1px; border: none; }
 
@@ -302,6 +306,15 @@ QLabel#Section, QLabel#CardTitle {
     letter-spacing: 0.1em;
 }
 QLabel#Placeholder { color: #64748b; font-size: 15px; }
+QLabel#EmptyState {
+    color: #64748b;
+    background-color: #f8fafc;
+    border: 1px dashed rgba(15,23,42,0.13);
+    border-radius: 8px;
+    padding: 26px 28px;
+    font-size: 12px;
+    line-height: 1.5;
+}
 
 QLabel#BatchUid {
     font-family: "JetBrains Mono", "Cascadia Code", "SF Mono", Consolas, "Courier New", "DejaVu Sans Mono", monospace;
@@ -421,6 +434,7 @@ QPushButton#PhaseDotShooting, QPushButton#PhaseDotShotDone,
 QPushButton#PhaseDotOrganizing, QPushButton#PhaseDotDone {
     min-width: 12px; max-width: 12px;
     min-height: 12px; max-height: 12px;
+    padding: 0px;
     border-radius: 6px;
     background-color: transparent;
 }
@@ -633,25 +647,53 @@ QTabWidget#RightRailTabs QTabBar::tab:selected {
 
 /* ── Specimen list ───────────────────────────────────────────────── */
 QListWidget#SpecimenList {
-    background-color: transparent;
+    background-color: #f8fafc;
     border: 1px solid rgba(15,23,42,0.08);
     border-radius: 8px;
     alternate-background-color: transparent;
     outline: none;
-    padding: 5px;
+    padding: 6px;
 }
 QListWidget#SpecimenList::item {
     color: #334155;
     border: 1px solid transparent;
     border-radius: 6px;
-    padding: 9px 11px;
-    margin: 2px 0;
+    padding: 0px;
+    margin: 3px 0;
 }
-QListWidget#SpecimenList::item:hover { background-color: #ffffff; }
+QListWidget#SpecimenList::item:hover { background-color: transparent; }
 QListWidget#SpecimenList::item:selected {
-    background-color: #e6f5f3;
-    border: 1px solid rgba(15,118,110,0.24);
+    background-color: transparent;
+    border: 1px solid transparent;
     color: #17212b;
+}
+QFrame#SpecimenRow {
+    background-color: #ffffff;
+    border: 1px solid rgba(15,23,42,0.08);
+    border-radius: 6px;
+}
+QFrame#SpecimenRow:hover {
+    background-color: #ffffff;
+    border-color: rgba(15,118,110,0.24);
+}
+QLabel#SpecimenUid {
+    font-family: "JetBrains Mono", "Cascadia Code", "SF Mono", Consolas, "Courier New", "DejaVu Sans Mono", monospace;
+    color: #17212b;
+    font-size: 12px;
+    font-weight: 700;
+}
+QLabel#SpecimenSubtext {
+    color: #94a3b8;
+    font-size: 11px;
+}
+QLabel#SpecimenBadge {
+    color: #0d9488;
+    background-color: rgba(15,118,110,0.11);
+    border: 1px solid rgba(15,118,110,0.24);
+    border-radius: 999px;
+    padding: 1px 7px;
+    font-size: 11px;
+    font-weight: 600;
 }
 
 /* ── Generic list ────────────────────────────────────────────────── */

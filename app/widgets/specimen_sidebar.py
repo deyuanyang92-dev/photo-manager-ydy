@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Optional
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import QSize, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QApplication,
     QFrame,
@@ -312,7 +312,7 @@ class SpecimenSidebar(QWidget):
             item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, uid)
             item.setToolTip(uid)
-            item.setSizeHint(row.sizeHint())
+            item.setSizeHint(QSize(0, 58))
             self._list.addItem(item)
             self._list.setItemWidget(item, row)
             shown += 1
@@ -321,38 +321,37 @@ class SpecimenSidebar(QWidget):
 
     def _build_row_widget(self, uid: str, name: str, name_cn: str, svc) -> QWidget:
         """Build one specimen row: UID + name + collab badge + 4 phase dots."""
-        row = QWidget()
+        row = QFrame()
+        row.setObjectName("SpecimenRow")
+        row.setMinimumHeight(52)
         v = QVBoxLayout(row)
-        v.setContentsMargins(2, 3, 2, 3)
-        v.setSpacing(2)
+        v.setContentsMargins(10, 7, 10, 7)
+        v.setSpacing(5)
 
+        top = QHBoxLayout()
+        top.setContentsMargins(0, 0, 0, 0)
+        top.setSpacing(8)
         uid_lbl = QLabel(uid)
         uid_lbl.setObjectName("SpecimenUid")
-        v.addWidget(uid_lbl)
+        top.addWidget(uid_lbl, 1)
 
-        name_text = name or name_cn
-        badge = self._collab_badge(uid, svc)
-        if name_text or badge:
-            line = QHBoxLayout()
-            line.setContentsMargins(0, 0, 0, 0)
-            line.setSpacing(6)
-            if name_text:
-                nm = QLabel(name_text)
-                nm.setObjectName("MutedSmall")
-                line.addWidget(nm)
-            line.addStretch()
-            if badge:
-                bd = QLabel(badge)
-                bd.setObjectName("MutedSmall")
-                line.addWidget(bd)
-            v.addLayout(line)
+        print_btn = QPushButton()
+        print_btn.setObjectName("IconGhost")
+        print_btn.setFixedSize(26, 26)
+        print_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        print_btn.setToolTip("按默认模板打印该编号标签")
+        icons.set_button_icon(print_btn, "mdi6.printer-outline", color=icons.TONE_MUTED, size=15)
+        print_btn.clicked.connect(
+            lambda _=False, u=uid: self.print_labels_requested.emit(u)
+        )
+        top.addWidget(print_btn)
 
         # ── Phase dots ──
         current = self._phase_for(uid, svc)
         self._phase_state[uid] = current
         dots_row = QHBoxLayout()
-        dots_row.setContentsMargins(0, 1, 0, 0)
-        dots_row.setSpacing(7)
+        dots_row.setContentsMargins(0, 0, 0, 0)
+        dots_row.setSpacing(6)
         self._phase_dots[uid] = {}
         for code, obj_name, tip in self._PHASE_DOTS:
             dot = QPushButton()
@@ -369,8 +368,22 @@ class SpecimenSidebar(QWidget):
             )
             dots_row.addWidget(dot)
             self._phase_dots[uid][code] = dot
-        dots_row.addStretch()
-        v.addLayout(dots_row)
+        top.addLayout(dots_row)
+        v.addLayout(top)
+
+        name_text = name or name_cn
+        badge = self._collab_badge(uid, svc)
+        line = QHBoxLayout()
+        line.setContentsMargins(0, 0, 0, 0)
+        line.setSpacing(6)
+        nm = QLabel(name_text or "未填写物种信息")
+        nm.setObjectName("SpecimenSubtext")
+        line.addWidget(nm, 1)
+        if badge:
+            bd = QLabel(badge)
+            bd.setObjectName("SpecimenBadge")
+            line.addWidget(bd)
+        v.addLayout(line)
         return row
 
     def _phase_for(self, uid: str, svc) -> Optional[str]:
@@ -441,7 +454,7 @@ class SpecimenSidebar(QWidget):
 
         menu = QMenu(self)
         copy_act = menu.addAction("复制编号")
-        print_act = menu.addAction("打印标签...")
+        print_act = menu.addAction("打印默认标签")
         menu.addSeparator()
         rename_act = menu.addAction("修改编号…")
         menu.addSeparator()
@@ -486,7 +499,7 @@ class SpecimenSidebar(QWidget):
                 "警告",
                 f"该标本已有分组/任务记录。\n"
                 f"编号将从 {uid} 改变。\n"
-                "已生成的 TIFF/ZIP 文件名不会自动重命名。\n\n确认修改？",
+                "已生成的 TIFF/ZIP 成果文件会同步重命名。\n\n确认修改？",
                 QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
             )
             if reply != QMessageBox.StandardButton.Ok:

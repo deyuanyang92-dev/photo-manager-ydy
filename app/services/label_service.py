@@ -22,6 +22,7 @@ Usage
 from __future__ import annotations
 
 import copy
+import json
 import time
 import random
 import string
@@ -1015,6 +1016,91 @@ def persisted_copies() -> int:
         return max(1, min(10, int(qs.value(LABEL_COPIES_QSETTINGS_KEY, 1) or 1)))
     except (TypeError, ValueError):
         return 1
+
+
+# ── 排版设计 (imposition) persistence ─────────────────────────────────────────
+# Per-bucket JSON blob; whitelist-validated through sanitize_imposition so a
+# corrupt/hand-edited value can never feed garbage into the print geometry.
+
+LABEL_IMPOSITION_QSETTINGS_KEY = {
+    "sample": "labelSampleImposition",
+    "tissue": "labelTissueImposition",
+}
+
+# float keys → max mm (min is always 0)
+_IMPOSITION_FLOAT_KEYS = {
+    "marginMm": 50.0,
+    "marginTopMm": 50.0,
+    "marginBottomMm": 50.0,
+    "marginLeftMm": 50.0,
+    "marginRightMm": 50.0,
+    "gapMm": 30.0,
+    "gapXMm": 30.0,
+    "gapYMm": 30.0,
+}
+
+
+def sanitize_imposition(value) -> dict:
+    """Whitelist + clamp an imposition dict; anything invalid is dropped.
+
+    Default-equivalent values (force 0 = auto, startSlot 0, False bools,
+    portrait) are dropped so the stored dict stays minimal and "no keys"
+    keeps meaning "legacy geometry".
+    """
+    if not isinstance(value, dict):
+        return {}
+    out: dict = {}
+    for key, hi in _IMPOSITION_FLOAT_KEYS.items():
+        if key in value:
+            try:
+                v = float(value[key])
+            except (TypeError, ValueError):
+                continue
+            out[key] = max(0.0, min(hi, v))
+    for key in ("forceCols", "forceRows"):
+        if key in value:
+            try:
+                v = int(value[key])
+            except (TypeError, ValueError):
+                continue
+            if v > 0:
+                out[key] = min(50, v)
+    if "startSlot" in value:
+        try:
+            v = int(value["startSlot"])
+        except (TypeError, ValueError):
+            v = 0
+        if v > 0:
+            out["startSlot"] = v
+    for key in ("cutMarks", "shrinkToFit"):
+        if value.get(key):
+            out[key] = True
+    if value.get("orientation") == "landscape":
+        out["orientation"] = "landscape"
+    return out
+
+
+def persisted_imposition(bucket: str) -> dict:
+    """Read the persisted imposition dict for *bucket* ({} on any problem)."""
+    qs = QSettings(_QSETTINGS_ORG, _QSETTINGS_APP)
+    raw = qs.value(LABEL_IMPOSITION_QSETTINGS_KEY[bucket], "")
+    if not raw:
+        return {}
+    try:
+        return sanitize_imposition(json.loads(str(raw)))
+    except (ValueError, TypeError):
+        return {}
+
+
+def persist_imposition(bucket: str, imposition: Optional[dict]) -> None:
+    """Persist *imposition* for *bucket*; an empty dict removes the key."""
+    qs = QSettings(_QSETTINGS_ORG, _QSETTINGS_APP)
+    clean = sanitize_imposition(imposition or {})
+    key = LABEL_IMPOSITION_QSETTINGS_KEY[bucket]
+    if clean:
+        qs.setValue(key, json.dumps(clean, ensure_ascii=False))
+    else:
+        qs.remove(key)
 
 
 # ── Module-level helpers (used by labels_view) ────────────────────────────────

@@ -190,6 +190,107 @@ def _print_gui_help(probes: list[QtPlatformProbe]) -> None:
     )
 
 
+def _choose_startup_screen(screens, primary, cursor_screen):
+    """Pick the screen where the main window should appear.
+
+    In WSLg multi-monitor setups Qt's screen order is unstable, and the old
+    "nearest to (0,0)" rule opens the app on a monitor the user is not looking
+    at.  Qt primary is the least surprising default because it matches where
+    the window manager/taskbar expects new windows; cursor is only a fallback
+    because remote launches can report a stale/default cursor position.
+    """
+    screens = [s for s in (screens or []) if s is not None]
+    if primary in screens:
+        return primary
+    if cursor_screen in screens:
+        return cursor_screen
+    return screens[0] if screens else None
+
+
+def _startup_target_screen(app):
+    """Resolve the startup screen after QApplication exists."""
+    cursor_screen = None
+    try:
+        from PyQt6.QtGui import QCursor
+        cursor_screen = app.screenAt(QCursor.pos())
+    except Exception:  # noqa: BLE001
+        cursor_screen = None
+    return _choose_startup_screen(app.screens(), app.primaryScreen(), cursor_screen)
+
+
+def _screen_label(screen) -> str:
+    if screen is None:
+        return "<none>"
+    try:
+        g = screen.geometry()
+        return f"{screen.name()} {g.x()},{g.y()} {g.width()}x{g.height()}"
+    except Exception:  # noqa: BLE001
+        return str(screen)
+
+
+def _window_on_any_screen(win, screens) -> bool:
+    """Return True when the restored window frame overlaps a visible screen."""
+    try:
+        frame = win.frameGeometry()
+        if frame.isNull() or frame.width() <= 1 or frame.height() <= 1:
+            return False
+        for screen in screens or []:
+            if screen is not None and screen.availableGeometry().intersects(frame):
+                return True
+    except Exception:  # noqa: BLE001
+        return False
+    return False
+
+
+def _place_main_window(win, target) -> None:
+    """Put the main window on *target* and make it foreground-visible."""
+    from PyQt6.QtCore import Qt
+
+    if target is not None:
+        avail = target.availableGeometry()
+        win.showNormal()
+        win.setGeometry(avail)
+    win.setWindowState(
+        (win.windowState() & ~Qt.WindowState.WindowMinimized)
+        | Qt.WindowState.WindowMaximized
+        | Qt.WindowState.WindowActive
+    )
+    win.showMaximized()
+    win.raise_()
+    win.activateWindow()
+
+
+def _show_main_window_at_startup(win, app, target) -> str:
+    """Show the main window without destroying a valid restored position."""
+    from PyQt6.QtCore import Qt
+
+    if _window_on_any_screen(win, app.screens()):
+        win.setWindowState(
+            (win.windowState() & ~Qt.WindowState.WindowMinimized)
+            | Qt.WindowState.WindowMaximized
+            | Qt.WindowState.WindowActive
+        )
+        win.showMaximized()
+        win.raise_()
+        win.activateWindow()
+        return "restored"
+    _place_main_window(win, target)
+    return "fallback"
+
+
+def _ensure_main_window_visible(win, app, target) -> None:
+    """Delayed startup rescue for WSLg/window-manager focus races."""
+    try:
+        if not _window_on_any_screen(win, app.screens()):
+            _place_main_window(win, target)
+        else:
+            win.raise_()
+            win.activateWindow()
+        app.alert(win, 3000)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 _is_wsl = (
     sys.platform.startswith("linux")
     and "microsoft" in Path("/proc/version").read_text(errors="ignore").lower()
@@ -218,6 +319,7 @@ if _CHECK_GUI:
     _print_gui_help(probes)
     sys.exit(2)
 
+from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import QApplication
 
 from app.app_context import AppContext
@@ -309,26 +411,22 @@ def main() -> int:
     # 启动自动恢复上次项目——免得每次重启都回到 "(未选)" 空项目,用户得重选。
     _restore_last_project(ctx, win)
 
-    # Restore last window state + nav selection
+    # Restore last nav selection and saved docking state.
     win.restore_state()
-    # WSLg exposes one X screen per Windows monitor, but Qt's primaryScreen() is
-    # NOT the user's real (Windows) primary — here it picks rdp-0 at x=1920 (the
-    # right-hand monitor) while the Windows primary is the screen at the origin.
-    # Pinning to Qt-primary therefore throws the window onto a monitor the user
-    # isn't watching -> looks "won't open". Pick the screen nearest (0,0) instead:
-    # the Windows primary always sits at the virtual-desktop origin.
-    screens = app.screens() or ([app.primaryScreen()] if app.primaryScreen() else [])
-    target = None
-    if screens:
-        target = min(screens, key=lambda s: (abs(s.geometry().x()) + abs(s.geometry().y())))
-    if target is not None:
-        win.setGeometry(target.availableGeometry())
-    win.showMaximized()   # open full-screen so the columns get room to breathe
+    # WSLg multi-monitor ordering is unstable across boots and Windows display
+    # changes.  The old nearest-to-(0,0) rule often opened the app on a monitor
+    # the user was not looking at.  Prefer Qt primary, then cursor screen, and
+    # force a second delayed raise to absorb WM races.
+    target = _startup_target_screen(app)
     if not _HEADLESS_SMOKE:
+        print(f"启动窗口目标屏幕: {_screen_label(target)}", file=sys.stderr)
+    placement = _show_main_window_at_startup(win, app, target)
+    if not _HEADLESS_SMOKE:
+        print(f"启动窗口放置策略: {placement}", file=sys.stderr)
         # offscreen plugin warns "does not support raise()"; only needed for a
         # real window manager anyway (pull the window to the front + focus it).
-        win.raise_()
-        win.activateWindow()
+        QTimer.singleShot(250, lambda: _ensure_main_window_visible(win, app, target))
+        QTimer.singleShot(1000, lambda: _ensure_main_window_visible(win, app, target))
 
     if _HEADLESS_SMOKE:
         app.processEvents()

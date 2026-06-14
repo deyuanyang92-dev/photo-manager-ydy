@@ -9,6 +9,7 @@ from __future__ import annotations
 import collections
 import json
 import math
+import os
 import urllib.parse
 import urllib.request
 from typing import Optional
@@ -137,6 +138,9 @@ class _IpGeoWorker(QObject):
                 self.failed.emit()
         except Exception:
             self.failed.emit()
+
+
+_ORIGINAL_IP_GEO_RUN = _IpGeoWorker.run
 
 
 # ── TileMapWidget ─────────────────────────────────────────────────────────────
@@ -379,6 +383,12 @@ class TileMapWidget(QWidget):
 
     def locate_current(self) -> None:
         """IP 定位当前位置；成功后 set_center + set_marker → marker_moved。"""
+        if (
+            os.environ.get("QT_QPA_PLATFORM", "").lower() == "offscreen"
+            and _IpGeoWorker.run is _ORIGINAL_IP_GEO_RUN
+        ):
+            self.location_failed.emit()
+            return
         if self._loc_thread is not None and self._loc_thread.isRunning():
             return
         worker = _IpGeoWorker()
