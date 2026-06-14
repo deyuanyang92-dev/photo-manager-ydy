@@ -196,12 +196,23 @@ def test_date_section_visible_for_input(panel):
     assert not panel._date_group.isHidden()
 
 
-def test_collection_date_marked_required(panel):
-    """采集日期=编号核心字段(写入UID)→ 必填红*；拍摄日期保持选填(无*)。"""
+def test_required_fields_marked(panel):
+    """标本 UID 必填字段带红*; 站位/成果序号/拍照备注 选填(无*)。
+
+    必填(红*): 地区/样地/物种缩写/保存方式/采集日期/拍摄日期
+      - 地区/样地虽由项目级默认预填, 仍标必填(值须存在)
+      - 拍摄日期 2026-06-14 改定必填(原选填)
+    """
     labels = _labels_with_name(panel, "CompactFieldLabel")
-    col = [l for l in labels if "采集日期" in l.text()]
-    assert col, "采集日期 field label not found"
-    assert "*" in col[0].text(), "采集日期 should carry required (*) marker"
-    photo = [l for l in labels if "拍摄日期" in l.text()]
-    assert photo, "拍摄日期 field label not found"
-    assert "*" not in photo[0].text(), "拍摄日期 should stay optional (no *)"
+
+    def has_star(kw):
+        matches = [l for l in labels if kw in l.text()]
+        assert matches, f"{kw} field label not found"
+        return "*" in matches[0].text()
+
+    for kw in ("地区", "样地", "物种缩写", "保存方式", "采集日期", "拍摄日期"):
+        assert has_star(kw), f"{kw} should be required (*)"
+    # 站位选填(缺则 UID 少一段, 非 bug)
+    station = [l for l in labels if "站位" in l.text()]
+    assert station, "站位 field label not found"
+    assert "*" not in station[0].text(), "站位 should stay optional (no *)"

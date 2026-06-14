@@ -249,9 +249,9 @@ class NamingPanel(QWidget):
         geo_grid.setColumnStretch(0, 1)
         geo_grid.setColumnStretch(1, 1)
         geo_grid.setColumnStretch(2, 1)
-        geo_grid.addWidget(_field("地区", self._province,
+        geo_grid.addWidget(_field("地区", self._province, required=True,
                                   help_text="地区代码，如 FJ＝福建；通常由项目自动推导"), 0, 0)
-        geo_grid.addWidget(_field("样地", self._site,
+        geo_grid.addWidget(_field("样地", self._site, required=True,
                                   help_text="样地代码，如 YGLZ；通常自动推导"), 0, 1)
         geo_grid.addWidget(_field("站位", self._station,
                                   help_text="采集站位，如 B2；缺省时唯一编号自动少一段"), 0, 2)
@@ -347,9 +347,9 @@ class NamingPanel(QWidget):
         self._collection_date = _mk("采集 YYYYMMDD")
         date_grid.addWidget(_field("采集日期", self._collection_date, required=True,
                                    help_text="采集日期 YYYYMMDD —— 核心字段，写入唯一编号"), 0, 0)
-        self._photo_date = _mk("拍摄 YYYYMMDD（选填）")
-        date_grid.addWidget(_field("拍摄日期", self._photo_date,
-                                   help_text="拍摄日期 YYYYMMDD，选填"), 0, 1)
+        self._photo_date = _mk("拍摄 YYYYMMDD")
+        date_grid.addWidget(_field("拍摄日期", self._photo_date, required=True,
+                                   help_text="拍摄日期 YYYYMMDD"), 0, 1)
         form.addWidget(self._date_group)
 
         root.addLayout(form)
