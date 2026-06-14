@@ -54,6 +54,7 @@ from PyQt6.QtWidgets import (
 
 from app.config import icons
 from app.config.i18n import tr
+from app.utils import ui
 from app.views.base_view import BaseView
 
 if TYPE_CHECKING:
@@ -603,6 +604,7 @@ class MainWindow(QMainWindow):
             if cls.view_id == view_id:
                 self._activate_index(i)
                 return
+        self.statusBar().showMessage(tr("未找到页面: {}").format(view_id), 4000)
 
     def _activate_index(self, idx: int) -> None:
         if idx < 0 or idx >= len(self._view_classes):
@@ -616,12 +618,14 @@ class MainWindow(QMainWindow):
                 action.setChecked(i == idx)
         self._recolor_nav_icons(idx)
         view_cls = self._view_classes[idx]
-        view = self._ensure_view(view_cls)
-        if view:
-            self._stack.setCurrentWidget(view)
-            view.on_activate()
+        with ui.busy_cursor():
+            view = self._ensure_view(view_cls)
+            if view:
+                self._stack.setCurrentWidget(view)
+                view.on_activate()
         self.ctx.settings.last_nav_index = idx
         self.refresh_context_bar()
+        self.statusBar().showMessage(tr("已打开: {}").format(tr(view_cls.nav_title)), 1800)
 
     # ── Context bar ────────────────────────────────────────────────────────
 
@@ -631,9 +635,16 @@ class MainWindow(QMainWindow):
         view = self._stack.currentWidget()
         if view is not None and hasattr(view, "on_activate"):
             try:
-                view.on_activate()
-            except Exception:
-                pass
+                with ui.busy_cursor():
+                    view.on_activate()
+            except Exception as exc:  # noqa: BLE001
+                ui.exception(
+                    self,
+                    tr("工作区切换失败"),
+                    exc,
+                    text=tr("已切换工作区，但当前页面刷新失败。"),
+                    hint=tr("可先切到其他页面再回来；详细信息可用于排查插件、数据库或路径问题。"),
+                )
         self.set_status_specimen(tr("已切换工作区: {}").format(
             os.path.basename(path)))
 
@@ -678,8 +689,14 @@ class MainWindow(QMainWindow):
         if callable(handler):
             try:
                 handler()
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001
+                ui.exception(
+                    self,
+                    tr("新增编号失败"),
+                    exc,
+                    text=tr("无法打开新增编号流程。"),
+                    hint=tr("请确认当前项目数据库可访问，或把详细信息发给维护者。"),
+                )
 
     # ── Top-bar project actions ───────────────────────────────────────────
 
@@ -704,22 +721,36 @@ class MainWindow(QMainWindow):
         if not proj:
             return
 
-        # Persist to user_projects.json (dedup by directory)
-        all_projects = _load_projects()
-        existing_dirs = {p.get("directory") or p.get("dir") for p in all_projects}
-        if proj.get("directory") not in existing_dirs:
-            all_projects.append(proj)
-            _save_projects(all_projects)
+        try:
+            with ui.busy_cursor():
+                # Persist to user_projects.json (dedup by directory)
+                all_projects = _load_projects()
+                existing_dirs = {p.get("directory") or p.get("dir") for p in all_projects}
+                if proj.get("directory") not in existing_dirs:
+                    all_projects.append(proj)
+                    _save_projects(all_projects)
 
-        # Activate project in context and navigate
-        self.ctx.current_project_dir = proj.get("directory", "")
-        self.navigate_to("workbench")
-        self.refresh_context_bar()
+                # Activate project in context and navigate
+                self.ctx.current_project_dir = proj.get("directory", "")
+                self.navigate_to("workbench")
+                self.refresh_context_bar()
 
-        # Notify overview to reload next time it's activated
-        ov = self._views.get("overview")
-        if ov and hasattr(ov, "_load_projects"):
-            ov._load_projects()
+                # Notify overview to reload next time it's activated
+                ov = self._views.get("overview")
+                if ov and hasattr(ov, "_load_projects"):
+                    ov._load_projects()
+            self.statusBar().showMessage(
+                tr("已打开工作区: {}").format(os.path.basename(proj.get("directory", ""))),
+                4000,
+            )
+        except Exception as exc:  # noqa: BLE001
+            ui.exception(
+                self,
+                tr("打开工作区失败"),
+                exc,
+                text=tr("项目已创建/选择，但写入最近列表或进入工作台时失败。"),
+                hint=tr("请检查项目路径、磁盘权限和 _data/project.db 是否可写。"),
+            )
 
     # ── Status bar public API ─────────────────────────────────────────────
 

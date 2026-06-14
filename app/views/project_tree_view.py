@@ -19,7 +19,6 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QInputDialog,
     QLabel,
-    QMessageBox,
     QPushButton,
     QSplitter,
     QTreeWidget,
@@ -78,13 +77,17 @@ class ProjectTreeView(BaseView):
         bar.addWidget(self._root_lbl, 1)
         self._btn_newregion = QPushButton("新建调查区域…")
         self._btn_newregion.setObjectName("Primary")
+        self._btn_newregion.setToolTip("创建一个新的调查根目录，并在区域层保存负责人等默认信息")
         self._btn_newregion.clicked.connect(self._new_region)
         bar.addWidget(self._btn_newregion)
         self._btn_pick = QPushButton("选择根目录…")
+        self._btn_pick.setToolTip("选择已有调查目录，显示其中所有可进入的子工作区")
         self._btn_pick.clicked.connect(self._pick_root)
         bar.addWidget(self._btn_pick)
         self._btn_newsub = QPushButton("新建断面/子节点")
+        self._btn_newsub.setToolTip("在当前选中文件夹下新建断面、站位或任意子节点")
         self._btn_newsub.clicked.connect(self._new_subfolder)
+        self._btn_newsub.setEnabled(False)
         bar.addWidget(self._btn_newsub)
         root.addLayout(bar)
 
@@ -108,19 +111,30 @@ class ProjectTreeView(BaseView):
         self._detail_path.setObjectName("Mono")
         self._detail_path.setWordWrap(True)
         dl.addWidget(self._detail_path)
+        self._empty_state = QLabel(
+            "还没有选择调查根目录。\n\n"
+            "选择根目录：读取已有文件夹树，不改动原文件。\n"
+            "新建调查区域：创建一个区域根目录，后续断面会继承区域设置。"
+        )
+        self._empty_state.setObjectName("EmptyState")
+        self._empty_state.setWordWrap(True)
+        dl.addWidget(self._empty_state)
         self._stats_row = QHBoxLayout()
         self._stats_row.setSpacing(8)
         dl.addLayout(self._stats_row)
         self._btn_enter = QPushButton("进入工作区拍照")
         self._btn_enter.setObjectName("Primary")
+        self._btn_enter.setToolTip("把选中文件夹作为当前拍照工作区")
         self._btn_enter.clicked.connect(self._enter_selected)
         self._btn_enter.setEnabled(False)
         dl.addWidget(self._btn_enter)
         self._btn_summary = QPushButton("汇总导出…")
+        self._btn_summary.setToolTip("从选中文件夹向下汇总标本记录并导出")
         self._btn_summary.setEnabled(False)
         self._btn_summary.clicked.connect(self._open_summary_export)
         dl.addWidget(self._btn_summary)
         self._btn_station_import = QPushButton("导入站位总表…")
+        self._btn_station_import.setToolTip("把站位坐标和采集信息导入选中文件夹")
         self._btn_station_import.setEnabled(False)
         self._btn_station_import.clicked.connect(self._open_station_import)
         dl.addWidget(self._btn_station_import)
@@ -134,6 +148,7 @@ class ProjectTreeView(BaseView):
         g = _theme()
         bg, panel, border = g("bg", "#0a1e24"), g("panel_2", "#0e2329"), g("border", "#21424a")
         text, muted, accent = g("text", "#c8dcd6"), g("muted", "#7fa49b"), g("accent", "#4fd1b8")
+        border_medium = g("border_medium", border)
         accent_fg = g("accent_fg", "#ffffff")
         _ff = local_font_css()
         self.setStyleSheet(
@@ -142,6 +157,8 @@ class ProjectTreeView(BaseView):
             f"QLabel#PaneTitle{{color:{text};font-weight:600;font-size:15px;}}"
             f"QLabel#Muted{{color:{muted};font-size:12px;}}"
             f"QLabel#Mono{{color:{muted};font-family:monospace;font-size:11px;}}"
+            f"QLabel#EmptyState{{color:{muted};background:{panel};border:1px dashed {border_medium};"
+            f"border-radius:8px;padding:20px 22px;font-size:12px;line-height:1.5;}}"
             f"QPushButton{{background:{panel};color:{text};border:1px solid {border};"
             f"border-radius:5px;padding:5px 12px;font-size:13px;}}"
             f"QPushButton:hover{{background:{border};}}"
@@ -173,10 +190,15 @@ class ProjectTreeView(BaseView):
         self._btn_enter.setEnabled(False)
         self._btn_summary.setEnabled(False)
         self._btn_station_import.setEnabled(False)
+        self._btn_newsub.setEnabled(bool(self._root and Path(self._root).is_dir()))
         if not self._root or not Path(self._root).is_dir():
             self._root_lbl.setText("（未选根目录）")
+            self._detail_name.setText("选择或创建调查区域")
+            self._detail_path.setText("")
+            self._empty_state.show()
             return
         self._root_lbl.setText(self._root)
+        self._empty_state.hide()
         tree = pts.scan_tree(self._root)
         root_item = self._build_item(tree)
         self._tree.addTopLevelItem(root_item)
@@ -209,7 +231,12 @@ class ProjectTreeView(BaseView):
             self._btn_enter.setEnabled(False)
             self._btn_summary.setEnabled(False)
             self._btn_station_import.setEnabled(False)
+            self._btn_newsub.setEnabled(bool(self._root))
+            self._empty_state.setText("选择左侧文件夹后，可进入工作区、汇总导出或导入站位表。")
+            self._empty_state.show()
             return
+        self._empty_state.hide()
+        self._btn_newsub.setEnabled(True)
         self._btn_enter.setEnabled(True)
         self._btn_summary.setEnabled(True)
         self._btn_station_import.setEnabled(True)
@@ -352,14 +379,13 @@ class ProjectTreeView(BaseView):
         items = self._tree.selectedItems()
         item = items[0] if items else None
         if item is not None and item.childCount() > 0 and not pts.is_workspace(path):
-            resp = QMessageBox.question(
+            resp = ui.question(
                 self,
                 "进入工作区",
                 f"「{Path(path).name}」下面还有子文件夹，看起来是调查区域。"
                 "通常在下层断面里拍照。仍要把这一层当作工作区进入吗？",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
             )
+            from PyQt6.QtWidgets import QMessageBox
             if resp != QMessageBox.StandardButton.Yes:
                 return
         # Single unified entry path: ensures dirs, sets dir + root (bounding the

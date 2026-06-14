@@ -24,9 +24,13 @@ critical(parent, title, text, **kw)  → QMessageBox.StandardButton
 """
 from __future__ import annotations
 
+import traceback
+from contextlib import contextmanager
 from typing import Optional
 
-from PyQt6.QtWidgets import QDialog, QFileDialog, QMessageBox, QWidget
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QGuiApplication
+from PyQt6.QtWidgets import QApplication, QDialog, QFileDialog, QMessageBox, QWidget
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
@@ -154,24 +158,77 @@ def get_save_file_name(
 
 # ── Message boxes ─────────────────────────────────────────────────────────────
 
+def _message_box(
+    parent: Optional[QWidget],
+    icon: "QMessageBox.Icon",
+    title: str,
+    text: str,
+    *,
+    informative_text: str = "",
+    detailed_text: str = "",
+    buttons: "QMessageBox.StandardButton" = QMessageBox.StandardButton.Ok,
+    default: Optional["QMessageBox.StandardButton"] = None,
+) -> "QMessageBox.StandardButton":
+    """Show a screen-aware message box with optional copyable diagnostics."""
+    box = QMessageBox(top_window(parent))
+    box.setIcon(icon)
+    box.setWindowTitle(title)
+    box.setText(text)
+    if informative_text:
+        box.setInformativeText(informative_text)
+    if detailed_text:
+        box.setDetailedText(detailed_text)
+    box.setStandardButtons(buttons)
+    if default is not None:
+        box.setDefaultButton(default)
+    box.setTextInteractionFlags(
+        Qt.TextInteractionFlag.TextSelectableByMouse
+        | Qt.TextInteractionFlag.TextSelectableByKeyboard
+    )
+    center_on(box, parent)
+    return box.exec()
+
+
 def warn(
     parent: Optional[QWidget],
     title: str,
     text: str,
+    informative_text: str = "",
+    detailed_text: str = "",
     **kw,
 ) -> "QMessageBox.StandardButton":
     """Show a warning message box parented on the top-level window."""
-    return QMessageBox.warning(top_window(parent), title, text, **kw)
+    if kw:
+        return QMessageBox.warning(top_window(parent), title, text, **kw)
+    return _message_box(
+        parent,
+        QMessageBox.Icon.Warning,
+        title,
+        text,
+        informative_text=informative_text,
+        detailed_text=detailed_text,
+    )
 
 
 def info(
     parent: Optional[QWidget],
     title: str,
     text: str,
+    informative_text: str = "",
+    detailed_text: str = "",
     **kw,
 ) -> "QMessageBox.StandardButton":
     """Show an information message box parented on the top-level window."""
-    return QMessageBox.information(top_window(parent), title, text, **kw)
+    if kw:
+        return QMessageBox.information(top_window(parent), title, text, **kw)
+    return _message_box(
+        parent,
+        QMessageBox.Icon.Information,
+        title,
+        text,
+        informative_text=informative_text,
+        detailed_text=detailed_text,
+    )
 
 
 def question(
@@ -185,14 +242,73 @@ def question(
     **kw,
 ) -> "QMessageBox.StandardButton":
     """Show a yes/no question dialog parented on the top-level window."""
-    return QMessageBox.question(top_window(parent), title, text, buttons, default, **kw)
+    if kw:
+        return QMessageBox.question(top_window(parent), title, text, buttons, default, **kw)
+    return _message_box(
+        parent,
+        QMessageBox.Icon.Question,
+        title,
+        text,
+        buttons=buttons,
+        default=default,
+    )
 
 
 def critical(
     parent: Optional[QWidget],
     title: str,
     text: str,
+    informative_text: str = "",
+    detailed_text: str = "",
     **kw,
 ) -> "QMessageBox.StandardButton":
     """Show a critical error message box parented on the top-level window."""
-    return QMessageBox.critical(top_window(parent), title, text, **kw)
+    if kw:
+        return QMessageBox.critical(top_window(parent), title, text, **kw)
+    return _message_box(
+        parent,
+        QMessageBox.Icon.Critical,
+        title,
+        text,
+        informative_text=informative_text,
+        detailed_text=detailed_text,
+    )
+
+
+def exception(
+    parent: Optional[QWidget],
+    title: str,
+    exc: BaseException,
+    *,
+    text: str = "",
+    hint: str = "",
+) -> "QMessageBox.StandardButton":
+    """Show an exception with a concise user message and expandable traceback."""
+    message = text or str(exc) or exc.__class__.__name__
+    detail = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    return critical(parent, title, message, informative_text=hint, detailed_text=detail)
+
+
+def show_status(parent: Optional[QWidget], text: str, timeout_ms: int = 4000) -> None:
+    """Show a short status-bar message when the parent window has a status bar."""
+    root = top_window(parent)
+    status = getattr(root, "statusBar", None)
+    if callable(status):
+        try:
+            status().showMessage(text, timeout_ms)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+@contextmanager
+def busy_cursor():
+    """Temporarily show the busy cursor around a short synchronous operation."""
+    app = QApplication.instance() or QGuiApplication.instance()
+    if app is None:
+        yield
+        return
+    app.setOverrideCursor(Qt.CursorShape.WaitCursor)
+    try:
+        yield
+    finally:
+        app.restoreOverrideCursor()

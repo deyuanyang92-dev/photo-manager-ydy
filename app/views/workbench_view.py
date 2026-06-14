@@ -54,6 +54,7 @@ from app.workers.helicon_worker import HeliconWorker
 
 from app.config import icons
 from app.config.theme import TOKENS
+from app.utils import ui
 from app.views.base_view import BaseView
 from app.widgets.grouping_panel import GroupingPanel
 from app.widgets.helicon_params_panel import HeliconParamsPanel
@@ -998,13 +999,7 @@ class WorkbenchView(BaseView):
             return False
 
     def _status_message(self, text: str, msec: int = 4000) -> None:
-        try:
-            win = self.window()
-            bar = win.statusBar() if hasattr(win, "statusBar") else None
-            if bar is not None:
-                bar.showMessage(text, msec)
-        except Exception:
-            pass
+        ui.show_status(self, text, msec)
 
     def _on_uid_corrected(self, old_uid: str, new_uid: str) -> None:
         """Handle UID change after storage correction in NamingPanel.
@@ -1027,11 +1022,11 @@ class WorkbenchView(BaseView):
         db = self.ctx.get_db()
         project_dir = self.ctx.current_project_dir
         if not db or not project_dir:
-            QMessageBox.information(self, "保存", "请先打开一个项目工作区。")
+            self._status_message("请先打开一个项目工作区。")
             return
         uid = self._naming.current_uid()
         if not uid:
-            QMessageBox.information(self, "保存", "编号尚未填写完整。")
+            self._status_message("编号尚未填写完整。")
             return
 
         # 采集日期软必填：它是编号核心字段、会写入 UID 日期段。空着强提醒，但允许继续
@@ -1576,7 +1571,7 @@ class WorkbenchView(BaseView):
         """
         jpg_paths = self._monitor.selected_jpg_paths()
         if not jpg_paths:
-            QMessageBox.information(self, "加入分组", "请先在上方监控区选中要入组的 JPG。")
+            self._status_message("请先在上方监控区选中要入组的 JPG。")
             return
         self._on_add_to_group(group_index, jpg_paths)
         self._monitor._on_select_none()
@@ -1601,7 +1596,7 @@ class WorkbenchView(BaseView):
         """
         project_dir = self.ctx.current_project_dir
         if not project_dir:
-            QMessageBox.information(self, "添加照片", "请先打开一个项目。")
+            self._status_message("请先打开一个项目。")
             return
 
         from PyQt6.QtWidgets import QFileDialog
@@ -1637,12 +1632,12 @@ class WorkbenchView(BaseView):
         """
         project_dir = self.ctx.current_project_dir
         if not project_dir:
-            QMessageBox.information(self, "无号合成", "请先打开一个项目。")
+            self._status_message("请先打开一个项目。")
             return
 
         jpg_paths = self._monitor.selected_jpg_paths()
         if not jpg_paths:
-            QMessageBox.information(self, "无号合成", "请先在监控区选中要合成的 JPG。")
+            self._status_message("请先在监控区选中要合成的 JPG。")
             return
 
         from app.services.helicon_service import detect_helicon
@@ -1692,7 +1687,7 @@ class WorkbenchView(BaseView):
         project_dir = self.ctx.current_project_dir
         db = self.ctx.get_db()
         if not project_dir or not db:
-            QMessageBox.information(self, "存量整理", "请先打开一个项目。")
+            self._status_message("请先打开一个项目。")
             return
 
         _inc0, _res0 = self._resolve_capture_subdirs()

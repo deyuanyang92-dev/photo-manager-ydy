@@ -291,6 +291,32 @@ def _ensure_main_window_visible(win, app, target) -> None:
         pass
 
 
+def _install_exception_hook(win) -> None:
+    """Route uncaught Qt-slot errors to both stderr and a copyable dialog."""
+    import traceback
+
+    old_hook = sys.excepthook
+
+    def _hook(exc_type, exc, tb):
+        old_hook(exc_type, exc, tb)
+        if _HEADLESS_SMOKE or os.environ.get("QT_QPA_PLATFORM") == "offscreen":
+            return
+        try:
+            from app.utils import ui
+            detail = "".join(traceback.format_exception(exc_type, exc, tb))
+            ui.critical(
+                win,
+                "程序遇到错误",
+                str(exc) or exc_type.__name__,
+                informative_text="操作没有按预期完成。展开详细信息可复制给维护者排查。",
+                detailed_text=detail,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    sys.excepthook = _hook
+
+
 _is_wsl = (
     sys.platform.startswith("linux")
     and "microsoft" in Path("/proc/version").read_text(errors="ignore").lower()
@@ -403,6 +429,7 @@ def main() -> int:
 
     # ── Main window ───────────────────────────────────────────────────
     win = MainWindow(ctx)
+    _install_exception_hook(win)
 
     # Register all 14 module views
     for view_cls in ALL_VIEWS:
