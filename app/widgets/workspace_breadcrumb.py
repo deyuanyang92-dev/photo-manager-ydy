@@ -1,17 +1,19 @@
-"""workspace_breadcrumb.py — 顶栏工作区面包屑（EOS Utility 式目录显示）.
+"""workspace_breadcrumb.py — 顶栏工作区路径条（OM 风格）.
 
-显示「根 / 断面A / ◀ B2站 ▾ ▶」：
+显示「根 / 断面A / ◀ 📁 B2 ▾ ▶」：
   - 祖先段可点 → 跳项目树页（远跳/换断面走树）。
-  - 叶子下拉  → 同级站位菜单（📷 = 已是工作区）。
-  - ◀ ▶      → 直接切上/下一个同级站位 —— 野外拍完 B1 一键进 B2。
-                走 project_service.enter_workspace（与项目树同一统一入口，
-                含盘未挂载守护），首/末端禁用对应箭头，不回绕。
+  - 叶子下拉  → 同级站位菜单（📷 = 已是工作区）+ 末尾「+ 新建断面…」
+                （在当前工作区父目录下建新同级目录并进入，名字预填 YYYYMMDD(）。
+  - ◀ ▶      → 访问历史后退/前进（浏览器式）—— 野外跨断面来回。
+                走 project_service.enter_workspace（与项目树同一统一入口，含盘未挂载
+                守护），首/末端禁用对应箭头，不回绕；中途回退后再切新工作区 → 截断前向分支。
 
 同级 = 同父目录下的子目录，过滤点号目录与 RESERVED_DIR_NAMES（工作区内部结构）。
-根即工作区时两箭头禁用：横跳出项目根属于换项目，必须走项目树，不给一键误跳。
+同级步进已退役：切同级走 ▾ 下拉点选。根即工作区（chain==1）只要有历史也能 ◀▶。
 """
 from __future__ import annotations
 
+import datetime
 import os
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -19,6 +21,7 @@ from typing import List, Optional, Tuple
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QMenu,
     QPushButton,
@@ -32,6 +35,9 @@ from app.services.project_tree_service import RESERVED_DIR_NAMES
 
 # >3 级时折叠中间层为 「…」，保持顶栏一行放得下：根 / … / 父 / 叶
 _MAX_SEGMENTS = 3
+
+# 新建断面名字禁含的字符（与 project_tree_view._new_subfolder 一致）
+_BAD_NAME_CHARS = ("/", "\\", "..")
 
 
 def breadcrumb_chain(
@@ -84,7 +90,7 @@ def sibling_dirs(workspace: str) -> List[str]:
 
 
 class WorkspaceBreadcrumb(QWidget):
-    """顶栏面包屑：父链可见 + ◀▶ 一键切同级站位."""
+    """顶栏路径条：父链可见 + 📁 叶子 + ◀▶ 访问历史 + ▾ 同级/新建断面."""
 
     workspace_changed = pyqtSignal(str)   # 切换成功后的新工作区路径
     navigate_requested = pyqtSignal(str)  # 远跳目标 view_id
@@ -105,6 +111,10 @@ class WorkspaceBreadcrumb(QWidget):
         self._siblings: List[str] = []
         self._sib_index: int = -1
         self._collapsed = False
+        # 访问历史（会话级，不持久化）。refresh 的外部检测 + _switch_to 显式记录；
+        # _history_step 仅移动指针不记录，故回退/前进不再入历史。
+        self._history: List[str] = []
+        self._history_pos: int = -1
         self.refresh()
 
     # ── 状态读取 ─────────────────────────────────────────────────────────
@@ -125,6 +135,24 @@ class WorkspaceBreadcrumb(QWidget):
             parts.append(self._leaf_btn.text())
         return " / ".join(parts)
 
+    # ── 访问历史 ─────────────────────────────────────────────────────────
+
+    def _current_history_entry(self) -> Optional[str]:
+        if self._history and 0 <= self._history_pos < len(self._history):
+            return self._history[self._history_pos]
+        return None
+
+    def _record_history(self, path: str) -> None:
+        """记录一次工作区访问：与指针相同则 no-op；否则截断前向分支后追加."""
+        resolved = str(Path(path).resolve())
+        if self._current_history_entry() == resolved:
+            return
+        if 0 <= self._history_pos < len(self._history) - 1:
+            # 中途回退后又切新路径 → 丢弃指针之后的历史（浏览器同款分支截断）
+            self._history = self._history[: self._history_pos + 1]
+        self._history.append(resolved)
+        self._history_pos = len(self._history) - 1
+
     # ── 重建 ─────────────────────────────────────────────────────────────
 
     def _clear(self) -> None:
@@ -141,6 +169,13 @@ class WorkspaceBreadcrumb(QWidget):
         self._collapsed = False
 
     def refresh(self) -> None:
+        # 外部切换检测：ctx.current 与历史指针不一致 → 视为外部进入（项目树/别处），
+        # 入历史。内部 _switch_to / _history_step 已先行同步指针，此处为 no-op。
+        ws = getattr(self._ctx, "current_project_dir", None)
+        if ws:
+            resolved = str(Path(ws).resolve())
+            if self._current_history_entry() != resolved:
+                self._record_history(resolved)
         self._clear()
         chain = self._chain()
         if not chain:
@@ -196,16 +231,19 @@ class WorkspaceBreadcrumb(QWidget):
         prev_btn = QToolButton()
         prev_btn.setObjectName("CrumbArrow")
         prev_btn.setText("◀")
-        prev_btn.setToolTip(tr("上一站位"))
+        prev_btn.setToolTip(tr("后退（访问历史）"))
         prev_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        prev_btn.clicked.connect(lambda: self._step(-1))
+        prev_btn.clicked.connect(lambda: self._history_step(-1))
         self._lay.addWidget(prev_btn)
         self._btn_prev = prev_btn
 
-        leaf = QPushButton(f"{leaf_name} ▾")
+        leaf = QPushButton(f"📁 {leaf_name} ▾")
         leaf.setObjectName("CrumbLeaf")
-        leaf.setToolTip(leaf_path + "\n" + tr("点击列出同级站位"))
+        leaf.setToolTip(leaf_path + "\n" + tr("点击列出同级站位 / 新建断面"))
         leaf.setCursor(Qt.CursorShape.PointingHandCursor)
+        _fnt = leaf.font()
+        _fnt.setBold(True)
+        leaf.setFont(_fnt)
         leaf.clicked.connect(self._show_sibling_menu)
         self._lay.addWidget(leaf)
         self._leaf_btn = leaf
@@ -213,26 +251,83 @@ class WorkspaceBreadcrumb(QWidget):
         next_btn = QToolButton()
         next_btn.setObjectName("CrumbArrow")
         next_btn.setText("▶")
-        next_btn.setToolTip(tr("下一站位"))
+        next_btn.setToolTip(tr("前进（访问历史）"))
         next_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        next_btn.clicked.connect(lambda: self._step(+1))
+        next_btn.clicked.connect(lambda: self._history_step(+1))
         self._lay.addWidget(next_btn)
         self._btn_next = next_btn
 
-        # 根即工作区（chain==1）→ 没有可横跳的同级；首/末端禁对应箭头，不回绕
-        can_move = len(chain) > 1 and self._sib_index >= 0
-        prev_btn.setEnabled(can_move and self._sib_index > 0)
-        next_btn.setEnabled(can_move and self._sib_index < len(self._siblings) - 1)
+        # ◀▶ 由访问历史驱动（非同级）；根即工作区只要有历史也能走
+        prev_btn.setEnabled(self._history_pos > 0)
+        next_btn.setEnabled(0 <= self._history_pos < len(self._history) - 1)
 
     # ── 切换 ─────────────────────────────────────────────────────────────
 
-    def _step(self, delta: int) -> None:
-        if self._sib_index < 0:
+    def _enter(self, path: str, root_override: Optional[str] = None) -> Optional[str]:
+        """统一进入入口（盘未挂载守护）；返回 resolved 路径，失败返回 None."""
+        from app.services import project_service
+        from app.services.project_paths import ProjectUnavailableError
+        root = root_override if root_override is not None else getattr(
+            self._ctx, "current_project_root", None
+        )
+        try:
+            resolved = project_service.enter_workspace(
+                self._ctx,
+                path,
+                root=root,
+                projects_json_path=
+                project_service.default_user_projects_json_path(),
+            )
+        except ProjectUnavailableError:
+            from app.utils import ui
+            ui.warn(self, tr("盘未连接"),
+                    tr("该目录所在磁盘未挂载或路径不可用：") + f"\n{path}")
+            return None
+        return resolved
+
+    def _switch_to(self, path: str) -> None:
+        """切到指定工作区（下拉点选 / 新建断面 / 外部）→ 记入访问历史."""
+        cur = getattr(self._ctx, "current_project_dir", None)
+        if cur and str(Path(cur).resolve()) == str(Path(path).resolve()):
             return
-        target = self._sib_index + delta
-        if not (0 <= target < len(self._siblings)):
+        resolved = self._enter(path)
+        if resolved is None:
             return
-        self._switch_to(self._siblings[target])
+        self._record_history(resolved)
+        self.refresh()
+        self.workspace_changed.emit(resolved)
+
+    def _switch_to_recent(self, path: str, root: Optional[str]) -> None:
+        """切到最近工作区；历史记录携带 root，跨调查区域时必须恢复它."""
+        cur = getattr(self._ctx, "current_project_dir", None)
+        if cur and str(Path(cur).resolve()) == str(Path(path).resolve()):
+            return
+        resolved = self._enter(path, root_override=root)
+        if resolved is None:
+            return
+        self._record_history(resolved)
+        self.refresh()
+        self.workspace_changed.emit(resolved)
+
+    def _history_step(self, delta: int) -> None:
+        """访问历史后退/前进：仅移动指针，不再入历史（不截断、不追加）."""
+        target = self._history_pos + delta
+        if not (0 <= target < len(self._history)):
+            return
+        path = self._history[target]
+        cur = getattr(self._ctx, "current_project_dir", None)
+        if cur and str(Path(cur).resolve()) == str(Path(path).resolve()):
+            self._history_pos = target
+            self.refresh()
+            return
+        resolved = self._enter(path)
+        if resolved is None:
+            return
+        self._history_pos = target
+        self.refresh()
+        self.workspace_changed.emit(resolved)
+
+    # ── ▾ 同级菜单 + 新建断面 ────────────────────────────────────────────
 
     def _build_sibling_menu(self) -> QMenu:
         menu = QMenu(self)
@@ -246,7 +341,51 @@ class WorkspaceBreadcrumb(QWidget):
                            if self._sib_index >= 0 else False)
             act.triggered.connect(
                 lambda _=False, p=path: self._switch_to(p))
+        menu.addSeparator()
+        self._add_recent_menu(menu)
+        menu.addSeparator()
+        new_act = menu.addAction(f"➕ {tr('新建断面…')}")
+        new_act.triggered.connect(self._on_new_section)
         return menu
+
+    def _recent_workspaces(self, limit: int = 10) -> list[dict]:
+        from app.services import project_service
+        projects = project_service.list_projects(
+            project_service.default_user_projects_json_path()
+        )
+        current = str(Path(getattr(self._ctx, "current_project_dir", "") or "").resolve())
+        out: list[dict] = []
+        seen: set[str] = set()
+        for item in reversed(projects):
+            path = str(item.get("directory") or item.get("dir") or "")
+            if not path:
+                continue
+            try:
+                resolved = str(Path(path).resolve())
+            except OSError:
+                resolved = path
+            if resolved == current or resolved in seen:
+                continue
+            seen.add(resolved)
+            name = str(item.get("name") or Path(resolved).name)
+            root = item.get("root")
+            out.append({"name": name, "directory": resolved, "root": str(root) if root else None})
+            if len(out) >= limit:
+                break
+        return out
+
+    def _add_recent_menu(self, menu: QMenu) -> None:
+        recent = self._recent_workspaces()
+        recent_menu = menu.addMenu("最近工作区")
+        recent_menu.setEnabled(bool(recent))
+        for item in recent:
+            label = f"🕘 {item['name']}"
+            act = recent_menu.addAction(label)
+            act.setToolTip(item["directory"])
+            act.triggered.connect(
+                lambda _=False, p=item["directory"], r=item.get("root"):
+                self._switch_to_recent(p, r)
+            )
 
     def _show_sibling_menu(self) -> None:
         if self._leaf_btn is None:
@@ -255,25 +394,44 @@ class WorkspaceBreadcrumb(QWidget):
         menu.exec(self._leaf_btn.mapToGlobal(
             self._leaf_btn.rect().bottomLeft()))
 
-    def _switch_to(self, path: str) -> None:
-        cur = getattr(self._ctx, "current_project_dir", None)
-        if cur and str(Path(cur).resolve()) == str(Path(path).resolve()):
+    def _new_section_parent(self) -> Optional[Path]:
+        """新建断面的父目录 = 当前工作区的父目录（= 新同级）."""
+        ws = getattr(self._ctx, "current_project_dir", None)
+        if not ws:
+            return None
+        return Path(ws).resolve().parent
+
+    def _default_section_name(self) -> str:
+        """预填「YYYYMMDD(」—— 用户续填地点后合上括号."""
+        return f"{datetime.date.today().strftime('%Y%m%d')}("
+
+    def _on_new_section(self) -> None:
+        if self._new_section_parent() is None:
             return
-        from app.services import project_service
-        from app.services.project_paths import ProjectUnavailableError
-        root = getattr(self._ctx, "current_project_root", None)
+        name, ok = QInputDialog.getText(
+            self, tr("新建断面"),
+            tr("文件夹名（如 20260612(草埔村)）："),
+            text=self._default_section_name(),
+        )
+        name = (name or "").strip()
+        if not ok or not name:
+            return
+        self.create_and_enter_section(name)
+
+    def create_and_enter_section(self, name: str) -> Optional[str]:
+        """在当前工作区父目录下建新同级目录并进入。名字非法/无法建 → 返回 None."""
+        name = (name or "").strip()
+        if not name or any(c in name for c in _BAD_NAME_CHARS):
+            return None
+        parent = self._new_section_parent()
+        if parent is None:
+            return None
+        target = parent / name
         try:
-            resolved = project_service.enter_workspace(
-                self._ctx,
-                path,
-                root=root,
-                projects_json_path=
-                project_service.default_user_projects_json_path(),
-            )
-        except ProjectUnavailableError:
+            target.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
             from app.utils import ui
-            ui.warn(self, tr("盘未连接"),
-                    tr("该目录所在磁盘未挂载或路径不可用：") + f"\n{path}")
-            return
-        self.refresh()
-        self.workspace_changed.emit(resolved)
+            ui.warn(self, tr("新建断面"), tr("无法创建：") + f" {exc}")
+            return None
+        self._switch_to(str(target))
+        return str(target.resolve()) if target.exists() else None
