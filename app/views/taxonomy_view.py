@@ -722,7 +722,7 @@ class _WormsJobWorker(QThread):
 
     def run(self) -> None:
         try:
-            while True:
+            while not self.isInterruptionRequested():
                 job = self._svc.get_job(self._job_id)
                 if not job or job.get("status") != "running":
                     if job:
@@ -1605,6 +1605,14 @@ class TaxonomyView(BaseView):
         if self._svc:
             self._svc.reload()
         self._load_page()
+
+    def stop_background_work(self) -> None:
+        """Interrupt the WoRMS batch-job worker so it cannot keep a QThread +
+        its DB reads alive past app exit (the must-reboot lock-leak path)."""
+        w = getattr(self, "_job_worker", None)
+        if w is not None and w.isRunning():
+            w.requestInterruption()
+            w.wait(2000)
 
     # ── View-switch ───────────────────────────────────────────────────────────
 

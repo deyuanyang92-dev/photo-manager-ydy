@@ -863,18 +863,54 @@ class MainWindow(QMainWindow):
             snapshot_projects_json(default_user_projects_json_path())
         except Exception:  # noqa: BLE001
             pass
+        self._teardown()
+        super().closeEvent(event)
+
+    def _teardown(self) -> None:
+        """Release all background resources so the process can actually exit.
+
+        Idempotent: safe to call from both closeEvent and app.aboutToQuit.
+        This is the fix for the "close → reopen → broken, must reboot" bug:
+        the per-project SQLite connections are opened in WAL mode and cached
+        globally in db_manager._db_cache; on WSL/drvfs (/mnt/...) the advisory
+        lock + -wal/-shm sidecars persist across an unclean exit, so the *next*
+        launch can't reopen the project DB until the OS reclaims the zombie
+        handle (a reboot). Closing every cached connection here checkpoints +
+        releases them deterministically.
+        """
+        if getattr(self, "_torn_down", False):
+            return
+        self._torn_down = True
+        # Stop every view's background QThread / subprocess FIRST (Helicon
+        # compose, WoRMS batch job, …) so none can keep a SQLite handle alive
+        # while we close the DB connections below.
+        for view in list(getattr(self, "_views", {}).values()):
+            try:
+                view.stop_background_work()
+            except Exception:  # noqa: BLE001
+                pass
         # Stop the global hotkey listener thread before exit.
         gh = getattr(self, "_global_hotkey", None)
         if gh is not None:
-            gh.stop()
-        # Gracefully stop collaboration service so mDNS un-registers before exit
+            try:
+                gh.stop()
+            except Exception:  # noqa: BLE001
+                pass
+        # Gracefully stop collaboration service so mDNS un-registers + uvicorn
+        # closes its sockets before exit (otherwise a stuck QThread can keep the
+        # process alive holding the DB handle).
         svc = getattr(self.ctx, "collab_service", None)
         if svc is not None:
             try:
                 svc.stop()
             except Exception:  # noqa: BLE001
                 pass
-        super().closeEvent(event)
+        # Close + checkpoint every cached SQLite connection (WAL sidecar flush).
+        try:
+            from app.db import db_manager
+            db_manager.close_all()
+        except Exception:  # noqa: BLE001
+            pass
 
     def _wire_collab_status_bar(self) -> None:
         """Connect CollabService signals to the status bar segment.

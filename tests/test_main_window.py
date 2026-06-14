@@ -270,6 +270,84 @@ def test_all_views_register():
     assert "settings" in win._views
 
 
+# ── Shutdown closes cached DB connections (no "must reboot" lock leak) ─────
+# On WSL/drvfs the per-project SQLite connection is opened in WAL mode and
+# cached globally in db_manager._db_cache.  If it is never closed at exit, the
+# -wal/-shm sidecars + advisory file lock persist on the Windows side of /mnt,
+# so the *next* launch hits "database is locked" / fails to open the project
+# until the OS reclaims the zombie handle (i.e. a reboot).  teardown() must
+# release those connections on every exit path.
+
+def test_teardown_closes_cached_db_connections(tmp_path):
+    from app.db import db_manager
+
+    db_manager.close_all()
+    project = tmp_path / "FJ-SHUTDOWN"
+    project.mkdir(parents=True, exist_ok=True)
+    # Open the project DB the same way the app does -> populates the cache.
+    conn = db_manager.open_project_db(str(project), create=True)
+    conn.execute("CREATE TABLE IF NOT EXISTS t(x)")
+    conn.commit()
+    assert db_manager._db_cache, "setup: DB connection should be cached"
+
+    ctx = AppContext()
+    ctx.current_project_dir = str(project)
+    win = MainWindow(ctx)
+    win._teardown()
+
+    assert db_manager._db_cache == {}, "teardown must close + evict cached DB connections"
+    # Reopening after teardown works (locks released) — the "must reboot" check.
+    conn2 = db_manager.open_project_db(str(project))
+    conn2.close()
+    db_manager.close_all()
+
+
+def test_teardown_is_idempotent():
+    # closeEvent + aboutToQuit can both fire; teardown must not double-close.
+    win = _fresh_window()
+    win._teardown()
+    win._teardown()  # second call must be a no-op, not raise
+    from app.db import db_manager
+    assert db_manager._db_cache == {}
+
+
+def test_teardown_cancels_view_background_workers():
+    # The must-reboot bug: an in-flight QThread (Helicon/WoRMS) reading the DB
+    # outlives exit and holds the SQLite handle. _teardown must ask every view
+    # to stop its background work BEFORE closing DB connections.
+    class _TrackingView(_DummyView):
+        stopped = 0
+
+        def stop_background_work(self):
+            self.stopped += 1
+
+    win = _fresh_window()
+    win.register_view(_TrackingView)
+    win.navigate_to("dummy")
+    view = win._views["dummy"]
+    assert view.stopped == 0
+    win._teardown()
+    assert view.stopped == 1, "teardown must call stop_background_work on each view"
+
+
+def test_base_view_stop_background_work_is_noop():
+    from app.views.base_view import BaseView
+    # Default must not raise — views that own no workers inherit it.
+    class _Plain(BaseView):
+        view_id = "plain"
+        nav_title = "P"
+        nav_icon = ""
+
+        def _setup_ui(self):
+            pass
+
+        def on_activate(self):
+            pass
+
+    p = _Plain(AppContext())
+    p.stop_background_work()  # must not raise
+
+
 # ── Startup stays lean: heavy libs are NOT imported at launch ──────────────
 # Locks the lazy-import wins. matplotlib (~1.8 s) must load only when the
 # 采集地图 tab is opened; openpyxl only when exporting. Run in a clean

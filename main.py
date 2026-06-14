@@ -431,6 +431,30 @@ def main() -> int:
     win = MainWindow(ctx)
     _install_exception_hook(win)
 
+    # Central shutdown hook: closeEvent already calls win._teardown(), but if
+    # the app exits any other way (crash, lastWindowClosed, OS signal, the
+    # offscreen smoke path) the DB connections would leak. On WSL/drvfs that
+    # leak locks the per-project SQLite DB until a reboot — the root cause of
+    # "close → reopen → must reboot". aboutToQuit is the guaranteed last stop.
+    app.aboutToQuit.connect(win._teardown)
+
+    # OS-signal → Qt quit bridge. On WSLg, closing the Windows-side window or
+    # killing the wsl.exe parent does NOT always deliver a Qt closeEvent — the
+    # XWayland socket can drop, leaving python alive with the window gone and
+    # aboutToQuit never firing. Translating SIGTERM/SIGINT/SIGHUP into
+    # app.quit() makes _teardown (→ close_all DB) reachable on that exact
+    # "window closed but process lingers" path. Qt swallows SIGINT for its own
+    # event loop, so install before exec.
+    import signal as _signal
+    for _sig in (_signal.SIGTERM, _signal.SIGINT,
+                 getattr(_signal, "SIGHUP", None)):
+        if _sig is None:
+            continue
+        try:
+            _signal.signal(_sig, lambda *_a: app.quit())
+        except (ValueError, OSError):  # not main thread / unsupported
+            pass
+
     # Register all 14 module views
     for view_cls in ALL_VIEWS:
         win.register_view(view_cls)

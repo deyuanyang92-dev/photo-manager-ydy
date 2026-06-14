@@ -750,6 +750,18 @@ class WorkbenchView(BaseView):
         self._fallback_timer.stop()
         self._fs_watcher.removePaths(self._fs_watcher.directories())
 
+    def stop_background_work(self) -> None:
+        """Cancel an in-flight Helicon compose so its subprocess + QThread
+        cannot outlive app exit (orphaned helicon-focus*.exe holds /mnt
+        handles → must-reboot lock leak)."""
+        w = getattr(self, "_helicon_worker", None)
+        if w is not None and w.isRunning():
+            try:
+                w.cancel()
+            except Exception:  # noqa: BLE001
+                pass
+            w.wait(3000)
+
     # ── Filesystem watcher helpers ──────────────────────────────────────────
 
     def _resolve_capture_subdirs(self) -> tuple[str, str]:

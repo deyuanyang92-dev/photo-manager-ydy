@@ -65,3 +65,14 @@ class BaseView(QWidget):
         any side effects that should happen on page entry.
         Guaranteed to run on the main thread.
         """
+
+    def stop_background_work(self) -> None:
+        """Cancel any background QThread / subprocess this view owns.
+
+        Called from MainWindow._teardown() on every exit path so a view's
+        in-flight worker (Helicon compose, WoRMS batch job, …) cannot keep a
+        QThread + its SQLite/subprocess handles alive past app exit — the root
+        cause of the "close → reopen → must reboot" lock leak on WSL/drvfs.
+        Default no-op; override in views that own long-running workers.
+        """
+

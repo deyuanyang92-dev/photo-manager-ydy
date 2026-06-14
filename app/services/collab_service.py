@@ -492,6 +492,7 @@ class CollabServerThread(QThread):
         self._activity_log = activity_log
         self._actual_port: Optional[int] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._server: Optional[Any] = None  # uvicorn.Server, set in run()
 
     @property
     def actual_port(self) -> Optional[int]:
@@ -533,6 +534,7 @@ class CollabServerThread(QThread):
             log_level="warning",
         )
         server = uvicorn.Server(config)
+        self._server = server
 
         # Emit port once server startup is complete (uvicorn calls startup first)
         async def _serve() -> None:
@@ -553,10 +555,31 @@ class CollabServerThread(QThread):
             self._loop.close()
 
     def stop(self) -> None:
-        if self._loop and not self._loop.is_closed():
-            self._loop.call_soon_threadsafe(self._loop.stop)
+        # Ask uvicorn to shut down gracefully (closes its listening sockets +
+        # in-flight handlers via should_exit). Force-stopping the asyncio loop
+        # instead strands the serve() coroutine and can leave the socket in
+        # CLOSE_WAIT — and on Windows that can keep this QThread alive long
+        # enough to hold the SQLite DB handle past exit. Fallback to a hard
+        # loop.stop() only if the server never started.
+        srv = getattr(self, "_server", None)
+        loop = self._loop
+        if srv is not None and loop is not None and not loop.is_closed():
+            try:
+                loop.call_soon_threadsafe(setattr, srv, "should_exit", True)
+            except RuntimeError:  # loop closed between the check and the call
+                pass
+        elif loop is not None and not loop.is_closed():
+            loop.call_soon_threadsafe(loop.stop)
         self.quit()
-        self.wait(3000)
+        self.wait(5000)
+        # Last-resort hard stop: if uvicorn ignored should_exit for 5+ s (stuck
+        # handler / CLOSE_WAIT socket on Windows), terminate so this QThread
+        # cannot keep the python process alive past app.exit() — which would
+        # re-introduce the must-reboot lock leak. The DB itself is not held by
+        # this thread, so terminate() here only risks an orphaned uvicorn task.
+        if self.isRunning():
+            self.terminate()
+            self.wait(1000)
 
 
 # ── mDNS discovery thread ─────────────────────────────────────────────────────

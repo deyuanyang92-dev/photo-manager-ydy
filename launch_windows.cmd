@@ -33,7 +33,13 @@ if not defined WSL_DIR (
 echo WSL path: %WSL_DIR%
 echo.
 
-wsl.exe --cd "%WSL_DIR%" bash -lc "set -o pipefail; python3 main.py 2>&1 | tee %LOG_FILE%"
+REM Launch python in the foreground of this bash, but capture its PID and
+REM forward TERM/INT/HUP to it. main.py installs SIGTERM/SIGHUP/SIGINT handlers
+REM that call app.quit() -> aboutToQuit -> _teardown -> db close. Without this,
+REM closing the .cmd window can orphan python in WSL holding the project's
+REM SQLite WAL lock -> next launch "must reboot". Process substitution keeps
+REM python as the job whose PID we track (not tee).
+wsl.exe --cd "%WSL_DIR%" bash -lc "set -o pipefail; python3 main.py > >(tee %LOG_FILE%) 2>&1 & PYTHON_PID=$!; trap 'kill -TERM $PYTHON_PID 2>/dev/null' TERM INT HUP; wait $PYTHON_PID"
 set "APP_EXIT=%ERRORLEVEL%"
 
 if not "%APP_EXIT%"=="0" (
