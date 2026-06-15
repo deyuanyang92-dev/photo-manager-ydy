@@ -175,11 +175,12 @@ class ProjectTreeView(BaseView):
     def on_activate(self) -> None:
         self._apply_style()
         if self._root is None:
+            # Restore an EXPLICIT user-chosen root only. Never guess by walking
+            # current_project_dir.parent — that produced wrong roots (a drive's
+            # project dump dir is not a survey root) and hid the real projects
+            # the user already created. With no root, _reload shows every
+            # recorded project as a flat list instead.
             saved = self.ctx.settings.project_tree_root
-            if not saved and self.ctx.current_project_dir:
-                # Default the root to the parent of the active project, so the
-                # current survey's siblings (断面) show up without extra clicks.
-                saved = str(Path(self.ctx.current_project_dir).resolve().parent)
             if saved and Path(saved).is_dir():
                 self._root = saved
         self._reload()
@@ -190,19 +191,85 @@ class ProjectTreeView(BaseView):
         self._btn_enter.setEnabled(False)
         self._btn_summary.setEnabled(False)
         self._btn_station_import.setEnabled(False)
-        self._btn_newsub.setEnabled(bool(self._root and Path(self._root).is_dir()))
-        if not self._root or not Path(self._root).is_dir():
+        if self._root and Path(self._root).is_dir():
+            # ── Rooted scan mode (unchanged): one survey root, recursive tree ──
+            self._btn_newsub.setEnabled(True)
+            self._root_lbl.setText(self._root)
+            self._empty_state.hide()
+            tree = pts.scan_tree(self._root)
+            root_item = self._build_item(tree)
+            self._tree.addTopLevelItem(root_item)
+            root_item.setExpanded(True)
+            return
+
+        # ── Flat-list mode: every project already recorded in user_projects.json ──
+        # No survey root chosen -> recognize the projects the user already created
+        # instead of showing a blank tree. Each project is a top-level node feeding
+        # the same _build_item, so selection / stats / enter / summary / station-import
+        # all keep working unchanged.
+        self._btn_newsub.setEnabled(False)
+        nodes = self._load_known_projects_nodes()
+        if not nodes:
             self._root_lbl.setText("（未选根目录）")
             self._detail_name.setText("选择或创建调查区域")
             self._detail_path.setText("")
+            self._empty_state.setText(
+                "还没有选择调查根目录，也没有已记录的项目。\n\n"
+                "选择根目录：读取已有文件夹树，不改动原文件。\n"
+                "新建调查区域：创建一个区域根目录，后续断面会继承区域设置。"
+            )
             self._empty_state.show()
             return
-        self._root_lbl.setText(self._root)
+        self._root_lbl.setText(f"（全部已建项目 · {len(nodes)}）")
         self._empty_state.hide()
-        tree = pts.scan_tree(self._root)
-        root_item = self._build_item(tree)
-        self._tree.addTopLevelItem(root_item)
-        root_item.setExpanded(True)
+        for node in nodes:
+            self._tree.addTopLevelItem(self._build_item(node))
+
+    def _load_known_projects_nodes(self) -> list:
+        """Synthesize scan_tree-shaped nodes for every project recorded in
+        ``user_projects.json``. Used by ``_reload`` in flat-list mode (no survey
+        root selected) so already-created projects are recognized without the
+        user having to pick a common parent folder.
+
+        Skips demo projects; dedupes by resolved directory; most-recent first
+        (the json is append-ordered, so the latest-entered project is last and
+        lands on top after reverse()). ``has_data`` mirrors ``pts.is_workspace``
+        so the 📷/📁 label and all downstream logic stays correct even when a
+        drive is unmounted.
+        """
+        from app.services.project_service import (
+            default_user_projects_json_path,
+            list_projects,
+        )
+        try:
+            projects = list_projects(default_user_projects_json_path())
+        except Exception:
+            return []
+
+        seen: set = set()
+        nodes: list = []
+        for p in projects:
+            if p.get("isDemo"):
+                continue
+            directory = p.get("directory") or p.get("dir") or ""
+            if not directory:
+                continue
+            try:
+                resolved = str(Path(directory).expanduser().resolve())
+            except (OSError, ValueError):
+                resolved = directory
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            name = p.get("name") or Path(directory).name or "(未命名)"
+            nodes.append({
+                "name": name,
+                "path": directory,
+                "has_data": pts.is_workspace(directory),
+                "children": [],
+            })
+        nodes.reverse()  # most-recent first
+        return nodes
 
     def _build_item(self, node: dict) -> QTreeWidgetItem:
         # Two-level semantics: a node with its own project.db is a 工作区 (where

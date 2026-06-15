@@ -64,12 +64,156 @@ def test_builds_tree_from_root(qtbot, tmp_path, ctx):
     assert any("断面b" in t and "工作区" not in t for t in child_texts)
 
 
-def test_no_root_shows_placeholder(qtbot, ctx):
+def _seed_projects_json(path: Path, projects: list) -> None:
+    """Write a user_projects.json with the given project list."""
+    import json
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"version": 1, "projects": projects}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _patch_recent_json(monkeypatch, tmp_path):
+    """Isolate the recent-workspaces json to tmp_path; returns the path."""
+    recent_json = tmp_path / "user_projects.json"
+    monkeypatch.setattr(
+        "app.services.project_service.default_user_projects_json_path",
+        lambda: str(recent_json),
+    )
+    return recent_json
+
+
+def test_no_root_empty_json_shows_placeholder(qtbot, tmp_path, ctx, monkeypatch):
+    # No root AND no recorded projects -> the original empty-state placeholder.
+    recent_json = _patch_recent_json(monkeypatch, tmp_path)
+    _seed_projects_json(recent_json, [])
+
     view = ProjectTreeView(ctx)
     qtbot.addWidget(view)
     view.on_activate()
     assert view._tree.topLevelItemCount() == 0
     assert "未选根目录" in view._root_lbl.text()
+    assert "没有已记录的项目" in view._empty_state.text()
+
+
+def test_no_root_flat_lists_known_projects(qtbot, tmp_path, ctx, monkeypatch):
+    # No root but projects recorded -> flat top-level list of every known project.
+    recent_json = _patch_recent_json(monkeypatch, tmp_path)
+
+    real_a = tmp_path / "ceshi6"
+    real_b = tmp_path / "ceshi7"
+    real_a.mkdir()
+    _make_workspace(real_b)  # only b is a real workspace (has project.db)
+
+    projects = [
+        {"id": "1", "name": "甲", "directory": str(real_a)},          # plain folder
+        {"id": "2", "name": "乙", "directory": str(real_b)},          # workspace
+        {"id": "3", "name": "demo", "directory": str(tmp_path / "x"), "isDemo": True},
+        {"id": "4", "name": "dup", "directory": str(real_a)},         # dup of id 1
+    ]
+    _seed_projects_json(recent_json, projects)
+
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    view.on_activate()
+
+    # demo skipped + dup deduped -> 2 nodes, most-recent-first (json tail on top)
+    assert view._tree.topLevelItemCount() == 2
+    assert "全部已建项目" in view._root_lbl.text()
+    assert "2" in view._root_lbl.text()
+    labels = [view._tree.topLevelItem(i).text(0) for i in range(2)]
+    # most-recent-first: dup(id4) was last in json but deduped against id1's dir,
+    # so the tail-survivor is 乙(workspace) on top, then 甲.
+    assert any("乙" in t and "工作区" in t for t in labels)
+    assert any("甲" in t and "工作区" not in t for t in labels)
+    # 乙 (the later entry) comes first
+    assert "乙" in labels[0]
+    assert "甲" in labels[1]
+
+
+def test_flat_list_enter_workspace_with_root_none(qtbot, tmp_path, ctx, monkeypatch):
+    # In flat-list mode (_root is None), entering a project works and the
+    # workspace becomes its own root; _root stays None so re-activate stays flat.
+    recent_json = _patch_recent_json(monkeypatch, tmp_path)
+    leaf = tmp_path / "ceshi8"
+    leaf.mkdir()
+    _make_workspace(leaf)
+    _seed_projects_json(recent_json, [{"id": "1", "name": "丙", "directory": str(leaf)}])
+
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    view.on_activate()
+
+    top = view._tree.topLevelItem(0)
+    top.setSelected(True)
+    view._tree.setCurrentItem(top)
+
+    with qtbot.waitSignal(view.enter_workspace_requested, timeout=1000):
+        view._enter_selected()
+
+    assert ctx.current_project_dir == str(leaf.resolve())
+    assert ctx.current_project_root == str(leaf.resolve())
+    assert view._root is None
+
+
+def test_dead_directory_in_json_shown_as_folder(qtbot, tmp_path, ctx, monkeypatch):
+    # A recorded project whose dir no longer exists (drive unmounted) still
+    # shows up, as a plain 📁 (not a workspace); entering it does NOT crash.
+    recent_json = _patch_recent_json(monkeypatch, tmp_path)
+    ghost = tmp_path / "never-existed"
+    _seed_projects_json(recent_json, [{"id": "1", "name": "幽灵", "directory": str(ghost)}])
+
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    view.on_activate()
+
+    assert view._tree.topLevelItemCount() == 1
+    assert "幽灵" in view._tree.topLevelItem(0).text(0)
+    assert "工作区" not in view._tree.topLevelItem(0).text(0)
+
+    # entering the dead node: ProjectUnavailableError is caught, no signal
+    top = view._tree.topLevelItem(0)
+    top.setSelected(True)
+    view._tree.setCurrentItem(top)
+    # the "盘未连接" path pops a modal box — stub it so headless test doesn't block
+    monkeypatch.setattr("app.views.project_tree_view.ui.warn", lambda *a, **k: None)
+    emitted = []
+    view.enter_workspace_requested.connect(lambda p: emitted.append(p))
+    try:
+        view._enter_selected()
+    except Exception as exc:  # pragma: no cover - defensive
+        pytest.fail(f"_enter_selected raised on dead dir: {exc}")
+    assert emitted == []
+
+
+def test_pick_root_after_flat_list_reverts_to_scan(qtbot, tmp_path, ctx, monkeypatch):
+    # Flat list populated, then user picks a real root -> tree reverts to scan mode.
+    recent_json = _patch_recent_json(monkeypatch, tmp_path)
+    leaf = tmp_path / "loose"
+    leaf.mkdir()
+    _seed_projects_json(recent_json, [{"id": "1", "name": "散", "directory": str(leaf)}])
+
+    # build a real survey root with a subfolder
+    sroot = tmp_path / "调查区"
+    (sroot / "断面a").mkdir(parents=True)
+
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    view.on_activate()
+    assert view._tree.topLevelItemCount() == 1  # flat list
+
+    monkeypatch.setattr(
+        "app.utils.ui.get_existing_directory", lambda *a, **k: str(sroot)
+    )
+    view._pick_root()
+
+    assert view._root == str(sroot.resolve())
+    top = view._tree.topLevelItem(0)
+    assert top is not None
+    assert "调查区" in top.text(0)
+    assert top.childCount() == 1  # scan mode: subfolders as children
+    assert view._tree.topLevelItemCount() == 1
 
 
 def test_enter_node_sets_ctx_and_root(qtbot, tmp_path, ctx, monkeypatch):
