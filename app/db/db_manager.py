@@ -136,6 +136,11 @@ def open_project_db(project_dir: str, *, create: bool = False) -> sqlite3.Connec
             f"工作区不可用（盘未挂载 / 数据库丢失）：{project_dir}"
         )
 
+    # check_same_thread=False: cached conn is shared, but ONLY the Qt main
+    # thread may use it. Any background QThread/worker that needs DB access
+    # MUST open its OWN sqlite3.connect() (do not call get_db()/reuse the
+    # cache) — sharing one Connection across threads corrupts cursors even
+    # under WAL. (Collab already self-stores; no worker currently hits this.)
     conn = sqlite3.connect(str(db_path), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")

@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Optional
 
 from PyQt6.QtCore import Qt, QFileSystemWatcher, QTimer
-from PyQt6.QtGui import QColor
+from PyQt6.QtGui import QColor, QPainter, QPixmap
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -100,6 +100,101 @@ class _BatchResultDialog(QDialog):
         btn = QPushButton("关闭")
         btn.clicked.connect(self.accept)
         layout.addWidget(btn)
+
+
+class _RnaQueueDialog(QDialog):
+    """RNAlater sheet queue preview with explicit print/clear actions."""
+
+    def __init__(self, uids: list[str], job: dict, grid_opts: dict, parent=None) -> None:
+        super().__init__(parent)
+        self.action: str = ""
+        self.setWindowTitle("RNAlater 合版队列")
+        self.resize(880, 620)
+
+        root = QHBoxLayout(self)
+        left = QVBoxLayout()
+        root.addLayout(left, 0)
+
+        title = QLabel(f"待打印 RNAlater 标签：{len(uids)}")
+        title.setStyleSheet("font-size:15px;font-weight:700;")
+        left.addWidget(title)
+
+        self._list = QListWidget()
+        self._list.setMinimumWidth(300)
+        for uid in uids:
+            self._list.addItem(uid)
+        left.addWidget(self._list, 1)
+
+        hint = QLabel("确认排版后打印；清空只会移出待打印队列，不删除标本记录。")
+        hint.setWordWrap(True)
+        hint.setObjectName("MutedSmall")
+        left.addWidget(hint)
+
+        btn_row = QHBoxLayout()
+        print_btn = QPushButton("打印合版")
+        print_btn.setObjectName("Primary")
+        clear_btn = QPushButton("清空队列")
+        clear_btn.setObjectName("Outline")
+        close_btn = QPushButton("关闭")
+        print_btn.clicked.connect(lambda: self._finish("print"))
+        clear_btn.clicked.connect(lambda: self._finish("clear"))
+        close_btn.clicked.connect(self.reject)
+        btn_row.addWidget(print_btn)
+        btn_row.addWidget(clear_btn)
+        btn_row.addWidget(close_btn)
+        left.addLayout(btn_row)
+
+        preview_box = QVBoxLayout()
+        root.addLayout(preview_box, 1)
+        pv_title = QLabel("合版预览")
+        pv_title.setStyleSheet("font-size:13px;font-weight:700;")
+        preview_box.addWidget(pv_title)
+        self._preview = QLabel()
+        self._preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._preview.setMinimumSize(500, 560)
+        self._preview.setStyleSheet("background:#ffffff;border:1px solid #c8d0d8;")
+        preview_box.addWidget(self._preview, 1)
+
+        self._render_preview(job, grid_opts)
+
+    def _finish(self, action: str) -> None:
+        self.action = action
+        self.accept()
+
+    def _render_preview(self, job: dict, grid_opts: dict) -> None:
+        from app.utils.label_sheet import compute_sheet_geometry, paint_sheet_page
+
+        w, h = 520, 560
+        pm = QPixmap(w, h)
+        pm.fill(QColor("#f3f6f8"))
+        painter = QPainter(pm)
+        try:
+            paper_type = job.get("paperType") or "a4"
+            geom = compute_sheet_geometry(
+                job.get("dims") or {},
+                paper_type,
+                job.get("paper"),
+                grid_opts,
+                w,
+                h,
+            )
+            info = paint_sheet_page(
+                painter,
+                job,
+                grid_opts,
+                0,
+                geom,
+                cut_marks=bool(grid_opts.get("cutMarks", True)),
+            )
+            painter.setPen(QColor("#475569"))
+            painter.drawText(
+                14,
+                h - 14,
+                f"{paper_type.upper()} · 每页 {info.get('per_page', 0)} 个 · 共 {info.get('total_pages', 1)} 页",
+            )
+        finally:
+            painter.end()
+        self._preview.setPixmap(pm)
 
 
 def _free_compose_output_name(incoming_dir: str, user_name: Optional[str]) -> str:
@@ -386,6 +481,7 @@ class WorkbenchView(BaseView):
         self._sidebar.new_specimen_requested.connect(self._on_new_specimen)
         self._sidebar.collab_manager_requested.connect(self._on_open_collab_panel)
         self._sidebar.print_labels_requested.connect(self._on_print_labels)
+        self._sidebar.print_rna_queue_requested.connect(self._on_print_rna_queue)
         self._sidebar.phase_mark_requested.connect(self._on_phase_mark)
         outer.addWidget(self._sidebar)
 
@@ -729,6 +825,7 @@ class WorkbenchView(BaseView):
         self._no_project_banner.hide()
         self._refresh_header()
         self._sidebar.refresh()
+        self._sync_rna_queue_count()
         self._refresh_monitor()
 
         # Re-select the previously active specimen if possible
@@ -736,6 +833,11 @@ class WorkbenchView(BaseView):
         if active_uid:
             self._sidebar.select_uid(active_uid)
             self._load_specimen(active_uid)
+        else:
+            # 无激活标本(空项目/新建):清命名卡,防上一项目最后加载的
+            # province/site 等字段残留显示(用户会误以为"被默认了")。
+            self._naming.load_specimen({})
+            self._current_uid = None
         self._refresh_batch_header()
 
         # Start filesystem watcher + fallback poll
@@ -956,10 +1058,9 @@ class WorkbenchView(BaseView):
     def _on_print_labels(self, uid: str) -> None:
         """Print this specimen's labels.
 
-        Fast path (一键直接打印): when a default printer exists and the persisted
-        label template yields something to print, send straight to that printer
-        — no studio detour, no preview, no dialog. R-prefix specimens print the
-        样品瓶 + RNAlater 组织管 labels together.
+        Fast path (一键直接打印): route sample and RNAlater labels to the project
+        configured printers. R-prefix specimens may send tissue labels directly
+        or queue them for A4/A5 sheet printing.
 
         Fallback: open the label studio pre-selected with *uid*, so the user can
         still tune fields / 留白 / 纸张 when there is no default printer or the
@@ -987,28 +1088,287 @@ class WorkbenchView(BaseView):
         """
         try:
             from PyQt6.QtPrintSupport import QPrinterInfo
-            from app.services.label_service import (
-                LabelService,
-                load_specimen_dicts,
-            )
-            from app.utils.label_print import build_printer, paint_jobs
+            from app.services import label_service
+            from app.services import project_settings_service as pss
+            import app.utils.label_print as label_print
 
-            printer_name = QPrinterInfo.defaultPrinterName()
-            if not printer_name:
+            project_dir = getattr(self.ctx, "current_project_dir", None)
+            project_root = getattr(self.ctx, "current_project_root", None)
+            if not isinstance(project_root, str):
+                project_root = None
+            db = self.ctx.get_db()
+            if db is None:
                 return False
-            specimens = load_specimen_dicts(self.ctx.get_db())
-            jobs = LabelService.quick_print_jobs_for_specimen(specimens, uid)
+            print_settings = (
+                pss.effective_print_settings(
+                    project_dir, root=project_root
+                )
+                if project_dir else dict(pss.DEFAULT_PRINT_SETTINGS)
+            )
+            local_print_settings = pss.load_setting_if_present(db, "print_settings")
+            if local_print_settings is not None:
+                print_settings = pss.merge_print_settings(print_settings, local_print_settings)
+            if not print_settings.get("quick_print", True):
+                return False
+
+            default_printer = QPrinterInfo.defaultPrinterName()
+            available = {
+                p.printerName()
+                for p in QPrinterInfo.availablePrinters()
+                if p.printerName()
+            }
+            sample_printer = self._resolve_quick_printer(
+                str(print_settings.get("sample_printer") or ""),
+                default_printer,
+                available,
+            )
+            tissue_printer = self._resolve_quick_printer(
+                str(print_settings.get("tissue_printer") or ""),
+                default_printer,
+                available,
+            )
+            if not sample_printer:
+                return False
+
+            sample_paper_type = str(print_settings.get("sample_paper_type") or "")
+            tissue_paper_type = str(print_settings.get("tissue_paper_type") or "")
+            paper_types = {
+                k: v for k, v in {
+                    "sample": sample_paper_type,
+                    "tissue": tissue_paper_type,
+                }.items() if v in {"label", "a4", "a5"}
+            } or None
+            template_keys = {
+                k: v for k, v in {
+                    "sample": str(print_settings.get("sample_template_key") or ""),
+                    "tissue": str(print_settings.get("tissue_template_key") or ""),
+                }.items() if v
+            } or None
+
+            specimens = label_service.load_specimen_dicts(db)
+            jobs = label_service.LabelService.quick_print_jobs_for_specimen(
+                specimens, uid, paper_types=paper_types, template_keys=template_keys
+            )
+            if not print_settings.get("include_tissue", True):
+                jobs = [j for j in jobs if j.get("bucket") != "tissue"]
             if not jobs:
                 return False
-            printer = build_printer(jobs[0])
-            printer.setPrinterName(printer_name)
-            if not paint_jobs(printer, jobs):
-                return False
-            n = sum(len(j.get("labels") or []) for j in jobs)
-            self._status_message(f"已发送到打印机：{printer_name} · 共 {n} 张标签")
+
+            direct_jobs: list[dict] = []
+            queued_tissue = 0
+            for job in jobs:
+                if job.get("bucket") == "tissue":
+                    if not tissue_printer:
+                        return False
+                    effective_tissue_paper = tissue_paper_type or label_service.persisted_paper_type("tissue")
+                    if self._should_queue_tissue_label(
+                        print_settings,
+                        sample_printer=sample_printer,
+                        tissue_printer=tissue_printer,
+                        tissue_paper_type=effective_tissue_paper,
+                    ):
+                        from app.services import rna_label_queue_service as rna_queue
+                        queued_tissue += rna_queue.enqueue(db, [uid])
+                        self._sync_rna_queue_count()
+                        continue
+                direct_jobs.append(job)
+
+            printed = 0
+            printers_used: list[str] = []
+            printed_details: list[str] = []
+            for job in direct_jobs:
+                target = tissue_printer if job.get("bucket") == "tissue" else sample_printer
+                if not target:
+                    return False
+                printer = label_print.build_printer(job)
+                printer.setPrinterName(target)
+                if not label_print.paint_jobs(printer, [job]):
+                    return False
+                printed += len(job.get("labels") or [])
+                if target not in printers_used:
+                    printers_used.append(target)
+                printed_details.append(self._quick_print_job_label(job, target))
+
+            msg_parts = []
+            if printed:
+                msg_parts.append(
+                    f"已发送 {printed} 张标签到 {'、'.join(printers_used)}"
+                    f"（{'; '.join(printed_details)}）"
+                )
+            if queued_tissue:
+                from app.services import rna_label_queue_service as rna_queue
+                msg_parts.append(f"RNAlater 标签已加入合版队列：当前 {rna_queue.pending_count(db)} 张")
+            if msg_parts:
+                self._status_message("；".join(msg_parts))
             return True
         except Exception:
             return False
+
+    def _sync_rna_queue_count(self) -> None:
+        db = None
+        try:
+            db = self.ctx.get_db()
+        except Exception:
+            db = None
+        count = 0
+        if db is not None:
+            try:
+                from app.services import rna_label_queue_service as rna_queue
+                count = rna_queue.pending_count(db)
+            except Exception:
+                count = 0
+        try:
+            self._sidebar.set_rna_queue_count(count)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _quick_print_job_label(job: dict, printer_name: str) -> str:
+        bucket = "RNAlater" if job.get("bucket") == "tissue" else "样品瓶"
+        tmpl = job.get("template") or {}
+        template_name = str(tmpl.get("name") or "未命名模板")
+        paper = str(job.get("paperType") or "label").upper()
+        return f"{bucket}: {template_name} / {paper} / {printer_name}"
+
+    @staticmethod
+    def _resolve_quick_printer(configured: str, default_printer: str, available: set[str]) -> str:
+        configured = (configured or "").strip()
+        if configured:
+            return configured if configured in available else ""
+        return default_printer or ""
+
+    @staticmethod
+    def _should_queue_tissue_label(
+        settings: dict,
+        *,
+        sample_printer: str,
+        tissue_printer: str,
+        tissue_paper_type: str,
+    ) -> bool:
+        strategy = str(settings.get("tissue_strategy") or "auto")
+        if strategy == "queue":
+            return True
+        if strategy == "direct":
+            return False
+        return (
+            bool(sample_printer)
+            and sample_printer == tissue_printer
+            and tissue_paper_type in {"a4", "a5"}
+        )
+
+    def _on_print_rna_queue(self) -> None:
+        """Open the RNAlater sheet queue preview, then print or clear."""
+        try:
+            from PyQt6.QtPrintSupport import QPrinterInfo
+            from app.services import label_service
+            from app.services import project_settings_service as pss
+            from app.services import rna_label_queue_service as rna_queue
+            from app.utils.label_core import unique_id
+            from app.utils.label_print import build_printer, paint_jobs
+            from app.utils.label_sheet import draw_crop_marks
+
+            db = self.ctx.get_db()
+            project_dir = getattr(self.ctx, "current_project_dir", None)
+            project_root = getattr(self.ctx, "current_project_root", None)
+            if not isinstance(project_root, str):
+                project_root = None
+            if db is None or not project_dir:
+                self._status_message("请先打开一个项目工作区。")
+                return
+
+            uids = rna_queue.pending_uids(db)
+            if not uids:
+                self._status_message("没有待打印的 RNAlater 合版标签。")
+                self._sync_rna_queue_count()
+                return
+
+            settings = pss.effective_print_settings(
+                project_dir, root=project_root
+            )
+            local_print_settings = pss.load_setting_if_present(db, "print_settings")
+            if local_print_settings is not None:
+                settings = pss.merge_print_settings(settings, local_print_settings)
+
+            default_printer = QPrinterInfo.defaultPrinterName()
+            available = {
+                p.printerName()
+                for p in QPrinterInfo.availablePrinters()
+                if p.printerName()
+            }
+            tissue_printer = self._resolve_quick_printer(
+                str(settings.get("tissue_printer") or ""),
+                default_printer,
+                available,
+            )
+            if not tissue_printer:
+                QMessageBox.information(self, "打印 RNA 合版", "未找到 RNAlater 标签打印机。")
+                return
+
+            specimens = label_service.load_specimen_dicts(db)
+            wanted = set(uids)
+            indices = [i for i, sp in enumerate(specimens) if unique_id(sp) in wanted]
+            if not indices:
+                self._status_message("队列里的 RNAlater 标签没有对应标本记录。")
+                return
+
+            lib = label_service.LabelTemplateLibrary("tissue")
+            paper_type = (
+                str(settings.get("tissue_paper_type") or "")
+                or label_service.persisted_paper_type("tissue")
+            )
+            if paper_type not in {"a4", "a5"}:
+                paper_type = str((settings.get("tissue_sheet") or {}).get("paper") or "a4")
+            if paper_type not in {"a4", "a5"}:
+                paper_type = "a4"
+            grid_opts = label_service.persisted_imposition("tissue")
+            if "cutMarks" not in grid_opts:
+                grid_opts = dict(grid_opts)
+                grid_opts["cutMarks"] = True
+
+            job = label_service.LabelService.build_print_job(
+                specimens,
+                label_service.resolve_template(lib),
+                "tissue",
+                selected_indices=indices,
+                dims=label_service.resolve_dims(lib, lib.selected_custom_dims()),
+                copies=1,
+                paper_type=paper_type,
+                paper=label_service.PAPER_SIZES.get(paper_type),
+            )
+            if not (job.get("items") or []):
+                self._status_message("队列中没有可生成的 RNAlater 标签。")
+                return
+            job["gridOpts"] = grid_opts
+
+            ordered_uids = [unique_id(specimens[i]) for i in indices]
+            dlg = _RnaQueueDialog(ordered_uids, job, grid_opts, self)
+            if dlg.exec() != QDialog.DialogCode.Accepted:
+                return
+            if dlg.action == "clear":
+                changed = rna_queue.clear_pending(db)
+                self._sync_rna_queue_count()
+                self._status_message(f"已清空 RNAlater 待打印队列：{changed} 张")
+                return
+            if dlg.action != "print":
+                return
+
+            printer = build_printer(job, grid_opts)
+            printer.setPrinterName(tissue_printer)
+            ok = paint_jobs(
+                printer,
+                [job],
+                grid_opts=grid_opts,
+                cut_marks=bool(grid_opts.get("cutMarks")),
+                draw_crop_marks=draw_crop_marks,
+            )
+            if not ok:
+                QMessageBox.warning(self, "打印 RNA 合版", "打印任务发送失败。")
+                return
+            rna_queue.mark_printed(db, ordered_uids)
+            self._sync_rna_queue_count()
+            self._status_message(f"RNAlater 合版已发送到 {tissue_printer} · {len(ordered_uids)} 张")
+        except Exception as exc:
+            QMessageBox.warning(self, "打印 RNA 合版", str(exc))
 
     def _status_message(self, text: str, msec: int = 4000) -> None:
         ui.show_status(self, text, msec)
@@ -1053,6 +1413,51 @@ class WorkbenchView(BaseView):
             )
             if reply != QMessageBox.StandardButton.Save:
                 return
+
+        # ── UID uniqueness (mirrors web server.js HTTP 409) ─────────────────
+        # A specimen UID is a museum-style catalogue number.
+        # (a) Cross-workspace: scan every OTHER known workspace's project.db;
+        #     if this UID is already owned there → refuse (global unique).
+        # (b) Same-workspace cover: editing a loaded specimen (_current_uid) and
+        #     changing its fields to another UID that already exists here →
+        #     refuse (would overwrite a different specimen via upsert).
+        # Re-saving the very same UID (update self, incl. _current_uid is None
+        # and the row already exists) is allowed — PRIMARY KEY upsert handles it.
+        from app.services import specimen_catalog_service as _catalog
+        try:
+            _current_resolved = str(Path(project_dir).resolve())
+        except OSError:
+            _current_resolved = project_dir
+        _other_hits = [
+            h for h in _catalog.find_uid(
+                uid,
+                current_project_dir=project_dir,
+                current_project_root=getattr(self.ctx, "current_project_root", None),
+            )
+            if h.project_dir != _current_resolved
+        ]
+        _local_owner = db.execute(
+            "SELECT owner_project_dir FROM specimens WHERE uid=?", (uid,)
+        ).fetchone()
+        _local_cover = (
+            _local_owner is not None
+            and self._current_uid is not None
+            and self._current_uid != uid
+        )
+        if _other_hits:
+            QMessageBox.warning(
+                self, "编号已被占用",
+                "⚠ " + _catalog.format_uid_conflict(uid, _other_hits),
+            )
+            self._naming.show_dup_warn(True)
+            return
+        if _local_cover:
+            QMessageBox.warning(
+                self, "编号已被占用",
+                f"⚠ 编号 {uid} 已存在于本项目（另一个标本），不能覆盖。请修改字段后再保存。",
+            )
+            self._naming.show_dup_warn(True)
+            return
 
         # ── Collaboration UID claim ───────────────────────────────────────
         # When collaboration is active (running + a group code), claim a NEW
@@ -3423,5 +3828,7 @@ class WorkbenchView(BaseView):
         self._results.clear()
         self._metadata.clear()
         self._taxon_card.clear()
+        self._naming.load_specimen({})  # 清命名卡残留字段
+        self._current_uid = None
         self._refresh_header()
         self._no_project_banner.show()

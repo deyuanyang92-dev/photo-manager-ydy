@@ -784,14 +784,18 @@ class CollectionMapView(BaseView):
         """把项目写入注册表（去重）、选中为过滤器并激活当前项目、刷新地图。"""
         if not proj:
             return
-        from app.views.overview_view import _load_projects, _save_projects
+        from app.services.project_service import (
+            default_user_projects_json_path,
+            save_project_descriptor,
+        )
+        from app.views.overview_view import _load_projects
         try:
-            all_projects = _load_projects()
-            existing_dirs = {p.get("directory") or p.get("dir") for p in all_projects}
             d = proj.get("directory")
-            if d not in existing_dirs:
-                all_projects.append(proj)
-                _save_projects(all_projects)
+            save_project_descriptor(
+                default_user_projects_json_path(),
+                proj,
+                existing_projects=_load_projects(),
+            )
             self._project_filter = d
             self.ctx.current_project_dir = d
             self._populate_projects()

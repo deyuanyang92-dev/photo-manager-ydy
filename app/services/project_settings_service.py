@@ -10,6 +10,8 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Optional
 
+from PyQt6.QtCore import QSettings
+
 # ── Defaults (mirrors app.js:3084-3092, 9634, 9527, etc.) ─────────────────────
 
 DEFAULT_TIFF_FIELDS: dict[str, bool] = {
@@ -47,6 +49,29 @@ DEFAULT_CODE_LABELS: dict[str, Any] = {
     "species": {},
 }
 
+DEFAULT_NAMING_RULES: dict[str, Any] = {
+    "components": [
+        "province",
+        "site",
+        "station",
+        "species_id",
+        "storage",
+        "date_seg",
+    ],
+    "required": {
+        "province": True,
+        "site": True,
+        "station": False,
+        "species_id": True,
+        "storage": True,
+        "collection_date": True,
+        "photo_date": True,
+    },
+    "site_min_length": 2,
+    "date_8_digits": True,
+    "storage_prefix": True,
+}
+
 DEFAULT_CAPTURE_DEFAULTS: dict[str, str] = {
     # 项目级默认拍摄坐标/地理区（站位级数据的兜底）。新号自动带，选站位后由
     # 采集记录覆盖。空 = 不预填。
@@ -63,6 +88,46 @@ DEFAULT_PROJECT_META: dict[str, str] = {
     "location": "",
     "photo_location": "",
 }
+
+DEFAULT_PRINT_SETTINGS: dict[str, Any] = {
+    # 工作台编号旁打印按钮的项目级偏好。默认贴合拍摄现场流程：
+    # 有默认打印机就直出；普通标本打印样品瓶标签，R 前缀标本额外打印
+    # RNAlater 组织管标签。完整批量/模板调整仍在标签打印页。
+    "quick_print": True,
+    "include_tissue": True,
+    # Empty printer name = use the current system default.  Separate fields let
+    # sample-bottle and RNAlater tube labels go to different devices/papers.
+    "sample_printer": "",
+    "tissue_printer": "",
+    # Empty = follow the paper mode last chosen in 标签打印. Otherwise one of
+    # "label", "a4", "a5".
+    "sample_paper_type": "",
+    "tissue_paper_type": "",
+    # Empty = follow the template last chosen in 标签打印. Otherwise a built-in
+    # template key or "custom:<template_id>" from the per-bucket library.
+    "sample_template_key": "",
+    "tissue_template_key": "",
+    # auto: direct print when the tissue route is a dedicated/small-label path;
+    # queue when tissue uses a sheet paper on the same printer.
+    "tissue_strategy": "auto",  # auto/direct/queue
+    "missing_printer_policy": "open_studio",
+    "tissue_sheet": {
+        "paper": "a4",
+        "label_w_mm": 30.0,
+        "label_h_mm": 15.0,
+        "margin_left_mm": 5.0,
+        "margin_top_mm": 5.0,
+        "margin_right_mm": 5.0,
+        "margin_bottom_mm": 5.0,
+        "gap_x_mm": 2.0,
+        "gap_y_mm": 2.0,
+        "cut_marks": True,
+    },
+}
+
+_APP_SETTINGS_ORG = "SpecimenPhotoWorkbench"
+_APP_SETTINGS_APP = "标本照片工作台"
+_GLOBAL_PRINT_DEFAULTS_KEY = "print/default_settings"
 
 # Built-in preservation methods — constants, never stored in DB (mirrors app.js:549)
 BUILTIN_STORAGES: list[dict[str, Any]] = [
@@ -96,6 +161,28 @@ def load_setting(db: sqlite3.Connection, key: str, default: dict) -> dict:
         except (ValueError, TypeError):
             pass
     return dict(default)
+
+
+def load_setting_if_present(db: sqlite3.Connection, key: str) -> Optional[dict]:
+    """Return parsed JSON for *key*, or None when the row is absent/invalid."""
+    row = db.execute(
+        "SELECT value_json FROM project_settings WHERE setting_key=?", (key,)
+    ).fetchone()
+    if not row:
+        return None
+    try:
+        data = json.loads(row[0])
+    except (ValueError, TypeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def merge_print_settings(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """Return print settings with explicit project values applied over *base*."""
+    result = _print_settings_copy(base)
+    if isinstance(override, dict):
+        _merge_all(result, override)
+    return result
 
 
 def save_setting(db: sqlite3.Connection, key: str, data: dict) -> None:
@@ -133,6 +220,57 @@ def _merge_effective(base: dict, override: dict) -> None:
             continue
         else:
             base[k] = v
+
+
+def _merge_all(base: dict, override: dict) -> None:
+    """Deep-merge *override* into *base*, including empty values.
+
+    Used for app-wide defaults where choosing an empty string is meaningful
+    (for example "跟随标签打印页").
+    """
+    for k, v in override.items():
+        if isinstance(v, dict):
+            child = base.get(k)
+            if not isinstance(child, dict):
+                child = {}
+                base[k] = child
+            _merge_all(child, v)
+        else:
+            base[k] = v
+
+
+def _print_settings_copy(default: Optional[dict] = None) -> dict[str, Any]:
+    return json.loads(json.dumps(default or DEFAULT_PRINT_SETTINGS, ensure_ascii=False))
+
+
+def load_global_print_defaults() -> dict[str, Any]:
+    """Return app-wide workbench print defaults.
+
+    These are used before project/folder overrides, so users can configure
+    printers/templates once instead of repeating them in every project.
+    """
+    result = _print_settings_copy()
+    raw = QSettings(_APP_SETTINGS_ORG, _APP_SETTINGS_APP).value(
+        _GLOBAL_PRINT_DEFAULTS_KEY, ""
+    )
+    if raw:
+        try:
+            data = json.loads(str(raw))
+            if isinstance(data, dict):
+                _merge_all(result, data)
+        except (ValueError, TypeError):
+            pass
+    return result
+
+
+def save_global_print_defaults(data: dict[str, Any]) -> None:
+    """Persist app-wide workbench print defaults."""
+    result = _print_settings_copy()
+    if isinstance(data, dict):
+        _merge_all(result, data)
+    qs = QSettings(_APP_SETTINGS_ORG, _APP_SETTINGS_APP)
+    qs.setValue(_GLOBAL_PRINT_DEFAULTS_KEY, json.dumps(result, ensure_ascii=False))
+    qs.sync()
 
 
 def get_effective(
@@ -228,3 +366,10 @@ def effective_new_specimen_prefill(
         "lat": str(capture.get("lat", "") or ""),
         "geo_area": capture.get("geoArea", "") or "",
     }
+
+
+def effective_print_settings(
+    project_dir: str, *, root: Optional[str] = None
+) -> dict[str, Any]:
+    """Return inherited workbench quick-print settings for *project_dir*."""
+    return get_effective(project_dir, "print_settings", load_global_print_defaults(), root=root)

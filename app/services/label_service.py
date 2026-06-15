@@ -420,6 +420,7 @@ class LabelService:
         *,
         copies: Optional[int] = None,
         paper_types: Optional[dict] = None,
+        template_keys: Optional[dict] = None,
     ) -> list[dict]:
         """Build ready-to-print jobs for ONE specimen using the user's persisted
         template / size / paper / copies — no label-studio wizard needed.
@@ -428,8 +429,8 @@ class LabelService:
         job; an R-prefix specimen additionally yields the RNAlater tissue job
         (so 一键 = 样品瓶 + 组织管). Returns ``[]`` when *uid* matches no specimen.
 
-        ``copies`` / ``paper_types`` override the persisted values when given
-        (e.g. for testing); otherwise read from QSettings.
+        ``copies`` / ``paper_types`` / ``template_keys`` override the persisted
+        values when given (e.g. for testing); otherwise read from QSettings.
         """
         js = [_specimen_to_js_dict(sp) for sp in specimens]
         idx = next((i for i, d in enumerate(js) if unique_id(d) == uid), None)
@@ -439,7 +440,12 @@ class LabelService:
         jobs: list[dict] = []
         for bucket in ("sample", "tissue"):
             lib = LabelTemplateLibrary(bucket)
-            tmpl = resolve_template(lib)
+            template_key = (
+                template_keys.get(bucket, lib.selected_key())
+                if template_keys is not None
+                else lib.selected_key()
+            )
+            tmpl = resolve_template_key(lib, template_key)
             dims = resolve_dims(lib, lib.selected_custom_dims())
             ptype = (
                 (paper_types or {}).get(bucket)
@@ -935,9 +941,19 @@ def resolve_template(lib: "LabelTemplateLibrary") -> dict:
     library, otherwise from ``BUILTIN_TEMPLATES``; falls back to the bucket
     default.  Shared by Step2 (card grid), Step3 (size preview) and Step4 (job).
     """
+    return resolve_template_key(lib, lib.selected_key())
+
+
+def resolve_template_key(lib: "LabelTemplateLibrary", key: Optional[str]) -> dict:
+    """Resolve an explicit template key for *lib*.
+
+    ``key`` may be a built-in key or ``custom:<id>``. Empty/unknown keys fall
+    back to the bucket default. This lets project quick-print settings pin a
+    template without mutating the user's label-studio selection.
+    """
     bucket = lib.bucket
     default_key = DEFAULT_TEMPLATE_KEY[bucket]
-    key = lib.selected_key() or default_key
+    key = str(key or "").strip() or default_key
     if _is_library_key(key):
         rec = lib.get(_id_from_key(key))
         if rec and rec.get("template"):

@@ -140,17 +140,21 @@ class MainWindow(QMainWindow):
 
         lay.addSpacing(18)
 
-        # Project switcher in topbar (left side) — EOS-Utility 式面包屑：
-        # 父链可见 + ◀▶ 一键切同级站位（enter_workspace 统一入口）。
+        # Workspace path picker: current folder + visit history + open/new actions.
         from app.widgets.workspace_breadcrumb import WorkspaceBreadcrumb
         self._project_switcher = WorkspaceBreadcrumb(self.ctx)
-        self._project_switcher.setMaximumWidth(420)
+        self._project_switcher.setMaximumWidth(470)
         self._project_switcher.navigate_requested.connect(self.navigate_to)
         self._project_switcher.workspace_changed.connect(
             self._on_breadcrumb_switch)
+        self._project_switcher.new_workspace_requested.connect(self._on_new_project)
+        self._project_switcher.open_workspace_requested.connect(self._on_open_workspace)
         lay.addWidget(self._project_switcher)
 
-        lay.addSpacing(16)
+        self._btn_compress = QAction(tr("归档"), self)
+        self._btn_compress.setEnabled(False)
+
+        lay.addSpacing(14)
 
         # Segmented nav row (buttons added by register_view)
         self._nav_row = QHBoxLayout()
@@ -207,49 +211,6 @@ class MainWindow(QMainWindow):
         self._nav_pin_menu.setIcon(icons.icon("mdi6.pin-outline", color=icons.TONE_MUTED))
         self._nav_menu_btn.setMenu(self._nav_menu)
         lay.addWidget(self._nav_menu_btn)
-
-        # Divider: separate the flexible nav region from the fixed action cluster
-        # so the right side reads as one tidy group rather than buttons crowding
-        # the tabs.
-        lay.addSpacing(12)
-        lay.addWidget(self._topbar_divider())
-        lay.addSpacing(12)
-
-        # Right side: compact global actions. Uniform 30px height keeps every
-        # control on one baseline; uniform 6px gaps keep the cluster even.
-        self._btn_new_project = QPushButton(tr("新建"))
-        self._btn_new_project.setObjectName("Outline")
-        self._btn_new_project.setToolTip(tr("新建一个项目工作区目录"))
-        self._btn_new_project.setFixedHeight(30)
-        icons.set_button_icon(self._btn_new_project, "mdi6.plus",
-                              color=icons.TONE_MUTED, size=15)
-        self._btn_new_project.clicked.connect(self._on_new_project)
-        self._btn_new_project.setCursor(Qt.CursorShape.PointingHandCursor)
-        lay.addWidget(self._btn_new_project)
-
-        lay.addSpacing(6)
-
-        self._btn_open_ws = QPushButton(tr("打开"))
-        self._btn_open_ws.setObjectName("Outline")
-        self._btn_open_ws.setToolTip(tr("打开已有项目工作区目录"))
-        self._btn_open_ws.setFixedHeight(30)
-        icons.set_button_icon(self._btn_open_ws, "mdi6.folder-open-outline",
-                              color=icons.TONE_MUTED, size=15)
-        self._btn_open_ws.clicked.connect(self._on_open_workspace)
-        self._btn_open_ws.setCursor(Qt.CursorShape.PointingHandCursor)
-        lay.addWidget(self._btn_open_ws)
-
-        lay.addSpacing(6)
-
-        self._btn_compress = QPushButton(tr("归档"))
-        self._btn_compress.setObjectName("Outline")
-        self._btn_compress.setToolTip(tr("智能压缩归档（JPG→JXL→ZIP）"))
-        self._btn_compress.setFixedHeight(30)
-        icons.set_button_icon(self._btn_compress, "mdi6.archive-outline",
-                              color=icons.TONE_MUTED, size=15)
-        self._btn_compress.clicked.connect(lambda: self.navigate_to("workbench"))
-        self._btn_compress.setCursor(Qt.CursorShape.PointingHandCursor)
-        lay.addWidget(self._btn_compress)
 
         lay.addSpacing(10)
         lay.addWidget(self._topbar_divider())
@@ -538,10 +499,6 @@ class MainWindow(QMainWindow):
                 menu.setTitle(tr(group["title"]))
         self._nav_pin_menu.setTitle(tr("固定到顶栏"))
 
-        self._btn_new_project.setText(tr("新建"))
-        self._btn_new_project.setToolTip(tr("新建一个项目工作区目录"))
-        self._btn_open_ws.setText(tr("打开"))
-        self._btn_open_ws.setToolTip(tr("打开已有项目工作区目录"))
         self._btn_compress.setText(tr("归档"))
         self._btn_compress.setToolTip(tr("智能压缩归档（JPG→JXL→ZIP）"))
         self._settings_btn.setToolTip(tr("配置"))
@@ -698,20 +655,24 @@ class MainWindow(QMainWindow):
                     hint=tr("请确认当前项目数据库可访问，或把详细信息发给维护者。"),
                 )
 
-    # ── Top-bar project actions ───────────────────────────────────────────
+    # ── Top-bar workspace folder actions ──────────────────────────────────
 
     def _on_new_project(self) -> None:
-        """「+ 新建项目」topbar button → ProjectDialog(mode="new")."""
+        """Folder menu: create a photo workspace."""
         self._open_project_dialog(mode="new")
 
     def _on_open_workspace(self) -> None:
-        """「+ 打开工作区」topbar button → ProjectDialog(mode="open")."""
+        """Folder menu: open an existing folder as a photo workspace."""
         self._open_project_dialog(mode="open")
 
     def _open_project_dialog(self, mode: str) -> None:
         """Open ProjectDialog, persist result, navigate to workbench."""
         from app.views.project_dialog import ProjectDialog
-        from app.views.overview_view import _load_projects, _save_projects
+        from app.services.project_service import (
+            default_user_projects_json_path,
+            save_project_descriptor,
+        )
+        from app.views.overview_view import _load_projects
 
         existing = _load_projects()
         dlg = ProjectDialog(mode=mode, existing_projects=existing, parent=self)
@@ -723,12 +684,12 @@ class MainWindow(QMainWindow):
 
         try:
             with ui.busy_cursor():
-                # Persist to user_projects.json (dedup by directory)
-                all_projects = _load_projects()
-                existing_dirs = {p.get("directory") or p.get("dir") for p in all_projects}
-                if proj.get("directory") not in existing_dirs:
-                    all_projects.append(proj)
-                    _save_projects(all_projects)
+                # Persist to user_projects.json (dedup by directory, keep metadata).
+                save_project_descriptor(
+                    default_user_projects_json_path(),
+                    proj,
+                    existing_projects=existing,
+                )
 
                 # Activate project in context and navigate
                 self.ctx.current_project_dir = proj.get("directory", "")
@@ -740,15 +701,15 @@ class MainWindow(QMainWindow):
                 if ov and hasattr(ov, "_load_projects"):
                     ov._load_projects()
             self.statusBar().showMessage(
-                tr("已打开工作区: {}").format(os.path.basename(proj.get("directory", ""))),
+                tr("已打开文件夹: {}").format(os.path.basename(proj.get("directory", ""))),
                 4000,
             )
         except Exception as exc:  # noqa: BLE001
             ui.exception(
                 self,
-                tr("打开工作区失败"),
+                tr("打开文件夹失败"),
                 exc,
-                text=tr("项目已创建/选择，但写入最近列表或进入工作台时失败。"),
+                text=tr("文件夹已创建/选择，但写入最近列表或进入工作台时失败。"),
                 hint=tr("请检查项目路径、磁盘权限和 _data/project.db 是否可写。"),
             )
 

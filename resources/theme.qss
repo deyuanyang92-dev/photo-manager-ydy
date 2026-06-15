@@ -167,6 +167,26 @@ QToolButton#CrumbArrow:hover {
 QToolButton#CrumbArrow:disabled {
     color: #94a3b8;
 }
+QToolButton#WorkspaceMenuButton,
+QToolButton#WorkspaceFolderButton {
+    background-color: #ffffff;
+    border: 1px solid rgba(15,23,42,0.08);
+    border-radius: 6px;
+    padding: 0;
+    color: #64748b;
+    font-size: 12px;
+    font-weight: 700;
+}
+QToolButton#WorkspaceMenuButton:hover,
+QToolButton#WorkspaceFolderButton:hover {
+    color: #0f766e;
+    border-color: #0f766e;
+    background-color: rgba(15,118,110,0.06);
+}
+QToolButton#WorkspaceFolderButton::menu-button {
+    border: none;
+    width: 0;
+}
 QLabel#ActiveBadgeOn {
     background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #14b8a6, stop:1 #0f766e);
     color: #f4f6f8;
@@ -671,20 +691,40 @@ QFrame#SpecimenRow {
     background-color: #ffffff;
     border: 1px solid rgba(15,23,42,0.08);
     border-radius: 6px;
+    margin: 1px 0;
+}
+QFrame#SpecimenRowActive {
+    background-color: rgba(15,118,110,0.11);
+    border: 1px solid rgba(15,118,110,0.24);
+    border-left: 4px solid #0f766e;
+    border-radius: 6px;
+    margin: 1px 0;
 }
 QFrame#SpecimenRow:hover {
     background-color: #ffffff;
     border-color: rgba(15,118,110,0.24);
 }
+QFrame#SpecimenRowActive:hover {
+    background-color: #e6f5f3;
+    border-color: rgba(15,118,110,0.24);
+    border-left: 4px solid #0f766e;
+}
 QLabel#SpecimenUid {
     font-family: "JetBrains Mono", "Cascadia Code", "SF Mono", Consolas, "Courier New", "DejaVu Sans Mono", monospace;
     color: #17212b;
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 700;
+    letter-spacing: 0;
 }
 QLabel#SpecimenSubtext {
-    color: #94a3b8;
-    font-size: 11px;
+    color: #64748b;
+    font-size: 12px;
+    font-weight: 500;
+}
+QLabel#SpecimenMissingText {
+    color: #64748b;
+    font-size: 12px;
+    font-weight: 600;
 }
 QLabel#SpecimenBadge {
     color: #0d9488;
@@ -694,6 +734,14 @@ QLabel#SpecimenBadge {
     padding: 1px 7px;
     font-size: 11px;
     font-weight: 600;
+}
+QLabel#SpecimenActivePill {
+    color: #f4f6f8;
+    background-color: #0f766e;
+    border-radius: 999px;
+    padding: 2px 8px;
+    font-size: 11px;
+    font-weight: 700;
 }
 
 /* ── Generic list ────────────────────────────────────────────────── */

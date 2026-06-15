@@ -3,7 +3,7 @@
 TDD suite — covers spec invariants and edge cases.
 """
 import pytest
-from app.utils.naming import specimen_date_seg, derive_uid
+from app.utils.naming import build_result_id, build_uid, normalize_uid, specimen_date_seg, derive_uid
 
 
 # ── specimen_date_seg ──────────────────────────────────────────────────────
@@ -92,3 +92,32 @@ class TestDeriveUid:
         # lon 119 and lat 88 must not appear in the uid
         assert "119" not in uid
         assert "88" not in uid
+
+    def test_lowercase_segments_are_canonicalized(self):
+        sp = self._make_sp(
+            province="fj", site="d", station="f", id="dd001", storage="t95e"
+        )
+        assert derive_uid(sp) == "FJ-D-F-DD001-T95E-20260601"
+
+
+def test_build_uid_and_result_id_canonicalize_case():
+    uid = build_uid(
+        province="fj",
+        site="d",
+        station="f",
+        species_id="dd001",
+        storage="t95e",
+        date_seg="20260612-0613",
+    )
+    result_id = build_result_id(
+        province="fj",
+        site="d",
+        station="f",
+        species_id="dd001",
+        storage="t95e",
+        date_seg="20260612-0613",
+        seq=1,
+    )
+    assert normalize_uid("fj-d-f-dd001") == "FJ-D-F-DD001"
+    assert uid == "FJ-D-F-DD001-T95E-20260612-0613"
+    assert result_id == "FJ-D-F-DD001-1-T95E-20260612-0613"

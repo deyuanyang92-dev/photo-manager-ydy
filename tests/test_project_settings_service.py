@@ -7,10 +7,14 @@ import pytest
 from app.services.project_settings_service import (
     load_setting,
     save_setting,
+    load_global_print_defaults,
+    save_global_print_defaults,
+    effective_print_settings,
     DEFAULT_TIFF_FIELDS,
     DEFAULT_PERSONNEL,
     DEFAULT_CODE_LABELS,
     DEFAULT_PROJECT_META,
+    DEFAULT_PRINT_SETTINGS,
     BUILTIN_STORAGES,
 )
 
@@ -67,6 +71,42 @@ def test_code_labels_default_structure():
     assert "province" in DEFAULT_CODE_LABELS
     assert "stations" in DEFAULT_CODE_LABELS
     assert isinstance(DEFAULT_CODE_LABELS["stations"], dict)
+
+
+def test_naming_rules_default_required_fields():
+    from app.services.project_settings_service import DEFAULT_NAMING_RULES
+    assert DEFAULT_NAMING_RULES["components"] == [
+        "province", "site", "station", "species_id", "storage", "date_seg"
+    ]
+    required = DEFAULT_NAMING_RULES["required"]
+    assert required["province"] is True
+    assert required["site"] is True
+    assert required["station"] is False
+    assert required["species_id"] is True
+    assert required["storage"] is True
+    assert required["collection_date"] is True
+    assert required["photo_date"] is True
+
+
+def test_global_print_defaults_roundtrip_and_effective_fallback(tmp_path):
+    old = load_global_print_defaults()
+    try:
+        save_global_print_defaults({
+            "sample_template_key": "detailed",
+            "tissue_template_key": "tissueMini",
+            "sample_paper_type": "label",
+        })
+        loaded = load_global_print_defaults()
+        assert loaded["sample_template_key"] == "detailed"
+        assert loaded["tissue_template_key"] == "tissueMini"
+        assert loaded["quick_print"] is DEFAULT_PRINT_SETTINGS["quick_print"]
+
+        project_dir = tmp_path / "leaf"
+        project_dir.mkdir()
+        eff = effective_print_settings(str(project_dir), root=str(project_dir))
+        assert eff["sample_template_key"] == "detailed"
+    finally:
+        save_global_print_defaults(old)
 
 
 # ── get_effective: inheritance along the folder tree ─────────────────────────

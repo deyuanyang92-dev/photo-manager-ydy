@@ -8,6 +8,7 @@ Emits ``specimen_selected(uid: str)`` when the user clicks a row.
 """
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Optional
 
 from PyQt6.QtCore import QSize, Qt, pyqtSignal
@@ -15,19 +16,18 @@ from PyQt6.QtWidgets import (
     QApplication,
     QFrame,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMenu,
-    QMessageBox,
     QPushButton,
     QVBoxLayout,
     QWidget,
 )
 
 from app.config import icons
+from app.utils.naming import normalize_uid
 
 if TYPE_CHECKING:
     from app.app_context import AppContext
@@ -62,8 +62,10 @@ class SpecimenSidebar(QWidget):
     activate_requested = pyqtSignal(str)
     deactivate_requested = pyqtSignal(str)
     new_specimen_requested = pyqtSignal()
+    edit_specimen_requested = pyqtSignal(str)
     collab_manager_requested = pyqtSignal()   # "协作管理" button clicked
     print_labels_requested = pyqtSignal(str)
+    print_rna_queue_requested = pyqtSignal()
     phase_mark_requested = pyqtSignal(str, str)  # (uid, status_code) — phase dot click
 
     # 4 per-编号 phase dots: (status_code, objectName, tooltip).  Order = workflow.
@@ -103,13 +105,23 @@ class SpecimenSidebar(QWidget):
         self._new_btn.setObjectName("Outline")
         self._new_btn.setFixedHeight(34)
         icons.set_button_icon(self._new_btn, "mdi6.plus", color=icons.TONE_ACCENT, size=15)
-        self._new_btn.setToolTip("开始一个新的标本唯一编号（右侧填写）")
+        self._new_btn.setToolTip("开始一个新的标本唯一编号 / voucher number（右侧填写）")
         self._new_btn.clicked.connect(self.new_specimen_requested.emit)
         root.addWidget(self._new_btn)
 
+        self._rna_queue_btn = QPushButton("RNA 待打印")
+        self._rna_queue_btn.setObjectName("Ghost")
+        self._rna_queue_btn.setFixedHeight(30)
+        self._rna_queue_btn.setToolTip("打印已加入队列的 RNAlater 组织管标签")
+        icons.set_button_icon(self._rna_queue_btn, "mdi6.printer-outline",
+                              color=icons.TONE_MUTED, size=14)
+        self._rna_queue_btn.clicked.connect(self.print_rna_queue_requested.emit)
+        self._rna_queue_btn.setEnabled(False)
+        root.addWidget(self._rna_queue_btn)
+
         # Search box with a leading magnifier action.
         self._search = QLineEdit()
-        self._search.setPlaceholderText("搜索标本唯一编号")
+        self._search.setPlaceholderText("搜索标本唯一编号 / voucher number")
         self._search.setClearButtonEnabled(True)
         self._search.setFixedHeight(32)
         if icons.available():
@@ -123,7 +135,7 @@ class SpecimenSidebar(QWidget):
         # Section label + count
         header = QHBoxLayout()
         header.setContentsMargins(2, 0, 2, 0)
-        lbl = QLabel("已有标本唯一编号")
+        lbl = QLabel("已有标本唯一编号 / voucher number")
         lbl.setObjectName("Section")
         header.addWidget(lbl)
         header.addStretch()
@@ -211,6 +223,11 @@ class SpecimenSidebar(QWidget):
 
         root.addWidget(collab_strip)
 
+    def set_rna_queue_count(self, count: int) -> None:
+        count = max(0, int(count or 0))
+        self._rna_queue_btn.setText(f"RNA 待打印（{count}）" if count else "RNA 待打印")
+        self._rna_queue_btn.setEnabled(count > 0)
+
     # ── Public API ────────────────────────────────────────────────────────────
 
     def refresh(self) -> None:
@@ -241,6 +258,7 @@ class SpecimenSidebar(QWidget):
         if not db:
             return []
         project_dir = self.ctx.current_project_dir or ""
+        self._normalize_project_specimen_uids(db, project_dir)
 
         rows: list[dict] = []
         try:
@@ -258,7 +276,7 @@ class SpecimenSidebar(QWidget):
             for row in cursor.fetchall():
                 rows.append(
                     {
-                        "uid": row[0],
+                        "uid": normalize_uid(row[0]),
                         "name": row[1],
                         "name_cn": row[2],
                     }
@@ -308,32 +326,42 @@ class SpecimenSidebar(QWidget):
             if query and query not in uid.lower() and query not in name.lower() and query not in name_cn.lower():
                 continue
 
-            row = self._build_row_widget(uid, name, name_cn, svc)
+            active = bool(entry.get("active"))
+            row = self._build_row_widget(uid, name, name_cn, svc, active=active)
             item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, uid)
             item.setToolTip(uid)
-            item.setSizeHint(QSize(0, 58))
+            item.setSizeHint(QSize(0, 82 if active else 76))
             self._list.addItem(item)
             self._list.setItemWidget(item, row)
             shown += 1
 
         self._count_label.setText(str(shown))
 
-    def _build_row_widget(self, uid: str, name: str, name_cn: str, svc) -> QWidget:
+    def _build_row_widget(
+        self, uid: str, name: str, name_cn: str, svc, *, active: bool = False
+    ) -> QWidget:
         """Build one specimen row: UID + name + collab badge + 4 phase dots."""
         row = QFrame()
-        row.setObjectName("SpecimenRow")
-        row.setMinimumHeight(52)
+        row.setObjectName("SpecimenRowActive" if active else "SpecimenRow")
+        row.setMinimumHeight(70)
         v = QVBoxLayout(row)
-        v.setContentsMargins(10, 7, 10, 7)
-        v.setSpacing(5)
+        v.setContentsMargins(11, 8, 11, 8)
+        v.setSpacing(7)
 
         top = QHBoxLayout()
         top.setContentsMargins(0, 0, 0, 0)
         top.setSpacing(8)
         uid_lbl = QLabel(uid)
         uid_lbl.setObjectName("SpecimenUid")
+        uid_lbl.setToolTip(uid)
+        uid_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         top.addWidget(uid_lbl, 1)
+
+        if active:
+            active_badge = QLabel("拍摄中")
+            active_badge.setObjectName("SpecimenActivePill")
+            top.addWidget(active_badge)
 
         print_btn = QPushButton()
         print_btn.setObjectName("IconGhost")
@@ -346,13 +374,26 @@ class SpecimenSidebar(QWidget):
         )
         top.addWidget(print_btn)
 
+        v.addLayout(top)
+
         # ── Phase dots ──
         current = self._phase_for(uid, svc)
         self._phase_state[uid] = current
+        self._phase_dots[uid] = {}
+
+        name_text = name or name_cn
+        badge = self._collab_badge(uid, svc)
+        line = QHBoxLayout()
+        line.setContentsMargins(0, 0, 0, 0)
+        line.setSpacing(8)
+        nm = QLabel(name_text or "未填写物种信息")
+        nm.setObjectName("SpecimenSubtext" if name_text else "SpecimenMissingText")
+        nm.setToolTip(name_text or "未填写物种信息")
+        line.addWidget(nm, 1)
+
         dots_row = QHBoxLayout()
         dots_row.setContentsMargins(0, 0, 0, 0)
-        dots_row.setSpacing(6)
-        self._phase_dots[uid] = {}
+        dots_row.setSpacing(7)
         for code, obj_name, tip in self._PHASE_DOTS:
             dot = QPushButton()
             dot.setObjectName(obj_name)
@@ -368,23 +409,79 @@ class SpecimenSidebar(QWidget):
             )
             dots_row.addWidget(dot)
             self._phase_dots[uid][code] = dot
-        top.addLayout(dots_row)
-        v.addLayout(top)
-
-        name_text = name or name_cn
-        badge = self._collab_badge(uid, svc)
-        line = QHBoxLayout()
-        line.setContentsMargins(0, 0, 0, 0)
-        line.setSpacing(6)
-        nm = QLabel(name_text or "未填写物种信息")
-        nm.setObjectName("SpecimenSubtext")
-        line.addWidget(nm, 1)
+        line.addLayout(dots_row)
         if badge:
             bd = QLabel(badge)
             bd.setObjectName("SpecimenBadge")
             line.addWidget(bd)
         v.addLayout(line)
         return row
+
+    def _normalize_project_specimen_uids(self, db, project_dir: str) -> None:
+        """Migrate old lowercase UID rows to the canonical uppercase spelling.
+
+        If the uppercase UID already exists, leave the old row untouched to avoid
+        accidentally merging two records.
+        """
+        if not project_dir:
+            return
+        try:
+            rows = db.execute(
+                """
+                SELECT uid, province, site, station, id, storage, raw_json
+                FROM specimens
+                WHERE owner_project_dir = ?
+                """,
+                (project_dir,),
+            ).fetchall()
+        except Exception:
+            return
+
+        for row in rows:
+            old_uid = row["uid"] if hasattr(row, "keys") else row[0]
+            new_uid = normalize_uid(old_uid)
+            if not old_uid or not new_uid or old_uid == new_uid:
+                continue
+            try:
+                if db.execute(
+                    "SELECT 1 FROM specimens WHERE uid = ?",
+                    (new_uid,),
+                ).fetchone():
+                    continue
+                raw_text = row["raw_json"] if hasattr(row, "keys") else row[6]
+                try:
+                    raw = json.loads(raw_text or "{}")
+                except Exception:
+                    raw = {}
+                if isinstance(raw, dict):
+                    for key in (
+                        "uid", "uniqueId", "province", "site", "station",
+                        "id", "storage", "collectionDate", "photoDate",
+                    ):
+                        if isinstance(raw.get(key), str):
+                            raw[key] = raw[key].upper()
+                else:
+                    raw = {}
+
+                from app.services.specimen_rename_service import migrate_uid_references
+                with db:
+                    db.execute(
+                        """
+                        UPDATE specimens
+                        SET uid = ?,
+                            province = UPPER(COALESCE(province, '')),
+                            site = UPPER(COALESCE(site, '')),
+                            station = UPPER(COALESCE(station, '')),
+                            id = UPPER(COALESCE(id, '')),
+                            storage = UPPER(COALESCE(storage, '')),
+                            raw_json = ?
+                        WHERE uid = ?
+                        """,
+                        (new_uid, json.dumps(raw, ensure_ascii=False), old_uid),
+                    )
+                    migrate_uid_references(db, old_uid, new_uid)
+            except Exception:
+                continue
 
     def _phase_for(self, uid: str, svc) -> Optional[str]:
         """Resolve *uid*'s confirmed phase (collab task first, else project DB)."""
@@ -456,7 +553,7 @@ class SpecimenSidebar(QWidget):
         copy_act = menu.addAction("复制编号")
         print_act = menu.addAction("打印默认标签")
         menu.addSeparator()
-        rename_act = menu.addAction("修改编号…")
+        edit_act = menu.addAction("在右侧编辑…")
         menu.addSeparator()
         activate_act = menu.addAction("激活")
         deactivate_act = menu.addAction("去激活")
@@ -466,50 +563,12 @@ class SpecimenSidebar(QWidget):
             QApplication.clipboard().setText(uid)
         elif chosen == print_act:
             self.print_labels_requested.emit(uid)
-        elif chosen == rename_act:
-            self._on_rename_specimen_code(uid)
+        elif chosen == edit_act:
+            self.edit_current_specimen()
         elif chosen == activate_act:
             self.activate_requested.emit(uid)
         elif chosen == deactivate_act:
             self.deactivate_requested.emit(uid)
-
-    def _on_rename_specimen_code(self, uid: str) -> None:
-        """Prompt for a new specimen id segment and apply rename via the service."""
-        from app.utils.naming import parse_uid
-        parsed = parse_uid(uid)
-        current_code = (parsed or {}).get("speciesId") or ""
-        new_code, ok = QInputDialog.getText(
-            self, "修改标本编号", "新编号：", text=current_code
-        )
-        if not ok or not new_code.strip():
-            return
-
-        from app.services.specimen_rename_service import (
-            rename_specimen_code,
-            specimen_has_risky_references,
-        )
-        db = self.ctx.get_db()
-        if not db:
-            QMessageBox.critical(self, "错误", "未打开项目，无法修改编号")
-            return
-
-        if specimen_has_risky_references(db, uid):
-            reply = QMessageBox.warning(
-                self,
-                "警告",
-                f"该标本已有分组/任务记录。\n"
-                f"编号将从 {uid} 改变。\n"
-                "已生成的 TIFF/ZIP 成果文件会同步重命名。\n\n确认修改？",
-                QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
-            )
-            if reply != QMessageBox.StandardButton.Ok:
-                return
-
-        try:
-            rename_specimen_code(db, uid, new_code.strip())
-            self.refresh()
-        except ValueError as exc:
-            QMessageBox.critical(self, "错误", str(exc))
 
     def copy_current_uid(self) -> bool:
         """Copy selected UID to clipboard. Returns False when nothing selected."""
@@ -525,6 +584,14 @@ class SpecimenSidebar(QWidget):
         if not uid:
             return False
         self.print_labels_requested.emit(uid)
+        return True
+
+    def edit_current_specimen(self) -> bool:
+        """Request loading the selected specimen into the right-rail editor."""
+        uid = self.current_uid()
+        if not uid:
+            return False
+        self.edit_specimen_requested.emit(uid)
         return True
 
     # ── Collab badge helpers ──────────────────────────────────────────────────

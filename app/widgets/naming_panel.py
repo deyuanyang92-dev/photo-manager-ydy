@@ -16,6 +16,7 @@ result_id_generated(result_id: str)
 """
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Optional
 
 from PyQt6.QtCore import Qt, pyqtSignal
@@ -97,6 +98,7 @@ class NamingPanel(QWidget):
     uid_generated = pyqtSignal(str)
     result_id_generated = pyqtSignal(str)
     save_requested = pyqtSignal()
+    delete_requested = pyqtSignal(str)
     uid_corrected = pyqtSignal(str, str)  # (old_uid, new_uid) after storage correction
     open_project_settings = pyqtSignal()  # "其他… 打开项目设置" picked in 保存方式
     keys_committed = pyqtSignal()         # 地区/样地/站位/采集日期 finished editing or picked
@@ -108,6 +110,10 @@ class NamingPanel(QWidget):
         self._persisted_uid: Optional[str] = None  # UID of the currently loaded saved specimen
         self._storage_syncing = False  # re-entrancy guard between combo ↔ _storage
         self._section_visibility_cache: dict[str, bool] = {}
+        self._field_labels: dict[str, QLabel] = {}
+        self._field_label_text: dict[str, str] = {}
+        self._naming_rules_required: dict[str, bool] = {}
+        self._external_naming_values: dict[str, str] = {}
         self._setup_ui()
 
     # ── Collapse ────────────────────────────────────────────────────────────
@@ -189,6 +195,7 @@ class NamingPanel(QWidget):
             return edit
 
         def _field(label: str, widget: QWidget, *, required: bool = False,
+                   key: str = "",
                    help_text: str = "") -> QWidget:
             box = QWidget()
             box.setObjectName("CompactField")
@@ -202,11 +209,11 @@ class NamingPanel(QWidget):
             label_row.setSpacing(4)
             lbl = QLabel()
             lbl.setObjectName("CompactFieldLabel")
-            if required:
-                lbl.setText(f"{label} <span style='color:#e06a5a;'>*</span>")
-                lbl.setTextFormat(Qt.TextFormat.RichText)
-            else:
-                lbl.setText(label)
+            lbl.setTextFormat(Qt.TextFormat.RichText)
+            if key:
+                self._field_labels[key] = lbl
+                self._field_label_text[key] = label
+            self._set_required_label(lbl, label, required)
             label_row.addWidget(lbl)
             label_row.addStretch()
             lay.addLayout(label_row)
@@ -250,10 +257,13 @@ class NamingPanel(QWidget):
         geo_grid.setColumnStretch(1, 1)
         geo_grid.setColumnStretch(2, 1)
         geo_grid.addWidget(_field("地区", self._province, required=True,
+                                  key="province",
                                   help_text="地区代码，如 FJ＝福建；通常由项目自动推导"), 0, 0)
         geo_grid.addWidget(_field("样地", self._site, required=True,
+                                  key="site",
                                   help_text="样地代码，如 YGLZ；通常自动推导"), 0, 1)
         geo_grid.addWidget(_field("站位", self._station,
+                                  key="station",
                                   help_text="采集站位，如 B2；缺省时唯一编号自动少一段"), 0, 2)
         form.addWidget(self._geo_group)
 
@@ -262,14 +272,15 @@ class NamingPanel(QWidget):
         identity_grid.setColumnStretch(1, 0)
         identity_grid.setColumnStretch(2, 1)
         identity_grid.addWidget(_field("物种缩写", self._species_id, required=True,
-                                       help_text="物种拼音缩写编号，如 DLC001；用于生成唯一编号"), 0, 0)
+                                       key="species_id",
+                                       help_text="物种拼音缩写编号，如 DLC001；这是标本唯一编号的一段，不是完整 voucher number"), 0, 0)
 
         # Sequence hint + 填入建议 — inline (no popup), aligned under the field column.
         seq_cell = QWidget()
         seq_lay = QHBoxLayout(seq_cell)
         seq_lay.setContentsMargins(0, 0, 0, 0)
         seq_lay.setSpacing(8)
-        self._seq_hint_label = QLabel("输入物种缩写后显示下一个编号")
+        self._seq_hint_label = QLabel("输入物种缩写前缀后显示下一个可用编号")
         self._seq_hint_label.setObjectName("MutedSmall")
         self._seq_hint_label.setWordWrap(True)
         seq_lay.addWidget(self._seq_hint_label, stretch=1)
@@ -324,6 +335,7 @@ class NamingPanel(QWidget):
             lambda t: self._sync_combo_to_storage(t.strip())
         )
         identity_grid.addWidget(_field("保存方式", self._storage_combo, required=True,
+                                       key="storage",
                                        help_text="标本保存方式；R 前缀表示已取 RNA（RNAlater）"), 0, 2)
         # 保存方式说明灰字 + ✓已取RNA·RNAlater 徽标 (web pres-detail-row, app.js:9309)
         self._pres_detail = QLabel("")
@@ -346,9 +358,11 @@ class NamingPanel(QWidget):
         date_grid.setColumnStretch(1, 1)
         self._collection_date = _mk("采集 YYYYMMDD")
         date_grid.addWidget(_field("采集日期", self._collection_date, required=True,
+                                   key="collection_date",
                                    help_text="采集日期 YYYYMMDD —— 核心字段，写入唯一编号"), 0, 0)
         self._photo_date = _mk("拍摄 YYYYMMDD")
         date_grid.addWidget(_field("拍摄日期", self._photo_date, required=True,
+                                   key="photo_date",
                                    help_text="拍摄日期 YYYYMMDD"), 0, 1)
         form.addWidget(self._date_group)
 
@@ -383,21 +397,30 @@ class NamingPanel(QWidget):
         preview_lay.setSpacing(6)
         preview_hdr = QHBoxLayout()
         preview_hdr.setContentsMargins(0, 0, 0, 0)
-        preview_lbl = QLabel("标本唯一编号")
+        preview_lbl = QLabel("标本唯一编号 / voucher number")
         preview_lbl.setObjectName("NamingGroupTitle")
         preview_hdr.addWidget(preview_lbl)
         preview_hdr.addStretch()
         self._pin_btn = QPushButton("添加")
         self._pin_btn.setObjectName("Primary")
         self._pin_btn.setFixedHeight(26)
-        self._pin_btn.setToolTip("把当前编号保存并添加到左侧标本列表")
+        self._pin_btn.setToolTip("把当前 voucher number 保存并添加到左侧标本列表")
         icons.set_button_icon(self._pin_btn, "mdi6.pin-outline",
                               color=icons.TONE_ON_ACCENT, size=13)
         self._pin_btn.clicked.connect(self.save_requested.emit)
         preview_hdr.addWidget(self._pin_btn)
+        self._delete_btn = QPushButton("删除")
+        self._delete_btn.setObjectName("Outline")
+        self._delete_btn.setFixedHeight(26)
+        self._delete_btn.setToolTip("删除当前选中的标本编号（不删除磁盘成果文件）")
+        icons.set_button_icon(self._delete_btn, "mdi6.trash-can-outline",
+                              color=icons.TONE_DANGER, size=13)
+        self._delete_btn.clicked.connect(self._emit_delete_requested)
+        self._delete_btn.hide()
+        preview_hdr.addWidget(self._delete_btn)
         copy_uid = QToolButton()
         copy_uid.setObjectName("CompactIconButton")
-        copy_uid.setToolTip("复制唯一编号")
+        copy_uid.setToolTip("复制标本唯一编号 / voucher number")
         copy_uid.setIcon(icons.icon("mdi6.content-copy", color=icons.TONE_MUTED))
         copy_uid.clicked.connect(self._copy_uid)
         preview_hdr.addWidget(copy_uid)
@@ -425,7 +448,7 @@ class NamingPanel(QWidget):
         root.addWidget(self._rna_warning)
 
         # Duplicate-UID warning (naming-dup-warn, hidden by default)  #cursor
-        self._dup_warn = QLabel("⚠ 编号重复 — 该编号已存在")
+        self._dup_warn = QLabel("⚠ 标本唯一编号重复 — 该 voucher number 已存在")
         self._dup_warn.setObjectName("UnattributedWarning")
         self._dup_warn.setWordWrap(True)
         self._dup_warn.hide()
@@ -447,6 +470,12 @@ class NamingPanel(QWidget):
 
         # Wire all edits to live-preview
         for widget in (
+            self._province, self._site, self._station, self._species_id,
+        ):
+            widget.textChanged.connect(
+                lambda text, edit=widget: self._normalize_uppercase_edit(edit, text)
+            )
+        for widget in (
             self._province, self._site, self._station,
             self._species_id, self._storage,
             self._collection_date, self._photo_date,
@@ -459,6 +488,7 @@ class NamingPanel(QWidget):
         # editingFinished (focus-out / Enter) keeps it low-noise — no DB write here.
         for widget in (self._province, self._site, self._station, self._collection_date):
             widget.editingFinished.connect(self.keys_committed.emit)
+        self.refresh_naming_rules()
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -489,6 +519,7 @@ class NamingPanel(QWidget):
         except (ValueError, TypeError):
             self._seq.setValue(1)
         self._update_preview()
+        self._update_edit_actions()
 
     def current_uid(self) -> str:
         return self._uid_preview.text() if self._uid_preview.text() != "—" else ""
@@ -503,9 +534,21 @@ class NamingPanel(QWidget):
         else:
             self._dup_warn.hide()
 
+    def persisted_uid(self) -> str:
+        """Return the loaded saved UID, or an empty string for a new draft."""
+        return self._persisted_uid or ""
+
     def current_sequence_suggestion(self) -> str:
         """Return the currently suggested species id, e.g. ``DLC004``."""
         return str(self._seq_apply_btn.property("suggested_id") or "")
+
+    def set_external_naming_values(self, values: dict[str, str]) -> None:
+        """Provide optional fields from taxonomy/metadata cards for UID templates."""
+        self._external_naming_values = {
+            str(k): str(v or "").strip()
+            for k, v in (values or {}).items()
+        }
+        self._update_preview()
 
     # ── Collection-record keys (auto-fill source) ─────────────────────────────
 
@@ -527,8 +570,10 @@ class NamingPanel(QWidget):
         runs the auto-fill. Other fields (物种/保存方式) are untouched.
         """
         for edit, val in (
-            (self._province, province), (self._site, site),
-            (self._station, station), (self._collection_date, collection_date),
+            (self._province, str(province or "").upper()),
+            (self._site, str(site or "").upper()),
+            (self._station, str(station or "").upper()),
+            (self._collection_date, collection_date or ""),
         ):
             edit.blockSignals(True)
             edit.setText(val or "")
@@ -616,6 +661,118 @@ class NamingPanel(QWidget):
 
     # ── Internal ──────────────────────────────────────────────────────────────
 
+    def _set_required_label(self, label_widget: QLabel, text: str, required: bool) -> None:
+        if required:
+            label_widget.setText(f"{text} <span style='color:#e06a5a;'>*</span>")
+        else:
+            label_widget.setText(text)
+
+    def refresh_naming_rules(self) -> None:
+        """Reload per-project required-field rules and update label stars."""
+        self._naming_rules_required = self._load_required_rules()
+        for key, label_widget in self._field_labels.items():
+            self._set_required_label(
+                label_widget,
+                self._field_label_text.get(key, key),
+                bool(self._naming_rules_required.get(key, False)),
+            )
+        self._check_compliance(self.current_uid())
+
+    def _load_required_rules(self) -> dict[str, bool]:
+        try:
+            db = self.ctx.get_db()
+        except Exception:
+            db = None
+        try:
+            from app.services.project_settings_service import (
+                DEFAULT_NAMING_RULES,
+                load_setting,
+            )
+            defaults = DEFAULT_NAMING_RULES["required"]
+            if db is None:
+                return dict(defaults)
+            rules = load_setting(db, "naming_rules", DEFAULT_NAMING_RULES)
+            required = rules.get("required", defaults)
+            return {key: bool(required.get(key, val)) for key, val in defaults.items()}
+        except Exception:
+            return {
+                "province": True,
+                "site": True,
+                "station": False,
+                "species_id": True,
+                "storage": True,
+                "collection_date": True,
+                "photo_date": True,
+            }
+
+    def _load_component_rules(self) -> list[str]:
+        try:
+            db = self.ctx.get_db()
+        except Exception:
+            db = None
+        try:
+            from app.services.project_settings_service import (
+                DEFAULT_NAMING_RULES,
+                load_setting,
+            )
+            defaults = DEFAULT_NAMING_RULES["components"]
+            if db is None:
+                return list(defaults)
+            rules = load_setting(db, "naming_rules", DEFAULT_NAMING_RULES)
+            components = rules.get("components", defaults)
+            if not isinstance(components, list):
+                return list(defaults)
+            return [str(c) for c in components if c]
+        except Exception:
+            return ["province", "site", "station", "species_id", "storage", "date_seg"]
+
+    def _safe_uid_segment(self, value: str) -> str:
+        text = str(value or "").strip()
+        text = re.sub(r"\s+", "_", text)
+        return text.replace("-", "_")
+
+    def _component_values(self, date_seg: str) -> dict[str, str]:
+        values = {
+            "province": self._province.text().strip(),
+            "site": self._site.text().strip(),
+            "station": self._station.text().strip(),
+            "species_id": self._species_id.text().strip(),
+            "storage": self._storage.text().strip(),
+            "collection_date": self._collection_date.text().strip(),
+            "photo_date": self._photo_date.text().strip(),
+            "date_seg": date_seg,
+        }
+        values.update(self._external_naming_values)
+        return values
+
+    def _build_configured_uid(self, date_seg: str, seq: int | None = None) -> str:
+        values = self._component_values(date_seg)
+        parts: list[str] = []
+        for key in self._load_component_rules():
+            if key == "result_seq":
+                continue
+            raw_val = values.get(key, "")
+            val = str(raw_val or "").strip() if key == "date_seg" else self._safe_uid_segment(raw_val)
+            if not val:
+                continue
+            if seq is not None and key == "storage":
+                parts.append(str(seq))
+            parts.append(val)
+        if seq is not None and "storage" not in self._load_component_rules():
+            insert_at = min(4, len(parts))
+            parts.insert(insert_at, str(seq))
+        return "-".join(parts)
+
+    def _normalize_uppercase_edit(self, edit: QLineEdit, text: str) -> None:
+        upper = text.upper()
+        if text == upper:
+            return
+        cursor = edit.cursorPosition()
+        edit.blockSignals(True)
+        edit.setText(upper)
+        edit.setCursorPosition(min(cursor, len(upper)))
+        edit.blockSignals(False)
+
     def _update_preview(self) -> None:
         province = self._province.text().strip()
         site = self._site.text().strip()
@@ -628,23 +785,8 @@ class NamingPanel(QWidget):
 
         date_seg = specimen_date_seg(col_date or None, photo_date or None)
 
-        uid = build_uid(
-            province=province or None,
-            site=site or None,
-            station=station or None,
-            species_id=species_id or None,
-            storage=storage or None,
-            date_seg=date_seg or None,
-        )
-        result_id = build_result_id(
-            province=province or None,
-            site=site or None,
-            station=station or None,
-            species_id=species_id or None,
-            storage=storage or None,
-            date_seg=date_seg or None,
-            seq=seq,
-        )
+        uid = self._build_configured_uid(date_seg)
+        result_id = self._build_configured_uid(date_seg, seq=seq)
 
         self._set_preview(self._uid_preview, uid)
         self._set_preview(self._result_preview, result_id)
@@ -672,12 +814,27 @@ class NamingPanel(QWidget):
         self._update_sequence_hint(species_id)
         self._check_duplicate(uid)    # #cursor findDuplicateSpecimen
         self._check_compliance(uid)   # #cursor designComplianceCheck
+        self._update_edit_actions()
+
+    def _update_edit_actions(self) -> None:
+        editing = bool(self._persisted_uid)
+        self._pin_btn.setText("保存修改" if editing else "添加")
+        self._pin_btn.setToolTip(
+            "保存对当前编号的修改，编号变化时迁移旧编号"
+            if editing else
+            "把当前 voucher number 保存并添加到左侧标本列表"
+        )
+        self._delete_btn.setVisible(editing)
+
+    def _emit_delete_requested(self) -> None:
+        if self._persisted_uid:
+            self.delete_requested.emit(self._persisted_uid)
 
     def _update_sequence_hint(self, species_text: str) -> None:
         """Refresh the per-prefix next-number hint from the project DB."""
         suggested = ""
         if not species_text.strip():
-            self._seq_hint_label.setText("输入物种缩写后显示下一个编号")
+            self._seq_hint_label.setText("输入物种缩写前缀后显示下一个可用编号")
             self._seq_apply_btn.setEnabled(False)
             self._seq_apply_btn.setText("填入建议")
             self._seq_apply_btn.setProperty("suggested_id", "")
@@ -766,11 +923,25 @@ class NamingPanel(QWidget):
             from pathlib import Path as _Path
             project_name = _Path(owner).name if owner else "标本库"
             self._dup_warn.setText(
-                f"⚠ 编号重复 — 该唯一编号已存在（项目「{project_name}」），请修改字段后再保存"
+                f"⚠ 标本唯一编号重复 — 该 voucher number 已存在（项目「{project_name}」），请修改字段后再保存"
             )
             self._dup_warn.show()
         else:
-            self._dup_warn.hide()
+            try:
+                from app.services import specimen_catalog_service as catalog
+                hits = catalog.conflicting_uid_hits(
+                    uid,
+                    current_project_dir=getattr(self.ctx, "current_project_dir", None),
+                    current_project_root=getattr(self.ctx, "current_project_root", None),
+                    allowed_current_uid=self._persisted_uid,
+                )
+            except Exception:
+                hits = []
+            if hits:
+                self._dup_warn.setText("⚠ " + catalog.format_uid_conflict(uid, hits))
+                self._dup_warn.show()
+            else:
+                self._dup_warn.hide()
 
     def _check_compliance(self, uid: str) -> None:
         """Light 7-segment format compliance check for the live preview UID.
@@ -785,14 +956,43 @@ class NamingPanel(QWidget):
         species_id = self._species_id.text().strip()
         storage = self._storage.text().strip()
         col_date = self._collection_date.text().strip()
+        photo_date = self._photo_date.text().strip()
 
         issues: list[str] = []
+        required = self._load_required_rules()
+        self._naming_rules_required = required
+        values = {
+            "province": province,
+            "site": site,
+            "station": station,
+            "species_id": species_id,
+            "storage": storage,
+            "collection_date": col_date,
+            "photo_date": photo_date,
+        }
+        labels = {
+            "province": "地区",
+            "site": "样地",
+            "station": "站位",
+            "species_id": "物种缩写",
+            "storage": "保存方式",
+            "collection_date": "采集日期",
+            "photo_date": "拍摄日期",
+        }
 
         # Only check when the user has started filling in fields
-        any_filled = any([province, site, station, species_id, storage, col_date])
+        any_filled = any([province, site, station, species_id, storage, col_date, photo_date])
         if not any_filled:
             self._compliance_warn.hide()
             return
+
+        missing = [
+            labels[key]
+            for key, is_required in required.items()
+            if is_required and not values.get(key)
+        ]
+        if missing:
+            issues.append("缺少必填：" + "、".join(missing))
 
         if province and not province.isalpha():
             issues.append("地区应为字母（如 FJ）")

@@ -1160,6 +1160,26 @@ QToolButton#CrumbArrow:hover {{
 QToolButton#CrumbArrow:disabled {{
     color: {t["muted_dim"]};
 }}
+QToolButton#WorkspaceMenuButton,
+QToolButton#WorkspaceFolderButton {{
+    background-color: {t["modal_surface"]};
+    border: 1px solid {t["border"]};
+    border-radius: {t["radius_sm"]};
+    padding: 0;
+    color: {t["muted"]};
+    font-size: {t["font_sm"]};
+    font-weight: 700;
+}}
+QToolButton#WorkspaceMenuButton:hover,
+QToolButton#WorkspaceFolderButton:hover {{
+    color: {t["accent"]};
+    border-color: {t["accent"]};
+    background-color: {t["accent_softer"]};
+}}
+QToolButton#WorkspaceFolderButton::menu-button {{
+    border: none;
+    width: 0;
+}}
 QLabel#ActiveBadgeOn {{
     background: {accent_grad};
     color: {t["bg"]};
@@ -1664,20 +1684,40 @@ QFrame#SpecimenRow {{
     background-color: {t["panel"]};
     border: 1px solid {t["border"]};
     border-radius: {t["radius_sm"]};
+    margin: 1px 0;
+}}
+QFrame#SpecimenRowActive {{
+    background-color: {t["accent_soft"]};
+    border: 1px solid {t["accent_glow"]};
+    border-left: 4px solid {t["accent"]};
+    border-radius: {t["radius_sm"]};
+    margin: 1px 0;
 }}
 QFrame#SpecimenRow:hover {{
     background-color: {t["modal_surface"]};
     border-color: {t["accent_glow"]};
 }}
+QFrame#SpecimenRowActive:hover {{
+    background-color: {t["nav_selected_bg"]};
+    border-color: {t["accent_glow"]};
+    border-left: 4px solid {t["accent"]};
+}}
 QLabel#SpecimenUid {{
     font-family: {mono};
     color: {t["text"]};
-    font-size: {t["font_sm"]};
+    font-size: {t["font_body"]};
     font-weight: 700;
+    letter-spacing: 0;
 }}
 QLabel#SpecimenSubtext {{
-    color: {t["muted_dim"]};
-    font-size: {t["font_xs"]};
+    color: {t["muted"]};
+    font-size: {t["font_sm"]};
+    font-weight: 500;
+}}
+QLabel#SpecimenMissingText {{
+    color: {t["muted"]};
+    font-size: {t["font_sm"]};
+    font-weight: 600;
 }}
 QLabel#SpecimenBadge {{
     color: {t["accent_hover"]};
@@ -1687,6 +1727,14 @@ QLabel#SpecimenBadge {{
     padding: 1px 7px;
     font-size: {t["font_xs"]};
     font-weight: 600;
+}}
+QLabel#SpecimenActivePill {{
+    color: {t["bg"]};
+    background-color: {t["accent"]};
+    border-radius: {t["radius_pill"]};
+    padding: 2px 8px;
+    font-size: {t["font_xs"]};
+    font-weight: 700;
 }}
 
 /* ── Generic list ────────────────────────────────────────────────── */

@@ -248,6 +248,61 @@ def record_recent_workspace(
     return projects
 
 
+def save_project_descriptor(
+    user_projects_json_path: str,
+    project: dict,
+    root: Optional[str] = None,
+    existing_projects: Optional[list[dict]] = None,
+) -> list:
+    """Upsert a full project descriptor into ``user_projects.json``.
+
+    ``record_recent_workspace`` is intentionally path-first for tree nodes. New
+    project creation already has richer metadata (name, projectCode, location,
+    collector, year, dateRange); this helper keeps those fields instead of
+    reducing the project to only a recent path.
+    """
+    raw_dir = project.get("directory") or project.get("dir") or ""
+    if not raw_dir:
+        return list_projects(user_projects_json_path)
+
+    resolved = str(Path(raw_dir).resolve())
+    entry = dict(project)
+    has_explicit_id = bool(entry.get("id"))
+    entry["directory"] = resolved
+    entry["dir"] = resolved
+    entry.setdefault("name", _workspace_display_name(resolved, root))
+    if root:
+        entry["root"] = str(Path(root).resolve())
+
+    projects = (
+        list(existing_projects)
+        if existing_projects is not None
+        else list_projects(user_projects_json_path)
+    )
+    for idx, existing in enumerate(projects):
+        existing_dir = existing.get("directory") or existing.get("dir") or ""
+        if existing_dir and str(Path(existing_dir).resolve()) == resolved:
+            merged = dict(existing)
+            if not has_explicit_id:
+                entry.pop("id", None)
+            merged.update({k: v for k, v in entry.items() if v is not None})
+            merged["directory"] = resolved
+            merged["dir"] = resolved
+            projects[idx] = merged
+            break
+    else:
+        entry.setdefault("id", str(uuid.uuid4()))
+        projects.append(entry)
+
+    out = Path(user_projects_json_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(
+        json.dumps({"version": 1, "projects": projects}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return projects
+
+
 def enter_workspace(
     ctx,
     path: str,

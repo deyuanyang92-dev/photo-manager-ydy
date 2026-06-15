@@ -174,8 +174,8 @@ class TestAddProject:
         monkeypatch.setattr("app.views.project_dialog.ProjectDialog", _FakeDialog)
         monkeypatch.setattr("app.views.overview_view._load_projects", lambda: [])
         monkeypatch.setattr(
-            "app.views.overview_view._save_projects",
-            lambda projs: saved.setdefault("projects", projs),
+            "app.services.project_service.save_project_descriptor",
+            lambda _path, proj, **_kw: saved.setdefault("project", proj),
         )
         # _populate_projects 重建列表时读注册表 → 让它看到新项目
         monkeypatch.setattr(
@@ -190,7 +190,7 @@ class TestAddProject:
         assert _FakeDialog.last_kwargs is not None
         assert _FakeDialog.last_kwargs.get("mode") == "new"
         # 2. 持久化到注册表
-        assert saved.get("projects") == [new_proj]
+        assert saved.get("project") == new_proj
         # 3. 选中新项目（停留在地图）
         assert v._project_filter == new_dir
         assert v.ctx.current_project_dir == new_dir

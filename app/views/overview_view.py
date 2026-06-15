@@ -1,9 +1,9 @@
-"""overview_view.py — 项目总览: project list with enter/detail actions.
+"""overview_view.py — 最近使用: recent photo workspace list.
 
-Faithfully mirrors the real web「项目总览」page:
+Faithfully mirrors the real web project list while presenting it as recent use:
 
   overview-header-actions
-    h2 "项目总览"  [+ 新建项目]  [+ 打开工作区]
+    h2 "最近使用"  [+ 新建工作区]  [+ 打开文件夹]
 
   photo-toolbar (time filter)
     "时间筛选"  [全部]  [<year> …]  (dynamic, derived from actual project years)
@@ -627,14 +627,14 @@ class _ProjectDetailDialog(QDialog):
         layout.addWidget(splitter)
 
 
-# ── New-project dialog ─────────────────────────────────────────────────────────
+# ── New-workspace dialog ───────────────────────────────────────────────────────
 
 class _NewProjectDialog(QDialog):
-    """Minimal 「新建项目」modal — mirrors the web new-project modal fields."""
+    """Minimal new-workspace modal — mirrors the web fields."""
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("新建项目")
+        self.setWindowTitle("新建工作区")
         self.setMinimumWidth(480)
 
         from PyQt6.QtWidgets import QLineEdit, QFormLayout
@@ -644,7 +644,7 @@ class _NewProjectDialog(QDialog):
 
         self._name_edit = QLineEdit()
         self._name_edit.setPlaceholderText("例如：厦门潮间带多毛类调查")
-        self._form.addRow("项目名称：", self._name_edit)
+        self._form.addRow("工作区名称：", self._name_edit)
 
         self._dir_edit = QLineEdit()
         self._dir_edit.setPlaceholderText("选择或输入磁盘目录")
@@ -678,7 +678,7 @@ class _NewProjectDialog(QDialog):
         root.addWidget(btns)
 
     def _browse(self) -> None:
-        path = QFileDialog.getExistingDirectory(self, "选择项目目录")
+        path = QFileDialog.getExistingDirectory(self, "选择文件夹")
         if path:
             self._dir_edit.setText(path)
             if not self._name_edit.text():
@@ -688,7 +688,7 @@ class _NewProjectDialog(QDialog):
         name = self._name_edit.text().strip()
         directory = self._dir_edit.text().strip()
         if not directory:
-            QMessageBox.warning(self, "新建项目", "请选择磁盘目录。")
+            QMessageBox.warning(self, "新建工作区", "请选择磁盘目录。")
             return
         if not name:
             name = Path(directory).name
@@ -709,10 +709,10 @@ class _NewProjectDialog(QDialog):
 # ── Main overview view ─────────────────────────────────────────────────────────
 
 class OverviewView(BaseView):
-    """项目总览 — project list with enter-workspace / detail actions.
+    """最近使用 — workspace list with enter/detail actions.
 
     Mirrors app.js:13856-13943 (renderOverview project-list branch):
-      overview-header-actions:  h2 + [+ 新建项目] + [+ 打开工作区]
+      overview-header-actions:  h2 + [+ 新建工作区] + [+ 打开文件夹]
       photo-toolbar:            时间筛选 + 全部 / <year…>  (dynamic)
       specimen-table-wrap:      specimen-table columns
         项目名称 / 磁盘目录 / 时间 / 地点 / 负责人 / 操作
@@ -730,7 +730,7 @@ class OverviewView(BaseView):
     """
 
     view_id = "overview"
-    nav_title = "最近工作区"
+    nav_title = "最近使用"
     nav_icon = "📊"
 
     # Emitted when user clicks 「进入工作区」; carries the project directory.
@@ -772,9 +772,9 @@ class OverviewView(BaseView):
         header_row.setSpacing(12)
         header_row.setContentsMargins(0, 0, 0, 20)
 
-        self._title_lbl = QLabel("最近工作区")
+        self._title_lbl = QLabel("最近使用")
         self._title_lbl.setObjectName("Title")
-        self._title_lbl.setToolTip("最近进过的拍照工作区（如 雷州岛 / 断面a），不是大项目列表。在「项目树」里浏览整次调查。")
+        self._title_lbl.setToolTip("最近打开过的拍照文件夹；完整目录树可在「项目树」里浏览。")
         # serif font + 28px — mirrors .overview-header h2
         self._title_lbl.setStyleSheet(
             'font-family: "Noto Serif SC","Source Han Serif SC",SimSun,Georgia,serif;'
@@ -783,13 +783,13 @@ class OverviewView(BaseView):
         header_row.addWidget(self._title_lbl)
         header_row.addStretch()
 
-        self._btn_new = QPushButton("+ 新建项目")
+        self._btn_new = QPushButton("+ 新建工作区")
         self._btn_new.setObjectName("Primary")
         self._btn_new.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_new.clicked.connect(self._on_new_project)
         header_row.addWidget(self._btn_new)
 
-        self._btn_open = QPushButton("+ 打开工作区")
+        self._btn_open = QPushButton("+ 打开文件夹")
         self._btn_open.setObjectName("Outline")
         self._btn_open.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_open.clicked.connect(self._on_open_workspace)
@@ -1148,8 +1148,12 @@ class OverviewView(BaseView):
         dlg.exec()
 
     def _on_new_project(self) -> None:
-        """Open 「新建项目」 modal (ProjectDialog) and persist the new project."""
+        """Open new-workspace modal and persist the workspace."""
         from app.views.project_dialog import ProjectDialog
+        from app.services.project_service import (
+            default_user_projects_json_path,
+            save_project_descriptor,
+        )
         existing = _load_projects()
         dlg = ProjectDialog(mode="new", existing_projects=existing, parent=self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
@@ -1158,11 +1162,11 @@ class OverviewView(BaseView):
         if not proj:
             return
         try:
-            all_projects = _load_projects()
-            existing_dirs = {p.get("directory") or p.get("dir") for p in all_projects}
-            if proj.get("directory") not in existing_dirs:
-                all_projects.append(proj)
-                _save_projects(all_projects)
+            save_project_descriptor(
+                default_user_projects_json_path(),
+                proj,
+                existing_projects=existing,
+            )
             self._load_projects()
             # Activate new project in context and navigate to workbench
             main_win = self.window()
@@ -1173,11 +1177,15 @@ class OverviewView(BaseView):
             if hasattr(main_win, "refresh_context_bar"):
                 main_win.refresh_context_bar()
         except Exception as exc:
-            QMessageBox.critical(self, "新建项目失败", str(exc))
+            QMessageBox.critical(self, "新建工作区失败", str(exc))
 
     def _on_open_workspace(self) -> None:
-        """Open 「打开工作区」 modal (ProjectDialog) and register the project."""
+        """Open folder picker modal and register the workspace."""
         from app.views.project_dialog import ProjectDialog
+        from app.services.project_service import (
+            default_user_projects_json_path,
+            save_project_descriptor,
+        )
         existing = _load_projects()
         dlg = ProjectDialog(mode="open", existing_projects=existing, parent=self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
@@ -1186,11 +1194,11 @@ class OverviewView(BaseView):
         if not proj:
             return
         try:
-            all_projects = _load_projects()
-            existing_dirs = {p.get("directory") or p.get("dir") for p in all_projects}
-            if proj.get("directory") not in existing_dirs:
-                all_projects.append(proj)
-                _save_projects(all_projects)
+            save_project_descriptor(
+                default_user_projects_json_path(),
+                proj,
+                existing_projects=existing,
+            )
             self._load_projects()
             # Activate project and navigate to workbench
             main_win = self.window()
@@ -1201,7 +1209,7 @@ class OverviewView(BaseView):
             if hasattr(main_win, "refresh_context_bar"):
                 main_win.refresh_context_bar()
         except Exception as exc:
-            QMessageBox.critical(self, "打开工作区失败", str(exc))
+            QMessageBox.critical(self, "打开文件夹失败", str(exc))
 
     # ── Font helpers ───────────────────────────────────────────────────────────
 

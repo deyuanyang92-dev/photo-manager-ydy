@@ -1,15 +1,16 @@
 """workspace_breadcrumb.py — 顶栏工作区路径条（OM 风格）.
 
 显示「根 / 断面A / ◀ 📁 B2 ▾ ▶」：
-  - 祖先段可点 → 跳项目树页（远跳/换断面走树）。
-  - 叶子下拉  → 同级站位菜单（📷 = 已是工作区）+ 末尾「+ 新建断面…」
-                （在当前工作区父目录下建新同级目录并进入，名字预填 YYYYMMDD(）。
+  - 祖先段可点 → 跳项目树页（远跳走树）。
+  - 叶子下拉  → 当前工作区 / 同目录文件夹 / 最近使用 / 新建文件夹分组。
+                同目录文件夹菜单中 📷 = 已是工作区；新建在当前工作区父目录下建
+                新文件夹并进入，名字预填 YYYYMMDD(。
   - ◀ ▶      → 访问历史后退/前进（浏览器式）—— 野外跨断面来回。
                 走 project_service.enter_workspace（与项目树同一统一入口，含盘未挂载
                 守护），首/末端禁用对应箭头，不回绕；中途回退后再切新工作区 → 截断前向分支。
 
-同级 = 同父目录下的子目录，过滤点号目录与 RESERVED_DIR_NAMES（工作区内部结构）。
-同级步进已退役：切同级走 ▾ 下拉点选。根即工作区（chain==1）只要有历史也能 ◀▶。
+同目录 = 同父目录下的子目录，过滤点号目录与 RESERVED_DIR_NAMES（工作区内部结构）。
+同目录切换走 ▾ 下拉点选。根即工作区（chain==1）只要有历史也能 ◀▶。
 """
 from __future__ import annotations
 
@@ -18,7 +19,7 @@ import os
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import QSize, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QHBoxLayout,
     QInputDialog,
@@ -36,7 +37,7 @@ from app.services.project_tree_service import RESERVED_DIR_NAMES
 # >3 级时折叠中间层为 「…」，保持顶栏一行放得下：根 / … / 父 / 叶
 _MAX_SEGMENTS = 3
 
-# 新建断面名字禁含的字符（与 project_tree_view._new_subfolder 一致）
+# 新建文件夹名字禁含的字符（与 project_tree_view._new_subfolder 一致）
 _BAD_NAME_CHARS = ("/", "\\", "..")
 
 
@@ -90,10 +91,12 @@ def sibling_dirs(workspace: str) -> List[str]:
 
 
 class WorkspaceBreadcrumb(QWidget):
-    """顶栏路径条：父链可见 + 📁 叶子 + ◀▶ 访问历史 + ▾ 同级/新建断面."""
+    """顶栏路径条：父链可见 + 📁 叶子 + ◀▶ 访问历史 + ▾ 同目录/新建文件夹."""
 
     workspace_changed = pyqtSignal(str)   # 切换成功后的新工作区路径
     navigate_requested = pyqtSignal(str)  # 远跳目标 view_id
+    new_workspace_requested = pyqtSignal()
+    open_workspace_requested = pyqtSignal()
 
     def __init__(self, ctx, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -108,6 +111,8 @@ class WorkspaceBreadcrumb(QWidget):
         self._leaf_btn: Optional[QPushButton] = None
         self._btn_prev: Optional[QToolButton] = None
         self._btn_next: Optional[QToolButton] = None
+        self._btn_menu: Optional[QToolButton] = None
+        self._btn_folder: Optional[QToolButton] = None
         self._siblings: List[str] = []
         self._sib_index: int = -1
         self._collapsed = False
@@ -166,6 +171,8 @@ class WorkspaceBreadcrumb(QWidget):
         self._leaf_btn = None
         self._btn_prev = None
         self._btn_next = None
+        self._btn_menu = None
+        self._btn_folder = None
         self._collapsed = False
 
     def refresh(self) -> None:
@@ -193,6 +200,7 @@ class WorkspaceBreadcrumb(QWidget):
         btn.clicked.connect(lambda: self.navigate_requested.emit("overview"))
         self._lay.addWidget(btn)
         self._placeholder_btn = btn
+        self._add_workspace_folder_button()
 
     def _build_chain(self, chain: List[Tuple[str, str]]) -> None:
         # 折叠：根 / … / 父 / 叶（中间层只在项目树里看）
@@ -237,10 +245,12 @@ class WorkspaceBreadcrumb(QWidget):
         self._lay.addWidget(prev_btn)
         self._btn_prev = prev_btn
 
-        leaf = QPushButton(f"📁 {leaf_name} ▾")
+        leaf = QPushButton(leaf_name)
         leaf.setObjectName("CrumbLeaf")
-        leaf.setToolTip(leaf_path + "\n" + tr("点击列出同级站位 / 新建断面"))
+        leaf.setToolTip(leaf_path + "\n" + tr("点击切换同目录文件夹或新建文件夹"))
         leaf.setCursor(Qt.CursorShape.PointingHandCursor)
+        icons.set_button_icon(leaf, "mdi6.folder-outline",
+                              color=icons.TONE_MUTED, size=15)
         _fnt = leaf.font()
         _fnt.setBold(True)
         leaf.setFont(_fnt)
@@ -257,9 +267,51 @@ class WorkspaceBreadcrumb(QWidget):
         self._lay.addWidget(next_btn)
         self._btn_next = next_btn
 
+        menu_btn = QToolButton()
+        menu_btn.setObjectName("WorkspaceMenuButton")
+        menu_btn.setText("▾")
+        menu_btn.setFixedSize(30, 30)
+        menu_btn.setToolTip(tr("同目录文件夹和最近使用"))
+        menu_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        menu_btn.clicked.connect(self._show_sibling_menu)
+        self._lay.addWidget(menu_btn)
+        self._btn_menu = menu_btn
+
+        self._add_workspace_folder_button()
+
         # ◀▶ 由访问历史驱动（非同级）；根即工作区只要有历史也能走
         prev_btn.setEnabled(self._history_pos > 0)
         next_btn.setEnabled(0 <= self._history_pos < len(self._history) - 1)
+
+    def _add_workspace_folder_button(self) -> None:
+        folder_btn = QToolButton()
+        folder_btn.setObjectName("WorkspaceFolderButton")
+        folder_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        folder_btn.setFixedSize(34, 30)
+        folder_btn.setAccessibleName(tr("打开/新建工作区"))
+        folder_btn.setToolTip(tr("打开已有文件夹，或新建一个拍照工作区"))
+        folder_btn.setIcon(
+            icons.icon("mdi6.folder-open-outline", color=icons.TONE_MUTED,
+                       color_active=icons.TONE_ACCENT_HOVER)
+        )
+        folder_btn.setIconSize(QSize(17, 17))
+        folder_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        folder_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        folder_menu = QMenu(folder_btn)
+        folder_menu.setObjectName("WorkspaceFolderMenu")
+        new_act = folder_menu.addAction(
+            icons.icon("mdi6.plus", color=icons.TONE_MUTED),
+            tr("新建工作区…"),
+        )
+        new_act.triggered.connect(lambda _=False: self.new_workspace_requested.emit())
+        open_act = folder_menu.addAction(
+            icons.icon("mdi6.folder-open-outline", color=icons.TONE_MUTED),
+            tr("打开文件夹…"),
+        )
+        open_act.triggered.connect(lambda _=False: self.open_workspace_requested.emit())
+        folder_btn.setMenu(folder_menu)
+        self._lay.addWidget(folder_btn)
+        self._btn_folder = folder_btn
 
     # ── 切换 ─────────────────────────────────────────────────────────────
 
@@ -286,7 +338,7 @@ class WorkspaceBreadcrumb(QWidget):
         return resolved
 
     def _switch_to(self, path: str) -> None:
-        """切到指定工作区（下拉点选 / 新建断面 / 外部）→ 记入访问历史."""
+        """切到指定工作区（下拉点选 / 新建文件夹 / 外部）→ 记入访问历史."""
         cur = getattr(self._ctx, "current_project_dir", None)
         if cur and str(Path(cur).resolve()) == str(Path(path).resolve()):
             return
@@ -298,7 +350,7 @@ class WorkspaceBreadcrumb(QWidget):
         self.workspace_changed.emit(resolved)
 
     def _switch_to_recent(self, path: str, root: Optional[str]) -> None:
-        """切到最近工作区；历史记录携带 root，跨调查区域时必须恢复它."""
+        """切到最近使用的工作区；历史记录携带 root，跨调查区域时必须恢复它."""
         cur = getattr(self._ctx, "current_project_dir", None)
         if cur and str(Path(cur).resolve()) == str(Path(path).resolve()):
             return
@@ -327,26 +379,39 @@ class WorkspaceBreadcrumb(QWidget):
         self.refresh()
         self.workspace_changed.emit(resolved)
 
-    # ── ▾ 同级菜单 + 新建断面 ────────────────────────────────────────────
+    # ── ▾ 同目录菜单 + 新建文件夹 ────────────────────────────────────────
+
+    def _current_workspace_name(self) -> str:
+        ws = getattr(self._ctx, "current_project_dir", None)
+        return Path(ws).name if ws else ""
 
     def _build_sibling_menu(self) -> QMenu:
         menu = QMenu(self)
+        cur_name = self._current_workspace_name()
+        if cur_name:
+            cur = menu.addAction(f"当前：{cur_name}")
+            cur.setEnabled(False)
+            menu.addSeparator()
+        self._add_siblings_menu(menu)
+        self._add_recent_menu(menu)
+        menu.addSeparator()
+        new_act = menu.addAction(f"➕ {tr('新建文件夹…')}")
+        new_act.triggered.connect(self._on_new_section)
+        return menu
+
+    def _add_siblings_menu(self, menu: QMenu) -> None:
         from app.services.project_tree_service import is_workspace
+        sib_menu = menu.addMenu("同目录文件夹")
+        sib_menu.setEnabled(bool(self._siblings))
         for path in self._siblings:
             name = os.path.basename(path)
             label = f"📷 {name}" if is_workspace(path) else f"📁 {name}"
-            act = menu.addAction(label)
+            act = sib_menu.addAction(label)
             act.setCheckable(True)
             act.setChecked(path == self._siblings[self._sib_index]
                            if self._sib_index >= 0 else False)
             act.triggered.connect(
                 lambda _=False, p=path: self._switch_to(p))
-        menu.addSeparator()
-        self._add_recent_menu(menu)
-        menu.addSeparator()
-        new_act = menu.addAction(f"➕ {tr('新建断面…')}")
-        new_act.triggered.connect(self._on_new_section)
-        return menu
 
     def _recent_workspaces(self, limit: int = 10) -> list[dict]:
         from app.services import project_service
@@ -376,16 +441,25 @@ class WorkspaceBreadcrumb(QWidget):
 
     def _add_recent_menu(self, menu: QMenu) -> None:
         recent = self._recent_workspaces()
-        recent_menu = menu.addMenu("最近工作区")
+        recent_menu = menu.addMenu("最近使用")
         recent_menu.setEnabled(bool(recent))
         for item in recent:
-            label = f"🕘 {item['name']}"
+            label = f"🕘 {self._recent_label(item)}"
             act = recent_menu.addAction(label)
             act.setToolTip(item["directory"])
             act.triggered.connect(
                 lambda _=False, p=item["directory"], r=item.get("root"):
                 self._switch_to_recent(p, r)
             )
+
+    @staticmethod
+    def _recent_label(item: dict) -> str:
+        name = str(item.get("name") or "")
+        directory = str(item.get("directory") or "")
+        if "/" in name or "\\" in name:
+            return name
+        parent = Path(directory).parent.name if directory else ""
+        return f"{parent} / {name}" if parent else name
 
     def _show_sibling_menu(self) -> None:
         if self._leaf_btn is None:
@@ -395,7 +469,7 @@ class WorkspaceBreadcrumb(QWidget):
             self._leaf_btn.rect().bottomLeft()))
 
     def _new_section_parent(self) -> Optional[Path]:
-        """新建断面的父目录 = 当前工作区的父目录（= 新同级）."""
+        """新建文件夹的父目录 = 当前工作区的父目录."""
         ws = getattr(self._ctx, "current_project_dir", None)
         if not ws:
             return None
@@ -409,7 +483,7 @@ class WorkspaceBreadcrumb(QWidget):
         if self._new_section_parent() is None:
             return
         name, ok = QInputDialog.getText(
-            self, tr("新建断面"),
+            self, tr("新建文件夹"),
             tr("文件夹名（如 20260612(草埔村)）："),
             text=self._default_section_name(),
         )
@@ -419,7 +493,7 @@ class WorkspaceBreadcrumb(QWidget):
         self.create_and_enter_section(name)
 
     def create_and_enter_section(self, name: str) -> Optional[str]:
-        """在当前工作区父目录下建新同级目录并进入。名字非法/无法建 → 返回 None."""
+        """在当前工作区父目录下建新文件夹并进入。名字非法/无法建 → 返回 None."""
         name = (name or "").strip()
         if not name or any(c in name for c in _BAD_NAME_CHARS):
             return None
@@ -431,7 +505,7 @@ class WorkspaceBreadcrumb(QWidget):
             target.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
             from app.utils import ui
-            ui.warn(self, tr("新建断面"), tr("无法创建：") + f" {exc}")
+            ui.warn(self, tr("新建文件夹"), tr("无法创建：") + f" {exc}")
             return None
         self._switch_to(str(target))
         return str(target.resolve()) if target.exists() else None

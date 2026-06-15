@@ -131,7 +131,7 @@ def test_function_menu_groups_all_registered_views():
     project_menu = win._nav_group_menus["project"]
     assert [a.text() for a in project_menu.actions()] == [
         "照片工作区",
-        "最近工作区",
+        "最近使用",
         "项目树",
         "项目汇总",
     ]
@@ -141,6 +141,17 @@ def test_function_menu_groups_all_registered_views():
         "采集地图",
         "截图",
     ]
+
+
+def test_workspace_actions_are_integrated_into_breadcrumb():
+    win = _fresh_window()
+    folder_btn = win._project_switcher._btn_folder
+    actions = [a.text() for a in folder_btn.menu().actions()]
+
+    assert not hasattr(win, "_project_actions_btn")
+    assert folder_btn.objectName() == "WorkspaceFolderButton"
+    assert folder_btn.accessibleName() == "打开/新建工作区"
+    assert actions == ["新建工作区…", "打开文件夹…"]
 
 
 def test_nav_pin_menu_toggles_topbar_segments():

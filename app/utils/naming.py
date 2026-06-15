@@ -57,7 +57,7 @@ def derive_uid(sp: dict) -> str:
         sp.get("storage"),
         date_seg,
     ]
-    return "-".join(str(p) for p in parts if p)
+    return normalize_uid("-".join(str(p) for p in parts if p))
 
 
 @dataclass(frozen=True)
@@ -78,6 +78,16 @@ class SpeciesSequenceSummary:
 
 
 _SPECIES_CODE_RE = re.compile(r"^\s*([A-Za-z]+)(\d*)\s*$")
+
+
+def normalize_uid(value: Optional[str]) -> str:
+    """Return the canonical UID spelling used by UI/storage paths.
+
+    UID segments are codes, not prose. Uppercasing the complete UID keeps
+    province/site/station/species/storage consistent while leaving digits and
+    Chinese text unchanged.
+    """
+    return str(value or "").strip().upper()
 
 
 def species_code_parts(value: Optional[str]) -> tuple[str, Optional[int], int]:
@@ -309,7 +319,7 @@ def build_uid(
     Missing / falsy fields are omitted (no double-dash).
     """
     parts = [province, site, station, species_id, storage, date_seg]
-    return "-".join(str(p) for p in parts if p)
+    return normalize_uid("-".join(str(p) for p in parts if p))
 
 
 def build_result_id(
@@ -327,7 +337,7 @@ def build_result_id(
     Format: province-site-station-speciesId-seq-storage-dateSeg
     """
     parts = [province, site, station, species_id, str(seq), storage, date_seg]
-    return "-".join(str(p) for p in parts if p)
+    return normalize_uid("-".join(str(p) for p in parts if p))
 
 
 def extract_unique_id(result_id: str) -> str:

@@ -391,7 +391,12 @@ class ProjectTreeView(BaseView):
         if not directory:
             return
         try:
-            from app.services.project_service import seed_region_settings
+            from app.services.project_service import (
+                default_user_projects_json_path,
+                save_project_descriptor,
+                seed_region_settings,
+            )
+            from app.views.overview_view import _load_projects
             seed_region_settings(
                 directory,
                 collector=proj.get("collector", ""),
@@ -402,6 +407,11 @@ class ProjectTreeView(BaseView):
                     "date_range": proj.get("dateRange", ""),
                     "project_code": proj.get("projectCode", ""),
                 },
+            )
+            save_project_descriptor(
+                default_user_projects_json_path(),
+                proj,
+                existing_projects=_load_projects(),
             )
         except Exception as exc:  # pragma: no cover - defensive
             ui.warn(self, "新建调查区域", f"创建失败：{exc}")

@@ -12,7 +12,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from PyQt6.QtWidgets import QApplication, QPushButton
+from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import QApplication, QLabel, QPushButton
 
 from app.db import db_manager
 from app.services import activation_service
@@ -103,6 +104,29 @@ def test_dot_click_does_not_self_persist(ctx, db):
     assert activation_service.get_collab_status(db, "U-4") is None
 
 
+def test_edit_request_only_emits_uid(ctx, db):
+    """Left sidebar edit entry delegates to the right rail; it must not save."""
+    _add_specimen(db, "U-EDIT", "Marphysa sp.")
+    sb = SpecimenSidebar(ctx)
+    sb.refresh()
+    sb.select_uid("U-EDIT")
+    seen = []
+    sb.edit_specimen_requested.connect(seen.append)
+
+    assert sb.edit_current_specimen() is True
+
+    assert seen == ["U-EDIT"]
+    assert db.execute(
+        "SELECT uid FROM specimens WHERE uid = ?",
+        ("U-EDIT",),
+    ).fetchone()
+
+
+def test_edit_current_specimen_returns_false_without_selection(ctx, db):
+    sb = SpecimenSidebar(ctx)
+    assert sb.edit_current_specimen() is False
+
+
 def test_refresh_phases_resyncs_after_external_change(ctx, db):
     _add_specimen(db, "U-5")
     sb = SpecimenSidebar(ctx)
@@ -112,3 +136,45 @@ def test_refresh_phases_resyncs_after_external_change(ctx, db):
     activation_service.set_collab_status(db, "U-5", "shot_done")
     sb.refresh_phases()
     assert _dots(sb, "U-5")["shot_done"].isChecked() is True
+
+
+def test_refresh_canonicalizes_lowercase_uid_and_references(ctx, db):
+    _add_specimen(db, "fj-d-f-dd001")
+    db.execute(
+        "INSERT INTO tasks(uid, is_active) VALUES(?, 1)",
+        ("fj-d-f-dd001",),
+    )
+    db.commit()
+
+    sb = SpecimenSidebar(ctx)
+    sb.refresh()
+
+    assert db.execute(
+        "SELECT 1 FROM specimens WHERE uid = ?",
+        ("FJ-D-F-DD001",),
+    ).fetchone()
+    assert db.execute(
+        "SELECT 1 FROM tasks WHERE uid = ? AND is_active = 1",
+        ("FJ-D-F-DD001",),
+    ).fetchone()
+    assert sb._list.item(0).data(Qt.ItemDataRole.UserRole) == "FJ-D-F-DD001"
+
+
+def test_active_specimen_row_has_active_style_and_badge(ctx, db):
+    _add_specimen(db, "FJ-D-F-DD001")
+    db.execute(
+        "INSERT INTO tasks(uid, is_active) VALUES(?, 1)",
+        ("FJ-D-F-DD001",),
+    )
+    db.commit()
+
+    sb = SpecimenSidebar(ctx)
+    sb.refresh()
+
+    row = sb._list.itemWidget(sb._list.item(0))
+    assert row.objectName() == "SpecimenRowActive"
+    badges = [
+        w for w in row.findChildren(QLabel)
+        if w.objectName() == "SpecimenActivePill"
+    ]
+    assert badges and badges[0].text() == "拍摄中"

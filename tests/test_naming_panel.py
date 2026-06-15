@@ -216,3 +216,92 @@ def test_required_fields_marked(panel):
     station = [l for l in labels if "站位" in l.text()]
     assert station, "站位 field label not found"
     assert "*" not in station[0].text(), "站位 should stay optional (no *)"
+
+
+def test_uid_code_fields_auto_uppercase(panel):
+    """地区/样地/站位/物种缩写输入小写时，控件和 UID 预览都自动转大写。"""
+    panel._province.setText("fj")
+    panel._site.setText("d")
+    panel._station.setText("f")
+    panel._species_id.setText("dd001")
+    panel._storage.setText("T95E")
+    panel._collection_date.setText("20260612")
+    panel._photo_date.setText("20260613")
+
+    assert panel._province.text() == "FJ"
+    assert panel._site.text() == "D"
+    assert panel._station.text() == "F"
+    assert panel._species_id.text() == "DD001"
+    assert panel.current_uid() == "FJ-D-F-DD001-T95E-20260612-0613"
+
+
+def test_project_naming_rules_control_required_stars_and_warning(qapp):
+    import sqlite3
+    from app.db.db_manager import ensure_schema
+    from app.services.project_settings_service import DEFAULT_NAMING_RULES, save_setting
+    from app.widgets.naming_panel import NamingPanel
+
+    db = sqlite3.connect(":memory:")
+    ensure_schema(db)
+    rules = dict(DEFAULT_NAMING_RULES)
+    rules["required"] = dict(DEFAULT_NAMING_RULES["required"])
+    rules["required"]["station"] = True
+    rules["required"]["photo_date"] = False
+    save_setting(db, "naming_rules", rules)
+
+    ctx = MagicMock()
+    ctx.get_db.return_value = db
+    p = NamingPanel(ctx)
+    p.show()
+    try:
+        labels = _labels_with_name(p, "CompactFieldLabel")
+        station = [l for l in labels if "站位" in l.text()][0]
+        photo_date = [l for l in labels if "拍摄日期" in l.text()][0]
+        assert "*" in station.text()
+        assert "*" not in photo_date.text()
+
+        p._province.setText("FJ")
+        p._site.setText("SMW")
+        p._species_id.setText("DD001")
+        p._storage.setText("T95E")
+        p._collection_date.setText("20260612")
+        qapp.processEvents()
+        assert p._compliance_warn.isVisible()
+        assert "缺少必填：站位" in p._compliance_warn.text()
+    finally:
+        p.close()
+        db.close()
+
+
+def test_project_naming_components_can_include_taxonomy_and_notes(qapp):
+    import sqlite3
+    from app.db.db_manager import ensure_schema
+    from app.services.project_settings_service import DEFAULT_NAMING_RULES, save_setting
+    from app.widgets.naming_panel import NamingPanel
+
+    db = sqlite3.connect(":memory:")
+    ensure_schema(db)
+    rules = dict(DEFAULT_NAMING_RULES)
+    rules["components"] = [
+        "province", "site", "species_id", "scientific_name", "notes", "date_seg"
+    ]
+    save_setting(db, "naming_rules", rules)
+
+    ctx = MagicMock()
+    ctx.get_db.return_value = db
+    p = NamingPanel(ctx)
+    p.show()
+    try:
+        p._province.setText("FJ")
+        p._site.setText("D")
+        p._species_id.setText("DD001")
+        p._collection_date.setText("20260612")
+        p._photo_date.setText("20260613")
+        p.set_external_naming_values({
+            "scientific_name": "Marphysa sanguinea",
+            "notes": "red-form",
+        })
+        assert p.current_uid() == "FJ-D-DD001-Marphysa_sanguinea-red_form-20260612-0613"
+    finally:
+        p.close()
+        db.close()

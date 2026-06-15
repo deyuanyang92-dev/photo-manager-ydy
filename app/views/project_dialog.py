@@ -1,4 +1,4 @@
-"""project_dialog.py — 「新建拍摄项目」and 「打开工作区」dialog.
+"""project_dialog.py — create a photo workspace or open an existing folder.
 
 Mirrors the web oracle:
   - renderProjectModal()     → app.js:10597-10734
@@ -6,7 +6,7 @@ Mirrors the web oracle:
   - commitProject()          → inside renderProjectModal form submit
 
 Fields (新建模式, 7 fields):
-  1. 项目名称*     (required)
+  1. 工作区名称*   (required)
   2. 项目编号       (optional, default suggestProjectCode)
   3. 目录*          (required, dir-picker)
   4. 采集地点*      (required)
@@ -14,7 +14,7 @@ Fields (新建模式, 7 fields):
   6. 开始日期*      (required, default today YYYYMMDD)
   7. 结束日期        (optional)
 
-打开工作区模式: only 目录 (name = dir.name).
+打开文件夹模式: only 目录 (name = dir.name).
 
 On accept:
   - Calls project_service.create_project + ensure_project_dirs
@@ -82,7 +82,7 @@ def _strip_non_digits(s: str) -> str:
 # ── Dialog ────────────────────────────────────────────────────────────────────
 
 class ProjectDialog(QDialog):
-    """Modal dialog for 「新建拍摄项目」or 「打开工作区」.
+    """Modal dialog for creating a photo workspace or opening a folder.
 
     Parameters
     ----------
@@ -111,11 +111,11 @@ class ProjectDialog(QDialog):
         self._project: Optional[dict] = None  # populated on accept
 
         if mode != "new":
-            self.setWindowTitle("打开工作区")
+            self.setWindowTitle("打开文件夹")
         elif self._light:
-            self.setWindowTitle("新建项目")
+            self.setWindowTitle("新建工作区")
         else:
-            self.setWindowTitle("新建拍摄项目")
+            self.setWindowTitle("新建拍照工作区")
 
         self.setMinimumWidth(520)
         self._build_ui()
@@ -136,17 +136,17 @@ class ProjectDialog(QDialog):
 
         if self._light:
             intro = (
-                "为采集地图/采集方案新建一个项目：只需 项目名称 + 目录，其余可留空后续再补。"
+                "为采集地图/采集方案新建一个工作区：只需 名称 + 目录，其余可留空后续再补。"
                 "建好后留在采集地图，直接导入站位经纬度。"
             )
         elif self._mode == "new":
             intro = (
-                "项目目录由相机软件、Helicon 和本照片工作区共同使用；"
+                "工作区目录由相机软件、Helicon 和本软件共同使用；"
                 "新照片会出现在监控区，确认最终成片后才创建标本唯一编号和成果编号。"
             )
         else:
             intro = (
-                "只需指定一个磁盘目录即可打开工作区；"
+                "只需指定一个磁盘目录即可打开为拍照工作区；"
                 "根目录下将自动创建 incoming-jpg/（相机）与 results/（Helicon TIFF 与 ZIP）。"
                 "名称留空则用目录名。"
             )
@@ -171,7 +171,7 @@ class ProjectDialog(QDialog):
             # New mode: project name (required)
             self._name_edit = QLineEdit()
             self._name_edit.setPlaceholderText("例如：厦门潮间带多毛类调查")
-            form.addRow("项目名称 *：", self._name_edit)
+            form.addRow("工作区名称 *：", self._name_edit)
 
             # Project code (optional, auto-suggested)
             today_year = str(date.today().year)
@@ -224,11 +224,11 @@ class ProjectDialog(QDialog):
 
         # Buttons
         if self._light:
-            accept_label = "创建项目（留在采集地图）"
+            accept_label = "创建工作区（留在采集地图）"
         elif self._mode == "new":
-            accept_label = "创建并进入照片工作区"
+            accept_label = "创建并进入工作区"
         else:
-            accept_label = "打开工作区"
+            accept_label = "打开文件夹"
 
         btn_box = QDialogButtonBox()
         cancel_btn = btn_box.addButton("取消", QDialogButtonBox.ButtonRole.RejectRole)
@@ -243,7 +243,7 @@ class ProjectDialog(QDialog):
     # ── Actions ───────────────────────────────────────────────────────────────
 
     def _browse_dir(self) -> None:
-        path = get_existing_directory(self, "选择项目目录")
+        path = get_existing_directory(self, "选择文件夹")
         if path:
             self._dir_edit.setText(path)
             # Auto-fill name from dir name if still empty
@@ -253,27 +253,27 @@ class ProjectDialog(QDialog):
     def _on_accept(self) -> None:
         directory = self._dir_edit.text().strip()
         if not directory:
-            warn(self, "新建项目" if self._mode == "new" else "打开工作区",
+            warn(self, "新建工作区" if self._mode == "new" else "打开文件夹",
                  "请选择磁盘目录。")
             return
 
         if self._mode == "new":
             name = self._name_edit.text().strip()
             if not name:
-                warn(self, "新建项目", "请填写项目名称。")
+                warn(self, "新建工作区", "请填写工作区名称。")
                 return
             if not self._light:
                 location = self._location_edit.text().strip()
                 if not location:
-                    warn(self, "新建项目", "请填写采集地点。")
+                    warn(self, "新建工作区", "请填写采集地点。")
                     return
                 collector = self._collector_edit.text().strip()
                 if not collector:
-                    warn(self, "新建项目", "请填写负责人。")
+                    warn(self, "新建工作区", "请填写负责人。")
                     return
                 start_raw = self._start_date_edit.text().strip()
                 if not start_raw:
-                    warn(self, "新建项目", "请填写开始日期。")
+                    warn(self, "新建工作区", "请填写开始日期。")
                     return
         else:
             name = self._name_edit.text().strip() or Path(directory).name

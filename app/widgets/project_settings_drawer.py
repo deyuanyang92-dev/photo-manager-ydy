@@ -1,7 +1,7 @@
-"""project_settings_drawer.py — Project settings side drawer (5-tab redesign).
+"""project_settings_drawer.py — Project settings side drawer.
 
 Mirrors renderProjectSettingsDrawer() (app.js:9418-9931) with tabs:
-  概要 / 保存方式 / 人员预设 / 命名规则 / TIFF元数据
+  概要 / 保存方式 / 人员预设 / 命名规则 / TIFF元数据 / 打印
 
 Public API (unchanged):
   .refresh()           — reload from DB + Helicon detection
@@ -17,11 +17,14 @@ from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QComboBox,
+    QDialog,
     QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -141,6 +144,7 @@ class ProjectSettingsDrawer(QWidget):
 
     closed = pyqtSignal()
     helicon_path_changed = pyqtSignal(str)
+    naming_rules_changed = pyqtSignal()
 
     def __init__(self, ctx: "AppContext", parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -163,7 +167,7 @@ class ProjectSettingsDrawer(QWidget):
         head = QHBoxLayout(head_w)
         head.setContentsMargins(20, 14, 12, 14)
         head.setSpacing(8)
-        title = QLabel("项目设置")
+        title = QLabel("当前项目设置")
         title.setObjectName("WorkspaceTitle")
         head.addWidget(title)
         head.addStretch()
@@ -185,10 +189,11 @@ class ProjectSettingsDrawer(QWidget):
         root.addWidget(self._tabs, stretch=1)
 
         self._tabs.addTab(self._build_tab_overview(),   "概要")
-        self._tabs.addTab(self._build_tab_storages(),   "保存方式")
-        self._tabs.addTab(self._build_tab_personnel(),  "人员预设")
-        self._tabs.addTab(self._build_tab_code_labels(),"命名规则")
-        self._tabs.addTab(self._build_tab_tiff_meta(),  "TIFF 元数据")
+        self._tabs.addTab(self._build_tab_storages(),   "保存")
+        self._tabs.addTab(self._build_tab_personnel(),  "人员")
+        self._tabs.addTab(self._build_tab_code_labels(),"命名")
+        self._tabs.addTab(self._build_tab_tiff_meta(),  "TIFF")
+        self._tabs.addTab(self._build_tab_printing(),   "打印")
 
     # ── Tab 1: 概要 ───────────────────────────────────────────────────────────
 
@@ -404,6 +409,57 @@ class ProjectSettingsDrawer(QWidget):
 
         lay.addWidget(_divider())
 
+        req_lbl = QLabel("必填字段（右侧编号卡按此显示 * 并提示缺项）")
+        req_lbl.setObjectName("Section")
+        req_lbl.setWordWrap(True)
+        lay.addWidget(req_lbl)
+        self._naming_required_checks: dict[str, QCheckBox] = {}
+        required_fields = [
+            ("地区", "province"),
+            ("样地", "site"),
+            ("站位", "station"),
+            ("物种缩写", "species_id"),
+            ("保存方式", "storage"),
+            ("采集日期", "collection_date"),
+            ("拍摄日期", "photo_date"),
+        ]
+        for label, key in required_fields:
+            cb = QCheckBox(label)
+            cb.stateChanged.connect(self._save_naming_rules)
+            self._naming_required_checks[key] = cb
+            lay.addWidget(cb)
+
+        lay.addWidget(_divider())
+
+        comp_lbl = QLabel("编号组成（按固定顺序拼接，分类/备注字段默认不参与）")
+        comp_lbl.setObjectName("Section")
+        comp_lbl.setWordWrap(True)
+        lay.addWidget(comp_lbl)
+        self._naming_component_checks: dict[str, QCheckBox] = {}
+        component_fields = [
+            ("地区", "province"),
+            ("样地", "site"),
+            ("站位", "station"),
+            ("物种缩写", "species_id"),
+            ("保存方式", "storage"),
+            ("日期段", "date_seg"),
+            ("类群", "taxon_group"),
+            ("目", "order_name"),
+            ("科", "family"),
+            ("属", "genus"),
+            ("物种学名", "scientific_name"),
+            ("物种中文名", "scientific_name_cn"),
+            ("备注标签", "notes"),
+            ("拍照备注", "photo_notes"),
+        ]
+        for label, key in component_fields:
+            cb = QCheckBox(label)
+            cb.stateChanged.connect(self._save_naming_rules)
+            self._naming_component_checks[key] = cb
+            lay.addWidget(cb)
+
+        lay.addWidget(_divider())
+
         # 默认采集坐标 / 地理区（项目级兜底）。新建标本自动带；选定具体站位后，
         # 该站采集记录会以更高优先级覆盖（见 metadata_panel.apply_autofill）。
         cap_lbl = QLabel("默认采集坐标 / 地理区（新标本兜底，选站位后由采集记录覆盖）")
@@ -439,7 +495,7 @@ class ProjectSettingsDrawer(QWidget):
         lay.addWidget(_divider())
 
         # Species dict
-        sp_lbl = QLabel("物种缩写说明（缩写 → 中文）")
+        sp_lbl = QLabel("物种缩写说明（如 DLC001 的前缀 → 中文）")
         sp_lbl.setObjectName("Section")
         lay.addWidget(sp_lbl)
         self._species_kv = _KVEditor(key_placeholder="缩写", val_placeholder="中文说明")
@@ -520,6 +576,261 @@ class ProjectSettingsDrawer(QWidget):
         lay.addStretch()
         return w
 
+    # ── Tab 6: 打印 ──────────────────────────────────────────────────────────
+
+    def _build_tab_printing(self) -> QWidget:
+        w, lay = _scrollable_tab()
+        lay.setSpacing(12)
+
+        hint = QLabel("工作台编号旁的打印按钮使用此设置；模板留空则沿用「标签打印」页最近选择。")
+        hint.setObjectName("MutedSmall")
+        hint.setWordWrap(True)
+        lay.addWidget(hint)
+
+        # ── 单张打印 ──────────────────────────────────────────────────────────
+        self._quick_print_mode = QComboBox()
+        self._quick_print_mode.setFixedHeight(30)
+        self._quick_print_mode.addItem("直接打印到指定打印机", True)
+        self._quick_print_mode.addItem("打开标签打印页", False)
+        self._quick_print_mode.currentIndexChanged.connect(self._save_print_settings)
+
+        self._print_tissue_cb = QCheckBox("RNA 编号同时打印 RNAlater 组织管标签")
+        self._print_tissue_cb.setToolTip("关闭后，工作台编号旁打印按钮只输出一张样品标签。")
+        self._print_tissue_cb.stateChanged.connect(self._save_print_settings)
+
+        lay.addWidget(_settings_group("单张打印", [
+            _row("点击打印", self._quick_print_mode, width=72),
+            self._print_tissue_cb,
+        ]))
+
+        # ── 样品瓶 / 酒精 ─────────────────────────────────────────────────────
+        self._sample_printer_combo = QComboBox()
+        self._sample_printer_combo.setFixedHeight(30)
+        self._sample_printer_combo.currentIndexChanged.connect(self._save_print_settings)
+
+        self._sample_template_combo = QComboBox()
+        self._sample_template_combo.setFixedHeight(30)
+        self._sample_template_combo.currentIndexChanged.connect(self._save_print_settings)
+
+        self._sample_paper_combo = QComboBox()
+        self._sample_paper_combo.setFixedHeight(30)
+        self._populate_quick_paper_combo(self._sample_paper_combo)
+        self._sample_paper_combo.currentIndexChanged.connect(self._on_sample_paper_changed)
+
+        self._sample_imposition_btn = QPushButton("酒精标签排版设计…")
+        self._sample_imposition_btn.setObjectName("Outline")
+        self._sample_imposition_btn.setFixedHeight(28)
+        self._sample_imposition_btn.clicked.connect(
+            lambda: self._open_imposition_designer("sample")
+        )
+
+        sample_grp = _settings_group("样品瓶 / 酒精", [
+            _row("打印机", self._sample_printer_combo, width=64),
+            _row("模板",   self._sample_template_combo, width=64),
+            _row("纸张",   self._sample_paper_combo, width=64),
+            _row("合版",   self._sample_imposition_btn, width=64),
+        ])
+        sample_grp.setToolTip("需要设计或修改模板时，进入「标签打印」页编辑。")
+        lay.addWidget(sample_grp)
+
+        # ── RNAlater 组织管 ───────────────────────────────────────────────────
+        self._tissue_printer_combo = QComboBox()
+        self._tissue_printer_combo.setFixedHeight(30)
+        self._tissue_printer_combo.currentIndexChanged.connect(self._save_print_settings)
+
+        self._tissue_template_combo = QComboBox()
+        self._tissue_template_combo.setFixedHeight(30)
+        self._tissue_template_combo.currentIndexChanged.connect(self._save_print_settings)
+
+        self._tissue_paper_combo = QComboBox()
+        self._tissue_paper_combo.setFixedHeight(30)
+        self._populate_quick_paper_combo(self._tissue_paper_combo)
+        self._tissue_paper_combo.currentIndexChanged.connect(self._on_tissue_paper_changed)
+
+        self._tissue_imposition_btn = QPushButton("RNA 标签排版设计…")
+        self._tissue_imposition_btn.setObjectName("Outline")
+        self._tissue_imposition_btn.setFixedHeight(28)
+        self._tissue_imposition_btn.clicked.connect(
+            lambda: self._open_imposition_designer("tissue")
+        )
+
+        self._tissue_strategy_combo = QComboBox()
+        self._tissue_strategy_combo.setFixedHeight(30)
+        self._tissue_strategy_combo.addItem("自动选择（推荐）", "auto")
+        self._tissue_strategy_combo.addItem("直接打印", "direct")
+        self._tissue_strategy_combo.addItem("加入合版队列", "queue")
+        self._tissue_strategy_combo.currentIndexChanged.connect(self._save_print_settings)
+
+        tissue_grp = _settings_group("RNAlater 组织管", [
+            _row("打印机", self._tissue_printer_combo, width=64),
+            _row("模板",   self._tissue_template_combo, width=64),
+            _row("纸张",   self._tissue_paper_combo, width=64),
+            _row("合版",   self._tissue_imposition_btn, width=64),
+            _row("策略",   self._tissue_strategy_combo, width=64),
+        ])
+        tissue_grp.setToolTip(
+            "样品瓶与 RNAlater 可绑同一台或不同打印机；同台且 RNA 用 A4/A5 合版纸时，"
+            "自动策略会把 RNAlater 标签加入左侧 RNA 待打印队列。模板编辑请进「标签打印」页。"
+        )
+        lay.addWidget(tissue_grp)
+
+        default_row = QHBoxLayout()
+        default_row.setSpacing(6)
+        self._save_print_default_btn = QPushButton("设为全局默认")
+        self._save_print_default_btn.setObjectName("Outline")
+        self._save_print_default_btn.setFixedHeight(28)
+        self._save_print_default_btn.clicked.connect(self._save_print_defaults)
+        default_row.addWidget(self._save_print_default_btn)
+        default_row.addStretch()
+        lay.addLayout(default_row)
+
+        lay.addStretch()
+        return w
+
+    @staticmethod
+    def _populate_quick_paper_combo(combo: QComboBox) -> None:
+        combo.addItem("跟随标签打印页", "")
+        combo.addItem("标签卷纸 / 单张标签", "label")
+        combo.addItem("A4 合版", "a4")
+        combo.addItem("A5 合版", "a5")
+
+    def _refresh_printer_combo(self, combo: QComboBox, selected: str) -> None:
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("系统默认打印机", "")
+        try:
+            from PyQt6.QtPrintSupport import QPrinterInfo
+            names = [p.printerName() for p in QPrinterInfo.availablePrinters()]
+        except Exception:
+            names = []
+        for name in sorted({n for n in names if n}):
+            combo.addItem(name, name)
+        if selected and combo.findData(selected) < 0:
+            combo.addItem(f"{selected}（未检测到）", selected)
+        idx = combo.findData(selected or "")
+        combo.setCurrentIndex(idx if idx >= 0 else 0)
+        combo.blockSignals(False)
+
+    def _refresh_template_combo(self, combo: QComboBox, bucket: str, selected: str) -> None:
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("跟随标签打印页", "")
+        try:
+            from app.services import label_service
+            for key, tmpl in label_service.BUILTIN_TEMPLATES.items():
+                if bucket == "tissue" and tmpl.get("flavor") != "tissue":
+                    continue
+                if bucket == "sample" and tmpl.get("flavor") == "tissue":
+                    continue
+                combo.addItem(f"内置：{tmpl.get('name') or key}", key)
+            lib = label_service.LabelTemplateLibrary(bucket)
+            for rec in lib.records():
+                tid = rec.get("id")
+                if tid:
+                    combo.addItem(f"自定义：{rec.get('name') or tid}", label_service.key_from_id(tid))
+        except Exception:
+            pass
+        if selected and combo.findData(selected) < 0:
+            combo.addItem(f"{selected}（未找到）", selected)
+        idx = combo.findData(selected or "")
+        combo.setCurrentIndex(idx if idx >= 0 else 0)
+        combo.blockSignals(False)
+
+    def _paper_type_for_imposition(self, bucket: str) -> str:
+        return self._effective_sheet_paper_for_bucket(bucket)
+
+    def _effective_sheet_paper_for_bucket(self, bucket: str) -> str:
+        combo = self._tissue_paper_combo if bucket == "tissue" else self._sample_paper_combo
+        paper_type = str(combo.currentData() or "")
+        if not paper_type:
+            try:
+                from app.services import label_service
+                paper_type = label_service.persisted_paper_type(bucket)
+            except Exception:
+                paper_type = ""
+        if paper_type not in {"a4", "a5"}:
+            return ""
+        return paper_type
+
+    def _sync_imposition_buttons(self) -> None:
+        for bucket, btn in (
+            ("sample", self._sample_imposition_btn),
+            ("tissue", self._tissue_imposition_btn),
+        ):
+            combo = self._tissue_paper_combo if bucket == "tissue" else self._sample_paper_combo
+            paper_type = self._effective_sheet_paper_for_bucket(bucket)
+            enabled = bool(paper_type) and combo.isEnabled()
+            btn.setEnabled(enabled)
+            label = "酒精标签" if bucket == "sample" else "RNA 标签"
+            if paper_type:
+                btn.setText(f"{label}排版设计…")
+                btn.setToolTip(f"编辑 {paper_type.upper()} 合版的边距、间距、行列、方向和起始格。")
+            else:
+                btn.setText(f"{label}排版设计（选择 A4/A5 后可用）")
+                btn.setToolTip("标签卷纸/单张标签是一张一张直接打印，不使用整页合版排版。")
+
+    def _template_key_for_bucket(self, bucket: str) -> str:
+        combo = self._tissue_template_combo if bucket == "tissue" else self._sample_template_combo
+        return str(combo.currentData() or "")
+
+    def _demo_specimen_for_bucket(self, bucket: str) -> dict:
+        storage = "RD95E" if bucket == "tissue" else "D95E"
+        return {
+            "uid": f"FJ-XM-B2-DLC001-{storage}-20260602",
+            "id": "DLC001",
+            "province": "FJ",
+            "site": "XM",
+            "station": "B2",
+            "storage": storage,
+            "collectionDate": "20260602",
+            "photoDate": "20260602",
+            "collector": "采集人",
+            "species": "样品标签",
+            "latin": "Marphysa sp.",
+            "family": "Eunicidae",
+        }
+
+    def _imposition_job(self, bucket: str) -> dict:
+        from app.services import label_service
+        lib = label_service.LabelTemplateLibrary(bucket)
+        tmpl = label_service.resolve_template_key(lib, self._template_key_for_bucket(bucket))
+        paper_type = self._paper_type_for_imposition(bucket)
+        return label_service.LabelService.build_print_job(
+            [self._demo_specimen_for_bucket(bucket)],
+            tmpl,
+            bucket,
+            selected_indices=[0],
+            dims=label_service.resolve_dims(lib, lib.selected_custom_dims()),
+            copies=12,
+            paper_type=paper_type,
+            paper=label_service.PAPER_SIZES.get(paper_type),
+        )
+
+    def _open_imposition_designer(self, bucket: str) -> None:
+        from app.services import label_service
+        from app.widgets.label_imposition_dialog import LabelImpositionDialog
+
+        if not self._paper_type_for_imposition(bucket):
+            QMessageBox.information(
+                self,
+                "排版设计",
+                "当前纸张是标签卷纸/单张标签，不需要 A4/A5 合版排版。请先把纸张切换为 A4 合版或 A5 合版。",
+            )
+            return
+        job = self._imposition_job(bucket)
+        snapshot = label_service.persisted_imposition(bucket)
+        dlg = LabelImpositionDialog(
+            job,
+            snapshot,
+            self,
+            demo_data=self._demo_specimen_for_bucket(bucket),
+        )
+        dlg.setWindowTitle(
+            "酒精标签排版设计" if bucket == "sample" else "RNAlater 标签排版设计"
+        )
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            label_service.persist_imposition(bucket, dlg.imposition())
+
     # ── Public API ────────────────────────────────────────────────────────────
 
     def refresh(self) -> None:
@@ -575,8 +886,14 @@ class ProjectSettingsDrawer(QWidget):
             DEFAULT_PROJECT_META,
             DEFAULT_PERSONNEL,
             DEFAULT_CODE_LABELS,
+            DEFAULT_NAMING_RULES,
             DEFAULT_CAPTURE_DEFAULTS,
             DEFAULT_TIFF_FIELDS,
+            DEFAULT_PRINT_SETTINGS,
+            effective_print_settings,
+            load_setting_if_present,
+            load_global_print_defaults,
+            merge_print_settings,
         )
 
         # 概要
@@ -595,6 +912,19 @@ class ProjectSettingsDrawer(QWidget):
         self._site_edit.setText(cl.get("site", ""))
         self._stations_kv.load(cl.get("stations", {}))
         self._species_kv.load(cl.get("species", {}))
+        rules = load_setting(db, "naming_rules", DEFAULT_NAMING_RULES)
+        required = rules.get("required", DEFAULT_NAMING_RULES["required"])
+        for key, cb in self._naming_required_checks.items():
+            cb.blockSignals(True)
+            cb.setChecked(bool(required.get(key, DEFAULT_NAMING_RULES["required"].get(key, False))))
+            cb.blockSignals(False)
+        components = rules.get("components", DEFAULT_NAMING_RULES["components"])
+        if not isinstance(components, list):
+            components = DEFAULT_NAMING_RULES["components"]
+        for key, cb in self._naming_component_checks.items():
+            cb.blockSignals(True)
+            cb.setChecked(key in components)
+            cb.blockSignals(False)
         # 默认采集坐标 / 地理区
         cap = load_setting(db, "capture_defaults", DEFAULT_CAPTURE_DEFAULTS)
         self._cap_lon_edit.setText(str(cap.get("lon", "") or ""))
@@ -612,6 +942,66 @@ class ProjectSettingsDrawer(QWidget):
         # 自定义保存方式
         custom = load_setting(db, "custom_storages", [])
         self._rebuild_custom_list(custom, db)
+
+        # 工作台单张打印
+        project_dir = getattr(self.ctx, "current_project_dir", None)
+        project_root = getattr(self.ctx, "current_project_root", None)
+        if not isinstance(project_root, str):
+            project_root = None
+        if project_dir:
+            pr = effective_print_settings(
+                project_dir,
+                root=project_root,
+            )
+        else:
+            pr = load_setting(db, "print_settings", load_global_print_defaults())
+        local_print_settings = load_setting_if_present(db, "print_settings")
+        if local_print_settings is not None:
+            pr = merge_print_settings(pr, local_print_settings)
+        quick = bool(pr.get("quick_print", DEFAULT_PRINT_SETTINGS["quick_print"]))
+        idx = self._quick_print_mode.findData(quick)
+        if idx < 0:
+            idx = 0
+        self._quick_print_mode.blockSignals(True)
+        self._quick_print_mode.setCurrentIndex(idx)
+        self._quick_print_mode.blockSignals(False)
+        self._print_tissue_cb.blockSignals(True)
+        self._print_tissue_cb.setChecked(bool(pr.get(
+            "include_tissue", DEFAULT_PRINT_SETTINGS["include_tissue"]
+        )))
+        self._print_tissue_cb.blockSignals(False)
+        self._refresh_printer_combo(
+            self._sample_printer_combo,
+            str(pr.get("sample_printer", DEFAULT_PRINT_SETTINGS["sample_printer"]) or ""),
+        )
+        self._refresh_printer_combo(
+            self._tissue_printer_combo,
+            str(pr.get("tissue_printer", DEFAULT_PRINT_SETTINGS["tissue_printer"]) or ""),
+        )
+        self._refresh_template_combo(
+            self._sample_template_combo,
+            "sample",
+            str(pr.get("sample_template_key", DEFAULT_PRINT_SETTINGS["sample_template_key"]) or ""),
+        )
+        self._refresh_template_combo(
+            self._tissue_template_combo,
+            "tissue",
+            str(pr.get("tissue_template_key", DEFAULT_PRINT_SETTINGS["tissue_template_key"]) or ""),
+        )
+        for combo, key in (
+            (self._sample_paper_combo, "sample_paper_type"),
+            (self._tissue_paper_combo, "tissue_paper_type"),
+        ):
+            idx = combo.findData(str(pr.get(key, DEFAULT_PRINT_SETTINGS[key]) or ""))
+            combo.blockSignals(True)
+            combo.setCurrentIndex(idx if idx >= 0 else 0)
+            combo.blockSignals(False)
+        strategy = str(pr.get("tissue_strategy", DEFAULT_PRINT_SETTINGS["tissue_strategy"]) or "auto")
+        idx = self._tissue_strategy_combo.findData(strategy)
+        self._tissue_strategy_combo.blockSignals(True)
+        self._tissue_strategy_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self._tissue_strategy_combo.blockSignals(False)
+        self._sync_imposition_buttons()
 
     def _save_project_meta(self) -> None:
         db = self.ctx.get_db()
@@ -645,6 +1035,27 @@ class ProjectSettingsDrawer(QWidget):
         save_setting(db, "code_labels", data)
         self._update_code_preview(db)
 
+    def _save_naming_rules(self) -> None:
+        db = self.ctx.get_db()
+        if db is None:
+            return
+        from app.services.project_settings_service import (
+            DEFAULT_NAMING_RULES,
+            load_setting,
+            save_setting,
+        )
+        data = load_setting(db, "naming_rules", DEFAULT_NAMING_RULES)
+        data["required"] = {
+            key: cb.isChecked()
+            for key, cb in self._naming_required_checks.items()
+        }
+        data["components"] = [
+            key for key, cb in self._naming_component_checks.items()
+            if cb.isChecked()
+        ]
+        save_setting(db, "naming_rules", data)
+        self.naming_rules_changed.emit()
+
     def _save_capture_defaults(self) -> None:
         """保存项目级默认采集坐标 / 地理区（capture_defaults）。"""
         db = self.ctx.get_db()
@@ -664,6 +1075,39 @@ class ProjectSettingsDrawer(QWidget):
         from app.services.project_settings_service import save_setting
         data = {key: cb.isChecked() for key, cb in self._tiff_checks.items()}
         save_setting(db, "tiff_fields", data)
+
+    def _save_print_settings(self) -> None:
+        db = self.ctx.get_db()
+        if db is None:
+            return
+        from app.services.project_settings_service import save_setting
+        save_setting(db, "print_settings", self._collect_print_settings())
+
+    def _collect_print_settings(self) -> dict:
+        return {
+            "quick_print": bool(self._quick_print_mode.currentData()),
+            "include_tissue": self._print_tissue_cb.isChecked(),
+            "sample_printer": str(self._sample_printer_combo.currentData() or ""),
+            "tissue_printer": str(self._tissue_printer_combo.currentData() or ""),
+            "sample_template_key": str(self._sample_template_combo.currentData() or ""),
+            "tissue_template_key": str(self._tissue_template_combo.currentData() or ""),
+            "sample_paper_type": str(self._sample_paper_combo.currentData() or ""),
+            "tissue_paper_type": str(self._tissue_paper_combo.currentData() or ""),
+            "tissue_strategy": str(self._tissue_strategy_combo.currentData() or "auto"),
+        }
+
+    def _save_print_defaults(self) -> None:
+        from app.services.project_settings_service import save_global_print_defaults
+        save_global_print_defaults(self._collect_print_settings())
+        QMessageBox.information(self, "打印默认值", "已保存为全局打印默认值。")
+
+    def _on_sample_paper_changed(self) -> None:
+        self._save_print_settings()
+        self._sync_imposition_buttons()
+
+    def _on_tissue_paper_changed(self) -> None:
+        self._save_print_settings()
+        self._sync_imposition_buttons()
 
     def _update_code_preview(self, db) -> None:
         try:
@@ -750,13 +1194,30 @@ class ProjectSettingsDrawer(QWidget):
             edit.setEnabled(enabled)
         self._province_edit.setEnabled(enabled)
         self._site_edit.setEnabled(enabled)
+        for cb in self._naming_required_checks.values():
+            cb.setEnabled(enabled)
+        for cb in self._naming_component_checks.values():
+            cb.setEnabled(enabled)
         self._stations_kv.setEnabled(enabled)
         self._species_kv.setEnabled(enabled)
         for cb in self._tiff_checks.values():
             cb.setEnabled(enabled)
         self._new_code_edit.setEnabled(enabled)
         self._new_detail_edit.setEnabled(enabled)
+        self._quick_print_mode.setEnabled(enabled)
+        self._print_tissue_cb.setEnabled(enabled)
+        self._sample_printer_combo.setEnabled(enabled)
+        self._tissue_printer_combo.setEnabled(enabled)
+        self._sample_template_combo.setEnabled(enabled)
+        self._tissue_template_combo.setEnabled(enabled)
+        self._sample_paper_combo.setEnabled(enabled)
+        self._tissue_paper_combo.setEnabled(enabled)
+        self._sample_imposition_btn.setEnabled(enabled)
+        self._tissue_imposition_btn.setEnabled(enabled)
+        self._tissue_strategy_combo.setEnabled(enabled)
+        self._save_print_default_btn.setEnabled(True)
         self._silent_compose_cb.setEnabled(True)
+        self._sync_imposition_buttons()
 
     # ── Slots ─────────────────────────────────────────────────────────────────
 
@@ -811,6 +1272,17 @@ def _scrollable_tab() -> tuple[QWidget, QVBoxLayout]:
 def _row(label: str, field: QWidget, width: int = 90) -> QWidget:
     from app.widgets._form_row import form_row
     return form_row(label, field, label_width=width)
+
+
+def _settings_group(title: str, widgets: list[QWidget]) -> QGroupBox:
+    """Bordered sub-section grouping related form rows inside a settings tab."""
+    gb = QGroupBox(title)
+    lay = QVBoxLayout(gb)
+    lay.setSpacing(8)
+    lay.setContentsMargins(12, 10, 12, 12)
+    for wd in widgets:
+        lay.addWidget(wd)
+    return gb
 
 
 def _divider() -> QFrame:

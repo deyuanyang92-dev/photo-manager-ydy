@@ -11,8 +11,8 @@
                 （唯一入口），成功后发 workspace_changed；首/末端禁用，不回绕。
                 中途回退后再切新工作区 → 截断前向分支。同级切换改走 ▾ 下拉。
       * 根即工作区（chain==1）只要有历史也能 ◀▶（修复「光秃秃无箭头」）。
-      * 叶子下拉 → 同级菜单（已是工作区的标 📷）+ 末尾「+ 新建断面…」：
-                在当前工作区父目录下建新同级目录并进入；名字预填 YYYYMMDD(；
+      * 叶子下拉 → 同目录文件夹（已是工作区的标 📷）+ 末尾「+ 新建文件夹…」：
+                在当前工作区父目录下建新文件夹并进入；名字预填 YYYYMMDD(；
                 拒 / \\ .. 空。
   - MainWindow._project_switcher 即该控件；refresh_context_bar() 后 text() 反映链。
 
@@ -251,7 +251,7 @@ def test_root_workspace_navigates_when_history(tmp_path, monkeypatch):
     assert w._btn_next.isEnabled()           # 有前进
 
 
-# ── ▾ + 新建断面 ────────────────────────────────────────────────────────
+# ── ▾ + 新建文件夹 ──────────────────────────────────────────────────────
 
 
 def test_dropdown_has_new_section_action(tmp_path):
@@ -260,7 +260,7 @@ def test_dropdown_has_new_section_action(tmp_path):
     w.refresh()
     menu = w._build_sibling_menu()
     labels = [a.text() for a in menu.actions()]
-    assert any("新建断面" in s for s in labels)
+    assert any("新建文件夹" in s for s in labels)
 
 
 def test_default_section_name_is_date_prefixed(tmp_path):
@@ -280,7 +280,7 @@ def test_create_section_makes_dir_and_switches(tmp_path, monkeypatch):
     _patch_enter(monkeypatch, calls)
     new_path = w.create_and_enter_section("20260612(草埔村)")
     assert new_path is not None
-    # 建在当前工作区父目录下（= 新同级断面）
+    # 建在当前工作区父目录下。
     assert (sect / "20260612(草埔村)").is_dir()
     # 走了 enter_workspace
     assert calls and os.path.basename(calls[-1][0]) == "20260612(草埔村)"
@@ -307,14 +307,24 @@ def test_dropdown_lists_siblings_marks_workspaces(tmp_path):
     w = WorkspaceBreadcrumb(_Ctx(str(sect / "B2"), str(root)))
     w.refresh()
     menu = w._build_sibling_menu()
-    # 只数同级站位项（排除分隔线 + 末尾「新建断面」）
-    sib_labels = [a.text() for a in menu.actions()
-                  if not a.isSeparator() and not a.menu()
-                  and "新建断面" not in a.text()]
+    sib_menu = next(a.menu() for a in menu.actions() if a.menu() and "同目录文件夹" in a.text())
+    sib_labels = [a.text() for a in sib_menu.actions()]
     assert len(sib_labels) == 3
     assert any("B1" in s for s in sib_labels)
     # B2 是工作区 → 带 📷
     assert any("📷" in s and "B2" in s for s in sib_labels)
+
+
+def test_dropdown_groups_current_siblings_recent_and_new(tmp_path):
+    root, sect = _make_tree(tmp_path)
+    w = WorkspaceBreadcrumb(_Ctx(str(sect / "B2"), str(root)))
+    w.refresh()
+    menu = w._build_sibling_menu()
+    labels = [a.text() for a in menu.actions() if not a.isSeparator()]
+    assert labels[0] == "当前：B2"
+    assert any("同目录文件夹" in s for s in labels)
+    assert any("最近使用" in s for s in labels)
+    assert labels[-1].endswith("新建文件夹…")
 
 
 def test_dropdown_includes_recent_workspaces(tmp_path, monkeypatch):
@@ -349,7 +359,7 @@ def test_dropdown_includes_recent_workspaces(tmp_path, monkeypatch):
     w.refresh()
 
     menu = w._build_sibling_menu()
-    recent = next(a.menu() for a in menu.actions() if a.menu() and "最近工作区" in a.text())
+    recent = next(a.menu() for a in menu.actions() if a.menu() and "最近使用" in a.text())
     labels = [a.text() for a in recent.actions()]
 
     assert any("另一航次 / 断面Z" in s for s in labels)
@@ -371,6 +381,13 @@ def test_recent_workspace_switch_uses_recorded_root(tmp_path, monkeypatch):
 
     assert calls[-1] == (str(other), str(other_root))
     assert str(other.resolve()) in w._history
+
+
+def test_recent_label_adds_parent_for_short_names():
+    item = {"name": "ce", "directory": "/tmp/survey/ce"}
+    assert WorkspaceBreadcrumb._recent_label(item) == "survey / ce"
+    item2 = {"name": "survey / ce", "directory": "/tmp/survey/ce"}
+    assert WorkspaceBreadcrumb._recent_label(item2) == "survey / ce"
 
 
 # ── MainWindow 集成 ──────────────────────────────────────────────────────

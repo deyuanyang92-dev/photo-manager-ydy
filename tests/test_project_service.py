@@ -627,6 +627,76 @@ class TestRecordRecentWorkspace:
         assert entry["name"] == "断面a"
 
 
+class TestSaveProjectDescriptor:
+    def test_persists_full_project_metadata(self, tmp_path):
+        from app.services.project_service import save_project_descriptor
+        json_path = tmp_path / "user_projects.json"
+        project_dir = tmp_path / "厦门潮间带"
+        project_dir.mkdir()
+        project = {
+            "id": "p1",
+            "name": "厦门潮间带多毛类调查",
+            "directory": str(project_dir),
+            "projectCode": "PRJ-2026-01",
+            "location": "福建 · 厦门",
+            "collector": "杨德援",
+            "year": "2026",
+            "dateRange": "20260601 ~ 20260615",
+        }
+
+        projects = save_project_descriptor(str(json_path), project)
+
+        assert json_path.exists()
+        entry = projects[0]
+        assert entry["directory"] == str(project_dir.resolve())
+        assert entry["dir"] == str(project_dir.resolve())
+        assert entry["name"] == "厦门潮间带多毛类调查"
+        assert entry["projectCode"] == "PRJ-2026-01"
+        assert entry["location"] == "福建 · 厦门"
+        assert entry["collector"] == "杨德援"
+        assert entry["dateRange"] == "20260601 ~ 20260615"
+
+    def test_upserts_by_resolved_directory(self, tmp_path):
+        from app.services.project_service import save_project_descriptor
+        json_path = tmp_path / "user_projects.json"
+        project_dir = tmp_path / "proj"
+        project_dir.mkdir()
+
+        save_project_descriptor(str(json_path), {
+            "id": "old",
+            "name": "旧名称",
+            "directory": str(project_dir),
+            "collector": "旧负责人",
+        })
+        projects = save_project_descriptor(str(json_path), {
+            "name": "新名称",
+            "directory": str(project_dir / "."),
+            "location": "新地点",
+        })
+
+        assert len(projects) == 1
+        assert projects[0]["id"] == "old"
+        assert projects[0]["name"] == "新名称"
+        assert projects[0]["collector"] == "旧负责人"
+        assert projects[0]["location"] == "新地点"
+
+    def test_records_root_for_tree_project(self, tmp_path):
+        from app.services.project_service import save_project_descriptor
+        json_path = tmp_path / "user_projects.json"
+        region = tmp_path / "雷州岛"
+        leaf = region / "断面a"
+        leaf.mkdir(parents=True)
+
+        projects = save_project_descriptor(
+            str(json_path),
+            {"directory": str(leaf)},
+            root=str(region),
+        )
+
+        assert projects[0]["root"] == str(region.resolve())
+        assert projects[0]["name"] == "雷州岛 / 断面a"
+
+
 # ── seed_region_settings (scaffold a 调查区域 root as inheritance anchor) ─────
 
 

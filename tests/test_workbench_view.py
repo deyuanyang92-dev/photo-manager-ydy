@@ -40,6 +40,31 @@ def qt_app():
     return _APP
 
 
+@pytest.fixture(autouse=True)
+def _teardown_leaked_workbench():
+    """每个用例后停掉泄漏的 WorkbenchView 定时器。
+
+    WorkbenchView 构造即起 _debounce_timer(50ms)→_refresh_monitor→再 start(300)
+    自循环；_wb() 不做清理，上个用例的 widget 定时器会在下个用例 setup 时
+    对已关闭的 db / 即将销毁的 tmp_path 跑 _refresh_monitor → 阻塞事件循环
+    （首发现象：673 真·快速打印后，690 无打印机型用例 hang）。用现成的
+    on_activate 的反操作 on_deactivate() 停两个定时器，再 deleteLater。
+    """
+    yield
+    from app.views.workbench_view import WorkbenchView
+    app = QApplication.instance()
+    if app is None:
+        return
+    for w in app.topLevelWidgets():
+        if isinstance(w, WorkbenchView):
+            try:
+                w.on_deactivate()
+            except Exception:
+                pass
+            w.deleteLater()
+    app.processEvents()
+
+
 # ── Minimal AppContext mock ───────────────────────────────────────────────────
 
 def _make_ctx(project_dir: str | None = None, db: sqlite3.Connection | None = None):
@@ -53,6 +78,7 @@ def _make_ctx(project_dir: str | None = None, db: sqlite3.Connection | None = No
     ctx.settings.auto_activate_on_new_specimen = False
     ctx.settings.auto_organize_after_compose = False
     ctx.settings.silent_compose = False
+    ctx.collab_service = None
     return ctx
 
 
@@ -98,6 +124,10 @@ def _make_db(path: str) -> sqlite3.Connection:
         CREATE TABLE IF NOT EXISTS seen_files (
             name TEXT PRIMARY KEY,
             first_seen_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS project_settings (
+            setting_key TEXT PRIMARY KEY,
+            value_json TEXT NOT NULL
         );
     """)
     conn.commit()
@@ -184,6 +214,46 @@ class TestConstruction:
         assert w.nav_icon == "🔬"
 
 
+class TestRightRailEditEntry:
+    def test_sidebar_edit_request_loads_all_right_rail_cards(self, tmp_path):
+        from app.views.workbench_view import WorkbenchView
+
+        project_dir = str(tmp_path)
+        db = _make_db(":memory:")
+        raw = {
+            "uid": "FJ-XM-B2-DLC001-T95E-20260601",
+            "province": "FJ",
+            "site": "XM",
+            "station": "B2",
+            "id": "DLC001",
+            "storage": "T95E",
+            "collectionDate": "20260601",
+        }
+        db.execute(
+            """
+            INSERT INTO specimens (
+                uid, id, province, site, station, storage, collection_date,
+                scientific_name, family, collector, owner_project_dir, raw_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                raw["uid"], "DLC001", "FJ", "XM", "B2", "T95E", "20260601",
+                "Marphysa sp.", "Eunicidae", "采集人A", project_dir,
+                json.dumps(raw, ensure_ascii=False),
+            ),
+        )
+        db.commit()
+        w = WorkbenchView(_make_ctx(project_dir, db))
+
+        w._on_edit_specimen_requested(raw["uid"])
+
+        assert w._current_uid == raw["uid"]
+        assert w._naming.persisted_uid() == raw["uid"]
+        assert w._naming._species_id.text() == "DLC001"
+        assert w._taxon_card.field_values()["scientific_name"] == "Marphysa sp."
+        assert w._metadata._collector.text() == "采集人A"
+
+
 # ── on_activate smoke tests ───────────────────────────────────────────────────
 
 class TestOnActivate:
@@ -249,6 +319,36 @@ class TestOnActivate:
         w.on_activate()  # must not raise
         db.close()
 
+    def test_on_activate_clears_stale_naming_when_no_active_specimen(self, tmp_path):
+        """切/进一个无激活标本的项目时,命名卡残留字段(上一项目的)必须清空。
+
+        回归:此前 on_activate 无激活标本分支没清 naming_panel,上个项目最后加载
+        的 province/site 等残留显示 → 用户在新空项目里误以为"默认了"。
+        """
+        from app.views.workbench_view import WorkbenchView
+        project_dir = str(tmp_path / "proj")
+        Path(project_dir).mkdir(parents=True)
+        (Path(project_dir) / "incoming-jpg").mkdir()
+        (Path(project_dir) / "results").mkdir()
+        (Path(project_dir) / "_data").mkdir()
+        db_path = str(tmp_path / "proj" / "_data" / "project.db")
+        db = _make_db(db_path)
+        ctx = _make_ctx(project_dir=project_dir, db=db)
+        w = WorkbenchView(ctx)
+        # 模拟上一项目残留:命名卡字段非空 + _current_uid 指向旧号
+        w._naming._province.setText("ZJ")
+        w._naming._site.setText("SMW")
+        w._naming._storage.setText("D95E")
+        w._current_uid = "ZJ-SMW-DLC001-D95E-20260601"
+        # 空项目无激活标本
+        assert w._get_active_uid() is None
+        w.on_activate()
+        assert w._naming._province.text() == ""
+        assert w._naming._site.text() == ""
+        assert w._naming._storage.text() == ""
+        assert w._current_uid is None
+        db.close()
+
 
 # ── 新增编号: 日期沿用上一号 (同断面连拍日期不变) ────────────────────────────
 
@@ -290,6 +390,164 @@ class TestNewSpecimenDateCarryOver:
             assert w._naming._photo_date.text() == ""
         finally:
             db.close()
+
+
+class TestRightRailSpecimenIdentityEdits:
+    def _make_workbench(self, tmp_path):
+        from app.views.workbench_view import WorkbenchView
+        project_dir = str(tmp_path / "proj_identity")
+        Path(project_dir).mkdir(parents=True)
+        (Path(project_dir) / "incoming-jpg").mkdir()
+        (Path(project_dir) / "results").mkdir()
+        (Path(project_dir) / "_data").mkdir()
+        db = _make_db(str(Path(project_dir) / "_data" / "project.db"))
+        ctx = _make_ctx(project_dir=project_dir, db=db)
+        w = WorkbenchView(ctx)
+        w.on_activate()
+        return w, db, project_dir
+
+    def _insert_specimen(self, db, uid, project_dir, species_id="DLC001"):
+        db.execute(
+            """
+            INSERT INTO specimens
+              (uid, id, province, site, station, storage,
+               collection_date, photo_date, owner_project_dir, raw_json)
+            VALUES (?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                uid,
+                species_id,
+                "FJ",
+                "XM",
+                "B2",
+                "T95E",
+                "20260601",
+                "",
+                project_dir,
+                None,
+            ),
+        )
+        db.commit()
+
+    def test_selected_specimen_save_renames_instead_of_adding(self, tmp_path):
+        old_uid = "FJ-XM-B2-DLC001-T95E-20260601"
+        new_uid = "FJ-XM-B2-DLC002-T95E-20260601"
+        w, db, project_dir = self._make_workbench(tmp_path)
+        try:
+            self._insert_specimen(db, old_uid, project_dir)
+            db.execute("INSERT INTO grouping (uid, group_index) VALUES (?, 0)", (old_uid,))
+            db.execute("INSERT INTO tasks (uid) VALUES (?)", (old_uid,))
+            db.commit()
+
+            w._on_specimen_selected(old_uid)
+            w._naming._species_id.setText("DLC002")
+            w._on_naming_save()
+
+            assert db.execute("SELECT 1 FROM specimens WHERE uid=?", (new_uid,)).fetchone()
+            assert not db.execute("SELECT 1 FROM specimens WHERE uid=?", (old_uid,)).fetchone()
+            assert db.execute("SELECT 1 FROM grouping WHERE uid=?", (new_uid,)).fetchone()
+            assert db.execute("SELECT 1 FROM tasks WHERE uid=?", (new_uid,)).fetchone()
+            raw = json.loads(db.execute(
+                "SELECT raw_json FROM specimens WHERE uid=?", (new_uid,)
+            ).fetchone()[0])
+            assert raw["id"] == "DLC002"
+            assert old_uid in raw["previousUniqueIds"]
+        finally:
+            db.close()
+
+    def test_selected_specimen_save_refuses_to_cover_existing_uid(self, tmp_path):
+        old_uid = "FJ-XM-B2-DLC001-T95E-20260601"
+        existing_uid = "FJ-XM-B2-DLC002-T95E-20260601"
+        w, db, project_dir = self._make_workbench(tmp_path)
+        try:
+            self._insert_specimen(db, old_uid, project_dir)
+            self._insert_specimen(db, existing_uid, project_dir, species_id="DLC002")
+            w._on_specimen_selected(old_uid)
+            w._naming._species_id.setText("DLC002")
+
+            from PyQt6.QtWidgets import QMessageBox
+            with pytest.MonkeyPatch.context() as mp:
+                warnings = []
+                mp.setattr(
+                    QMessageBox,
+                    "warning",
+                    lambda *args, **kwargs: warnings.append(args) or QMessageBox.StandardButton.Ok,
+                )
+                w._on_naming_save()
+
+            assert warnings
+            assert db.execute("SELECT 1 FROM specimens WHERE uid=?", (old_uid,)).fetchone()
+            assert db.execute("SELECT 1 FROM specimens WHERE uid=?", (existing_uid,)).fetchone()
+            assert db.execute("SELECT COUNT(*) FROM specimens").fetchone()[0] == 2
+        finally:
+            db.close()
+
+    def test_delete_selected_specimen_removes_db_references(self, tmp_path):
+        uid = "FJ-XM-B2-DLC001-T95E-20260601"
+        w, db, project_dir = self._make_workbench(tmp_path)
+        try:
+            self._insert_specimen(db, uid, project_dir)
+            db.execute("INSERT INTO grouping (uid, group_index) VALUES (?, 0)", (uid,))
+            db.execute("INSERT INTO tasks (uid) VALUES (?)", (uid,))
+            db.commit()
+            w._on_specimen_selected(uid)
+
+            from PyQt6.QtWidgets import QMessageBox
+            with pytest.MonkeyPatch.context() as mp:
+                mp.setattr(
+                    QMessageBox,
+                    "warning",
+                    lambda *args, **kwargs: QMessageBox.StandardButton.Ok,
+                )
+                w._on_delete_specimen(uid)
+
+            assert not db.execute("SELECT 1 FROM specimens WHERE uid=?", (uid,)).fetchone()
+            assert not db.execute("SELECT 1 FROM grouping WHERE uid=?", (uid,)).fetchone()
+            assert not db.execute("SELECT 1 FROM tasks WHERE uid=?", (uid,)).fetchone()
+            assert w._current_uid is None
+        finally:
+            db.close()
+
+    def test_new_specimen_save_refuses_uid_existing_in_other_workspace(self, tmp_path):
+        from app.db import db_manager
+        from app.views.workbench_view import WorkbenchView
+
+        root = tmp_path / "survey_global"
+        ws_a = root / "断面A"
+        ws_b = root / "断面B"
+        ws_a.mkdir(parents=True)
+        ws_b.mkdir(parents=True)
+        db_a = db_manager.open_project_db(str(ws_a), create=True)
+        db_b = db_manager.open_project_db(str(ws_b), create=True)
+        uid = "FJ-XM-B2-DLC001-T95E-20260601"
+        db_a.execute(
+            "INSERT INTO specimens (uid, owner_project_dir) VALUES (?, ?)",
+            (uid, str(ws_a)),
+        )
+        db_a.commit()
+        ctx = _make_ctx(project_dir=str(ws_b), db=db_b)
+        ctx.current_project_root = str(root)
+        w = WorkbenchView(ctx)
+        w._naming._province.setText("FJ")
+        w._naming._site.setText("XM")
+        w._naming._station.setText("B2")
+        w._naming._species_id.setText("DLC001")
+        w._naming._storage.setText("T95E")
+        w._naming._collection_date.setText("20260601")
+
+        from PyQt6.QtWidgets import QMessageBox
+        with pytest.MonkeyPatch.context() as mp:
+            warnings = []
+            mp.setattr(
+                QMessageBox,
+                "warning",
+                lambda *args, **kwargs: warnings.append(args) or QMessageBox.StandardButton.Ok,
+            )
+            w._on_naming_save()
+
+        assert warnings
+        assert "已存在于项目" in warnings[0][2]
+        assert not db_b.execute("SELECT 1 FROM specimens WHERE uid=?", (uid,)).fetchone()
 
 
 # ── NamingPanel live-preview ──────────────────────────────────────────────────
@@ -670,21 +928,154 @@ class TestWorkbenchQuickPrint:
         ctx = _make_ctx(project_dir=project_dir, db=db)
         return WorkbenchView(ctx), ctx, uid, db
 
-    def test_quick_print_rna_prints_two_jobs(self, tmp_path, monkeypatch):
+    def test_quick_print_rna_defaults_to_sample_and_tissue_jobs(self, tmp_path, monkeypatch):
         from PyQt6.QtPrintSupport import QPrinterInfo
         import app.utils.label_print as lp
         captured = {}
 
         def _fake_paint(printer, jobs, **kw):
-            captured["buckets"] = [j["bucket"] for j in jobs]
+            captured.setdefault("buckets", []).extend(j["bucket"] for j in jobs)
             return True
 
         monkeypatch.setattr(QPrinterInfo, "defaultPrinterName",
                             staticmethod(lambda: "FakePrinter"))
+        # 不构造真 QPrinter —— 离屏环境里 setPrinterName("FakePrinter") 会触发
+        # CUPS spooler 查询，QPrinter 析构/事件处理在后续测试里阻塞事件循环
+        # （拖死 test_quick_print_no_default_printer_returns_false）。control-flow
+        # 单测只需 build_printer 返回桩对象。
+        monkeypatch.setattr(lp, "build_printer", lambda job, **kw: MagicMock())
         monkeypatch.setattr(lp, "paint_jobs", _fake_paint)
         w, ctx, uid, db = self._wb(tmp_path, "RD75E")   # R-prefix → tissue too
         assert w._quick_print_labels(uid) is True
         assert captured["buckets"] == ["sample", "tissue"]
+        db.close()
+
+    def test_quick_print_can_skip_tissue_when_project_setting_disabled(self, tmp_path, monkeypatch):
+        from PyQt6.QtPrintSupport import QPrinterInfo
+        from app.services.project_settings_service import save_setting
+        import app.utils.label_print as lp
+        captured = {}
+
+        def _fake_paint(printer, jobs, **kw):
+            captured.setdefault("buckets", []).extend(j["bucket"] for j in jobs)
+            return True
+
+        monkeypatch.setattr(QPrinterInfo, "defaultPrinterName",
+                            staticmethod(lambda: "FakePrinter"))
+        monkeypatch.setattr(lp, "build_printer", lambda job, **kw: MagicMock())
+        monkeypatch.setattr(lp, "paint_jobs", _fake_paint)
+        w, ctx, uid, db = self._wb(tmp_path, "RD75E")
+        save_setting(db, "print_settings", {
+            "quick_print": True,
+            "include_tissue": False,
+        })
+        assert w._quick_print_labels(uid) is True
+        assert captured["buckets"] == ["sample"]
+        db.close()
+
+    def test_quick_print_uses_project_template_keys_and_reports_them(self, tmp_path, monkeypatch):
+        from PyQt6.QtPrintSupport import QPrinterInfo
+        from app.services.project_settings_service import save_setting
+        import app.utils.label_print as lp
+        captured = {}
+        messages = []
+
+        def _fake_paint(printer, jobs, **kw):
+            captured.setdefault("templates", []).extend(
+                j["template"]["name"] for j in jobs
+            )
+            return True
+
+        monkeypatch.setattr(QPrinterInfo, "defaultPrinterName",
+                            staticmethod(lambda: "FakePrinter"))
+        monkeypatch.setattr(lp, "build_printer", lambda job, **kw: MagicMock())
+        monkeypatch.setattr(lp, "paint_jobs", _fake_paint)
+        w, ctx, uid, db = self._wb(tmp_path, "RD75E")
+        monkeypatch.setattr(w, "_status_message", lambda text, msec=4000: messages.append(text))
+        save_setting(db, "print_settings", {
+            "quick_print": True,
+            "include_tissue": True,
+            "sample_template_key": "detailed",
+            "tissue_template_key": "tissueMini",
+        })
+        assert w._quick_print_labels(uid) is True
+        assert captured["templates"] == ["详细", "RNAlater 组织管 25×10"]
+        assert "样品瓶: 详细" in messages[-1]
+        assert "RNAlater: RNAlater 组织管 25×10" in messages[-1]
+        db.close()
+
+    def test_quick_print_uses_global_template_default_when_project_has_none(self, tmp_path, monkeypatch):
+        from PyQt6.QtPrintSupport import QPrinterInfo
+        from app.services.project_settings_service import (
+            DEFAULT_PRINT_SETTINGS,
+            load_global_print_defaults,
+            save_global_print_defaults,
+        )
+        import app.utils.label_print as lp
+        captured = {}
+
+        def _fake_paint(printer, jobs, **kw):
+            captured.setdefault("templates", []).extend(
+                j["template"]["name"] for j in jobs
+            )
+            return True
+
+        old = load_global_print_defaults()
+        try:
+            save_global_print_defaults({
+                **DEFAULT_PRINT_SETTINGS,
+                "sample_template_key": "detailed",
+                "tissue_template_key": "tissueMini",
+            })
+            monkeypatch.setattr(QPrinterInfo, "defaultPrinterName",
+                                staticmethod(lambda: "FakePrinter"))
+            monkeypatch.setattr(lp, "build_printer", lambda job, **kw: MagicMock())
+            monkeypatch.setattr(lp, "paint_jobs", _fake_paint)
+            w, ctx, uid, db = self._wb(tmp_path, "RD75E")
+            assert w._quick_print_labels(uid) is True
+            assert captured["templates"] == ["详细", "RNAlater 组织管 25×10"]
+            db.close()
+        finally:
+            save_global_print_defaults(old)
+
+    def test_quick_print_can_queue_tissue_for_same_printer_sheet_mode(self, tmp_path, monkeypatch):
+        from PyQt6.QtPrintSupport import QPrinterInfo
+        import app.services.label_service as label_service
+        import app.utils.label_print as lp
+        from app.services import rna_label_queue_service as rna_queue
+        captured = {}
+
+        def _fake_paint(printer, jobs, **kw):
+            captured.setdefault("buckets", []).extend(j["bucket"] for j in jobs)
+            return True
+
+        monkeypatch.setattr(QPrinterInfo, "defaultPrinterName",
+                            staticmethod(lambda: "FakePrinter"))
+        monkeypatch.setattr(label_service, "persisted_paper_type",
+                            lambda bucket: "a4" if bucket == "tissue" else "label")
+        monkeypatch.setattr(lp, "build_printer", lambda job, **kw: MagicMock())
+        monkeypatch.setattr(lp, "paint_jobs", _fake_paint)
+        w, ctx, uid, db = self._wb(tmp_path, "RD75E")
+        assert w._quick_print_labels(uid) is True
+        assert captured["buckets"] == ["sample"]
+        assert rna_queue.pending_uids(db) == [uid]
+        db.close()
+
+    def test_quick_print_setting_can_force_studio_fallback(self, tmp_path, monkeypatch):
+        from PyQt6.QtPrintSupport import QPrinterInfo
+        from app.services.project_settings_service import save_setting
+        import app.utils.label_print as lp
+
+        monkeypatch.setattr(QPrinterInfo, "defaultPrinterName",
+                            staticmethod(lambda: "FakePrinter"))
+        monkeypatch.setattr(lp, "build_printer", lambda job, **kw: MagicMock())
+        monkeypatch.setattr(lp, "paint_jobs", lambda printer, jobs, **kw: True)
+        w, ctx, uid, db = self._wb(tmp_path, "D95E")
+        save_setting(db, "print_settings", {
+            "quick_print": False,
+            "include_tissue": False,
+        })
+        assert w._quick_print_labels(uid) is False
         db.close()
 
     def test_quick_print_no_default_printer_returns_false(self, tmp_path, monkeypatch):
@@ -709,6 +1100,7 @@ class TestWorkbenchQuickPrint:
         import app.utils.label_print as lp
         monkeypatch.setattr(QPrinterInfo, "defaultPrinterName",
                             staticmethod(lambda: "FakePrinter"))
+        monkeypatch.setattr(lp, "build_printer", lambda job, **kw: MagicMock())
         monkeypatch.setattr(lp, "paint_jobs", lambda printer, jobs, **kw: True)
         w, ctx, uid, db = self._wb(tmp_path, "D95E")
         w._on_print_labels(uid)
