@@ -38,8 +38,12 @@ $pyinstallerArgs = @(
     "--hidden-import", "qtawesome",
     "--collect-all", "qtawesome",
     "--collect-all", "pyproj",
-    "--collect-submodules", "PIL",
-    "--collect-submodules", "matplotlib"
+    "--exclude-module", "matplotlib.tests",
+    "--exclude-module", "matplotlib.testing",
+    "--exclude-module", "pandas",
+    "--exclude-module", "pytest",
+    "--exclude-module", "tkinter",
+    "--exclude-module", "_tkinter"
 )
 
 $mapDir = Get-ChildItem -Directory | Where-Object { $_.Name -eq "地图" } | Select-Object -First 1

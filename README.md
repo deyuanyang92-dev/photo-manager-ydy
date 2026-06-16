@@ -3,6 +3,18 @@
 把 `photo-platform-ydy/` 的 Web 原型复现为 Windows / macOS / Linux 桌面 GUI（PyQt6）。
 功能 100% 照搬 Web 原型，界面美观+顺手，真实数据只读导入零丢失。
 
+## Windows 直接使用
+
+仓库内已提供 Windows 便携版：
+
+- 下载：`releases/SpecimenPhotoWorkbench-win64.zip`
+- 解压到普通目录，例如 `D:\Apps\SpecimenPhotoWorkbench\`
+- 双击 `SpecimenPhotoWorkbench.exe`
+- 进入后在“项目总览”中新建或打开项目目录
+
+不要直接在 zip 压缩包里运行 exe，必须先解压。更完整的安装和使用说明见
+`docs/windows-install.md`。
+
 - 方案：`/root/.claude/plans/docs-cross-platform-desktop-gui-plan-md-hidden-frog.md`
 - 决策记录：`docs/adr/`
 - 每模块详细设计：`docs/specs/`（Opus 出，Sonnet 据此 TDD 实现）
