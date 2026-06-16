@@ -67,6 +67,24 @@ class TestEnsureSchema:
         assert "grouping" in tables
         assert "seen_files" in tables
         assert "_import_manifest" in tables
+        assert "survey_project" in tables
+        assert "workspaces" in tables
+        assert "workspace_index_cache" in tables
+        assert "report_runs" in tables
+        assert "workspace_meta" in tables
+        assert "devices" in tables
+        assert "uid_sequences" in tables
+        assert "uid_reservations" in tables
+        assert "photos" in tables
+        assert "photo_files" in tables
+        assert "photo_metadata" in tables
+        assert "photo_assignments" in tables
+        assert "assets" in tables
+        assert "asset_derivations" in tables
+        assert "processing_runs" in tables
+        assert "audit_log" in tables
+        assert "label_print_events" in tables
+        assert "qc_findings" in tables
 
     def test_darwin_core_view_created(self, tmp_project):
         conn = db_manager.open_project_db(tmp_project, create=True)

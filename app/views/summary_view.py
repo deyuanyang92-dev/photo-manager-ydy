@@ -20,6 +20,7 @@ from __future__ import annotations
 import csv
 import io
 import sqlite3
+from collections import Counter
 from datetime import date as _date
 from pathlib import Path
 from typing import Optional
@@ -417,6 +418,10 @@ class SummaryView(BaseView):
             # Transparent scrollarea background so controls region blends in
             f"QScrollArea{{background:transparent;border:none;}}"
             f"QScrollArea > QWidget > QWidget{{background:transparent;}}"
+            f"QFrame#Dashboard{{background:{_C_BG2};border:1px solid {_C_BORDER};border-radius:6px;}}"
+            f"QLabel#DashValue{{font-size:18px;font-weight:700;color:{_C_TEXT};}}"
+            f"QLabel#DashName{{font-size:11px;color:{_C_MUTED};}}"
+            f"QLabel#DashPeople{{font-size:12px;color:{_C_TEXT};}}"
         )
 
         # ── Outer layout: controls region (fixed-height scroll) + table (stretch) ──
@@ -574,7 +579,10 @@ class SummaryView(BaseView):
         self._controls_scroll = controls_scroll
         root.addWidget(controls_scroll)
 
-        root.addSpacing(12)
+        self._dashboard = self._build_dashboard()
+        root.addWidget(self._dashboard)
+
+        root.addSpacing(10)
 
         # ── Table (takes all remaining space) ─────────────────────────────────
         self._table = QTableView()
@@ -586,6 +594,42 @@ class SummaryView(BaseView):
         self._table.verticalHeader().setVisible(False)
         self._table.horizontalHeader().setStretchLastSection(False)
         root.addWidget(self._table, stretch=1)
+
+    def _build_dashboard(self) -> QFrame:
+        frame = QFrame()
+        frame.setObjectName("Dashboard")
+        lay = QHBoxLayout(frame)
+        lay.setContentsMargins(12, 8, 12, 8)
+        lay.setSpacing(14)
+
+        self._dash_values: dict[str, QLabel] = {}
+        for key, name in (
+            ("specimens", "标本"),
+            ("alcohol", "酒精固定"),
+            ("rna", "RNA"),
+            ("photos", "照片"),
+            ("unassigned", "未分配照片"),
+            ("prints", "标签打印"),
+        ):
+            box = QWidget()
+            box_l = QVBoxLayout(box)
+            box_l.setContentsMargins(0, 0, 0, 0)
+            box_l.setSpacing(1)
+            val = QLabel("0")
+            val.setObjectName("DashValue")
+            lbl = QLabel(name)
+            lbl.setObjectName("DashName")
+            box_l.addWidget(val)
+            box_l.addWidget(lbl)
+            lay.addWidget(box)
+            self._dash_values[key] = val
+
+        lay.addSpacing(10)
+        self._dash_people = QLabel("拍摄人：-    采集人：-    标签打印：-")
+        self._dash_people.setObjectName("DashPeople")
+        self._dash_people.setWordWrap(True)
+        lay.addWidget(self._dash_people, stretch=1)
+        return frame
 
     def _table_key_press(self, event) -> None:
         from PyQt6.QtGui import QKeySequence
@@ -811,6 +855,88 @@ class SummaryView(BaseView):
 
         n = len(specs)
         self._count_lbl.setText(f"{n} 条 · {len(vis_cols)} 列")
+        self._refresh_dashboard(specs)
+
+    def _refresh_dashboard(self, specs: Optional[list[Specimen]] = None) -> None:
+        specs = list(specs if specs is not None else self._filtered_specimens())
+        totals = {
+            "specimens": len(specs),
+            "alcohol": 0,
+            "rna": 0,
+            "photos": 0,
+            "unassigned": 0,
+            "prints": 0,
+        }
+        photographers: Counter[str] = Counter()
+        collectors: Counter[str] = Counter()
+        identifiers: Counter[str] = Counter()
+        label_printers: Counter[str] = Counter()
+
+        for sp in specs:
+            storage = (sp.storage or "").strip()
+            if _is_rna(storage):
+                totals["rna"] += 1
+            elif storage:
+                totals["alcohol"] += 1
+            photographers[self._person_key(sp.photographer)] += 1
+            collectors[self._person_key(sp.collector)] += 1
+            identifiers[self._person_key(sp.identifier)] += 1
+
+        db = self._safe_db()
+        if db is not None:
+            try:
+                row = db.execute(
+                    """
+                    SELECT COUNT(*) AS total,
+                           SUM(CASE WHEN current_assignment_id IS NULL THEN 1 ELSE 0 END) AS unassigned
+                      FROM photos
+                    """
+                ).fetchone()
+                totals["photos"] = int(row["total"] or 0) if row else 0
+                totals["unassigned"] = int(row["unassigned"] or 0) if row else 0
+            except Exception:
+                pass
+
+            try:
+                rows = db.execute(
+                    "SELECT actor, SUM(label_count) AS labels FROM label_print_events GROUP BY actor"
+                ).fetchall()
+                for row in rows:
+                    n = int(row["labels"] or 0)
+                    totals["prints"] += n
+                    label_printers[self._person_key(row["actor"])] += n
+            except Exception:
+                pass
+
+        for key, val in totals.items():
+            if key in self._dash_values:
+                self._dash_values[key].setText(str(val))
+        self._dash_people.setText(
+            "    ".join([
+                f"拍摄人：{self._format_people(photographers)}",
+                f"采集人：{self._format_people(collectors)}",
+                f"鉴定人：{self._format_people(identifiers)}",
+                f"标签打印：{self._format_people(label_printers)}",
+            ])
+        )
+
+    @staticmethod
+    def _person_key(name: Optional[str]) -> str:
+        value = str(name or "").strip()
+        return value or "未填写"
+
+    @staticmethod
+    def _format_people(counter: Counter[str], limit: int = 3) -> str:
+        if not counter:
+            return "-"
+        return "，".join(f"{name}{count}" for name, count in counter.most_common(limit))
+
+    def _safe_db(self) -> Optional[sqlite3.Connection]:
+        try:
+            return self.ctx.get_db()
+        except Exception:
+            return None
+
 
     # ── UI event handlers ────────────────────────────────────────────────────
 

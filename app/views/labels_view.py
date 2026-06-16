@@ -101,7 +101,9 @@ def _template_display_name(key: str, tmpl: dict) -> str:
         "tissueCompact": "RNAlater · 组织管（30×15）",
         "tissueMini": "RNAlater · 极小管（25×10）",
     }
-    return labels.get(key, tmpl.get("name", key))
+    code = tmpl.get("code", "?")
+    name = labels.get(key, tmpl.get("name", key))
+    return f"{code} {name}"
 
 
 class _ClickablePreview(QLabel):
@@ -1608,9 +1610,20 @@ QPushButton#PrintBtn:disabled {{
         if dialog.exec() != QPrintDialog.DialogCode.Accepted:
             return
 
-        paint_jobs(
+        ok = paint_jobs(
             printer, jobs,
             grid_opts=self._grid_opts(),
             cut_marks=bool(self._imposition.get("cutMarks")),
             draw_crop_marks=self._draw_crop_marks,
         )
+        if ok:
+            try:
+                from app.services.activity_audit_service import default_actor, record_print_jobs
+                record_print_jobs(
+                    self.ctx.get_db(),
+                    jobs,
+                    actor=default_actor(self.ctx),
+                    printer_name=printer.printerName() or printer.outputFileName(),
+                )
+            except Exception:
+                pass

@@ -1,16 +1,17 @@
 """results_column.py — ② 成果内容 column widget.
 
-Mirrors the web prototype's ``results-column`` area, redesigned per the user's
-request into **paired rows**: each result sequence is one row showing its
-composed TIFF (left) and its lossless ZIP archive (right) side-by-side, so the
-two products of the same 编号 read as associated.  Each card carries a real,
-zoomable preview display-box; the whole area collapses via a single toggle.
+Mirrors the web prototype's ``results-column`` area as a **Windows Explorer
+file list**: each result file is one compact row — icon LEFT, filename + meta
+RIGHT.  A composed TIFF shows its thumbnail; a lossless ZIP shows the standard
+zip-folder icon (like Windows).  Files of the same 编号 group under one
+"成果 N" header.  The whole area collapses via a single toggle.
 
   ┌ 成果内容          N 项        缩放 [────]   ▾ ┐
   │  成果 1                                       │
-  │    [ TIFF 展示框 ]   |   [ ZIP 展示框 ]       │
+  │    [🖼] a.tif              已合成          ⋮  │
+  │    [📦] a.zip              23.4 MB         ⋮  │
   │  成果 2                                       │
-  │    [ TIFF 展示框 ]   |   [ 尚未压缩 ]         │
+  │    [🖼] b.tif              已合成          ⋮  │
   └───────────────────────────────────────────────┘
 
 Public API
@@ -29,7 +30,7 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from PyQt6.QtCore import QPoint, Qt, pyqtSignal
+from PyQt6.QtCore import QEvent, QPoint, Qt, pyqtSignal
 from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import (
     QDialog,
@@ -117,6 +118,8 @@ class _TiffLightboxDialog(QDialog):
         self._image_label.setScaledContents(False)
         self._image_label.set_scroll_area(self._scroll)
         self._scroll.setWidget(self._image_label)
+        self._scroll.viewport().installEventFilter(self)
+        self._image_label.installEventFilter(self)
         layout.addWidget(self._scroll, stretch=1)
 
         zoom_row = QHBoxLayout()
@@ -159,6 +162,39 @@ class _TiffLightboxDialog(QDialog):
         layout.addLayout(nav_row)
 
         self._load_current()
+
+    def eventFilter(self, obj, event) -> bool:
+        if event.type() == QEvent.Type.Wheel and obj in (
+            self._scroll.viewport(),
+            self._image_label,
+        ):
+            return self._handle_wheel(obj, event)
+        return super().eventFilter(obj, event)
+
+    def _handle_wheel(self, obj, event) -> bool:
+        delta = event.angleDelta().y()
+        if delta == 0:
+            return False
+
+        mods = event.modifiers()
+        if mods & Qt.KeyboardModifier.AltModifier:
+            if delta < 0 and self._index < len(self._paths) - 1:
+                self._go_next()
+            elif delta > 0 and self._index > 0:
+                self._go_prev()
+            event.accept()
+            return True
+
+        # Mouse wheel zooms the preview; Ctrl+wheel follows the Windows/browser
+        # convention and lands on the same path.
+        anchor = None
+        if hasattr(event, "position"):
+            anchor = event.position().toPoint()
+            if obj is self._image_label:
+                anchor = self._image_label.mapTo(self._scroll.viewport(), anchor)
+        self._zoom_by_wheel_delta(delta, anchor)
+        event.accept()
+        return True
 
     def _load_current(self) -> None:
         path = self._paths[self._index]
@@ -228,6 +264,41 @@ class _TiffLightboxDialog(QDialog):
         self._fit_to_window = True
         self._render_current()
 
+    def _actual_size(self) -> None:
+        self._set_zoom_percent(100)
+
+    def _zoom_by_wheel_delta(self, delta: int, anchor: Optional[QPoint] = None) -> None:
+        steps = max(1, abs(delta) // 120)
+        direction = 1 if delta > 0 else -1
+        current = self._zoom_slider.value()
+        self._set_zoom_percent(current + direction * steps * 10, anchor)
+
+    def _set_zoom_percent(self, pct: int, anchor: Optional[QPoint] = None) -> None:
+        if self._base_pixmap.isNull():
+            return
+        pct = max(self._zoom_slider.minimum(), min(self._zoom_slider.maximum(), int(pct)))
+        viewport = self._scroll.viewport()
+        if anchor is None:
+            anchor = viewport.rect().center()
+
+        hbar = self._scroll.horizontalScrollBar()
+        vbar = self._scroll.verticalScrollBar()
+        old_w = max(1, self._image_label.width())
+        old_h = max(1, self._image_label.height())
+        rel_x = (hbar.value() + anchor.x()) / old_w
+        rel_y = (vbar.value() + anchor.y()) / old_h
+
+        self._fit_to_window = False
+        self._zoom_slider.blockSignals(True)
+        self._zoom_slider.setValue(pct)
+        self._zoom_slider.blockSignals(False)
+        self._render_current()
+
+        new_w = max(1, self._image_label.width())
+        new_h = max(1, self._image_label.height())
+        hbar.setValue(int(new_w * rel_x) - anchor.x())
+        vbar.setValue(int(new_h * rel_y) - anchor.y())
+
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         if self._fit_to_window:
@@ -251,11 +322,29 @@ class _TiffLightboxDialog(QDialog):
             subprocess.run(["xdg-open", str(path.parent)])
 
     def keyPressEvent(self, e) -> None:
-        if e.key() == Qt.Key.Key_Left and self._index > 0:
+        key = e.key()
+        mods = e.modifiers()
+        ctrl = bool(mods & Qt.KeyboardModifier.ControlModifier)
+
+        if ctrl and key in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
+            self._set_zoom_percent(self._zoom_slider.value() + 10)
+        elif ctrl and key == Qt.Key.Key_Minus:
+            self._set_zoom_percent(self._zoom_slider.value() - 10)
+        elif ctrl and key in (Qt.Key.Key_0, Qt.Key.Key_F):
+            self._fit_current()
+        elif ctrl and key == Qt.Key.Key_1:
+            self._actual_size()
+        elif key in (Qt.Key.Key_Left, Qt.Key.Key_Up, Qt.Key.Key_PageUp, Qt.Key.Key_Backspace) and self._index > 0:
             self._go_prev()
-        elif e.key() == Qt.Key.Key_Right and self._index < len(self._paths) - 1:
+        elif key in (Qt.Key.Key_Right, Qt.Key.Key_Down, Qt.Key.Key_PageDown, Qt.Key.Key_Space) and self._index < len(self._paths) - 1:
             self._go_next()
-        elif e.key() == Qt.Key.Key_Escape:
+        elif key == Qt.Key.Key_Home and self._index != 0:
+            self._index = 0
+            self._load_current()
+        elif key == Qt.Key.Key_End and self._index != len(self._paths) - 1:
+            self._index = len(self._paths) - 1
+            self._load_current()
+        elif key == Qt.Key.Key_Escape:
             self.close()
         else:
             super().keyPressEvent(e)
@@ -263,9 +352,9 @@ class _TiffLightboxDialog(QDialog):
 
 # ── Thumbnail decode (cached at ResultsColumn level) ───────────────────────────
 
-_MIN_THUMB = 72
-_MAX_THUMB = 280
-_DEFAULT_THUMB = 112
+_MIN_THUMB = 32
+_MAX_THUMB = 96
+_DEFAULT_THUMB = 48
 _BASE_THUMB = 280  # base decode size; zoom scales DOWN from this cached pixmap
 
 
@@ -308,14 +397,12 @@ def _decode_thumb(path: str, max_size: int = _BASE_THUMB) -> Optional[QPixmap]:
 # ── Individual result cards ────────────────────────────────────────────────────
 
 class _ResultCardBase(QFrame):
-    """Shared base: a square preview display-box (zoomable) + a body column."""
+    """Shared base: one compact file-list row — icon LEFT, name + meta RIGHT
+    (Windows Explorer list style).  Subclasses supply the icon source, the meta
+    text and the context-menu actions."""
 
     _FALLBACK_ICON = "mdi6.file-image-outline"
-    _TILE_BG = (
-        "background: qradialgradient(cx:0.46, cy:0.42, radius:0.62,"
-        " fx:0.46, fy:0.42, stop:0 rgba(66,212,160,0.40),"
-        " stop:0.4 rgba(54,201,143,0.10), stop:1 #091b20);"
-    )
+    _ICON_TINT = "#3a6b75"
 
     def __init__(self, info: dict, thumb_provider=None,
                  thumb_size: int = _DEFAULT_THUMB,
@@ -331,58 +418,65 @@ class _ResultCardBase(QFrame):
     def _setup_ui(self) -> None:
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(0)
+        lay.setContentsMargins(10, 6, 8, 6)
+        lay.setSpacing(10)
 
-        self._preview = QLabel()
-        self._preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lay.addWidget(self._preview)
+        self._icon = QLabel()
+        self._icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._icon.setFixedSize(self._thumb_size, self._thumb_size)
+        lay.addWidget(self._icon)
 
         body = self._build_body()
         lay.addWidget(body, stretch=1)
 
         from app.config.effects import apply_card_shadow
-        apply_card_shadow(self, blur=14, y=2, alpha=45)
+        apply_card_shadow(self, blur=10, y=1, alpha=30)
 
         path = self._info.get("path", "")
         if self._thumb_provider and path:
             self._base_pm = self._thumb_provider(path)
-        self._apply_thumb()
+        self._apply_icon()
 
     def _build_body(self) -> QWidget:  # override
         return QWidget()
 
-    def _apply_thumb(self) -> None:
+    def _icon_pixmap(self) -> Optional[QPixmap]:
+        """Override to force a glyph (e.g. ZIP).  Default = decoded thumbnail."""
+        return self._base_pm
+
+    def _apply_icon(self) -> None:
         s = self._thumb_size
-        self._preview.setFixedSize(s, s)
-        if self._base_pm is not None and not self._base_pm.isNull():
-            self._preview.setStyleSheet(
-                "border:none; border-top-left-radius:12px;"
-                " border-bottom-left-radius:12px; background:#06141a;"
-            )
-            self._preview.setPixmap(self._base_pm.scaled(
+        self._icon.setFixedSize(s, s)
+        self._icon.setStyleSheet("border:none; border-radius:6px; background:transparent;")
+        pm = self._icon_pixmap()
+        if pm is not None and not pm.isNull():
+            self._icon.setPixmap(pm.scaled(
                 s, s,
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation,
             ))
         else:
-            self._preview.setStyleSheet(
-                "border:none; border-top-left-radius:12px;"
-                " border-bottom-left-radius:12px;" + self._TILE_BG
+            g = min(26, max(12, s - 6))
+            self._icon.setPixmap(
+                icons.icon(self._FALLBACK_ICON, color=self._ICON_TINT).pixmap(g, g)
             )
-            g = min(28, max(14, s // 2))
-            self._preview.setPixmap(
-                icons.icon(self._FALLBACK_ICON, color="#1f4148").pixmap(g, g)
-            )
-        self.setMinimumHeight(s)
+
+    def _make_menu_btn(self, tip: str, handler) -> QPushButton:
+        b = QPushButton()
+        b.setObjectName("Ghost")
+        b.setFixedSize(24, 24)
+        b.setToolTip(tip)
+        icons.set_button_icon(b, "mdi6.dots-vertical", size=14)
+        b.clicked.connect(lambda: handler(b.mapToGlobal(b.rect().bottomLeft())))
+        return b
 
     def set_thumb_size(self, size: int) -> None:
         self._thumb_size = size
-        self._apply_thumb()
+        self._apply_icon()
 
 
 class _TiffCard(_ResultCardBase):
-    """A single composed-TIFF result card with a real, zoomable preview box."""
+    """One composed-TIFF file row: thumbnail icon + filename + 已合成."""
 
     _FALLBACK_ICON = "mdi6.file-image-outline"
 
@@ -397,13 +491,12 @@ class _TiffCard(_ResultCardBase):
     def _build_body(self) -> QWidget:
         body = QWidget()
         body_lay = QVBoxLayout(body)
-        body_lay.setContentsMargins(10, 8, 8, 8)
-        body_lay.setSpacing(4)
+        body_lay.setContentsMargins(0, 0, 0, 0)
+        body_lay.setSpacing(2)
 
         name = self._info.get("name") or Path(self._info.get("path", "")).name
         name_lbl = QLabel(name)
         name_lbl.setObjectName("Mono")
-        name_lbl.setWordWrap(True)
         name_lbl.setToolTip(self._info.get("path", name))
         body_lay.addWidget(name_lbl)
 
@@ -415,17 +508,8 @@ class _TiffCard(_ResultCardBase):
         state_chip.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         row.addWidget(state_chip)
         row.addStretch()
-        menu_btn = QPushButton()
-        menu_btn.setObjectName("Ghost")
-        menu_btn.setFixedSize(26, 26)
-        menu_btn.setToolTip("成果操作")
-        icons.set_button_icon(menu_btn, "mdi6.dots-vertical", size=14)
-        menu_btn.clicked.connect(
-            lambda: self._show_menu(menu_btn.mapToGlobal(menu_btn.rect().bottomLeft()))
-        )
-        row.addWidget(menu_btn)
+        row.addWidget(self._make_menu_btn("成果操作", self._show_menu))
         body_lay.addLayout(row)
-        body_lay.addStretch()
         return body
 
     def mouseDoubleClickEvent(self, event) -> None:
@@ -451,14 +535,10 @@ class _TiffCard(_ResultCardBase):
 
 
 class _ArchiveCard(_ResultCardBase):
-    """A single ZIP-archive result card (no decodable image → glyph tile)."""
+    """One ZIP-archive file row: Windows-style zip-folder icon + filename + size."""
 
     _FALLBACK_ICON = "mdi6.folder-zip-outline"
-    _TILE_BG = (
-        "background: qradialgradient(cx:0.46, cy:0.42, radius:0.62,"
-        " fx:0.46, fy:0.42, stop:0 rgba(74,144,217,0.42),"
-        " stop:0.4 rgba(74,144,217,0.10), stop:1 #091b20);"
-    )
+    _ICON_TINT = "#c9981f"  # Windows zip-folder amber
 
     def __init__(self, info: dict, open_fn=None, restore_fn=None,
                  thumb_size: int = _DEFAULT_THUMB,
@@ -468,16 +548,19 @@ class _ArchiveCard(_ResultCardBase):
         super().__init__(info, thumb_provider=None,
                          thumb_size=thumb_size, parent=parent)
 
+    def _icon_pixmap(self) -> Optional[QPixmap]:
+        # A ZIP has no preview — always the zip-folder glyph (like Windows).
+        return None
+
     def _build_body(self) -> QWidget:
         body = QWidget()
         body_lay = QVBoxLayout(body)
-        body_lay.setContentsMargins(10, 8, 8, 8)
-        body_lay.setSpacing(4)
+        body_lay.setContentsMargins(0, 0, 0, 0)
+        body_lay.setSpacing(2)
 
         name = self._info.get("name") or Path(self._info.get("path", "")).name
         name_lbl = QLabel(name)
         name_lbl.setObjectName("Mono")
-        name_lbl.setWordWrap(True)
         name_lbl.setToolTip(self._info.get("path", name))
         body_lay.addWidget(name_lbl)
 
@@ -490,17 +573,8 @@ class _ArchiveCard(_ResultCardBase):
         state_lbl.setObjectName("MutedSmall")
         row.addWidget(state_lbl)
         row.addStretch()
-        menu_btn = QPushButton()
-        menu_btn.setObjectName("Ghost")
-        menu_btn.setFixedSize(26, 26)
-        menu_btn.setToolTip("归档操作")
-        icons.set_button_icon(menu_btn, "mdi6.dots-vertical", size=14)
-        menu_btn.clicked.connect(
-            lambda: self._show_menu(menu_btn.mapToGlobal(menu_btn.rect().bottomLeft()))
-        )
-        row.addWidget(menu_btn)
+        row.addWidget(self._make_menu_btn("归档操作", self._show_menu))
         body_lay.addLayout(row)
-        body_lay.addStretch()
         return body
 
     def contextMenuEvent(self, event) -> None:
@@ -519,7 +593,7 @@ class _ArchiveCard(_ResultCardBase):
 
 
 def _placeholder(text: str) -> QWidget:
-    """Muted box shown when a row is missing its TIFF or its ZIP side."""
+    """Muted box shown when a sequence has no files."""
     f = QFrame()
     f.setObjectName("Card")
     lay = QVBoxLayout(f)
@@ -533,27 +607,31 @@ def _placeholder(text: str) -> QWidget:
 
 
 class _ResultRow(QFrame):
-    """One result sequence: header label + [TIFF | ZIP] paired side-by-side."""
+    """One result sequence: header label + stacked compact file rows
+    (one row per file — TIFF then ZIP — Windows Explorer list style)."""
 
-    def __init__(self, seq_label: str, tiff_card: Optional[QWidget],
-                 zip_card: Optional[QWidget],
+    def __init__(self, seq_label: str, file_rows: list,
                  parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setObjectName("ResultRow")
+        self._rows = [r for r in file_rows if r is not None]
         v = QVBoxLayout(self)
-        v.setContentsMargins(0, 0, 0, 6)
-        v.setSpacing(6)
+        v.setContentsMargins(0, 0, 0, 8)
+        v.setSpacing(4)
 
         hdr = QLabel(seq_label)
         hdr.setObjectName("MutedSmall")
         v.addWidget(hdr)
 
-        pair = QHBoxLayout()
-        pair.setContentsMargins(0, 0, 0, 0)
-        pair.setSpacing(12)
-        pair.addWidget(tiff_card if tiff_card is not None else _placeholder("无对应成片"), 1)
-        pair.addWidget(zip_card if zip_card is not None else _placeholder("尚未压缩"), 1)
-        v.addLayout(pair)
+        if not self._rows:
+            v.addWidget(_placeholder("无成果"))
+        for r in self._rows:
+            v.addWidget(r)
+
+    def set_thumb_size(self, size: int) -> None:
+        for r in self._rows:
+            if hasattr(r, "set_thumb_size"):
+                r.set_thumb_size(size)
 
 
 def _pair_results(composed_tiffs: list, archive_zips: list) -> list:
@@ -692,25 +770,26 @@ class ResultsColumn(QWidget):
         all_tiff_paths = [Path(i["path"]) for i in composed_tiffs if i.get("path")]
         rows = _pair_results(composed_tiffs, archive_zips)
         for seq_label, tinfo, zinfo in rows:
-            tcard = None
+            file_rows: list = []
             if tinfo is not None:
-                tcard = _TiffCard(
+                tc = _TiffCard(
                     tinfo,
                     open_fn=self._open_in_explorer,
                     lightbox_fn=lambda p, _paths=all_tiff_paths: self._open_tiff_lightbox(p, _paths),
                     thumb_provider=self._thumb_provider,
                     thumb_size=self._thumb_size,
                 )
-                self._cards.append(tcard)
-            zcard = None
+                self._cards.append(tc)
+                file_rows.append(tc)
             if zinfo is not None:
-                zcard = _ArchiveCard(
+                zc = _ArchiveCard(
                     zinfo, open_fn=self._open_in_explorer,
                     restore_fn=lambda p: self.restore_requested.emit(p),
                     thumb_size=self._thumb_size,
                 )
-                self._cards.append(zcard)
-            self._rows_lay.addWidget(_ResultRow(seq_label, tcard, zcard))
+                self._cards.append(zc)
+                file_rows.append(zc)
+            self._rows_lay.addWidget(_ResultRow(seq_label, file_rows))
 
         n = len(rows)
         self._count.setText(f"{n} 项")

@@ -855,6 +855,48 @@ class TestNewTubeTemplates:
         from app.services.label_service import BUILTIN_TEMPLATES
         assert "qrFirst" in BUILTIN_TEMPLATES
 
+    # ── 语义编号 (BTL/CRYO/…) ────────────────────────────────────────────────
+    EXPECTED_CODES = {
+        "standard": "BTL-STD",
+        "compact": "BTL-MINI",
+        "detailed": "BTL-DET",
+        "tissueCompact": "TIS-30",
+        "tissueMini": "TIS-25",
+        "tissueCustom": "TIS-CUST",
+        "cryo2mlSide": "CRYO-SIDE",
+        "cryo2mlCap": "CRYO-CAP",
+        "falcon5ml": "FAL-5",
+        "falcon15ml": "FAL-15",
+        "falcon50ml": "FAL-50",
+        "bottle500ml": "BTL-500",
+        "qrFirst": "SEQ-QR",
+        "museumDense": "MUS-DENSE",
+    }
+
+    def test_every_builtin_has_code(self):
+        from app.services.label_service import BUILTIN_TEMPLATES
+        missing = [k for k in BUILTIN_TEMPLATES if not BUILTIN_TEMPLATES[k].get("code")]
+        assert not missing, f"Templates missing code: {missing}"
+
+    def test_codes_are_unique(self):
+        from app.services.label_service import BUILTIN_TEMPLATES
+        codes = [BUILTIN_TEMPLATES[k].get("code") for k in BUILTIN_TEMPLATES]
+        assert len(set(codes)) == len(codes), f"Duplicate codes: {codes}"
+
+    def test_expected_code_mapping(self):
+        from app.services.label_service import BUILTIN_TEMPLATES
+        for key, code in self.EXPECTED_CODES.items():
+            assert BUILTIN_TEMPLATES[key]["code"] == code, (
+                f"{key}: expected {code}, got {BUILTIN_TEMPLATES[key].get('code')}"
+            )
+
+    def test_builtin_template_code_helper(self):
+        from app.services.label_service import builtin_template_code
+        assert builtin_template_code("standard") == "BTL-STD"
+        assert builtin_template_code("cryo2mlSide") == "CRYO-SIDE"
+        # unknown key → fallback uppercase key
+        assert builtin_template_code("nope") == "NOPE"
+
     def test_new_paper_sizes_registered(self):
         from app.services.label_service import PAPER_SIZES
         for k in ("label_13x13", "label_38x13", "label_45x17", "label_55x20", "label_75x25"):

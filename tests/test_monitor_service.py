@@ -116,3 +116,27 @@ class TestScanMarksGroupedJpg:
         )
         assert hasattr(entry, "is_grouped")
         assert entry.is_grouped is False
+
+
+class TestScanRegistersPhotoAssets:
+    def test_scan_project_upserts_photo_rows(self, tmp_path):
+        from app.db import db_manager
+        try:
+            project = tmp_path / "proj"
+            incoming = project / "incoming-jpg"
+            incoming.mkdir(parents=True)
+            jpg = incoming / "asset.jpg"
+            jpg.write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 100)
+            db = db_manager.open_project_db(str(project), create=True)
+
+            result = scan_project(str(project), db)
+
+            assert [f.name for f in result.jpg_files] == ["asset.jpg"]
+            photo = db.execute("SELECT * FROM photos").fetchone()
+            file_row = db.execute("SELECT * FROM photo_files").fetchone()
+            assert photo["original_filename"] == "asset.jpg"
+            assert photo["first_seen_at"] == result.jpg_files[0].first_seen_at
+            assert file_row["relative_path"] == "incoming-jpg/asset.jpg"
+            assert file_row["exists_on_disk"] == 1
+        finally:
+            db_manager.close_all()

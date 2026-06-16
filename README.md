@@ -18,6 +18,18 @@ pytest tests/ -v         # 跑测试
 Windows 桌面双击启动：双击仓库里的 `launch_windows.cmd`。它会通过 `wsl.exe`
 进入当前 WSL 项目目录启动 GUI；如果失败，会保留错误窗口和 `/tmp/specimen-photo-workbench-launch.log`。
 
+## Windows 打包 / 安装
+
+在 Windows PowerShell 中构建发行包：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\build_windows.ps1
+```
+
+输出目录为 `dist\SpecimenPhotoWorkbench\`，可分发压缩包为
+`dist\SpecimenPhotoWorkbench-win64.zip`。安装与使用说明见
+`docs/windows-install.md`。
+
 ## 红线（绝不破）
 
 - **TIFF 绝不自动删**（无损母片）。仅允许用户在确认对话框后**手动**删除；后台/归档/整理流程一律不得删 TIFF。

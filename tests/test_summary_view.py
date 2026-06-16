@@ -75,6 +75,18 @@ CREATE TABLE IF NOT EXISTS grouping (
     retired_tiff_paths TEXT, raw_json TEXT,
     PRIMARY KEY (uid, group_index)
 );
+CREATE TABLE IF NOT EXISTS photos (
+    photo_id TEXT PRIMARY KEY,
+    current_assignment_id TEXT
+);
+CREATE TABLE IF NOT EXISTS label_print_events (
+    event_id TEXT PRIMARY KEY,
+    actor TEXT,
+    bucket TEXT,
+    specimen_uids_json TEXT NOT NULL DEFAULT '[]',
+    copies INTEGER DEFAULT 1,
+    label_count INTEGER DEFAULT 0
+);
 """
 
 
@@ -110,6 +122,27 @@ def _insert_specimen_full(
         " collection_date, photo_date, collector) "
         "VALUES (?, ?, ?, 'Aplysiidae', ?, ?, ?, ?)",
         (uid, name, name_cn, proj, coll_date, photo_date, collector),
+    )
+    db.commit()
+
+
+def _insert_specimen_accountable(
+    db: sqlite3.Connection,
+    uid: str,
+    *,
+    storage: str,
+    collector: str,
+    photographer: str,
+    identifier: str = "",
+    proj: str = "/tmp/proj_A",
+) -> None:
+    db.execute(
+        """
+        INSERT OR REPLACE INTO specimens
+        (uid, scientific_name, family, storage, collector, photographer, identifier, owner_project_dir)
+        VALUES (?, 'Aplysia californica', 'Aplysiidae', ?, ?, ?, ?, ?)
+        """,
+        (uid, storage, collector, photographer, identifier, proj),
     )
     db.commit()
 
@@ -178,6 +211,37 @@ class TestOnActivate:
     def test_count_label_shows_row_count(self, view_with_data) -> None:
         text = view_with_data._count_lbl.text()
         assert "3" in text or text  # "3 条 · N 列"
+
+    def test_dashboard_shows_project_accountability_counts(self) -> None:
+        from app.views.summary_view import SummaryView
+        db = _make_db()
+        _insert_specimen_accountable(
+            db, "SP001", storage="D95E", collector="张三", photographer="李四", identifier="王五"
+        )
+        _insert_specimen_accountable(
+            db, "SP002", storage="RD75E", collector="张三", photographer="赵六", identifier=""
+        )
+        db.execute("INSERT INTO photos (photo_id, current_assignment_id) VALUES ('P1', 'A1')")
+        db.execute("INSERT INTO photos (photo_id, current_assignment_id) VALUES ('P2', NULL)")
+        db.execute(
+            "INSERT INTO label_print_events "
+            "(event_id, actor, bucket, specimen_uids_json, copies, label_count) "
+            "VALUES ('E1', '周八', 'sample', '[\"SP001\"]', 1, 2)"
+        )
+        db.commit()
+        v = SummaryView(_make_ctx(db=db))
+        v.on_activate()
+
+        assert v._dash_values["specimens"].text() == "2"
+        assert v._dash_values["alcohol"].text() == "1"
+        assert v._dash_values["rna"].text() == "1"
+        assert v._dash_values["photos"].text() == "2"
+        assert v._dash_values["unassigned"].text() == "1"
+        assert v._dash_values["prints"].text() == "2"
+        people = v._dash_people.text()
+        assert "李四1" in people
+        assert "张三2" in people
+        assert "周八2" in people
 
 
 # ── Field picker ──────────────────────────────────────────────────────────────
@@ -454,7 +518,7 @@ class TestRegistry:
         from app.views.registry import ALL_VIEWS
         titles = [v.nav_title for v in ALL_VIEWS]
         assert titles == [
-            "照片工作区", "最近工作区", "项目树", "标签打印",
+            "照片工作区", "最近使用", "项目树", "标签打印",
             "WoRMS 分类库", "内置分类库", "坐标工具",
             "项目汇总", "采集记录", "采集地图", "配置",
         ]

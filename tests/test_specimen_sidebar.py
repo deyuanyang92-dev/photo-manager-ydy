@@ -42,10 +42,13 @@ def ctx(db):
     return c
 
 
-def _add_specimen(db, uid, name=""):
+def _add_specimen(db, uid, name="", storage=""):
     db.execute(
-        "INSERT INTO specimens (uid, scientific_name, owner_project_dir) VALUES (?, ?, ?)",
-        (uid, name, _PROJ),
+        """
+        INSERT INTO specimens (uid, scientific_name, storage, owner_project_dir)
+        VALUES (?, ?, ?, ?)
+        """,
+        (uid, name, storage, _PROJ),
     )
     db.commit()
 
@@ -178,3 +181,39 @@ def test_active_specimen_row_has_active_style_and_badge(ctx, db):
         if w.objectName() == "SpecimenActivePill"
     ]
     assert badges and badges[0].text() == "拍摄中"
+
+
+def test_rna_filter_button_shows_count_and_filters_r_prefix(ctx, db):
+    _add_specimen(db, "RNA-1", storage="RD75E")
+    _add_specimen(db, "NONRNA-1", storage="D95E")
+    sb = SpecimenSidebar(ctx)
+    sb.refresh()
+
+    assert sb._filter_all_btn.text() == "全部 2"
+    assert sb._filter_rna_btn.text() == "RNA 1"
+
+    sb._filter_rna_btn.click()
+
+    assert sb._list.count() == 1
+    assert sb._list.item(0).data(Qt.ItemDataRole.UserRole) == "RNA-1"
+    assert "RNA 1" in sb._count_label.text()
+
+
+def test_rna_badge_and_missing_species_are_visible_on_row(ctx, db):
+    _add_specimen(db, "RNA-2", storage="RT95E")
+    sb = SpecimenSidebar(ctx)
+    sb.refresh()
+
+    row = sb._list.itemWidget(sb._list.item(0))
+    rna_badges = [
+        w for w in row.findChildren(QLabel)
+        if w.objectName() == "SpecimenRnaBadge"
+    ]
+    missing = [
+        w for w in row.findChildren(QLabel)
+        if w.objectName() == "SpecimenMissingText"
+    ]
+
+    assert rna_badges and "已取 RNA" in rna_badges[0].text()
+    assert "RT95E" in rna_badges[0].text()
+    assert missing and missing[0].text() == "未填写物种信息"

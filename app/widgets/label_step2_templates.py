@@ -529,7 +529,7 @@ class LabelStep2Templates(QWidget):
 
         meta_row = QHBoxLayout()
         meta_row.setSpacing(6)
-        badge = QLabel("自定义" if kind == "custom" else "内置模板")
+        badge = QLabel("自定义" if kind == "custom" else f"内置 · {tmpl.get('code', '?')}")
         badge.setObjectName("CardBadge")
         badge.setProperty("custom", kind == "custom")
         meta_row.addWidget(badge)

@@ -86,6 +86,9 @@ def _patch_recent_json(monkeypatch, tmp_path):
 
 def test_no_root_empty_json_shows_placeholder(qtbot, tmp_path, ctx, monkeypatch):
     # No root AND no recorded projects -> the original empty-state placeholder.
+    app_dir = tmp_path / "isolated-app"
+    app_dir.mkdir()
+    monkeypatch.chdir(app_dir)
     recent_json = _patch_recent_json(monkeypatch, tmp_path)
     _seed_projects_json(recent_json, [])
 
@@ -99,6 +102,9 @@ def test_no_root_empty_json_shows_placeholder(qtbot, tmp_path, ctx, monkeypatch)
 
 def test_no_root_flat_lists_known_projects(qtbot, tmp_path, ctx, monkeypatch):
     # No root but projects recorded -> flat top-level list of every known project.
+    app_dir = tmp_path / "isolated-app"
+    app_dir.mkdir()
+    monkeypatch.chdir(app_dir)
     recent_json = _patch_recent_json(monkeypatch, tmp_path)
 
     real_a = tmp_path / "ceshi6"
@@ -135,6 +141,9 @@ def test_no_root_flat_lists_known_projects(qtbot, tmp_path, ctx, monkeypatch):
 def test_flat_list_enter_workspace_with_root_none(qtbot, tmp_path, ctx, monkeypatch):
     # In flat-list mode (_root is None), entering a project works and the
     # workspace becomes its own root; _root stays None so re-activate stays flat.
+    app_dir = tmp_path / "isolated-app"
+    app_dir.mkdir()
+    monkeypatch.chdir(app_dir)
     recent_json = _patch_recent_json(monkeypatch, tmp_path)
     leaf = tmp_path / "ceshi8"
     leaf.mkdir()
@@ -160,6 +169,9 @@ def test_flat_list_enter_workspace_with_root_none(qtbot, tmp_path, ctx, monkeypa
 def test_dead_directory_in_json_shown_as_folder(qtbot, tmp_path, ctx, monkeypatch):
     # A recorded project whose dir no longer exists (drive unmounted) still
     # shows up, as a plain 📁 (not a workspace); entering it does NOT crash.
+    app_dir = tmp_path / "isolated-app"
+    app_dir.mkdir()
+    monkeypatch.chdir(app_dir)
     recent_json = _patch_recent_json(monkeypatch, tmp_path)
     ghost = tmp_path / "never-existed"
     _seed_projects_json(recent_json, [{"id": "1", "name": "幽灵", "directory": str(ghost)}])
@@ -189,6 +201,9 @@ def test_dead_directory_in_json_shown_as_folder(qtbot, tmp_path, ctx, monkeypatc
 
 def test_pick_root_after_flat_list_reverts_to_scan(qtbot, tmp_path, ctx, monkeypatch):
     # Flat list populated, then user picks a real root -> tree reverts to scan mode.
+    app_dir = tmp_path / "isolated-app"
+    app_dir.mkdir()
+    monkeypatch.chdir(app_dir)
     recent_json = _patch_recent_json(monkeypatch, tmp_path)
     leaf = tmp_path / "loose"
     leaf.mkdir()
@@ -214,6 +229,33 @@ def test_pick_root_after_flat_list_reverts_to_scan(qtbot, tmp_path, ctx, monkeyp
     assert "调查区" in top.text(0)
     assert top.childCount() == 1  # scan mode: subfolders as children
     assert view._tree.topLevelItemCount() == 1
+
+
+def test_no_root_auto_discovers_workspace_candidates_near_cwd(qtbot, tmp_path, ctx, monkeypatch):
+    recent_json = _patch_recent_json(monkeypatch, tmp_path)
+    _seed_projects_json(recent_json, [])
+
+    parent = tmp_path / "project-dump"
+    app_dir = parent / "app"
+    app_dir.mkdir(parents=True)
+    monkeypatch.chdir(app_dir)
+
+    ceshi6 = parent / "ceshi6"
+    ceshi8 = parent / "ceshi8"
+    _make_workspace(ceshi6)
+    (ceshi8 / "_data").mkdir(parents=True)
+    (ceshi8 / "incoming-jpg").mkdir()
+
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    view.on_activate()
+
+    labels = [
+        view._tree.topLevelItem(i).text(0)
+        for i in range(view._tree.topLevelItemCount())
+    ]
+    assert any("ceshi6" in text and "工作区" in text for text in labels)
+    assert any("ceshi8" in text and "可导入" in text for text in labels)
 
 
 def test_enter_node_sets_ctx_and_root(qtbot, tmp_path, ctx, monkeypatch):

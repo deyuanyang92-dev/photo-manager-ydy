@@ -11,7 +11,7 @@
                 （唯一入口），成功后发 workspace_changed；首/末端禁用，不回绕。
                 中途回退后再切新工作区 → 截断前向分支。同级切换改走 ▾ 下拉。
       * 根即工作区（chain==1）只要有历史也能 ◀▶（修复「光秃秃无箭头」）。
-      * 叶子下拉 → 同目录文件夹（已是工作区的标 📷）+ 末尾「+ 新建文件夹…」：
+      * 叶子下拉 → 项目目录（已是工作区的标 📷）+ 末尾「+ 新建文件夹…」：
                 在当前工作区父目录下建新文件夹并进入；名字预填 YYYYMMDD(；
                 拒 / \\ .. 空。
   - MainWindow._project_switcher 即该控件；refresh_context_bar() 后 text() 反映链。
@@ -31,6 +31,8 @@ from PyQt6.QtWidgets import QApplication
 from app.widgets.workspace_breadcrumb import (
     WorkspaceBreadcrumb,
     breadcrumb_chain,
+    project_tree_dirs,
+    sibling_project_dirs,
     sibling_dirs,
 )
 
@@ -101,6 +103,32 @@ def test_siblings_filter(tmp_path):
     root, sect = _make_tree(tmp_path)
     sibs = sibling_dirs(str(sect / "B2"))
     assert [os.path.basename(p) for p in sibs] == ["B1", "B2", "B3"]
+
+
+def test_project_tree_dirs_lists_root_and_all_children(tmp_path):
+    root, sect = _make_tree(tmp_path)
+    (root / "学习子目录1").mkdir()
+    dirs = project_tree_dirs(str(root), str(root))
+    rels = [os.path.relpath(p, root) for p in dirs]
+    assert "." in rels
+    assert "断面A" in rels
+    assert os.path.join("断面A", "B1") in rels
+    assert "学习子目录1" in rels
+    assert "results" not in rels
+
+
+def test_sibling_project_dirs_lists_project_root_peers(tmp_path):
+    parent = tmp_path / "work"
+    proj = parent / "proj_x"
+    ceshi7 = parent / "ceshi7"
+    ceshi8 = parent / "ceshi8"
+    proj.mkdir(parents=True)
+    ceshi7.mkdir()
+    ceshi8.mkdir()
+
+    dirs = sibling_project_dirs(str(proj), str(proj))
+    names = [os.path.basename(p) for p in dirs]
+    assert {"proj_x", "ceshi7", "ceshi8"} <= set(names)
 
 
 # ── 控件 ──────────────────────────────────────────────────────────────────
@@ -288,6 +316,23 @@ def test_create_section_makes_dir_and_switches(tmp_path, monkeypatch):
     assert str((sect / "20260612(草埔村)").resolve()) in w._history
 
 
+def test_create_section_under_root_makes_child_not_peer(tmp_path, monkeypatch):
+    root = tmp_path / "proj_x"
+    root.mkdir()
+    ctx = _Ctx(str(root), str(root))
+    w = WorkspaceBreadcrumb(ctx)
+    w.refresh()
+    calls = []
+    _patch_enter(monkeypatch, calls)
+
+    new_path = w.create_and_enter_section("子目录1")
+
+    assert new_path == str((root / "子目录1").resolve())
+    assert (root / "子目录1").is_dir()
+    assert not (tmp_path / "子目录1").exists()
+    assert calls[-1] == (str(root / "子目录1"), str(root))
+
+
 def test_create_section_rejects_bad_name(tmp_path, monkeypatch):
     root, sect = _make_tree(tmp_path)
     ctx = _Ctx(str(sect / "B2"), str(root))
@@ -302,27 +347,76 @@ def test_create_section_rejects_bad_name(tmp_path, monkeypatch):
     assert before == after
 
 
-def test_dropdown_lists_siblings_marks_workspaces(tmp_path):
+def test_dropdown_lists_project_tree_marks_workspaces(tmp_path):
     root, sect = _make_tree(tmp_path)
     w = WorkspaceBreadcrumb(_Ctx(str(sect / "B2"), str(root)))
     w.refresh()
     menu = w._build_sibling_menu()
-    sib_menu = next(a.menu() for a in menu.actions() if a.menu() and "同目录文件夹" in a.text())
+    sib_menu = next(a.menu() for a in menu.actions() if a.menu() and "项目目录" in a.text())
     sib_labels = [a.text() for a in sib_menu.actions()]
-    assert len(sib_labels) == 3
+    assert len(sib_labels) >= 5
     assert any("B1" in s for s in sib_labels)
     # B2 是工作区 → 带 📷
     assert any("📷" in s and "B2" in s for s in sib_labels)
 
 
-def test_dropdown_groups_current_siblings_recent_and_new(tmp_path):
+def test_dropdown_root_workspace_lists_child_dirs(tmp_path):
+    root, sect = _make_tree(tmp_path)
+    w = WorkspaceBreadcrumb(_Ctx(str(root), str(root)))
+    w.refresh()
+    menu = w._build_sibling_menu()
+    tree_menu = next(a.menu() for a in menu.actions() if a.menu() and "项目目录" in a.text())
+    labels = [a.text() for a in tree_menu.actions()]
+    assert any("断面A" in s for s in labels)
+    assert any(os.path.join("断面A", "B2") in s for s in labels)
+
+
+def test_dropdown_lists_peer_project_dirs(tmp_path):
+    parent = tmp_path / "work"
+    proj = parent / "proj_x"
+    ceshi7 = parent / "ceshi7"
+    ceshi8 = parent / "ceshi8"
+    proj.mkdir(parents=True)
+    ceshi7.mkdir()
+    (ceshi8 / "_data").mkdir(parents=True)
+    (ceshi8 / "_data" / "project.db").write_text("")
+
+    w = WorkspaceBreadcrumb(_Ctx(str(proj), str(proj)))
+    w.refresh()
+    menu = w._build_sibling_menu()
+    peer_menu = next(a.menu() for a in menu.actions() if a.menu() and "同级目录" in a.text())
+    labels = [a.text() for a in peer_menu.actions()]
+    assert any("proj_x" in s for s in labels)
+    assert any("ceshi7" in s for s in labels)
+    assert any("📷" in s and "ceshi8" in s for s in labels)
+
+
+def test_switch_peer_root_uses_peer_as_root(tmp_path, monkeypatch):
+    parent = tmp_path / "work"
+    proj = parent / "proj_x"
+    ceshi7 = parent / "ceshi7"
+    proj.mkdir(parents=True)
+    ceshi7.mkdir()
+    ctx = _Ctx(str(proj), str(proj))
+    w = WorkspaceBreadcrumb(ctx)
+    w.refresh()
+    calls = []
+    _patch_enter(monkeypatch, calls)
+
+    w._switch_to_peer_root(str(ceshi7))
+
+    assert calls[-1] == (str(ceshi7), str(ceshi7))
+
+
+def test_dropdown_groups_current_project_tree_recent_and_new(tmp_path):
     root, sect = _make_tree(tmp_path)
     w = WorkspaceBreadcrumb(_Ctx(str(sect / "B2"), str(root)))
     w.refresh()
     menu = w._build_sibling_menu()
     labels = [a.text() for a in menu.actions() if not a.isSeparator()]
     assert labels[0] == "当前：B2"
-    assert any("同目录文件夹" in s for s in labels)
+    assert any("项目目录" in s for s in labels)
+    assert any("同级目录" in s for s in labels)
     assert any("最近使用" in s for s in labels)
     assert labels[-1].endswith("新建文件夹…")
 

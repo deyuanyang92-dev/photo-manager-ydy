@@ -26,6 +26,7 @@ import pytest
 # ── Qt setup (offscreen) ──────────────────────────────────────────────────────
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication
 
 # One shared QApplication instance for all tests in this module
@@ -663,6 +664,30 @@ class TestSpecimenSidebar:
         w = SpecimenSidebar(ctx)
         w.refresh()
         assert w._list.count() == 1
+        db.close()
+
+    def test_rna_filter_shows_only_r_prefix_storage(self, tmp_path):
+        from app.widgets.specimen_sidebar import SpecimenSidebar
+        project_dir = str(tmp_path)
+        db = _make_db(str(tmp_path / "project.db"))
+        db.execute(
+            "INSERT INTO specimens (uid, storage, owner_project_dir) VALUES (?, ?, ?)",
+            ("FJ-XM-B2-DLC001-T95E-20260601", "T95E", project_dir),
+        )
+        db.execute(
+            "INSERT INTO specimens (uid, storage, owner_project_dir) VALUES (?, ?, ?)",
+            ("FJ-XM-B2-DLC002-R95E-20260601", "R95E", project_dir),
+        )
+        db.commit()
+        ctx = _make_ctx(project_dir=project_dir, db=db)
+        w = SpecimenSidebar(ctx)
+        w.refresh()
+
+        assert w._list.count() == 2
+        w._set_filter_mode("rna")
+        assert w._list.count() == 1
+        assert w._list.item(0).data(Qt.ItemDataRole.UserRole) == "FJ-XM-B2-DLC002-R95E-20260601"
+        assert w._count_label.text() == "1"
         db.close()
 
     def test_copy_current_uid_to_clipboard(self, tmp_path, qt_app):

@@ -18,10 +18,48 @@ RESERVED_DIR_NAMES: frozenset[str] = frozenset({
     "_retired-tiff",  # 撤销合成/重合成退役的 TIF（工作区内部，不当树节点）
 })
 
+_WORKSPACE_MARKER_FILES: frozenset[str] = frozenset({
+    ".project-specimens.json",
+})
+
+_WORKSPACE_MARKER_DIRS: frozenset[str] = frozenset({
+    "_data",
+    "incoming-jpg",
+    "新拍JPG",
+    "results",
+})
+
 
 def is_workspace(dir_path: str) -> bool:
     """True if *dir_path* already has its own ``_data/project.db`` (已认领的工作区)."""
     return (Path(dir_path) / "_data" / "project.db").exists()
+
+
+def is_workspace_candidate(dir_path: str) -> bool:
+    """True when a folder looks like an existing or legacy photo workspace.
+
+    Older test/work directories may predate the current project registry and may
+    not be present in ``user_projects.json``. Treat folders with a real
+    ``project.db`` as workspaces, and folders with the old photo-workbench shape
+    as importable candidates.
+    """
+    p = Path(dir_path)
+    if is_workspace(str(p)):
+        return True
+    if any((p / name).exists() for name in _WORKSPACE_MARKER_FILES):
+        return True
+    marker_dirs = sum(1 for name in _WORKSPACE_MARKER_DIRS if (p / name).is_dir())
+    if marker_dirs >= 2:
+        return True
+    incoming = p / "incoming-jpg"
+    if incoming.is_dir():
+        try:
+            for child in incoming.iterdir():
+                if child.is_file() and child.suffix.lower() in {".jpg", ".jpeg"}:
+                    return True
+        except OSError:
+            pass
+    return False
 
 
 def scan_tree(root: str, max_depth: int = 6) -> dict:
@@ -96,4 +134,50 @@ def discover_workspaces(root_dir: str, max_depth: int = 6) -> list[dict]:
         rel = os.path.relpath(path, root_dir)
         name = rel if rel != "." else os.path.basename(path)
         out.append({"path": path, "rel": rel, "name": name})
+    return out
+
+
+def discover_workspace_candidates(root_dir: str, max_depth: int = 2) -> list[dict]:
+    """Return existing and legacy workspace-like folders under *root_dir*.
+
+    This is intentionally broader than :func:`discover_workspaces`: it is used
+    for adoption/import lists, where missing a real old project is worse than
+    showing a folder that can later be entered and materialised.
+    """
+    root_path = Path(root_dir)
+    out: list[dict] = []
+
+    def _walk(p: Path, depth: int) -> None:
+        if depth > max_depth:
+            return
+        if is_workspace_candidate(str(p)):
+            try:
+                rel = os.path.relpath(str(p), str(root_path))
+            except ValueError:
+                rel = p.name
+            out.append({
+                "path": str(p),
+                "rel": rel,
+                "name": rel if rel != "." else p.name,
+                "has_data": is_workspace(str(p)),
+                "is_candidate": True,
+            })
+            return
+        if depth == max_depth:
+            return
+        try:
+            entries = sorted(os.scandir(p), key=lambda e: e.name)
+        except OSError:
+            entries = []
+        for entry in entries:
+            name = entry.name
+            if name.startswith(".") or name in RESERVED_DIR_NAMES:
+                continue
+            try:
+                if entry.is_dir():
+                    _walk(Path(entry.path), depth + 1)
+            except OSError:
+                continue
+
+    _walk(root_path, 0)
     return out

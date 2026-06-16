@@ -910,6 +910,40 @@ class WorkbenchView(BaseView):
         self._load_specimen(uid)
         self._refresh_batch_header()
 
+    def _on_edit_specimen_requested(self, uid: str) -> None:
+        """Compatibility entry used by the sidebar edit action."""
+        if not uid:
+            return
+        self._on_specimen_selected(uid)
+
+    def _on_delete_specimen(self, uid: str) -> None:
+        """Delete a specimen and local DB references owned by the workbench."""
+        uid = str(uid or "").strip()
+        if not uid:
+            return
+        db = self.ctx.get_db()
+        if not db:
+            return
+        try:
+            with db:
+                db.execute("DELETE FROM grouping WHERE uid=?", (uid,))
+                db.execute("DELETE FROM tasks WHERE uid=?", (uid,))
+                try:
+                    db.execute("UPDATE photo_assignments SET specimen_uid=NULL WHERE specimen_uid=?", (uid,))
+                except Exception:
+                    pass
+                db.execute("DELETE FROM specimens WHERE uid=?", (uid,))
+            if self._current_uid == uid:
+                self._current_uid = None
+                for widget in (self._naming, self._metadata, self._taxon_card, self._grouping):
+                    clear = getattr(widget, "clear", None)
+                    if callable(clear):
+                        clear()
+            self._sidebar.refresh()
+            self._refresh_batch_header()
+        except Exception as exc:
+            QMessageBox.warning(self, "删除失败", str(exc))
+
     def _refresh_batch_header(self) -> None:
         """Sync the monitor's batch-ident bar with the active specimen."""
         db = self.ctx.get_db()
@@ -1176,6 +1210,12 @@ class WorkbenchView(BaseView):
             printed = 0
             printers_used: list[str] = []
             printed_details: list[str] = []
+            try:
+                from app.services.activity_audit_service import default_actor, record_print_jobs
+                actor = default_actor(self.ctx)
+            except Exception:
+                record_print_jobs = None
+                actor = ""
             for job in direct_jobs:
                 target = tissue_printer if job.get("bucket") == "tissue" else sample_printer
                 if not target:
@@ -1184,6 +1224,11 @@ class WorkbenchView(BaseView):
                 printer.setPrinterName(target)
                 if not label_print.paint_jobs(printer, [job]):
                     return False
+                if record_print_jobs is not None:
+                    try:
+                        record_print_jobs(db, [job], actor=actor, printer_name=target)
+                    except Exception:
+                        pass
                 printed += len(job.get("labels") or [])
                 if target not in printers_used:
                     printers_used.append(target)
@@ -1364,6 +1409,16 @@ class WorkbenchView(BaseView):
             if not ok:
                 QMessageBox.warning(self, "打印 RNA 合版", "打印任务发送失败。")
                 return
+            try:
+                from app.services.activity_audit_service import default_actor, record_print_jobs
+                record_print_jobs(
+                    db,
+                    [job],
+                    actor=default_actor(self.ctx),
+                    printer_name=tissue_printer,
+                )
+            except Exception:
+                pass
             rna_queue.mark_printed(db, ordered_uids)
             self._sync_rna_queue_count()
             self._status_message(f"RNAlater 合版已发送到 {tissue_printer} · {len(ordered_uids)} 张")
@@ -1400,6 +1455,20 @@ class WorkbenchView(BaseView):
         if not uid:
             self._status_message("编号尚未填写完整。")
             return
+        old_uid = (
+            self._current_uid
+            if self._current_uid and self._current_uid != uid
+            else None
+        )
+        old_raw: dict = {}
+        if old_uid:
+            try:
+                row = db.execute("SELECT raw_json FROM specimens WHERE uid=?", (old_uid,)).fetchone()
+                old_raw = json.loads(row["raw_json"] or "{}") if row else {}
+                if not isinstance(old_raw, dict):
+                    old_raw = {}
+            except Exception:
+                old_raw = {}
 
         # 采集日期软必填：它是编号核心字段、会写入 UID 日期段。空着强提醒，但允许继续
         # （兼容采集日期确实未知的标本——编号自动少一段）。默认「返回填写」。
@@ -1517,6 +1586,8 @@ class WorkbenchView(BaseView):
             # 使「保存」= 存全部。
             self._current_uid = uid
             self._on_save_metadata(uid, reload=False)
+            if old_uid:
+                self._finalize_uid_rename(old_uid, uid, old_raw)
             self._sidebar.refresh()
             self._sidebar.select_uid(uid)
             # 「新建编号后自动激活」开关（默认关，复刻 oracle
@@ -1526,6 +1597,50 @@ class WorkbenchView(BaseView):
                 self._on_sidebar_activate(uid)
         except Exception as exc:
             QMessageBox.warning(self, "保存失败", str(exc))
+
+    def _finalize_uid_rename(self, old_uid: str, new_uid: str, old_raw: Optional[dict] = None) -> None:
+        """Move DB references after right-rail editing changes the generated UID."""
+        if not old_uid or not new_uid or old_uid == new_uid:
+            return
+        db = self.ctx.get_db()
+        if not db:
+            return
+        raw = dict(old_raw or {})
+        n = self._naming
+        raw.update({
+            "uid": new_uid,
+            "id": n._species_id.text().strip(),
+            "province": n._province.text().strip(),
+            "site": n._site.text().strip(),
+            "station": n._station.text().strip(),
+            "storage": n._storage.text().strip(),
+            "collectionDate": n._collection_date.text().strip(),
+            "photoDate": n._photo_date.text().strip(),
+        })
+        prev = raw.get("previousUniqueIds") or []
+        if not isinstance(prev, list):
+            prev = []
+        if old_uid not in prev:
+            prev.append(old_uid)
+        raw["previousUniqueIds"] = prev
+        try:
+            from app.services.specimen_rename_service import migrate_uid_references
+            with db:
+                migrate_uid_references(db, old_uid, new_uid)
+                try:
+                    db.execute(
+                        "UPDATE photo_assignments SET specimen_uid=? WHERE specimen_uid=?",
+                        (new_uid, old_uid),
+                    )
+                except Exception:
+                    pass
+                db.execute("DELETE FROM specimens WHERE uid=?", (old_uid,))
+                db.execute(
+                    "UPDATE specimens SET raw_json=? WHERE uid=?",
+                    (json.dumps(raw, ensure_ascii=False), new_uid),
+                )
+        except Exception as exc:
+            QMessageBox.warning(self, "编号迁移失败", str(exc))
 
     def _seed_helicon_defaults(self) -> None:
         """Seed the compose params panel from saved Helicon defaults (QSettings).

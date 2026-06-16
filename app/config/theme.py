@@ -1710,12 +1710,16 @@ QLabel#SpecimenUid {{
     letter-spacing: 0;
 }}
 QLabel#SpecimenSubtext {{
-    color: {t["muted"]};
-    font-size: {t["font_sm"]};
+    color: {t["text_soft"]};
+    font-size: {t["font_body"]};
     font-weight: 500;
 }}
 QLabel#SpecimenMissingText {{
-    color: {t["muted"]};
+    color: {t["warn"]};
+    background-color: rgba(245, 158, 11, 0.10);
+    border: 1px solid rgba(245, 158, 11, 0.22);
+    border-radius: {t["radius_sm"]};
+    padding: 3px 7px;
     font-size: {t["font_sm"]};
     font-weight: 600;
 }}
@@ -1725,6 +1729,20 @@ QLabel#SpecimenBadge {{
     border: 1px solid {t["accent_glow"]};
     border-radius: {t["radius_pill"]};
     padding: 1px 7px;
+    font-size: {t["font_xs"]};
+    font-weight: 600;
+}}
+QLabel#SpecimenRnaBadge {{
+    color: #0f766e;
+    background-color: rgba(20, 184, 166, 0.14);
+    border: 1px solid rgba(15, 118, 110, 0.28);
+    border-radius: {t["radius_pill"]};
+    padding: 2px 8px;
+    font-size: {t["font_xs"]};
+    font-weight: 700;
+}}
+QLabel#SpecimenStorageText {{
+    color: {t["muted"]};
     font-size: {t["font_xs"]};
     font-weight: 600;
 }}

@@ -115,6 +115,54 @@ def test_lightbox_zoom_slider_switches_out_of_fit_mode(qtbot, tmp_path):
     assert dlg._image_label.pixmap() is not None
 
 
+def test_lightbox_wheel_zoom_helper_changes_zoom(qtbot, tmp_path):
+    """Mouse-wheel zoom path leaves fit mode and changes the zoom percentage."""
+    from PIL import Image
+    from app.widgets.results_column import _TiffLightboxDialog
+
+    tif = tmp_path / "real.tif"
+    Image.new("RGB", (200, 100), "white").save(tif)
+    dlg = _TiffLightboxDialog([tif], initial_index=0)
+    qtbot.addWidget(dlg)
+
+    start = dlg._zoom_slider.value()
+    dlg._zoom_by_wheel_delta(120)
+
+    assert dlg._fit_to_window is False
+    assert dlg._zoom_slider.value() == min(400, start + 10)
+    assert dlg._zoom_value.text().endswith("%")
+
+
+def test_lightbox_windows_shortcuts(qtbot, tmp_path):
+    """Common Windows-style shortcuts navigate and control zoom."""
+    from PIL import Image
+    from PyQt6.QtCore import Qt
+    from app.widgets.results_column import _TiffLightboxDialog
+
+    paths = []
+    for i in range(3):
+        tif = tmp_path / f"real_{i}.tif"
+        Image.new("RGB", (200, 100), "white").save(tif)
+        paths.append(tif)
+    dlg = _TiffLightboxDialog(paths, initial_index=1)
+    qtbot.addWidget(dlg)
+
+    qtbot.keyClick(dlg, Qt.Key.Key_PageDown)
+    assert dlg._index == 2
+    qtbot.keyClick(dlg, Qt.Key.Key_Home)
+    assert dlg._index == 0
+    qtbot.keyClick(dlg, Qt.Key.Key_End)
+    assert dlg._index == 2
+    qtbot.keyClick(dlg, Qt.Key.Key_PageUp)
+    assert dlg._index == 1
+
+    qtbot.keyClick(dlg, Qt.Key.Key_1, modifier=Qt.KeyboardModifier.ControlModifier)
+    assert dlg._zoom_value.text() == "100%"
+    qtbot.keyClick(dlg, Qt.Key.Key_0, modifier=Qt.KeyboardModifier.ControlModifier)
+    assert dlg._fit_to_window is True
+    assert dlg._zoom_value.text() == "适合窗口"
+
+
 def test_tiff_card_double_click_opens_lightbox(qtbot, tmp_path, monkeypatch):
     """Double-clicking a _TiffCard triggers the lightbox dialog (exec mocked)."""
     from app.widgets.results_column import ResultsColumn
@@ -162,8 +210,9 @@ def test_tiff_card_double_click_opens_lightbox(qtbot, tmp_path, monkeypatch):
 
 # ── Paired rows (同编号关联显示) ───────────────────────────────────────────────
 
-def test_pairing_by_seq(qtbot):
-    """A TIFF and its ZIP sharing the same seq render in ONE paired row."""
+def test_tiff_and_zip_render_as_two_list_rows(qtbot):
+    """A TIFF+ZIP sharing seq render in ONE group: two compact file rows —
+    a ``_TiffCard`` (thumbnail icon) and an ``_ArchiveCard`` (zip icon)."""
     from app.widgets.results_column import (
         ResultsColumn, _ResultRow, _TiffCard, _ArchiveCard,
     )
@@ -178,6 +227,21 @@ def test_pairing_by_seq(qtbot):
     assert len(rows) == 1
     assert len(rows[0].findChildren(_TiffCard)) == 1
     assert len(rows[0].findChildren(_ArchiveCard)) == 1
+
+
+def test_no_zip_only_tiff_row(qtbot):
+    """A TIFF with no paired ZIP yields one row with only a ``_TiffCard``."""
+    from app.widgets.results_column import ResultsColumn, _ResultRow, _TiffCard, _ArchiveCard
+    col = ResultsColumn()
+    qtbot.addWidget(col)
+    col.load_uid(
+        "UID",
+        [{"path": "/fake/a.tif", "name": "a.tif"}],
+        [],
+    )
+    row = col.findChildren(_ResultRow)[0]
+    assert len(row.findChildren(_TiffCard)) == 1
+    assert len(row.findChildren(_ArchiveCard)) == 0
 
 
 def test_pairing_by_stem_when_no_seq(qtbot):
@@ -229,10 +293,10 @@ def test_zoom_changes_thumb_size(qtbot):
     col = ResultsColumn()
     qtbot.addWidget(col)
     col.load_uid("UID", [{"path": "/fake/a.tif", "name": "a.tif"}], [])
-    col._set_zoom(220)
-    assert col._thumb_size == 220
+    col._set_zoom(80)
+    assert col._thumb_size == 80
     card = col.findChildren(_TiffCard)[0]
-    assert card._thumb_size == 220
+    assert card._thumb_size == 80
 
 
 def test_thumb_guard_on_fake_path(qtbot):

@@ -80,6 +80,7 @@ class SpecimenSidebar(QWidget):
         super().__init__(parent)
         self.ctx = ctx
         self._all_items: list[dict] = []  # [{uid, display, active}]
+        self._filter_mode = "all"
         # uid -> {code: QPushButton} for the 4 phase dots; uid -> current code.
         self._phase_dots: dict[str, dict[str, QPushButton]] = {}
         self._phase_state: dict[str, Optional[str]] = {}
@@ -131,6 +132,26 @@ class SpecimenSidebar(QWidget):
             )
         self._search.textChanged.connect(self._on_search)
         root.addWidget(self._search)
+
+        filter_row = QHBoxLayout()
+        filter_row.setContentsMargins(0, 0, 0, 0)
+        filter_row.setSpacing(6)
+        self._filter_all_btn = QPushButton("全部")
+        self._filter_all_btn.setObjectName("Ghost")
+        self._filter_all_btn.setCheckable(True)
+        self._filter_all_btn.setChecked(True)
+        self._filter_all_btn.setFixedHeight(26)
+        self._filter_all_btn.clicked.connect(lambda: self._set_filter_mode("all"))
+        filter_row.addWidget(self._filter_all_btn)
+        self._filter_rna_btn = QPushButton("仅 RNA")
+        self._filter_rna_btn.setObjectName("Ghost")
+        self._filter_rna_btn.setCheckable(True)
+        self._filter_rna_btn.setFixedHeight(26)
+        self._filter_rna_btn.setToolTip("只显示保存方式为 R 前缀、已取 RNA 组织的标本")
+        self._filter_rna_btn.clicked.connect(lambda: self._set_filter_mode("rna"))
+        filter_row.addWidget(self._filter_rna_btn)
+        filter_row.addStretch()
+        root.addLayout(filter_row)
 
         # Section label + count
         header = QHBoxLayout()
@@ -233,6 +254,7 @@ class SpecimenSidebar(QWidget):
     def refresh(self) -> None:
         """Reload specimens from the DB for the current project."""
         self._all_items = self._load_specimens()
+        self._update_filter_counts()
         self._apply_filter(self._search.text())
 
     def select_uid(self, uid: str) -> None:
@@ -266,7 +288,8 @@ class SpecimenSidebar(QWidget):
                 """
                 SELECT uid,
                        COALESCE(scientific_name, '') AS name,
-                       COALESCE(scientific_name_cn, '') AS name_cn
+                       COALESCE(scientific_name_cn, '') AS name_cn,
+                       COALESCE(storage, '') AS storage
                 FROM   specimens
                 WHERE  owner_project_dir = ?
                 ORDER  BY uid
@@ -279,6 +302,8 @@ class SpecimenSidebar(QWidget):
                         "uid": normalize_uid(row[0]),
                         "name": row[1],
                         "name_cn": row[2],
+                        "storage": row[3],
+                        "is_rna": str(row[3] or "").upper().startswith("R"),
                     }
                 )
         except Exception:
@@ -323,31 +348,59 @@ class SpecimenSidebar(QWidget):
             uid: str = entry["uid"]
             name: str = entry["name"]
             name_cn: str = entry["name_cn"]
-            if query and query not in uid.lower() and query not in name.lower() and query not in name_cn.lower():
+            storage: str = entry.get("storage") or ""
+            is_rna = bool(entry.get("is_rna"))
+            if self._filter_mode == "rna" and not is_rna:
+                continue
+            if (
+                query
+                and query not in uid.lower()
+                and query not in name.lower()
+                and query not in name_cn.lower()
+                and query not in storage.lower()
+            ):
                 continue
 
             active = bool(entry.get("active"))
-            row = self._build_row_widget(uid, name, name_cn, svc, active=active)
+            row = self._build_row_widget(
+                uid,
+                name,
+                name_cn,
+                storage,
+                svc,
+                active=active,
+                is_rna=is_rna,
+            )
             item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, uid)
             item.setToolTip(uid)
-            item.setSizeHint(QSize(0, 82 if active else 76))
+            item.setSizeHint(QSize(0, 102 if active else 96))
             self._list.addItem(item)
             self._list.setItemWidget(item, row)
             shown += 1
 
-        self._count_label.setText(str(shown))
+        total = len(self._all_items)
+        rna_total = sum(1 for item in self._all_items if item.get("is_rna"))
+        self._count_label.setText(f"显示 {shown} / 共 {total} · RNA {rna_total}")
 
     def _build_row_widget(
-        self, uid: str, name: str, name_cn: str, svc, *, active: bool = False
+        self,
+        uid: str,
+        name: str,
+        name_cn: str,
+        storage: str,
+        svc,
+        *,
+        active: bool = False,
+        is_rna: bool = False,
     ) -> QWidget:
         """Build one specimen row: UID + name + collab badge + 4 phase dots."""
         row = QFrame()
         row.setObjectName("SpecimenRowActive" if active else "SpecimenRow")
-        row.setMinimumHeight(70)
+        row.setMinimumHeight(88)
         v = QVBoxLayout(row)
-        v.setContentsMargins(11, 8, 11, 8)
-        v.setSpacing(7)
+        v.setContentsMargins(12, 9, 12, 9)
+        v.setSpacing(6)
 
         top = QHBoxLayout()
         top.setContentsMargins(0, 0, 0, 0)
@@ -376,20 +429,39 @@ class SpecimenSidebar(QWidget):
 
         v.addLayout(top)
 
+        name_text = name or name_cn
+        nm = QLabel(name_text or "未填写物种信息")
+        nm.setObjectName("SpecimenSubtext" if name_text else "SpecimenMissingText")
+        nm.setToolTip(name_text or "未填写物种信息")
+        nm.setWordWrap(True)
+        v.addWidget(nm)
+
         # ── Phase dots ──
         current = self._phase_for(uid, svc)
         self._phase_state[uid] = current
         self._phase_dots[uid] = {}
 
-        name_text = name or name_cn
         badge = self._collab_badge(uid, svc)
         line = QHBoxLayout()
         line.setContentsMargins(0, 0, 0, 0)
         line.setSpacing(8)
-        nm = QLabel(name_text or "未填写物种信息")
-        nm.setObjectName("SpecimenSubtext" if name_text else "SpecimenMissingText")
-        nm.setToolTip(name_text or "未填写物种信息")
-        line.addWidget(nm, 1)
+
+        if is_rna:
+            rna_badge = QLabel(f"已取 RNA · {storage or 'RNAlater'}")
+            rna_badge.setObjectName("SpecimenRnaBadge")
+            rna_badge.setToolTip("该标本已取 RNA 组织，保存于 RNAlater；R 前缀保存方式")
+            line.addWidget(rna_badge)
+        else:
+            storage_lbl = QLabel(storage or "未填保存方式")
+            storage_lbl.setObjectName("SpecimenStorageText")
+            storage_lbl.setToolTip("标本保存方式")
+            line.addWidget(storage_lbl)
+
+        if badge:
+            bd = QLabel(badge)
+            bd.setObjectName("SpecimenBadge")
+            line.addWidget(bd)
+        line.addStretch(1)
 
         dots_row = QHBoxLayout()
         dots_row.setContentsMargins(0, 0, 0, 0)
@@ -410,12 +482,15 @@ class SpecimenSidebar(QWidget):
             dots_row.addWidget(dot)
             self._phase_dots[uid][code] = dot
         line.addLayout(dots_row)
-        if badge:
-            bd = QLabel(badge)
-            bd.setObjectName("SpecimenBadge")
-            line.addWidget(bd)
         v.addLayout(line)
         return row
+
+    def _update_filter_counts(self) -> None:
+        total = len(self._all_items)
+        rna_total = sum(1 for item in self._all_items if item.get("is_rna"))
+        self._filter_all_btn.setText(f"全部 {total}")
+        self._filter_rna_btn.setText(f"RNA {rna_total}")
+        self._filter_rna_btn.setEnabled(rna_total > 0)
 
     def _normalize_project_specimen_uids(self, db, project_dir: str) -> None:
         """Migrate old lowercase UID rows to the canonical uppercase spelling.
@@ -521,6 +596,13 @@ class SpecimenSidebar(QWidget):
 
     def _on_search(self, text: str) -> None:
         self._apply_filter(text)
+
+    def _set_filter_mode(self, mode: str) -> None:
+        self._filter_mode = "rna" if mode == "rna" else "all"
+        self._filter_all_btn.setChecked(self._filter_mode == "all")
+        self._filter_rna_btn.setChecked(self._filter_mode == "rna")
+        self._update_filter_counts()
+        self._apply_filter(self._search.text())
 
     def _on_item_clicked(self, item: QListWidgetItem) -> None:
         uid = item.data(Qt.ItemDataRole.UserRole)

@@ -46,6 +46,7 @@ from app.utils.label_core import (
 BUILTIN_TEMPLATES: dict[str, dict] = {
     "standard": {
         "name": "标准",
+        "code": "BTL-STD",
         "desc": "完整信息，适合50×30mm+",
         "minSize": {"w": 50, "h": 30},
         "lineHeight": 1.3,
@@ -60,6 +61,7 @@ BUILTIN_TEMPLATES: dict[str, dict] = {
     },
     "compact": {
         "name": "紧凑",
+        "code": "BTL-MINI",
         "desc": "仅编号+QR，适合25×10mm+",
         "minSize": {"w": 25, "h": 10},
         "lineHeight": 1.3,
@@ -70,6 +72,7 @@ BUILTIN_TEMPLATES: dict[str, dict] = {
     },
     "detailed": {
         "name": "详细",
+        "code": "BTL-DET",
         "desc": "含拉丁名/科/坐标，适合60×40mm+",
         "minSize": {"w": 60, "h": 40},
         "lineHeight": 1.3,
@@ -88,6 +91,7 @@ BUILTIN_TEMPLATES: dict[str, dict] = {
     # Tissue (RNAlater tube) templates — flavor: "tissue"
     "tissueCompact": {
         "name": "RNAlater 组织管 30×15",
+        "code": "TIS-30",
         "desc": "RNAlater 组织管：headerId + storage·日期段 + QR",
         "flavor": "tissue",
         "minSize": {"w": 25, "h": 10},
@@ -100,6 +104,7 @@ BUILTIN_TEMPLATES: dict[str, dict] = {
     },
     "tissueMini": {
         "name": "RNAlater 组织管 25×10",
+        "code": "TIS-25",
         "desc": "0.5-1.5ml 极小管：仅 uniqueId + QR",
         "flavor": "tissue",
         "minSize": {"w": 20, "h": 8},
@@ -111,6 +116,7 @@ BUILTIN_TEMPLATES: dict[str, dict] = {
     },
     "tissueCustom": {
         "name": "转录组 · 自定义",
+        "code": "TIS-CUST",
         "desc": "复用模板编辑器，仅用于转录组桶",
         "flavor": "tissue",
         "minSize": {"w": 25, "h": 10},
@@ -124,6 +130,7 @@ BUILTIN_TEMPLATES: dict[str, dict] = {
     # ── 管形标签 / 圆形盖子标签 (Task 4) ──────────────────────────────────────
     "cryo2mlSide": {
         "name": "2ml冻存管·侧面",
+        "code": "CRYO-SIDE",
         "desc": "38×13mm，headerId+存储·日期+QR",
         "minSize": {"w": 30, "h": 10},
         "lineHeight": 1.1,
@@ -136,6 +143,7 @@ BUILTIN_TEMPLATES: dict[str, dict] = {
     },
     "cryo2mlCap": {
         "name": "2ml冻存管·盖子",
+        "code": "CRYO-CAP",
         "desc": "13mm圆形，uniqueId+QR居下",
         "shape": "circle",
         "bgColor": "#ffffff",
@@ -149,6 +157,7 @@ BUILTIN_TEMPLATES: dict[str, dict] = {
     },
     "falcon5ml": {
         "name": "5ml Falcon管",
+        "code": "FAL-5",
         "desc": "45×17mm，headerId+存储日期+物种",
         "minSize": {"w": 40, "h": 15},
         "lineHeight": 1.15,
@@ -163,6 +172,7 @@ BUILTIN_TEMPLATES: dict[str, dict] = {
     },
     "falcon15ml": {
         "name": "15ml Falcon管",
+        "code": "FAL-15",
         "desc": "55×20mm，完整字段",
         "minSize": {"w": 50, "h": 18},
         "lineHeight": 1.2,
@@ -178,6 +188,7 @@ BUILTIN_TEMPLATES: dict[str, dict] = {
     },
     "falcon50ml": {
         "name": "50ml Falcon管",
+        "code": "FAL-50",
         "desc": "75×25mm，含拉丁名",
         "minSize": {"w": 60, "h": 20},
         "lineHeight": 1.25,
@@ -194,6 +205,7 @@ BUILTIN_TEMPLATES: dict[str, dict] = {
     },
     "bottle500ml": {
         "name": "500ml标本瓶",
+        "code": "BTL-500",
         "desc": "90×35mm，完整信息含坐标",
         "minSize": {"w": 80, "h": 30},
         "lineHeight": 1.3,
@@ -215,6 +227,7 @@ BUILTIN_TEMPLATES: dict[str, dict] = {
     },
     "qrFirst": {
         "name": "测序公司·QR优先",
+        "code": "SEQ-QR",
         "desc": "40×25mm，QR居左，BGI/Illumina风格",
         "minSize": {"w": 35, "h": 20},
         "lineHeight": 1.2,
@@ -228,6 +241,7 @@ BUILTIN_TEMPLATES: dict[str, dict] = {
     },
     "museumDense": {
         "name": "博物馆标本签",
+        "code": "MUS-DENSE",
         "desc": "80×60mm，含拉丁/科/坐标/采集人",
         "minSize": {"w": 70, "h": 50},
         "lineHeight": 1.35,
@@ -249,6 +263,17 @@ BUILTIN_TEMPLATES: dict[str, dict] = {
         "qr": {"content": "uniqueId", "position": "right", "sizePct": 0.30, "ecc": "Q"},
     },
 }
+
+
+def builtin_template_code(key: str) -> str:
+    """Built-in template's short semantic code (BTL-STD / CRYO-SIDE / …).
+
+    Display-only alias over the stable dict key — the persisted value is always
+    the key, never the code, so existing project settings need no migration.
+    Falls back to the uppercased key if the code field is absent.
+    """
+    return BUILTIN_TEMPLATES.get(key, {}).get("code") or key.upper()
+
 
 # ── Paper size catalogue (mm) ──────────────────────────────────────────────────
 

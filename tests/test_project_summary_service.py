@@ -22,7 +22,9 @@ import openpyxl
 import pytest
 
 from app.db import db_manager
+from app.services.activity_audit_service import record_label_print_event
 from app.services import project_summary_service as pss
+from app.services.photo_asset_service import assign_photo
 
 
 # ── helpers ────────────────────────────────────────────────────────────────────
@@ -65,6 +67,21 @@ def _insert_grouping(conn, uid, group_index, status):
     conn.commit()
 
 
+def _insert_photo(conn, photo_id, *, assigned=False, assigned_by=""):
+    conn.execute(
+        """
+        INSERT INTO photos (
+          photo_id, original_filename, first_seen_at, lifecycle_status,
+          current_assignment_id
+        ) VALUES (?, ?, '2026-06-01T00:00:00+00:00', ?, NULL)
+        """,
+        (photo_id, f"{photo_id}.jpg", "assigned" if assigned else "incoming"),
+    )
+    conn.commit()
+    if assigned:
+        assign_photo(conn, photo_id, "UID-A1", assigned_by=assigned_by)
+
+
 @pytest.fixture(autouse=True)
 def _clean_db_cache():
     db_manager.close_all()
@@ -95,6 +112,79 @@ def test_label_dir_not_under_root_falls_back_to_basename(tmp_path):
     other.mkdir(parents=True)
     # relpath would be "../elsewhere/projX" → fall back to basename
     assert pss._label(str(other), str(root)) == "projX"
+
+
+# ── dashboard ─────────────────────────────────────────────────────────────────
+
+def test_project_dashboard_counts_storage_photos_people_and_prints(tmp_path):
+    root = tmp_path / "survey"
+    root.mkdir()
+    dir_a, conn_a = _make_workspace(root, "断面A")
+    dir_b, conn_b = _make_workspace(root, "断面B")
+
+    _insert_specimen(
+        conn_a,
+        "UID-A1",
+        storage="D95E",
+        collector="张三",
+        photographer="李四",
+        identifier="王五",
+    )
+    _insert_specimen(
+        conn_a,
+        "UID-A2",
+        storage="RD75E",
+        collector="张三",
+        photographer="赵六",
+        identifier="",
+    )
+    _insert_specimen(
+        conn_b,
+        "UID-B1",
+        storage="T95E",
+        collector="钱七",
+        photographer="李四",
+        identifier="王五",
+    )
+
+    _insert_photo(conn_a, "P1", assigned=True, assigned_by="李四")
+    _insert_photo(conn_a, "P2", assigned=False)
+    record_label_print_event(
+        conn_a,
+        specimen_uids=["UID-A1", "UID-A2"],
+        actor="周八",
+        bucket="sample",
+        copies=2,
+    )
+    record_label_print_event(
+        conn_a,
+        specimen_uids=["UID-A2"],
+        actor="周八",
+        bucket="tissue",
+        copies=1,
+    )
+
+    dashboard = pss.collect_project_dashboard([dir_a, dir_b], str(root))
+    totals = dashboard["totals"]
+    assert totals["workspace_count"] == 2
+    assert totals["specimen_count"] == 3
+    assert totals["alcohol_specimen_count"] == 2
+    assert totals["rna_specimen_count"] == 1
+    assert totals["photo_count"] == 2
+    assert totals["unassigned_photo_count"] == 1
+    assert totals["sample_label_print_count"] == 4
+    assert totals["tissue_label_print_count"] == 1
+
+    people = dashboard["by_person"]
+    assert {"name": "李四", "count": 2} in people["photographer"]
+    assert {"name": "张三", "count": 2} in people["collector"]
+    assert {"name": "未填写", "count": 1} in people["identifier"]
+    assert {"name": "李四", "count": 1} in people["photo_assigner"]
+    assert {"name": "周八", "count": 5} in people["label_printer"]
+
+    by_ws = {r["workspace_label"]: r for r in dashboard["by_workspace"]}
+    assert by_ws["断面A"]["specimen_count"] == 2
+    assert by_ws["断面B"]["specimen_count"] == 1
 
 
 # ── specimen summary ───────────────────────────────────────────────────────────

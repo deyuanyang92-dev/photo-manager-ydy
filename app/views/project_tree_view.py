@@ -248,27 +248,63 @@ class ProjectTreeView(BaseView):
 
         seen: set = set()
         nodes: list = []
-        for p in projects:
-            if p.get("isDemo"):
-                continue
-            directory = p.get("directory") or p.get("dir") or ""
+
+        def _add_node(directory: str, name: str, *, candidate: bool = False) -> None:
             if not directory:
-                continue
+                return
             try:
                 resolved = str(Path(directory).expanduser().resolve())
             except (OSError, ValueError):
                 resolved = directory
             if resolved in seen:
-                continue
+                return
             seen.add(resolved)
-            name = p.get("name") or Path(directory).name or "(未命名)"
             nodes.append({
-                "name": name,
+                "name": name or Path(directory).name or "(未命名)",
                 "path": directory,
                 "has_data": pts.is_workspace(directory),
+                "is_candidate": candidate,
                 "children": [],
             })
-        nodes.reverse()  # most-recent first
+
+        scan_roots: set[str] = set()
+        for p in projects:
+            if p.get("isDemo"):
+                continue
+            directory = p.get("directory") or p.get("dir") or ""
+            try:
+                scan_roots.add(str(Path(directory).expanduser().resolve().parent))
+            except (OSError, ValueError):
+                pass
+            _add_node(directory, p.get("name") or Path(directory).name)
+
+        for attr in ("current_project_root", "current_project_dir"):
+            value = getattr(self.ctx, attr, None)
+            if value:
+                try:
+                    scan_roots.add(str(Path(value).expanduser().resolve().parent))
+                except (OSError, ValueError):
+                    pass
+
+        try:
+            # Desktop/dev fallback: when the app itself lives inside a project
+            # dump folder, scan its siblings so old test folders like ceshi6 are
+            # not invisible just because user_projects.json was reset.
+            scan_roots.add(str(Path.cwd().resolve().parent))
+        except OSError:
+            pass
+
+        # Keep recent projects first, then append discovered legacy/candidate
+        # workspaces from nearby roots. Depth 1 is enough for sibling workspaces;
+        # depth 2 catches one container folder such as "ceshi/ceshi3".
+        nodes.reverse()  # most-recent recorded first
+        for root in sorted(scan_roots):
+            try:
+                candidates = pts.discover_workspace_candidates(root, max_depth=2)
+            except OSError:
+                candidates = []
+            for c in candidates:
+                _add_node(c["path"], c["name"], candidate=True)
         return nodes
 
     def _build_item(self, node: dict) -> QTreeWidgetItem:
@@ -277,6 +313,8 @@ class ProjectTreeView(BaseView):
         # anchor or just a container) — never call them all "项目".
         if node["has_data"]:
             label = f"📷 {node['name']}  ·  工作区"
+        elif node.get("is_candidate"):
+            label = f"📁 {node['name']}  ·  可导入"
         else:
             label = f"📁 {node['name']}"
         item = QTreeWidgetItem([label])

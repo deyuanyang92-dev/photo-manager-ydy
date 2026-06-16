@@ -722,7 +722,7 @@ class ProjectSettingsDrawer(QWidget):
                     continue
                 if bucket == "sample" and tmpl.get("flavor") == "tissue":
                     continue
-                combo.addItem(f"内置：{tmpl.get('name') or key}", key)
+                combo.addItem(f"内置：{tmpl.get('code', '?')} · {tmpl.get('name') or key}", key)
             lib = label_service.LabelTemplateLibrary(bucket)
             for rec in lib.records():
                 tid = rec.get("id")

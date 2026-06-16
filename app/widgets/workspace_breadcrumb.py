@@ -2,15 +2,16 @@
 
 显示「根 / 断面A / ◀ 📁 B2 ▾ ▶」：
   - 祖先段可点 → 跳项目树页（远跳走树）。
-  - 叶子下拉  → 当前工作区 / 同目录文件夹 / 最近使用 / 新建文件夹分组。
-                同目录文件夹菜单中 📷 = 已是工作区；新建在当前工作区父目录下建
+  - 叶子下拉  → 当前工作区 / 项目目录树 / 最近使用 / 新建文件夹分组。
+                项目目录树菜单中 📷 = 已是工作区；新建在当前工作区父目录下建
                 新文件夹并进入，名字预填 YYYYMMDD(。
   - ◀ ▶      → 访问历史后退/前进（浏览器式）—— 野外跨断面来回。
                 走 project_service.enter_workspace（与项目树同一统一入口，含盘未挂载
                 守护），首/末端禁用对应箭头，不回绕；中途回退后再切新工作区 → 截断前向分支。
 
-同目录 = 同父目录下的子目录，过滤点号目录与 RESERVED_DIR_NAMES（工作区内部结构）。
-同目录切换走 ▾ 下拉点选。根即工作区（chain==1）只要有历史也能 ◀▶。
+项目目录树 = 当前项目根目录下所有子目录，过滤点号目录与 RESERVED_DIR_NAMES
+（工作区内部结构）。目录切换走 ▾ 下拉点选。根即工作区（chain==1）也能列出
+根目录下的子目录；只要有历史也能 ◀▶。
 """
 from __future__ import annotations
 
@@ -90,6 +91,70 @@ def sibling_dirs(workspace: str) -> List[str]:
     return out
 
 
+def project_tree_dirs(root: Optional[str], workspace: str, max_depth: int = 6) -> List[str]:
+    """当前项目根目录下所有可进入目录（含 root/current），按树顺序展开."""
+    ws = Path(workspace).resolve()
+    base = Path(root).resolve() if root else ws.parent
+    try:
+        ws.relative_to(base)
+    except ValueError:
+        base = ws.parent
+
+    out: List[str] = []
+
+    def _walk(p: Path, depth: int) -> None:
+        out.append(str(p.resolve()))
+        if depth >= max_depth:
+            return
+        try:
+            entries = sorted(os.scandir(p), key=lambda e: e.name)
+        except OSError:
+            return
+        for entry in entries:
+            name = entry.name
+            if name.startswith(".") or name in RESERVED_DIR_NAMES:
+                continue
+            try:
+                if entry.is_dir():
+                    _walk(Path(entry.path), depth + 1)
+            except OSError:
+                continue
+
+    _walk(base, 0)
+    current = str(ws)
+    if current not in out:
+        out.append(current)
+    return out
+
+
+def sibling_project_dirs(root: Optional[str], workspace: str) -> List[str]:
+    """Directories beside the current project root/workspace, including itself."""
+    ws = Path(workspace).resolve()
+    anchor = Path(root).resolve() if root else ws
+    parent = anchor.parent
+    if parent == anchor:
+        return [str(anchor)]
+    out: List[str] = []
+    try:
+        entries = sorted(os.scandir(parent), key=lambda e: e.name)
+    except OSError:
+        return [str(anchor)]
+    for entry in entries:
+        name = entry.name
+        if name.startswith(".") or name in RESERVED_DIR_NAMES:
+            continue
+        try:
+            if entry.is_dir():
+                out.append(str(Path(entry.path).resolve()))
+        except OSError:
+            continue
+    current = str(anchor)
+    if current not in out:
+        out.append(current)
+        out.sort()
+    return out
+
+
 class WorkspaceBreadcrumb(QWidget):
     """顶栏路径条：父链可见 + 📁 叶子 + ◀▶ 访问历史 + ▾ 同目录/新建文件夹."""
 
@@ -114,6 +179,7 @@ class WorkspaceBreadcrumb(QWidget):
         self._btn_menu: Optional[QToolButton] = None
         self._btn_folder: Optional[QToolButton] = None
         self._siblings: List[str] = []
+        self._peer_dirs: List[str] = []
         self._sib_index: int = -1
         self._collapsed = False
         # 访问历史（会话级，不持久化）。refresh 的外部检测 + _switch_to 显式记录；
@@ -230,7 +296,14 @@ class WorkspaceBreadcrumb(QWidget):
                 self._lay.addWidget(sep)
 
         leaf_name, leaf_path = chain[-1]
-        self._siblings = sibling_dirs(leaf_path) if len(chain) > 1 else [leaf_path]
+        self._siblings = project_tree_dirs(
+            getattr(self._ctx, "current_project_root", None),
+            leaf_path,
+        )
+        self._peer_dirs = sibling_project_dirs(
+            getattr(self._ctx, "current_project_root", None),
+            leaf_path,
+        )
         try:
             self._sib_index = self._siblings.index(str(Path(leaf_path).resolve()))
         except ValueError:
@@ -271,7 +344,7 @@ class WorkspaceBreadcrumb(QWidget):
         menu_btn.setObjectName("WorkspaceMenuButton")
         menu_btn.setText("▾")
         menu_btn.setFixedSize(30, 30)
-        menu_btn.setToolTip(tr("同目录文件夹和最近使用"))
+        menu_btn.setToolTip(tr("项目目录和最近使用"))
         menu_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         menu_btn.clicked.connect(self._show_sibling_menu)
         self._lay.addWidget(menu_btn)
@@ -393,6 +466,7 @@ class WorkspaceBreadcrumb(QWidget):
             cur.setEnabled(False)
             menu.addSeparator()
         self._add_siblings_menu(menu)
+        self._add_peer_dirs_menu(menu)
         self._add_recent_menu(menu)
         menu.addSeparator()
         new_act = menu.addAction(f"➕ {tr('新建文件夹…')}")
@@ -400,18 +474,69 @@ class WorkspaceBreadcrumb(QWidget):
         return menu
 
     def _add_siblings_menu(self, menu: QMenu) -> None:
-        from app.services.project_tree_service import is_workspace
-        sib_menu = menu.addMenu("同目录文件夹")
+        from app.services.project_tree_service import is_workspace, is_workspace_candidate
+        root = getattr(self._ctx, "current_project_root", None)
+        sib_menu = menu.addMenu("项目目录")
         sib_menu.setEnabled(bool(self._siblings))
         for path in self._siblings:
-            name = os.path.basename(path)
-            label = f"📷 {name}" if is_workspace(path) else f"📁 {name}"
+            name = self._menu_path_label(path, root)
+            if is_workspace(path):
+                label = f"📷 {name}"
+            elif is_workspace_candidate(path):
+                label = f"📁 {name} · 可导入"
+            else:
+                label = f"📁 {name}"
             act = sib_menu.addAction(label)
             act.setCheckable(True)
             act.setChecked(path == self._siblings[self._sib_index]
                            if self._sib_index >= 0 else False)
             act.triggered.connect(
                 lambda _=False, p=path: self._switch_to(p))
+
+    def _add_peer_dirs_menu(self, menu: QMenu) -> None:
+        from app.services.project_tree_service import is_workspace, is_workspace_candidate
+        root = getattr(self._ctx, "current_project_root", None)
+        current_root = str(Path(root).resolve()) if root else ""
+        peer_menu = menu.addMenu("同级目录")
+        peer_menu.setEnabled(bool(self._peer_dirs))
+        for path in self._peer_dirs:
+            name = os.path.basename(path)
+            if is_workspace(path):
+                label = f"📷 {name}"
+            elif is_workspace_candidate(path):
+                label = f"📁 {name} · 可导入"
+            else:
+                label = f"📁 {name}"
+            act = peer_menu.addAction(label)
+            act.setToolTip(path)
+            act.setCheckable(True)
+            act.setChecked(bool(current_root) and path == current_root)
+            act.triggered.connect(
+                lambda _=False, p=path: self._switch_to_peer_root(p))
+
+    def _switch_to_peer_root(self, path: str) -> None:
+        """Switch to a sibling project folder and make it its own root."""
+        cur = getattr(self._ctx, "current_project_dir", None)
+        if cur and str(Path(cur).resolve()) == str(Path(path).resolve()):
+            return
+        resolved = self._enter(path, root_override=path)
+        if resolved is None:
+            return
+        self._record_history(resolved)
+        self.refresh()
+        self.workspace_changed.emit(resolved)
+
+    @staticmethod
+    def _menu_path_label(path: str, root: Optional[str]) -> str:
+        if not root:
+            return os.path.basename(path)
+        try:
+            rel = os.path.relpath(path, root)
+        except ValueError:
+            return os.path.basename(path)
+        if rel == ".":
+            return os.path.basename(os.path.normpath(path))
+        return rel
 
     def _recent_workspaces(self, limit: int = 10) -> list[dict]:
         from app.services import project_service
@@ -469,11 +594,21 @@ class WorkspaceBreadcrumb(QWidget):
             self._leaf_btn.rect().bottomLeft()))
 
     def _new_section_parent(self) -> Optional[Path]:
-        """新建文件夹的父目录 = 当前工作区的父目录."""
+        """新建文件夹的父目录.
+
+        当前工作区就是项目根时，新建的是根下子目录；在某个子目录里时，
+        新建的是当前工作区的同级目录。
+        """
         ws = getattr(self._ctx, "current_project_dir", None)
         if not ws:
             return None
-        return Path(ws).resolve().parent
+        workspace = Path(ws).resolve()
+        root = getattr(self._ctx, "current_project_root", None)
+        if root:
+            root_path = Path(root).resolve()
+            if workspace == root_path:
+                return root_path
+        return workspace.parent
 
     def _default_section_name(self) -> str:
         """预填「YYYYMMDD(」—— 用户续填地点后合上括号."""

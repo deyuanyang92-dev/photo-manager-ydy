@@ -334,6 +334,23 @@ def scan_project(
         for f in jpg_files:
             f.attributed_specimen_id = attribute_jpg(f, attr)
 
+    try:
+        from app.services.photo_asset_service import upsert_photo_file
+        for f in jpg_files:
+            upsert_photo_file(
+                db,
+                resolved,
+                f.path,
+                storage_role="incoming",
+                photo_kind="original",
+                specimen_uid=f.attributed_specimen_id,
+                assignment_source="monitor_attribution",
+                first_seen_at=f.first_seen_at,
+                compute_hash=False,
+            )
+    except Exception:
+        pass
+
     # ── is_grouped: mark JPGs that appear in grouping table ──────────────────
     # Query all jpg_paths from rows where uid IS NOT NULL; parse JSON lists.
     grouped_paths: set[str] = set()

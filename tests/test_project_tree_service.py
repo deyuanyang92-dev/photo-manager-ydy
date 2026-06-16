@@ -8,8 +8,10 @@ from pathlib import Path
 from app.services.project_tree_service import (
     scan_tree,
     is_workspace,
+    is_workspace_candidate,
     flatten_workspaces,
     discover_workspaces,
+    discover_workspace_candidates,
     RESERVED_DIR_NAMES,
 )
 
@@ -51,6 +53,33 @@ def test_has_data_flag_marks_adopted_workspaces(tmp_path):
     assert by_name["断面a"]["has_data"] is True
     assert by_name["断面b"]["has_data"] is False
     assert is_workspace(str(leaf)) is True
+
+
+def test_workspace_candidate_recognizes_legacy_layout(tmp_path):
+    legacy = tmp_path / "ceshi8"
+    (legacy / "_data").mkdir(parents=True)
+    (legacy / "incoming-jpg").mkdir()
+    assert is_workspace(str(legacy)) is False
+    assert is_workspace_candidate(str(legacy)) is True
+
+
+def test_discover_workspace_candidates_finds_legacy_and_db_dirs(tmp_path):
+    root = tmp_path / "root"
+    db_ws = root / "ceshi6"
+    legacy = root / "ceshi8"
+    plain = root / "plain"
+    db_ws.mkdir(parents=True)
+    legacy.mkdir()
+    plain.mkdir()
+    _make_workspace(db_ws)
+    (legacy / "_data").mkdir()
+    (legacy / "incoming-jpg").mkdir()
+
+    found = discover_workspace_candidates(str(root), max_depth=1)
+    by_name = {Path(x["path"]).name: x for x in found}
+    assert set(by_name) == {"ceshi6", "ceshi8"}
+    assert by_name["ceshi6"]["has_data"] is True
+    assert by_name["ceshi8"]["has_data"] is False
 
 
 def test_default_depth_reaches_six_levels(tmp_path):

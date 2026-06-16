@@ -339,6 +339,14 @@ def enter_workspace(
         pass
     ctx.current_project_dir = resolved
     ctx.current_project_root = str(Path(root).resolve()) if root else resolved
+    if root:
+        from app.services.project_catalog_service import register_workspace
+        register_workspace(
+            str(Path(root).resolve()),
+            resolved,
+            role="workspace",
+            name=_workspace_display_name(resolved, root),
+        )
     if projects_json_path:
         try:
             record_recent_workspace(projects_json_path, resolved, root)

@@ -301,7 +301,7 @@ class LabelDetailPanel(QWidget):
         is_tissue = bucket == "tissue"
         for key, tmpl in BUILTIN_TEMPLATES.items():
             if (tmpl.get("flavor") == "tissue") == is_tissue:
-                self._tmpl_combo.addItem(f"内置 · {tmpl.get('name', key)}", key)
+                self._tmpl_combo.addItem(f"内置 · {tmpl.get('code', '?')} {tmpl.get('name', key)}", key)
         for rec in lib.records():
             self._tmpl_combo.addItem(f"自定义 · {rec.get('name', '?')}", key_from_id(rec["id"]))
         cur_key = lib.selected_key() or _DEFAULT_TEMPLATE[bucket]

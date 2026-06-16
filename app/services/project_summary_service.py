@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from collections import Counter
 from pathlib import Path
 from typing import Iterator, Optional
 
@@ -87,6 +88,153 @@ def _default_out(root: str, suffix: str, ext: str) -> Path:
     out = root_path / "_data" / "exports" / f"{base}_{suffix}.{ext}"
     out.parent.mkdir(parents=True, exist_ok=True)
     return out
+
+
+# ── 0. 项目看板汇总 ─────────────────────────────────────────────────────────────
+
+def _is_rna_storage(storage: Optional[str]) -> bool:
+    return bool(storage) and str(storage).upper().startswith("R")
+
+
+def _is_alcohol_storage(storage: Optional[str]) -> bool:
+    """Current storage codes are ethanol/TNES/FAA style unless R-prefixed RNA."""
+    return bool(storage) and not _is_rna_storage(storage)
+
+
+def _person_key(value: Optional[str]) -> str:
+    s = str(value or "").strip()
+    return s or "未填写"
+
+
+def _counter_rows(counter: Counter) -> list[dict]:
+    return [
+        {"name": name, "count": count}
+        for name, count in sorted(counter.items(), key=lambda kv: (-kv[1], kv[0]))
+    ]
+
+
+def collect_project_dashboard(dirs: list[str], root: str) -> dict:
+    """Return dashboard-ready counts across workspaces.
+
+    The result is deliberately plain JSON-shaped data so both Qt views and a
+    future collaboration host API can use it directly.
+    """
+    totals = Counter()
+    photographers: Counter = Counter()
+    collectors: Counter = Counter()
+    identifiers: Counter = Counter()
+    label_printers: Counter = Counter()
+    photo_assigners: Counter = Counter()
+    by_workspace: list[dict] = []
+
+    for ws_dir, conn in _iter_dbs(dirs):
+        label = _label(ws_dir, root)
+        ws = Counter()
+        ws["workspace_count"] = 1
+
+        try:
+            rows = conn.execute(
+                "SELECT uid, storage, collector, photographer, identifier FROM specimens"
+            ).fetchall()
+        except sqlite3.Error:
+            rows = []
+        for row in rows:
+            ws["specimen_count"] += 1
+            if _is_rna_storage(row["storage"]):
+                ws["rna_specimen_count"] += 1
+            elif _is_alcohol_storage(row["storage"]):
+                ws["alcohol_specimen_count"] += 1
+            photographers[_person_key(row["photographer"])] += 1
+            collectors[_person_key(row["collector"])] += 1
+            identifiers[_person_key(row["identifier"])] += 1
+
+        try:
+            prow = conn.execute(
+                """
+                SELECT COUNT(*) AS total,
+                       SUM(CASE WHEN current_assignment_id IS NULL THEN 1 ELSE 0 END) AS unassigned
+                  FROM photos
+                """
+            ).fetchone()
+            ws["photo_count"] += int(prow["total"] or 0)
+            ws["unassigned_photo_count"] += int(prow["unassigned"] or 0)
+        except sqlite3.Error:
+            pass
+
+        try:
+            assigns = conn.execute(
+                """
+                SELECT assigned_by, COUNT(*) AS n
+                  FROM photo_assignments
+                 WHERE is_current=1
+                 GROUP BY assigned_by
+                """
+            ).fetchall()
+            for row in assigns:
+                photo_assigners[_person_key(row["assigned_by"])] += int(row["n"] or 0)
+        except sqlite3.Error:
+            pass
+
+        try:
+            prints = conn.execute(
+                """
+                SELECT actor, bucket, COUNT(*) AS events, SUM(label_count) AS labels
+                  FROM label_print_events
+                 GROUP BY actor, bucket
+                """
+            ).fetchall()
+            for row in prints:
+                events = int(row["events"] or 0)
+                labels = int(row["labels"] or 0)
+                bucket = str(row["bucket"] or "")
+                ws["label_print_event_count"] += events
+                ws["label_print_count"] += labels
+                if bucket == "tissue":
+                    ws["tissue_label_print_count"] += labels
+                else:
+                    ws["sample_label_print_count"] += labels
+                label_printers[_person_key(row["actor"])] += labels
+        except sqlite3.Error:
+            pass
+
+        totals.update(ws)
+        by_workspace.append({
+            "workspace_label": label,
+            "workspace_dir": ws_dir,
+            "specimen_count": ws["specimen_count"],
+            "alcohol_specimen_count": ws["alcohol_specimen_count"],
+            "rna_specimen_count": ws["rna_specimen_count"],
+            "photo_count": ws["photo_count"],
+            "unassigned_photo_count": ws["unassigned_photo_count"],
+            "label_print_event_count": ws["label_print_event_count"],
+            "sample_label_print_count": ws["sample_label_print_count"],
+            "tissue_label_print_count": ws["tissue_label_print_count"],
+            "label_print_count": ws["label_print_count"],
+        })
+
+    return {
+        "root": root,
+        "totals": {
+            "workspace_count": totals["workspace_count"],
+            "specimen_count": totals["specimen_count"],
+            "alcohol_specimen_count": totals["alcohol_specimen_count"],
+            "rna_specimen_count": totals["rna_specimen_count"],
+            "photo_count": totals["photo_count"],
+            "unassigned_photo_count": totals["unassigned_photo_count"],
+            "label_print_event_count": totals["label_print_event_count"],
+            "sample_label_print_count": totals["sample_label_print_count"],
+            "tissue_label_print_count": totals["tissue_label_print_count"],
+            "label_print_count": totals["label_print_count"],
+        },
+        "by_workspace": sorted(by_workspace, key=lambda r: r["workspace_label"]),
+        "by_person": {
+            "photographer": _counter_rows(photographers),
+            "collector": _counter_rows(collectors),
+            "identifier": _counter_rows(identifiers),
+            "photo_assigner": _counter_rows(photo_assigners),
+            "label_printer": _counter_rows(label_printers),
+        },
+    }
 
 
 # ── 1. 标本汇总 ─────────────────────────────────────────────────────────────────

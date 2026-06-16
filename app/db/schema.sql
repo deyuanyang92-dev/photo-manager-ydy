@@ -52,6 +52,259 @@ CREATE TABLE IF NOT EXISTS project_settings (
   value_json  TEXT NOT NULL DEFAULT '{}'
 );
 
+-- 根项目 catalog：用于管理一个调查项目下的子项目/断面工作区。
+-- 同一份 schema 同时适用于根项目库和工作区库；根项目库主要使用
+-- survey_project/workspaces/workspace_index_cache/report_runs，工作区库主要
+-- 使用 workspace_meta/specimens/grouping/collection_records 等事实表。
+CREATE TABLE IF NOT EXISTS survey_project (
+  project_id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  code TEXT,
+  root_relative_path TEXT DEFAULT '.',
+  location TEXT,
+  date_range TEXT,
+  created_at TEXT,
+  updated_at TEXT,
+  raw_json TEXT
+);
+
+CREATE TABLE IF NOT EXISTS workspaces (
+  workspace_id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  parent_workspace_id TEXT,
+  role TEXT,
+  name TEXT NOT NULL,
+  relative_path TEXT NOT NULL,
+  display_order INTEGER,
+  active INTEGER DEFAULT 1,
+  last_seen_at TEXT,
+  last_indexed_at TEXT,
+  raw_json TEXT,
+  UNIQUE(project_id, relative_path)
+);
+
+CREATE TABLE IF NOT EXISTS workspace_index_cache (
+  workspace_id TEXT PRIMARY KEY,
+  specimen_count INTEGER DEFAULT 0,
+  station_count INTEGER DEFAULT 0,
+  event_count INTEGER DEFAULT 0,
+  photo_count INTEGER DEFAULT 0,
+  unassigned_photo_count INTEGER DEFAULT 0,
+  result_count INTEGER DEFAULT 0,
+  missing_coord_count INTEGER DEFAULT 0,
+  taxonomy_incomplete_count INTEGER DEFAULT 0,
+  updated_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS report_runs (
+  report_id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  report_type TEXT NOT NULL,
+  scope_json TEXT NOT NULL,
+  output_path TEXT,
+  generated_at TEXT,
+  status TEXT,
+  raw_json TEXT
+);
+
+CREATE TABLE IF NOT EXISTS workspace_meta (
+  workspace_id TEXT PRIMARY KEY,
+  project_id TEXT,
+  role TEXT,
+  display_name TEXT,
+  root_project_hint TEXT,
+  created_at TEXT,
+  updated_at TEXT,
+  raw_json TEXT
+);
+
+CREATE TABLE IF NOT EXISTS devices (
+  device_id TEXT PRIMARY KEY,
+  device_name TEXT,
+  owner TEXT,
+  public_key TEXT,
+  trust_status TEXT DEFAULT 'trusted',
+  created_at TEXT,
+  last_seen_at TEXT,
+  raw_json TEXT
+);
+
+CREATE TABLE IF NOT EXISTS uid_sequences (
+  sequence_id TEXT PRIMARY KEY,
+  project_code TEXT DEFAULT '',
+  prefix TEXT NOT NULL,
+  scope TEXT DEFAULT 'workspace',
+  next_number INTEGER NOT NULL DEFAULT 1,
+  padding INTEGER NOT NULL DEFAULT 3,
+  updated_at TEXT,
+  raw_json TEXT,
+  UNIQUE(project_code, prefix, scope)
+);
+
+CREATE TABLE IF NOT EXISTS uid_reservations (
+  reservation_id TEXT PRIMARY KEY,
+  sequence_id TEXT NOT NULL,
+  device_id TEXT,
+  start_number INTEGER NOT NULL,
+  end_number INTEGER NOT NULL,
+  next_unused_number INTEGER NOT NULL,
+  status TEXT DEFAULT 'active',
+  created_at TEXT,
+  updated_at TEXT,
+  raw_json TEXT
+);
+
+CREATE TABLE IF NOT EXISTS photos (
+  photo_id TEXT PRIMARY KEY,
+  workspace_id TEXT,
+  content_hash TEXT,
+  perceptual_hash TEXT,
+  original_filename TEXT,
+  first_seen_at TEXT,
+  capture_datetime TEXT,
+  photo_kind TEXT DEFAULT 'original',
+  lifecycle_status TEXT DEFAULT 'incoming',
+  current_assignment_id TEXT,
+  primary_file_id TEXT,
+  metadata_id TEXT,
+  notes TEXT,
+  created_at TEXT,
+  updated_at TEXT,
+  raw_json TEXT
+);
+
+CREATE TABLE IF NOT EXISTS photo_files (
+  file_id TEXT PRIMARY KEY,
+  photo_id TEXT NOT NULL,
+  relative_path TEXT NOT NULL,
+  storage_role TEXT DEFAULT 'incoming',
+  size_bytes INTEGER,
+  mtime TEXT,
+  sha256 TEXT,
+  width INTEGER,
+  height INTEGER,
+  exists_on_disk INTEGER DEFAULT 1,
+  first_seen_at TEXT,
+  last_seen_at TEXT,
+  raw_json TEXT,
+  UNIQUE(relative_path)
+);
+
+CREATE TABLE IF NOT EXISTS photo_metadata (
+  metadata_id TEXT PRIMARY KEY,
+  photo_id TEXT NOT NULL,
+  camera_make TEXT,
+  camera_model TEXT,
+  lens_model TEXT,
+  exposure_time TEXT,
+  f_number TEXT,
+  iso TEXT,
+  focal_length TEXT,
+  exif_datetime TEXT,
+  gps_lat REAL,
+  gps_lon REAL,
+  image_width INTEGER,
+  image_height INTEGER,
+  raw_exif_json TEXT,
+  created_at TEXT,
+  updated_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS photo_assignments (
+  assignment_id TEXT PRIMARY KEY,
+  photo_id TEXT NOT NULL,
+  specimen_uid TEXT,
+  collection_event_id TEXT,
+  assigned_by TEXT,
+  assigned_at TEXT,
+  assignment_source TEXT,
+  confidence REAL,
+  is_current INTEGER DEFAULT 1,
+  revoked_at TEXT,
+  revoke_reason TEXT,
+  raw_json TEXT
+);
+
+CREATE TABLE IF NOT EXISTS assets (
+  asset_id TEXT PRIMARY KEY,
+  workspace_id TEXT,
+  specimen_uid TEXT,
+  asset_type TEXT,
+  relative_path TEXT NOT NULL,
+  content_hash TEXT,
+  lifecycle_status TEXT DEFAULT 'present',
+  created_at TEXT,
+  created_by TEXT,
+  software_name TEXT,
+  software_version TEXT,
+  processing_run_id TEXT,
+  raw_json TEXT,
+  UNIQUE(workspace_id, relative_path)
+);
+
+CREATE TABLE IF NOT EXISTS asset_derivations (
+  asset_id TEXT NOT NULL,
+  source_photo_id TEXT,
+  source_file_id TEXT,
+  role TEXT DEFAULT 'source',
+  raw_json TEXT
+);
+
+CREATE TABLE IF NOT EXISTS processing_runs (
+  run_id TEXT PRIMARY KEY,
+  workspace_id TEXT,
+  run_type TEXT,
+  started_at TEXT,
+  finished_at TEXT,
+  operator TEXT,
+  tool_name TEXT,
+  tool_version TEXT,
+  parameters_json TEXT,
+  status TEXT,
+  raw_json TEXT
+);
+
+CREATE TABLE IF NOT EXISTS audit_log (
+  audit_id TEXT PRIMARY KEY,
+  workspace_id TEXT,
+  actor TEXT,
+  action TEXT,
+  entity_type TEXT,
+  entity_id TEXT,
+  old_value_json TEXT,
+  new_value_json TEXT,
+  created_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS label_print_events (
+  event_id TEXT PRIMARY KEY,
+  workspace_id TEXT,
+  actor TEXT,
+  bucket TEXT,
+  template_key TEXT,
+  printer_name TEXT,
+  specimen_uids_json TEXT NOT NULL DEFAULT '[]',
+  copies INTEGER DEFAULT 1,
+  label_count INTEGER DEFAULT 0,
+  status TEXT DEFAULT 'printed',
+  created_at TEXT,
+  raw_json TEXT
+);
+
+CREATE TABLE IF NOT EXISTS qc_findings (
+  finding_id TEXT PRIMARY KEY,
+  workspace_id TEXT,
+  severity TEXT,
+  finding_type TEXT,
+  entity_type TEXT,
+  entity_id TEXT,
+  message TEXT,
+  status TEXT DEFAULT 'open',
+  created_at TEXT,
+  resolved_at TEXT,
+  raw_json TEXT
+);
+
 -- 采集记录簿（野外采集记录 / field collection log）
 -- 每条记录由 (province, site, station, collection_date) 唯一确定，对齐 UID 地点段。
 -- 拍照时按 4 键 lookup → 自动填充工作台能用上的字段子集；其余字段（生境/潮水等）
