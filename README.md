@@ -13,7 +13,10 @@
 - 进入后在“项目总览”中新建或打开项目目录
 
 不要直接在 zip 压缩包里运行 exe，必须先解压。更完整的安装和使用说明见
-`docs/windows-install.md`。
+`docs/windows-install.md`。便携包为了能直接放进 GitHub 仓库，没有内置完整
+`data\worms_taxonomy.json` 离线库；需要完整离线 WoRMS 查询时，把源码仓库
+`data\worms_taxonomy.json` 和 `data\worms_cache.json` 复制到解压目录的
+`_internal\data\`。
 
 - 方案：`/root/.claude/plans/docs-cross-platform-desktop-gui-plan-md-hidden-frog.md`
 - 决策记录：`docs/adr/`

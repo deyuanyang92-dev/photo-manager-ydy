@@ -15,12 +15,24 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 $distDir = Join-Path $Repo "dist\$Name"
 $buildDir = Join-Path $Repo "build\$Name"
+$packageDataDir = Join-Path $Repo "build\package-data"
 $zipPath = Join-Path $Repo "dist\$Name-win64.zip"
 
 if (Test-Path $distDir) { Remove-Item $distDir -Recurse -Force }
 if (Test-Path $buildDir) { Remove-Item $buildDir -Recurse -Force }
+if (Test-Path $packageDataDir) { Remove-Item $packageDataDir -Recurse -Force }
 if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
 if (Test-Path "$Name.spec") { Remove-Item "$Name.spec" -Force }
+
+New-Item -ItemType Directory -Path $packageDataDir | Out-Null
+foreach ($fileName in @("taxonomy_seed.json", "user_taxonomy.json")) {
+    $src = Join-Path $Repo "data\$fileName"
+    if (Test-Path $src) {
+        Copy-Item $src (Join-Path $packageDataDir $fileName) -Force
+    }
+}
+$recentProjects = Join-Path $packageDataDir "user_projects.json"
+'{"version":1,"projects":[]}' | Set-Content -Path $recentProjects -Encoding UTF8
 
 $pyinstallerArgs = @(
     "-m", "PyInstaller",
@@ -31,7 +43,7 @@ $pyinstallerArgs = @(
     "--name", $Name,
     "--icon", "resources\branding\app.ico",
     "--add-data", "resources;resources",
-    "--add-data", "data;data",
+    "--add-data", "$packageDataDir;data",
     "--add-data", "app\db\schema.sql;app\db",
     "--hidden-import", "PyQt6.QtSvg",
     "--hidden-import", "PyQt6.QtPrintSupport",

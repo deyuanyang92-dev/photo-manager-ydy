@@ -11,6 +11,7 @@ import os
 import subprocess
 import tempfile
 import time
+import importlib.util
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -176,9 +177,16 @@ def _print_gui_help(probes: list[QtPlatformProbe]) -> None:
             "\n当前进程是 root。WSLg 经常拒绝 root/沙箱进程连接 Windows 桌面；"
             "请在普通 WSL 用户终端运行 `python3 main.py`，不要加 sudo。"
         )
+    extra_hint = ""
+    if any("libEGL.so.1" in probe.stderr for probe in probes):
+        extra_hint = (
+            "\n当前报错是 `libEGL.so.1` 缺失，优先补系统 EGL / OpenGL 运行库：\n"
+            "  sudo apt update && sudo apt install -y libegl1 libgl1\n"
+        )
     print(
         "\n无法启动 GUI：当前 WSL 环境的 Qt xcb/wayland 平台都不可用。\n"
         f"{root_hint}\n"
+        f"{extra_hint}"
         "建议按顺序处理：\n"
         "  1. 在普通 WSL 用户终端运行，不要用 sudo/root 启动 GUI。\n"
         "  2. Windows PowerShell 执行 `wsl --update`，然后 `wsl --shutdown` 后重开 WSL。\n"
@@ -186,6 +194,34 @@ def _print_gui_help(probes: list[QtPlatformProbe]) -> None:
         "     `sudo apt update && sudo apt install -y libxcb-cursor0 libxcb-cursor-dev libxkbcommon-x11-0`\n"
         "  4. 诊断显示连接：`python3 main.py --check-gui`。\n"
         "  5. 只验证程序构造：`python3 main.py --smoke`。",
+        file=sys.stderr,
+    )
+
+
+def _print_missing_pyqt6_help() -> None:
+    print(
+        "GUI 启动失败：当前 Python 环境未安装 PyQt6。\n"
+        "\n"
+        "请先在当前环境执行：\n"
+        "  python3 -m pip install -r requirements.txt\n"
+        "\n"
+        "如果你在 conda/venv 里运行，请先激活同一个环境再安装。\n"
+        "在 WSL 里额外还需要系统 Qt X11 依赖，但现在这一步还没走到。",
+        file=sys.stderr,
+    )
+
+
+def _print_missing_qt_runtime_help(detail: str) -> None:
+    print(
+        "GUI 启动失败：PyQt6 已安装，但 Qt 运行时依赖缺失。\n"
+        f"  详细错误: {detail}\n"
+        "\n"
+        "这通常表示系统里的 EGL / OpenGL / X11 运行库没装全。\n"
+        "在 Ubuntu/Debian WSL 里优先尝试：\n"
+        "  sudo apt update\n"
+        "  sudo apt install -y libegl1 libgl1 libxcb-cursor0 libxkbcommon-x11-0\n"
+        "\n"
+        "如果 `sudo` 需要密码，这一步需要你在本机终端执行。",
         file=sys.stderr,
     )
 
@@ -321,6 +357,11 @@ _is_wsl = (
     sys.platform.startswith("linux")
     and "microsoft" in Path("/proc/version").read_text(errors="ignore").lower()
 )
+
+if importlib.util.find_spec("PyQt6") is None:
+    _print_missing_pyqt6_help()
+    sys.exit(2)
+
 if _is_wsl and not _CHECK_GUI and not os.environ.get("QT_QPA_PLATFORM"):
     _detect_wslg_display()
     probes: list[QtPlatformProbe] = []
@@ -345,8 +386,12 @@ if _CHECK_GUI:
     _print_gui_help(probes)
     sys.exit(2)
 
-from PyQt6.QtCore import QTimer
-from PyQt6.QtWidgets import QApplication
+try:
+    from PyQt6.QtCore import QTimer
+    from PyQt6.QtWidgets import QApplication
+except ImportError as exc:
+    _print_missing_qt_runtime_help(str(exc))
+    sys.exit(2)
 
 from app.app_context import AppContext
 from app.config.settings import AppSettings
