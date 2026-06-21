@@ -195,7 +195,7 @@ def test_tiff_card_double_click_opens_lightbox(qtbot, tmp_path, monkeypatch):
 
     # Find first TiffCard and simulate double-click
     from app.widgets.results_column import _TiffCard
-    cards = col.findChildren(_TiffCard)
+    cards = [c for c in col._cards if isinstance(c, _TiffCard)]
     assert len(cards) == 2
 
     # Simulate double-click on second card
@@ -270,7 +270,7 @@ def test_two_unpaired_tiffs_keep_input_order(qtbot):
         [],
     )
     assert len(col.findChildren(_ResultRow)) == 2
-    cards = col.findChildren(_TiffCard)
+    cards = [c for c in col._cards if isinstance(c, _TiffCard)]
     assert [c._info["name"] for c in cards] == ["a.tif", "b.tif"]
 
 
@@ -306,3 +306,84 @@ def test_thumb_guard_on_fake_path(qtbot):
     qtbot.addWidget(col)
     col.load_uid("UID", [{"path": "/fake/missing.tif", "name": "missing.tif"}], [])
     assert len(col.findChildren(_TiffCard)) == 1
+
+
+def test_results_column_has_windows_folder_actions(qtbot, tmp_path):
+    """The results header exposes Windows-Explorer-style folder and sort actions."""
+    from app.widgets.results_column import ResultsColumn
+
+    tif = tmp_path / "b.tif"
+    zipf = tmp_path / "a.zip"
+    tif.write_bytes(b"tif")
+    zipf.write_bytes(b"zip")
+
+    col = ResultsColumn()
+    qtbot.addWidget(col)
+    col.load_uid(
+        "UID",
+        [{"path": str(tif), "name": "b.tif", "seq": 1}],
+        [{"path": str(zipf), "name": "a.zip", "size": 3, "seq": 1}],
+    )
+
+    assert col._open_folder_btn.text() == "打开文件夹"
+    assert col._sort_btn.text() == "排序方式"
+    assert col._tile_btn.text() == "平铺"
+    assert col._tile_btn.isChecked()
+    assert col._results_dir == str(tmp_path)
+
+
+def test_results_sort_by_name_reorders_cards(qtbot):
+    """Sorting by name re-renders file cards in filename order."""
+    from app.widgets.results_column import ResultsColumn, _TiffCard
+
+    col = ResultsColumn()
+    qtbot.addWidget(col)
+    col.load_uid(
+        "UID",
+        [{"path": "/fake/b.tif", "name": "b.tif"},
+         {"path": "/fake/a.tif", "name": "a.tif"}],
+        [],
+    )
+
+    col._set_sort_key("name")
+
+    cards = [c for c in col._cards if isinstance(c, _TiffCard)]
+    assert [c._info["name"] for c in cards] == ["a.tif", "b.tif"]
+
+
+def test_results_tile_view_aligns_tiff_left_zip_right(qtbot):
+    """Tile mode keeps matching TIFF and ZIP in one aligned two-column row."""
+    from app.widgets.results_column import ResultsColumn, _ArchiveCard, _ResultRow, _TiffCard
+
+    col = ResultsColumn()
+    qtbot.addWidget(col)
+    col.load_uid(
+        "UID",
+        [{"path": "/fake/a.tif", "name": "a.tif", "seq": 1}],
+        [{"path": "/fake/a.zip", "name": "a.zip", "size": 10, "seq": 1}],
+    )
+
+    row = col.findChildren(_ResultRow)[0]
+    assert col._tile_view is True
+    assert isinstance(row._rows[0], _TiffCard)
+    assert isinstance(row._rows[1], _ArchiveCard)
+
+
+def test_results_sort_by_sequence_orders_pairs(qtbot):
+    """The explicit sequence sort orders paired rows by seq before filename."""
+    from app.widgets.results_column import ResultsColumn, _TiffCard
+
+    col = ResultsColumn()
+    qtbot.addWidget(col)
+    col.load_uid(
+        "UID",
+        [{"path": "/fake/b.tif", "name": "b.tif", "seq": 2},
+         {"path": "/fake/a.tif", "name": "a.tif", "seq": 1}],
+        [{"path": "/fake/b.zip", "name": "b.zip", "size": 2, "seq": 2},
+         {"path": "/fake/a.zip", "name": "a.zip", "size": 1, "seq": 1}],
+    )
+
+    col._set_sort_key("seq")
+
+    cards = [c for c in col._cards if isinstance(c, _TiffCard)]
+    assert [c._info["seq"] for c in cards] == [1, 2]

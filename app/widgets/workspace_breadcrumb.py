@@ -103,7 +103,11 @@ def project_tree_dirs(root: Optional[str], workspace: str, max_depth: int = 6) -
     out: List[str] = []
 
     def _walk(p: Path, depth: int) -> None:
-        out.append(str(p.resolve()))
+        # ``base`` is resolved once above and every descendant comes directly
+        # from scandir(base). Re-resolving each node makes Path.realpath issue
+        # lstat calls for every path component, which is extremely expensive
+        # on WSL mounted drives.
+        out.append(str(p))
         if depth >= max_depth:
             return
         try:
@@ -296,18 +300,13 @@ class WorkspaceBreadcrumb(QWidget):
                 self._lay.addWidget(sep)
 
         leaf_name, leaf_path = chain[-1]
-        self._siblings = project_tree_dirs(
-            getattr(self._ctx, "current_project_root", None),
-            leaf_path,
-        )
-        self._peer_dirs = sibling_project_dirs(
-            getattr(self._ctx, "current_project_root", None),
-            leaf_path,
-        )
-        try:
-            self._sib_index = self._siblings.index(str(Path(leaf_path).resolve()))
-        except ValueError:
-            self._sib_index = -1
+        # Directory choices are only needed when the user opens the menu.
+        # Building them here recursively scanned the entire project tree on
+        # every top-bar refresh (a multi-second operation on WSL/DrvFS).
+        current = str(Path(leaf_path).resolve())
+        self._siblings = [current]
+        self._peer_dirs = []
+        self._sib_index = 0
 
         prev_btn = QToolButton()
         prev_btn.setObjectName("CrumbArrow")
@@ -459,6 +458,16 @@ class WorkspaceBreadcrumb(QWidget):
         return Path(ws).name if ws else ""
 
     def _build_sibling_menu(self) -> QMenu:
+        workspace = getattr(self._ctx, "current_project_dir", None)
+        if workspace:
+            root = getattr(self._ctx, "current_project_root", None)
+            self._siblings = project_tree_dirs(root, workspace)
+            self._peer_dirs = sibling_project_dirs(root, workspace)
+            current = str(Path(workspace).resolve())
+            try:
+                self._sib_index = self._siblings.index(current)
+            except ValueError:
+                self._sib_index = -1
         menu = QMenu(self)
         cur_name = self._current_workspace_name()
         if cur_name:

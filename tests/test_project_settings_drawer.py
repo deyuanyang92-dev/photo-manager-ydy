@@ -100,6 +100,22 @@ def test_personnel_roundtrip(qtbot, db):
     assert data["collector"] == "张三"
 
 
+def test_personnel_save_emits_new_defaults(qtbot, db):
+    from app.widgets.project_settings_drawer import ProjectSettingsDrawer
+    ctx = _make_ctx(db=db)
+    d = ProjectSettingsDrawer(ctx)
+    qtbot.addWidget(d)
+    d.refresh()
+    d._person_edits["collector"].setText("张三")
+    d._person_edits["photographer"].setText("李四")
+
+    with qtbot.waitSignal(d.personnel_changed, timeout=1000) as signal:
+        d._save_personnel()
+
+    assert signal.args[0]["collector"] == "张三"
+    assert signal.args[0]["photographer"] == "李四"
+
+
 def test_tiff_fields_roundtrip(qtbot, db):
     from app.widgets.project_settings_drawer import ProjectSettingsDrawer
     from app.services.project_settings_service import load_setting, DEFAULT_TIFF_FIELDS

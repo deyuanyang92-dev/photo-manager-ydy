@@ -197,6 +197,73 @@ class TestProjectDefaultCoordsPrefill:
         wb._naming.set_location_keys("ZJ", "SMW", "B2", "20260518")
         assert wb._metadata._lon.text() == "66.6"               # 手动坐标不被覆盖
 
+
+class TestPersonnelDefaultPrecedence:
+    def test_new_specimen_uses_project_people_not_previous_specimen(self, qapp, ctx):
+        from app.services import project_settings_service as pss
+        pss.save_setting(ctx.get_db(), "personnel", {
+            "collector": "项目采集人", "photographer": "项目拍摄人",
+            "identifier": "", "verifier": "", "logistics": "",
+        })
+        from app.views.workbench_view import WorkbenchView
+        wb = WorkbenchView(ctx)
+        wb._metadata._collector.setText("上一标本采集人")
+        wb._metadata._photographer.setText("上一标本拍摄人")
+
+        wb._on_new_specimen()
+
+        assert wb._metadata._collector.text() == "项目采集人"
+        assert wb._metadata._photographer.text() == "项目拍摄人"
+
+    def test_station_record_overrides_project_people(self, qapp, ctx):
+        from app.services import project_settings_service as pss
+        pss.save_setting(ctx.get_db(), "personnel", {
+            "collector": "项目采集人", "photographer": "项目拍摄人",
+            "identifier": "", "verifier": "", "logistics": "",
+        })
+        crs.upsert_record(ctx.get_db(), {
+            "province": "FJ", "site": "XM", "station": "B2",
+            "collection_date": "20260602", "collector": "B2采集人",
+            "photographer": "B2拍摄人",
+        })
+        from app.views.workbench_view import WorkbenchView
+        wb = WorkbenchView(ctx)
+        wb._on_new_specimen()
+        wb._naming.set_location_keys("FJ", "XM", "B2", "20260602")
+
+        assert wb._metadata._collector.text() == "B2采集人"
+        assert wb._metadata._photographer.text() == "B2拍摄人"
+
+    def test_draft_manual_edit_updates_uid_summary(self, qapp, ctx):
+        from app.views.workbench_view import WorkbenchView
+        wb = WorkbenchView(ctx)
+        wb._on_new_specimen()
+        wb._metadata._collector.setText("现场采集人")
+        wb._metadata._on_field_edited("collector", "现场采集人")
+        assert "采集：现场采集人" in wb._naming._display_people.text()
+
+    def test_settings_change_updates_auto_draft_but_preserves_manual_override(self, qapp, ctx):
+        from app.views.workbench_view import WorkbenchView
+        wb = WorkbenchView(ctx)
+        wb._on_new_specimen()
+        wb._on_project_personnel_changed({
+            "collector": "新项目默认", "photographer": "新拍摄默认"
+        })
+        assert wb._metadata._collector.text() == "新项目默认"
+        wb._metadata._collector.setText("手动覆盖")
+        wb._metadata._on_field_edited("collector", "手动覆盖")
+        wb._on_project_personnel_changed({"collector": "又一个默认"})
+        assert wb._metadata._collector.text() == "手动覆盖"
+
+    def test_settings_change_never_overwrites_saved_specimen(self, qapp, ctx):
+        from app.views.workbench_view import WorkbenchView
+        wb = WorkbenchView(ctx)
+        wb._current_uid = "SAVED-UID"
+        wb._metadata._collector.setText("该标本实际采集人")
+        wb._on_project_personnel_changed({"collector": "项目新默认"})
+        assert wb._metadata._collector.text() == "该标本实际采集人"
+
+
 class TestLoadExistingSpecimenTriggersAutofill:
     """加载已存在的标本时，右栏应从匹配的采集记录回填 采集人/拍摄人 等。
 
@@ -208,12 +275,14 @@ class TestLoadExistingSpecimenTriggersAutofill:
     def test_load_specimen_fills_personnel_from_record(self, qapp, ctx):
         import json
         db = ctx.get_db()
+        # 采集记录：带 采集人/拍摄人
         crs.upsert_record(db, {
             "province": "ZJ", "site": "SMW", "station": "B2",
             "collection_date": "20260518",
             "collector": "记录采集人", "photographer": "记录拍摄人",
             "lon": "121.764", "lat": "29.114", "geo_area": "三门湾",
         })
+        # 标本：键匹配，但 collector/photographer 空（尚未回填）
         uid = "ZJ-SMW-B2-DLC001-T95E-20260518"
         raw = {
             "uid": uid, "province": "ZJ", "site": "SMW", "station": "B2",
@@ -239,3 +308,63 @@ class TestLoadExistingSpecimenTriggersAutofill:
         assert wb._metadata._collector.text() == "记录采集人"
         assert wb._metadata._photographer.text() == "记录拍摄人"
         assert wb._metadata._geo_area.text() == "三门湾"
+
+
+class TestLoadExistingSpecimenBackfillsPersonnel:
+    """加载已存标本时，空的 采集人/拍摄人 应从项目 personnel 默认值回填。
+
+    根因：_on_project_personnel_changed 只灌新草稿（_current_uid 为 None 时），
+    已存标本的空 personnel 字段不被项目默认值覆盖 → 建号时 personnel 还没设、
+    之后才设项目默认值的标本（如 DLC005），加载后 采集人 永远空。
+    """
+
+    def _insert_specimen(self, db, uid, collector, photographer, project_dir):
+        import json
+        raw = {"uid": uid, "province": "ZJ", "site": "SMW", "station": "B2",
+               "id": uid.split("-")[3], "storage": "T95E", "collectionDate": "20260518"}
+        db.execute(
+            """
+            INSERT INTO specimens (
+                uid, id, province, site, station, storage, collection_date,
+                collector, photographer, owner_project_dir, raw_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (uid, raw["id"], "ZJ", "SMW", "B2", "T95E", "20260518",
+             collector, photographer, project_dir,
+             json.dumps(raw, ensure_ascii=False)),
+        )
+        db.commit()
+
+    def test_load_specimen_backfills_empty_personnel_from_project(self, qapp, ctx):
+        from app.services import project_settings_service as pss
+        pss.save_setting(ctx.get_db(), "personnel", {
+            "collector": "yang et al", "photographer": "yang",
+            "identifier": "", "verifier": "", "logistics": "",
+        })
+        self._insert_specimen(ctx.get_db(), "ZJ-SMW-B2-DLC005-T95E-20260518",
+                              "", "", ctx.current_project_dir)
+
+        from app.views.workbench_view import WorkbenchView
+        wb = WorkbenchView(ctx)
+        wb._load_specimen("ZJ-SMW-B2-DLC005-T95E-20260518")
+
+        assert wb._metadata._collector.text() == "yang et al"
+        assert wb._metadata._photographer.text() == "yang"
+
+    def test_load_specimen_keeps_existing_personnel(self, qapp, ctx):
+        """已存（非空）collector 不被 personnel 默认值覆盖。"""
+        from app.services import project_settings_service as pss
+        pss.save_setting(ctx.get_db(), "personnel", {
+            "collector": "项目默认采集人", "photographer": "项目默认拍摄人",
+            "identifier": "", "verifier": "", "logistics": "",
+        })
+        self._insert_specimen(ctx.get_db(), "ZJ-SMW-B2-DLC007-T95E-20260518",
+                              "该标本实际采集人", "该标本实际拍摄人",
+                              ctx.current_project_dir)
+
+        from app.views.workbench_view import WorkbenchView
+        wb = WorkbenchView(ctx)
+        wb._load_specimen("ZJ-SMW-B2-DLC007-T95E-20260518")
+
+        assert wb._metadata._collector.text() == "该标本实际采集人"
+        assert wb._metadata._photographer.text() == "该标本实际拍摄人"

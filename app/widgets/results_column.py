@@ -607,14 +607,14 @@ def _placeholder(text: str) -> QWidget:
 
 
 class _ResultRow(QFrame):
-    """One result sequence: header label + stacked compact file rows
-    (one row per file — TIFF then ZIP — Windows Explorer list style)."""
+    """One result sequence with optional aligned TIFF / ZIP columns."""
 
-    def __init__(self, seq_label: str, file_rows: list,
+    def __init__(self, seq_label: str, tiff_row=None, zip_row=None,
+                 *, tile_view: bool = True,
                  parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setObjectName("ResultRow")
-        self._rows = [r for r in file_rows if r is not None]
+        self._rows = [r for r in (tiff_row, zip_row) if r is not None]
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 8)
         v.setSpacing(4)
@@ -625,8 +625,16 @@ class _ResultRow(QFrame):
 
         if not self._rows:
             v.addWidget(_placeholder("无成果"))
-        for r in self._rows:
-            v.addWidget(r)
+        elif tile_view:
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(10)
+            row.addWidget(tiff_row if tiff_row is not None else _placeholder("无 TIFF"), stretch=1)
+            row.addWidget(zip_row if zip_row is not None else _placeholder("无 ZIP"), stretch=1)
+            v.addLayout(row)
+        else:
+            for r in self._rows:
+                v.addWidget(r)
 
     def set_thumb_size(self, size: int) -> None:
         for r in self._rows:
@@ -684,6 +692,11 @@ class ResultsColumn(QWidget):
         self._thumb_cache: dict = {}
         self._cards: list = []
         self._collapsed = False
+        self._sort_key = "seq"
+        self._tile_view = True
+        self._results_dir: str = ""
+        self._current_tiffs: list[dict] = []
+        self._current_zips: list[dict] = []
         self._setup_ui()
 
     # ── UI ────────────────────────────────────────────────────────────────────
@@ -727,6 +740,34 @@ class ResultsColumn(QWidget):
         hdr.addWidget(self._count)
         hdr.addStretch()
 
+        self._open_folder_btn = QPushButton("打开文件夹")
+        self._open_folder_btn.setObjectName("Outline")
+        self._open_folder_btn.setFixedHeight(28)
+        self._open_folder_btn.setToolTip("在 Windows 文件资源管理器中打开 results 文件夹")
+        icons.set_button_icon(self._open_folder_btn, "mdi6.folder-open-outline",
+                              color=icons.TONE_ACCENT, size=14)
+        self._open_folder_btn.clicked.connect(self._open_results_folder)
+        hdr.addWidget(self._open_folder_btn)
+
+        self._sort_btn = QPushButton("排序方式")
+        self._sort_btn.setObjectName("Ghost")
+        self._sort_btn.setFixedHeight(28)
+        self._sort_btn.setToolTip("按文件名、类型、大小或修改时间排序")
+        icons.set_button_icon(self._sort_btn, "mdi6.sort", color=icons.TONE_MUTED, size=14)
+        self._sort_btn.clicked.connect(self._show_sort_menu)
+        hdr.addWidget(self._sort_btn)
+
+        self._tile_btn = QPushButton("平铺")
+        self._tile_btn.setObjectName("Ghost")
+        self._tile_btn.setCheckable(True)
+        self._tile_btn.setChecked(True)
+        self._tile_btn.setFixedHeight(28)
+        self._tile_btn.setToolTip("平铺为左右两列：左 TIFF，右 ZIP")
+        icons.set_button_icon(self._tile_btn, "mdi6.view-grid-outline",
+                              color=icons.TONE_MUTED, size=14)
+        self._tile_btn.clicked.connect(self._set_tile_view)
+        hdr.addWidget(self._tile_btn)
+
         zoom_lbl = QLabel("缩放")
         zoom_lbl.setObjectName("MutedSmall")
         hdr.addWidget(zoom_lbl)
@@ -749,6 +790,8 @@ class ResultsColumn(QWidget):
         self._body = QScrollArea()
         self._body.setWidgetResizable(True)
         self._body.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._body.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._body.customContextMenuRequested.connect(self._show_body_menu)
         self._rows_container = QWidget()
         self._rows_lay = QVBoxLayout(self._rows_container)
         self._rows_lay.setContentsMargins(0, 2, 0, 2)
@@ -767,10 +810,19 @@ class ResultsColumn(QWidget):
         """Populate the paired rows for the given specimen UID."""
         self._clear_rows()
 
-        all_tiff_paths = [Path(i["path"]) for i in composed_tiffs if i.get("path")]
-        rows = _pair_results(composed_tiffs, archive_zips)
+        self._current_tiffs = list(composed_tiffs or [])
+        self._current_zips = list(archive_zips or [])
+        self._remember_results_dir(composed_tiffs, archive_zips)
+        composed_tiffs = list(composed_tiffs or [])
+        archive_zips = list(archive_zips or [])
+        rows = self._sort_rows(_pair_results(composed_tiffs, archive_zips))
+        all_tiff_paths = [
+            Path(tinfo["path"]) for _label, tinfo, _zinfo in rows
+            if tinfo is not None and tinfo.get("path")
+        ]
         for seq_label, tinfo, zinfo in rows:
-            file_rows: list = []
+            tc = None
+            zc = None
             if tinfo is not None:
                 tc = _TiffCard(
                     tinfo,
@@ -780,7 +832,6 @@ class ResultsColumn(QWidget):
                     thumb_size=self._thumb_size,
                 )
                 self._cards.append(tc)
-                file_rows.append(tc)
             if zinfo is not None:
                 zc = _ArchiveCard(
                     zinfo, open_fn=self._open_in_explorer,
@@ -788,8 +839,9 @@ class ResultsColumn(QWidget):
                     thumb_size=self._thumb_size,
                 )
                 self._cards.append(zc)
-                file_rows.append(zc)
-            self._rows_lay.addWidget(_ResultRow(seq_label, file_rows))
+            self._rows_lay.addWidget(
+                _ResultRow(seq_label, tc, zc, tile_view=self._tile_view)
+            )
 
         n = len(rows)
         self._count.setText(f"{n} 项")
@@ -799,6 +851,9 @@ class ResultsColumn(QWidget):
     def clear(self) -> None:
         """Reset to empty (暂无成果) state."""
         self._clear_rows()
+        self._current_tiffs = []
+        self._current_zips = []
+        self._results_dir = ""
         self._show_empty()
 
     # ── Internals ───────────────────────────────────────────────────────────────
@@ -843,6 +898,106 @@ class ResultsColumn(QWidget):
         self._collapse_btn.setText("▸" if collapsed else "▾")
         self._collapse_btn.setChecked(collapsed)
 
+    def _show_sort_menu(self) -> None:
+        self._show_sort_menu_at(self._sort_btn.mapToGlobal(self._sort_btn.rect().bottomLeft()))
+
+    def _show_body_menu(self, pos) -> None:
+        self._show_sort_menu_at(self._body.viewport().mapToGlobal(pos), include_open=True)
+
+    def _show_sort_menu_at(self, global_pos, *, include_open: bool = False) -> None:
+        menu = QMenu(self)
+        if include_open:
+            open_act = menu.addAction("打开 results 文件夹")
+            open_act.setEnabled(bool(self._results_dir))
+            open_act.triggered.connect(self._open_results_folder)
+            menu.addSeparator()
+        for key, label in (
+            ("seq", "按顺序"),
+            ("name", "按名称"),
+            ("type", "按类型"),
+            ("size", "按大小"),
+            ("mtime", "按修改时间"),
+        ):
+            act = menu.addAction(("✓ " if self._sort_key == key else "") + label)
+            act.triggered.connect(lambda _=False, k=key: self._set_sort_key(k))
+        menu.exec(global_pos)
+
+    def _set_sort_key(self, key: str) -> None:
+        if key not in {"seq", "name", "type", "size", "mtime"}:
+            return
+        self._sort_key = key
+        self._sort_btn.setText({
+            "seq": "顺序",
+            "name": "名称",
+            "type": "类型",
+            "size": "大小",
+            "mtime": "修改时间",
+        }[key])
+        self.load_uid("", self._current_tiffs, self._current_zips)
+
+    def _set_tile_view(self, checked: bool) -> None:
+        self._tile_view = bool(checked)
+        self._tile_btn.setText("平铺" if self._tile_view else "列表")
+        self.load_uid("", self._current_tiffs, self._current_zips)
+
+    def _sort_rows(self, rows: list) -> list:
+        def stat_value(info: dict, attr: str, default=0):
+            if not info:
+                return default
+            try:
+                return getattr(Path(str(info.get("path") or "")).stat(), attr)
+            except Exception:
+                return default
+
+        def file_name(info: dict) -> str:
+            if not info:
+                return ""
+            path = Path(str(info.get("path") or info.get("name") or ""))
+            return str(info.get("name") or path.name)
+
+        def seq_value(info: dict):
+            if not info:
+                return (1, "")
+            seq = info.get("seq")
+            if seq is None:
+                return (1, Path(info.get("path") or info.get("name") or "").stem.lower())
+            try:
+                return (0, int(seq))
+            except Exception:
+                return (0, str(seq).lower())
+
+        def key(row):
+            _label, tinfo, zinfo = row
+            primary = tinfo or zinfo or {}
+            name = file_name(primary)
+            secondary = file_name(zinfo if primary is tinfo else tinfo)
+            name_key = (name.lower(), secondary.lower())
+            if self._sort_key == "seq":
+                return (seq_value(primary), name_key)
+            if self._sort_key == "type":
+                return (0 if tinfo else 1, Path(name).suffix.lower(), name.lower())
+            if self._sort_key == "size":
+                size = int((tinfo or {}).get("size") or stat_value(tinfo, "st_size"))
+                size += int((zinfo or {}).get("size") or stat_value(zinfo, "st_size"))
+                return (size, name.lower())
+            if self._sort_key == "mtime":
+                return (max(stat_value(tinfo, "st_mtime"), stat_value(zinfo, "st_mtime")),
+                        name.lower())
+            return name_key
+
+        return sorted(list(rows or []), key=key)
+
+    def _remember_results_dir(self, composed_tiffs: list, archive_zips: list) -> None:
+        for info in list(composed_tiffs or []) + list(archive_zips or []):
+            path = str(info.get("path") or "")
+            if path:
+                self._results_dir = str(Path(path).parent)
+                return
+
+    def _open_results_folder(self) -> None:
+        if self._results_dir:
+            self._open_in_explorer(self._results_dir)
+
     def _open_tiff_lightbox(self, clicked_path: Path, all_paths: list) -> None:
         """Open the TIFF lightbox dialog starting at *clicked_path*."""
         try:
@@ -860,8 +1015,12 @@ class ResultsColumn(QWidget):
         import subprocess
         import sys
         try:
+            is_dir = os.path.isdir(path)
             if sys.platform == "win32":
-                subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
+                if is_dir:
+                    subprocess.Popen(["explorer", os.path.normpath(path)])
+                else:
+                    subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
             else:
                 # WSL: open Windows Explorer via explorer.exe with wslpath
                 win_path = path
@@ -870,7 +1029,10 @@ class ResultsColumn(QWidget):
                     win_path = wsl_to_windows(path) or path
                 except Exception:
                     pass
-                subprocess.Popen(["explorer.exe", "/select,", win_path])
+                if is_dir:
+                    subprocess.Popen(["explorer.exe", win_path])
+                else:
+                    subprocess.Popen(["explorer.exe", "/select,", win_path])
         except Exception:
             pass
 

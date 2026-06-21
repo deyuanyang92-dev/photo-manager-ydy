@@ -32,6 +32,17 @@ def _restore_last_project(ctx, win) -> bool:
     if not os.path.isfile(os.path.join(last, "_data", "project.db")):
         return False  # 不是 workspace(没库)→ 不恢复
     try:
+        saved_root = ctx.settings.project_tree_root
+        root = last
+        if saved_root and os.path.isdir(saved_root):
+            last_abs = os.path.abspath(last)
+            root_abs = os.path.abspath(saved_root)
+            try:
+                if os.path.commonpath((last_abs, root_abs)) == root_abs:
+                    root = saved_root
+            except ValueError:
+                pass  # Different drives: the saved root cannot own this workspace.
+        ctx.current_project_root = root
         ctx.current_project_dir = last
         if hasattr(win, "refresh_context_bar"):
             win.refresh_context_bar()

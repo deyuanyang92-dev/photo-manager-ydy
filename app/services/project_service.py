@@ -27,6 +27,14 @@ LEGACY_INCOMING_JPG_DIR = "新拍JPG"
 RESULTS_DIR = "results"
 DATA_SUBDIR = "_data"
 
+LEGACY_ROOT_METADATA_FILES: frozenset[str] = frozenset({
+    ".project-specimens.json",
+})
+
+LEGACY_INCOMING_METADATA_FILES: frozenset[str] = frozenset({
+    ".specimen-log.json",
+})
+
 
 # ── Low-level helpers ──────────────────────────────────────────────────────────
 
@@ -65,6 +73,7 @@ def ensure_project_dirs(project_dir: str, *, create_root: bool = False) -> dict:
     incoming.mkdir(exist_ok=True)
     results.mkdir(exist_ok=True)
     data.mkdir(exist_ok=True)
+    migrate_legacy_metadata(root)
 
     return {
         "projectDir": str(root),
@@ -72,6 +81,49 @@ def ensure_project_dirs(project_dir: str, *, create_root: bool = False) -> dict:
         "resultsDir": str(results),
         "dataDir": str(data),
     }
+
+
+def migrate_legacy_metadata(project_dir: str | Path) -> list[str]:
+    """Move old web-era dot JSON files into ``_data/legacy``.
+
+    Modern projects keep their state in ``_data/project.db`` and
+    ``_data/state.json``. Hidden JSON files in the project root or
+    ``incoming-jpg`` are legacy sidecars; keeping them beside user folders makes
+    the project look messy in Explorer, and ``incoming-jpg`` should contain only
+    photo inputs.
+    """
+    root = Path(project_dir)
+    data = root / DATA_SUBDIR
+    legacy = data / "legacy"
+    moved: list[str] = []
+
+    def unique_dest(base: Path) -> Path:
+        if not base.exists():
+            return base
+        stem = base.stem
+        suffix = base.suffix
+        parent = base.parent
+        for idx in range(1, 1000):
+            candidate = parent / f"{stem}.{idx}{suffix}"
+            if not candidate.exists():
+                return candidate
+        return parent / f"{base.name}.{uuid.uuid4().hex}"
+
+    def move_file(src: Path, dest_name: str) -> None:
+        if not src.is_file():
+            return
+        legacy.mkdir(parents=True, exist_ok=True)
+        dest = unique_dest(legacy / dest_name)
+        src.replace(dest)
+        moved.append(str(dest))
+
+    for name in LEGACY_ROOT_METADATA_FILES:
+        move_file(root / name, name)
+    incoming = root / INCOMING_JPG_DIR
+    for name in LEGACY_INCOMING_METADATA_FILES:
+        move_file(incoming / name, f"{INCOMING_JPG_DIR}.{name.lstrip('.')}")
+
+    return moved
 
 
 def get_incoming_jpg_dir(project_dir: str) -> str:

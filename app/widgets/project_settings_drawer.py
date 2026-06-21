@@ -145,6 +145,7 @@ class ProjectSettingsDrawer(QWidget):
     closed = pyqtSignal()
     helicon_path_changed = pyqtSignal(str)
     naming_rules_changed = pyqtSignal()
+    personnel_changed = pyqtSignal(dict)
 
     def __init__(self, ctx: "AppContext", parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -670,7 +671,7 @@ class ProjectSettingsDrawer(QWidget):
         ])
         tissue_grp.setToolTip(
             "样品瓶与 RNAlater 可绑同一台或不同打印机；同台且 RNA 用 A4/A5 合版纸时，"
-            "自动策略会把 RNAlater 标签加入左侧 RNA 待打印队列。模板编辑请进「标签打印」页。"
+            "自动策略会把 RNAlater 标签加入合版队列。模板编辑请进「标签打印」页。"
         )
         lay.addWidget(tissue_grp)
 
@@ -1020,6 +1021,7 @@ class ProjectSettingsDrawer(QWidget):
         from app.services.project_settings_service import save_setting
         data = {key: edit.text().strip() for key, edit in self._person_edits.items()}
         save_setting(db, "personnel", data)
+        self.personnel_changed.emit(dict(data))
 
     def _save_code_labels(self) -> None:
         db = self.ctx.get_db()

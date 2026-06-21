@@ -230,6 +230,37 @@ class TestEnsureProjectDirs:
         assert isinstance(result, dict)
         assert "projectDir" in result or "project_dir" in result
 
+    def test_moves_legacy_metadata_to_data_legacy(self, tmp_path):
+        from app.services.project_service import ensure_project_dirs
+
+        proj_dir = tmp_path / "proj"
+        incoming = proj_dir / "incoming-jpg"
+        incoming.mkdir(parents=True)
+        (proj_dir / ".project-specimens.json").write_text("{}", encoding="utf-8")
+        (incoming / ".specimen-log.json").write_text("{}", encoding="utf-8")
+
+        ensure_project_dirs(str(proj_dir), create_root=False)
+
+        legacy = proj_dir / "_data" / "legacy"
+        assert not (proj_dir / ".project-specimens.json").exists()
+        assert not (incoming / ".specimen-log.json").exists()
+        assert (legacy / ".project-specimens.json").is_file()
+        assert (legacy / "incoming-jpg.specimen-log.json").is_file()
+
+    def test_legacy_metadata_migration_does_not_overwrite_existing_backup(self, tmp_path):
+        from app.services.project_service import ensure_project_dirs
+
+        proj_dir = tmp_path / "proj"
+        legacy = proj_dir / "_data" / "legacy"
+        legacy.mkdir(parents=True)
+        (legacy / ".project-specimens.json").write_text("old", encoding="utf-8")
+        (proj_dir / ".project-specimens.json").write_text("new", encoding="utf-8")
+
+        ensure_project_dirs(str(proj_dir), create_root=False)
+
+        assert (legacy / ".project-specimens.json").read_text(encoding="utf-8") == "old"
+        assert (legacy / ".project-specimens.1.json").read_text(encoding="utf-8") == "new"
+
 
 # ── get_project_summary ────────────────────────────────────────────────────
 

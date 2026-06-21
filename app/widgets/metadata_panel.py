@@ -454,8 +454,10 @@ class MetadataPanel(QWidget):
         # 仅发出变更信号触发 autosave（web scheduleRightPanelPersist app.js:9098），
         # 不改手动/自动标记 —— 供自动填路径复用。
         self._dirty = True
-        if self._uid:
-            self.metadata_changed.emit(self._uid, field, value)
+        # Drafts have no UID yet, but UI consumers (notably the UID display
+        # summary) still need live updates. Persistence handlers already gate
+        # on a real current UID, so an empty UID is safe and explicit here.
+        self.metadata_changed.emit(self._uid or "", field, value)
 
 
 # ── Nominatim reverse-geocode worker  #cursor metaReverseGeocode ─────────────

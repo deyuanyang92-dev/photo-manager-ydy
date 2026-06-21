@@ -305,3 +305,38 @@ def test_project_naming_components_can_include_taxonomy_and_notes(qapp):
     finally:
         p.close()
         db.close()
+
+
+class TestUidDisplaySummary:
+    def test_default_summary_shows_people_and_photo_notes(self, panel):
+        panel.set_display_metadata({
+            "collector": "张三", "photographer": "李四",
+            "notes": "标本备注", "photo_notes": "曝光异常，需要补拍",
+        })
+        assert panel._display_people.text() == "采集：张三  ·  拍摄：李四"
+        assert "拍照备注：曝光异常" in panel._display_notes.text()
+        assert "标本备注" not in panel._display_notes.text()
+
+    def test_empty_values_have_no_dangling_separator(self, panel):
+        panel.set_display_metadata({"collector": "张三", "photographer": ""})
+        assert panel._display_people.text() == "采集：张三"
+
+    def test_custom_field_selection_persists(self, panel):
+        panel.set_display_fields({"collector", "notes"})
+        assert panel._load_display_fields() == {"collector", "notes"}
+        panel.set_display_metadata({"collector": "A", "notes": "N"})
+        assert panel._display_people.text() == "采集：A"
+        assert panel._display_notes.text() == "备注：N"
+
+    def test_copy_uid_still_copies_only_uid(self, panel):
+        panel._province.setText("FJ")
+        panel._site.setText("XM")
+        panel._station.setText("B2")
+        panel._species_id.setText("DLC003")
+        panel._storage.setText("T95E")
+        panel._collection_date.setText("20260602")
+        panel._photo_date.setText("20260602")
+        panel.set_display_metadata({"collector": "张三"})
+        panel._copy_uid()
+        assert QApplication.clipboard().text() == panel.current_uid()
+        assert "张三" not in QApplication.clipboard().text()

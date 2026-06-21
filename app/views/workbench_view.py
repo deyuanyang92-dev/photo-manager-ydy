@@ -1903,6 +1903,14 @@ class WorkbenchView(BaseView):
             self._apply_collection_autofill()
         except Exception:
             pass
+        # 项目 personnel 默认值回填空字段。_on_project_personnel_changed 只灌新草稿
+        # （_current_uid 为 None），已存标本的空 采集人/拍摄人 不会被它覆盖 → 建号时
+        # personnel 还没设、之后才设的标本加载后永远空。空不是事实，加载时补默认值。
+        # 非破坏：apply_autofill 只填空字段，已存值不动。采集记录优先级更高（已先跑）。
+        try:
+            self._backfill_personnel_defaults()
+        except Exception:
+            pass
 
     def _sync_uid_display_summary(self) -> None:
         """Mirror existing metadata into the UID card's non-identity summary."""
@@ -1962,6 +1970,28 @@ class WorkbenchView(BaseView):
         # the user hits 保存 (fields are read straight off the panels then).
         if self._current_uid:
             self._schedule_rail_save()
+
+    def _backfill_personnel_defaults(self) -> None:
+        """把项目 personnel 默认值回填到已加载标本的【空】采集人/拍摄人/鉴定人。
+
+        与 _on_project_personnel_changed 互补：后者只灌新草稿（_current_uid 为
+        None 时），不碰已存标本。但已存标本的空 personnel 字段（建号时项目默认值
+        还没设、之后才设的情况）应能从项目默认值补上。非破坏：apply_autofill 只填
+        空字段，已存值（含采集记录已回填的）保留。
+        """
+        prefill = self._effective_prefill()
+        values = {
+            k: str(prefill.get(k) or "").strip()
+            for k in ("collector", "photographer", "identifier")
+        }
+        if not any(values.values()):
+            return
+        before = self._metadata.current_values()
+        self._metadata.apply_autofill(values, override_auto=True)
+        after = self._metadata.current_values()
+        if self._current_uid and before != after:
+            self._schedule_rail_save()
+        self._sync_uid_display_summary()
 
     # ── Monitor ───────────────────────────────────────────────────────────────
 

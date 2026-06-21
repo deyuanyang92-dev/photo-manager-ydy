@@ -328,6 +328,35 @@ def test_add_group_auto_labels(qtbot):
     assert panel._add_btn.isVisible() or True   # 载入后按钮可用
 
 
+def test_visible_group_numbers_and_default_angles_are_contiguous(qtbot):
+    """数据库内部索引可以有空洞，但 UI 必须始终显示组1/角度1、组2/角度2。"""
+    from app.widgets.grouping_panel import GroupingPanel, _DraftGroupRow
+    ctx = _make_app_context()
+    panel = GroupingPanel(ctx)
+    qtbot.addWidget(panel)
+    panel.load_grouping("test-uid", _make_grouping([
+        {"index": 2, "label": "角度3"},
+        {"index": 4, "label": "角度5"},
+    ]))
+
+    rows = panel.findChildren(_DraftGroupRow)
+    assert [row._group_number_chip.text() for row in rows] == ["组1", "组2"]
+    assert [row._label_edit.text() for row in rows] == ["角度1", "角度2"]
+    # 内部 ID 不变，避免破坏已有关联。
+    assert [row._group.group_index for row in rows] == [2, 4]
+
+
+def test_grouping_more_menu_exposes_helicon_params(qtbot):
+    from app.widgets.grouping_panel import GroupingPanel
+    panel = GroupingPanel(_make_app_context())
+    qtbot.addWidget(panel)
+    menu = panel._build_more_menu()
+    action = next(a for a in menu.actions() if a.text() == "Helicon 合成参数")
+
+    with qtbot.waitSignal(panel.helicon_params_requested, timeout=1000):
+        action.trigger()
+
+
 def test_add_group_needs_specimen(qtbot):
     """没绑标本时「新组」不崩、不建组（按钮本就隐藏）。"""
     from app.widgets.grouping_panel import GroupingPanel

@@ -125,6 +125,18 @@ def test_edit_request_only_emits_uid(ctx, db):
     ).fetchone()
 
 
+def test_delete_signal_emits_uid(ctx, db):
+    _add_specimen(db, "U-DELETE", "Marphysa sp.")
+    sb = SpecimenSidebar(ctx)
+    sb.refresh()
+    seen = []
+    sb.delete_specimen_requested.connect(seen.append)
+
+    sb.delete_specimen_requested.emit("U-DELETE")
+
+    assert seen == ["U-DELETE"]
+
+
 def test_edit_current_specimen_returns_false_without_selection(ctx, db):
     sb = SpecimenSidebar(ctx)
     assert sb.edit_current_specimen() is False
@@ -181,6 +193,25 @@ def test_active_specimen_row_has_active_style_and_badge(ctx, db):
         if w.objectName() == "SpecimenActivePill"
     ]
     assert badges and badges[0].text() == "拍摄中"
+
+
+def test_selected_specimen_row_gets_explicit_selected_property(ctx, db):
+    _add_specimen(db, "FJ-D-F-DD001")
+    _add_specimen(db, "FJ-D-F-DD002")
+    sb = SpecimenSidebar(ctx)
+    sb.refresh()
+
+    first = sb._list.item(0)
+    second = sb._list.item(1)
+    sb._list.setCurrentItem(first)
+    first_row = sb._list.itemWidget(first)
+    second_row = sb._list.itemWidget(second)
+    assert first_row.property("selected") is True
+    assert second_row.property("selected") is False
+
+    sb._list.setCurrentItem(second)
+    assert first_row.property("selected") is False
+    assert second_row.property("selected") is True
 
 
 def test_rna_filter_button_shows_count_and_filters_r_prefix(ctx, db):

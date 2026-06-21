@@ -21,6 +21,7 @@ Runs headless (QT_QPA_PLATFORM=offscreen).
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -117,6 +118,22 @@ def test_project_tree_dirs_lists_root_and_all_children(tmp_path):
     assert "results" not in rels
 
 
+def test_project_tree_scan_resolves_only_root_paths(tmp_path, monkeypatch):
+    """Walking descendants must not realpath every node on slow mounted disks."""
+    root, _sect = _make_tree(tmp_path)
+    original = Path.resolve
+    calls = []
+
+    def counted_resolve(self, *args, **kwargs):
+        calls.append(str(self))
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", counted_resolve)
+    project_tree_dirs(str(root), str(root))
+
+    assert len(calls) <= 3
+
+
 def test_sibling_project_dirs_lists_project_root_peers(tmp_path):
     parent = tmp_path / "work"
     proj = parent / "proj_x"
@@ -150,6 +167,27 @@ def test_widget_shows_chain(tmp_path):
     assert "航次2026" in w.text()
     assert "断面A" in w.text()
     assert "B2" in w.text()
+
+
+def test_refresh_does_not_scan_entire_project_tree(tmp_path, monkeypatch):
+    """Top-bar refresh is a hot path and must not recurse through the disk."""
+    root, sect = _make_tree(tmp_path)
+    calls = []
+
+    def record_scan(*args, **kwargs):
+        calls.append((args, kwargs))
+        return []
+
+    monkeypatch.setattr(
+        "app.widgets.workspace_breadcrumb.project_tree_dirs",
+        record_scan,
+    )
+    w = WorkspaceBreadcrumb(_Ctx(str(sect / "B2"), str(root)))
+    w.refresh()
+
+    assert calls == []
+    w._build_sibling_menu()
+    assert len(calls) == 1
 
 
 def test_widget_collapses_deep_chain(tmp_path):

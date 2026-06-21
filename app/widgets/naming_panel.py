@@ -85,6 +85,14 @@ _PRES_DETAIL = {
     for code, detail in STANDARD_PRESERVATION_METHODS + TRANSCRIPTOME_PRESERVATION_METHODS
 }
 
+_UID_DISPLAY_SETTINGS_KEY = "naming_panel/uid_display_fields"
+_UID_DISPLAY_FIELDS = (
+    ("collector", "采集人"), ("photographer", "拍摄人"),
+    ("identifier", "鉴定人"), ("notes", "备注"),
+    ("photo_notes", "拍照备注"),
+)
+_UID_DISPLAY_DEFAULTS = {"collector", "photographer", "photo_notes"}
+
 
 class NamingPanel(QWidget):
     """7-segment naming generator with live UID/result-ID preview.
@@ -106,7 +114,9 @@ class NamingPanel(QWidget):
 
     def __init__(self, ctx: "AppContext", parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
+        from PyQt6.QtCore import QSettings
         self.ctx = ctx
+        self._ui_settings = QSettings()
         self._persisted_uid: Optional[str] = None  # UID of the currently loaded saved specimen
         self._storage_syncing = False  # re-entrancy guard between combo ↔ _storage
         self._section_visibility_cache: dict[str, bool] = {}
@@ -114,6 +124,9 @@ class NamingPanel(QWidget):
         self._field_label_text: dict[str, str] = {}
         self._naming_rules_required: dict[str, bool] = {}
         self._external_naming_values: dict[str, str] = {}
+        self._display_metadata: dict[str, str] = {}
+        self._display_fields = self._load_display_fields()
+        self._display_notes_expanded = False
         self._setup_ui()
 
     # ── Collapse ────────────────────────────────────────────────────────────
@@ -383,6 +396,7 @@ class NamingPanel(QWidget):
         self._photo_notes.setFixedHeight(72)
         self._photo_notes.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self._photo_notes.document().contentsChanged.connect(self._auto_resize_notes)
+        self._photo_notes.textChanged.connect(self._on_photo_notes_display_changed)
         self._photo_notes.setPlaceholderText(
             "拍照现场备注，例：曝光异常、对焦点变化、补拍原因…"
         )
@@ -424,12 +438,40 @@ class NamingPanel(QWidget):
         copy_uid.setIcon(icons.icon("mdi6.content-copy", color=icons.TONE_MUTED))
         copy_uid.clicked.connect(self._copy_uid)
         preview_hdr.addWidget(copy_uid)
+        self._display_fields_btn = QToolButton()
+        self._display_fields_btn.setObjectName("CompactIconButton")
+        self._display_fields_btn.setToolTip("选择唯一编号下方的展示信息")
+        self._display_fields_btn.setIcon(
+            icons.icon("mdi6.tune-variant", color=icons.TONE_MUTED)
+        )
+        self._display_fields_btn.clicked.connect(self._open_display_fields_menu)
+        preview_hdr.addWidget(self._display_fields_btn)
         preview_lay.addLayout(preview_hdr)
         self._uid_preview = QLabel("—")
         self._uid_preview.setObjectName("PreviewEmpty")
         self._uid_preview.setWordWrap(True)
         self._uid_preview.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         preview_lay.addWidget(self._uid_preview)
+        self._display_people = QLabel("")
+        self._display_people.setObjectName("MutedSmall")
+        self._display_people.setWordWrap(True)
+        self._display_people.hide()
+        preview_lay.addWidget(self._display_people)
+        notes_row = QHBoxLayout()
+        notes_row.setContentsMargins(0, 0, 0, 0)
+        notes_row.setSpacing(4)
+        self._display_notes = QLabel("")
+        self._display_notes.setObjectName("MutedSmall")
+        self._display_notes.setWordWrap(True)
+        self._display_notes.hide()
+        notes_row.addWidget(self._display_notes, 1)
+        self._display_notes_btn = QPushButton("展开")
+        self._display_notes_btn.setObjectName("Tiny")
+        self._display_notes_btn.setFixedHeight(22)
+        self._display_notes_btn.clicked.connect(self._toggle_display_notes)
+        self._display_notes_btn.hide()
+        notes_row.addWidget(self._display_notes_btn)
+        preview_lay.addLayout(notes_row)
         root.addWidget(preview_frame)
 
         # 成果编号（含序号）not shown in the web naming card — kept as a hidden
@@ -512,6 +554,7 @@ class NamingPanel(QWidget):
         self._photo_notes.blockSignals(True)
         self._photo_notes.setPlainText(sp.get("photoNotes") or sp.get("photo_notes") or "")
         self._photo_notes.blockSignals(False)
+        self.set_display_metadata(sp)
         # seq hint
         hint = sp.get("nextResultSequenceHint") or sp.get("next_result_sequence_hint") or 1
         try:
@@ -521,11 +564,129 @@ class NamingPanel(QWidget):
         self._update_preview()
         self._update_edit_actions()
 
+    def set_display_metadata(self, values: dict) -> None:
+        """更新 UID 下方的展示摘要；不参与 UID 构造或复制。"""
+        aliases = {"photo_notes": "photoNotes"}
+        self._display_metadata = {
+            key: str(values.get(key) or values.get(aliases.get(key, "")) or "").strip()
+            for key, _label in _UID_DISPLAY_FIELDS
+        }
+        self._refresh_display_summary()
+
+    def set_display_fields(self, fields: set[str]) -> None:
+        allowed = {key for key, _label in _UID_DISPLAY_FIELDS}
+        self._display_fields = set(fields) & allowed
+        settings = self._ui_settings
+        settings.setValue(
+            _UID_DISPLAY_SETTINGS_KEY, ",".join(sorted(self._display_fields))
+        )
+        settings.sync()
+        self._refresh_display_summary()
+
+    def _load_display_fields(self) -> set[str]:
+        raw = self._ui_settings.value(_UID_DISPLAY_SETTINGS_KEY, None)
+        if raw is None:
+            return set(_UID_DISPLAY_DEFAULTS)
+        if isinstance(raw, str):
+            raw = [part for part in raw.split(",") if part]
+        allowed = {key for key, _label in _UID_DISPLAY_FIELDS}
+        return {str(v) for v in (raw or []) if str(v) in allowed}
+
+    def _build_display_fields_menu(self):
+        from PyQt6.QtWidgets import QMenu
+        menu = QMenu(self)
+        for key, label in _UID_DISPLAY_FIELDS:
+            action = menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(key in self._display_fields)
+            action.toggled.connect(
+                lambda checked, k=key: self._set_display_field_enabled(k, checked)
+            )
+        return menu
+
+    def _open_display_fields_menu(self) -> None:
+        menu = self._build_display_fields_menu()
+        menu.exec(self._display_fields_btn.mapToGlobal(
+            self._display_fields_btn.rect().bottomLeft()
+        ))
+
+    def _set_display_field_enabled(self, key: str, enabled: bool) -> None:
+        fields = set(self._display_fields)
+        if enabled:
+            fields.add(key)
+        else:
+            fields.discard(key)
+        self.set_display_fields(fields)
+
+    def _refresh_display_summary(self) -> None:
+        # setup_ui 创建备注框时会先连信号，容忍预览控件尚未创建。
+        if not hasattr(self, "_display_people"):
+            return
+        values = dict(self._display_metadata)
+        people_labels = {
+            "collector": "采集", "photographer": "拍摄", "identifier": "鉴定",
+        }
+        people = [
+            f"{people_labels[key]}：{values.get(key, '')}"
+            for key in ("collector", "photographer", "identifier")
+            if key in self._display_fields and values.get(key)
+        ]
+        self._display_people.setText("  ·  ".join(people))
+        self._display_people.setVisible(bool(people))
+
+        notes = []
+        for key, label in (("notes", "备注"), ("photo_notes", "拍照备注")):
+            if key in self._display_fields and values.get(key):
+                notes.append(f"{label}：{values[key]}")
+        full = "  ·  ".join(notes)
+        clipped = len(full) > 64 and not self._display_notes_expanded
+        self._display_notes.setText(full[:64].rstrip() + "…" if clipped else full)
+        self._display_notes.setToolTip(full)
+        self._display_notes.setVisible(bool(full))
+        self._display_notes_btn.setVisible(len(full) > 64)
+        self._display_notes_btn.setText("收起" if self._display_notes_expanded else "展开")
+
+    def _on_photo_notes_display_changed(self) -> None:
+        self._display_metadata["photo_notes"] = self._photo_notes.toPlainText().strip()
+        self._refresh_display_summary()
+
+    def _toggle_display_notes(self) -> None:
+        self._display_notes_expanded = not self._display_notes_expanded
+        self._refresh_display_summary()
+
     def current_uid(self) -> str:
         return self._uid_preview.text() if self._uid_preview.text() != "—" else ""
 
     def current_result_id(self) -> str:
         return self._result_preview.text() if self._result_preview.text() != "—" else ""
+
+    def missing_required_fields(self) -> list[str]:
+        """Return labels for project-required naming fields that are empty."""
+        required = self._load_required_rules()
+        self._naming_rules_required = required
+        values = {
+            "province": self._province.text().strip(),
+            "site": self._site.text().strip(),
+            "station": self._station.text().strip(),
+            "species_id": self._species_id.text().strip(),
+            "storage": self._storage.text().strip(),
+            "collection_date": self._collection_date.text().strip(),
+            "photo_date": self._photo_date.text().strip(),
+        }
+        labels = {
+            "province": "地区",
+            "site": "样地",
+            "station": "站位",
+            "species_id": "物种编号",
+            "storage": "保存方式",
+            "collection_date": "采集日期",
+            "photo_date": "拍照日期",
+        }
+        return [
+            labels[key]
+            for key, is_required in required.items()
+            if is_required and not values.get(key)
+        ]
 
     def show_dup_warn(self, show: bool = True) -> None:
         """Show or hide the duplicate-UID warning label."""
@@ -818,7 +979,7 @@ class NamingPanel(QWidget):
 
     def _update_edit_actions(self) -> None:
         editing = bool(self._persisted_uid)
-        self._pin_btn.setText("保存修改" if editing else "添加")
+        self._pin_btn.setText("保存" if editing else "添加")
         self._pin_btn.setToolTip(
             "保存对当前编号的修改，编号变化时迁移旧编号"
             if editing else
