@@ -196,3 +196,46 @@ class TestProjectDefaultCoordsPrefill:
         wb._metadata._lon.setText("66.6"); wb._metadata._on_field_edited("lon", "66.6")
         wb._naming.set_location_keys("ZJ", "SMW", "B2", "20260518")
         assert wb._metadata._lon.text() == "66.6"               # 手动坐标不被覆盖
+
+class TestLoadExistingSpecimenTriggersAutofill:
+    """加载已存在的标本时，右栏应从匹配的采集记录回填 采集人/拍摄人 等。
+
+    回归根因：_load_specimen 走 naming.load_specimen（直接 setText），
+    不发 keys_committed 信号 → _apply_collection_autofill 从不执行 →
+    已填的采集记录在拍摄界面右栏不显示。
+    """
+
+    def test_load_specimen_fills_personnel_from_record(self, qapp, ctx):
+        import json
+        db = ctx.get_db()
+        crs.upsert_record(db, {
+            "province": "ZJ", "site": "SMW", "station": "B2",
+            "collection_date": "20260518",
+            "collector": "记录采集人", "photographer": "记录拍摄人",
+            "lon": "121.764", "lat": "29.114", "geo_area": "三门湾",
+        })
+        uid = "ZJ-SMW-B2-DLC001-T95E-20260518"
+        raw = {
+            "uid": uid, "province": "ZJ", "site": "SMW", "station": "B2",
+            "id": "DLC001", "storage": "T95E", "collectionDate": "20260518",
+        }
+        db.execute(
+            """
+            INSERT INTO specimens (
+                uid, id, province, site, station, storage, collection_date,
+                collector, photographer, owner_project_dir, raw_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (uid, "DLC001", "ZJ", "SMW", "B2", "T95E", "20260518",
+             "", "", ctx.current_project_dir,
+             json.dumps(raw, ensure_ascii=False)),
+        )
+        db.commit()
+
+        from app.views.workbench_view import WorkbenchView
+        wb = WorkbenchView(ctx)
+        wb._load_specimen(uid)
+
+        assert wb._metadata._collector.text() == "记录采集人"
+        assert wb._metadata._photographer.text() == "记录拍摄人"
+        assert wb._metadata._geo_area.text() == "三门湾"

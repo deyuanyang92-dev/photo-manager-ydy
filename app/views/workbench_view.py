@@ -1796,6 +1796,16 @@ class WorkbenchView(BaseView):
 
         # Populate ② 成果内容 column from grouping data
         self._refresh_results_column(uid, grouping)
+        # Backfill empty capture fields from a matching 采集记录. load_specimen sets
+        # the four location keys via direct setText (no keys_committed signal), so
+        # _apply_collection_autofill would otherwise never run on the load path →
+        # 已填的 采集人/拍摄人/坐标 在右栏不显示。非破坏：只填空字段。
+        # 容错：采集记录表缺失/查询异常不能拖垮标本加载本身。
+        try:
+            self._apply_collection_autofill()
+        except Exception:
+            pass
+
 
     # ── Collection-record auto-fill ─────────────────────────────────────────────
 
