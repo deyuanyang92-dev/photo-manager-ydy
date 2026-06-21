@@ -458,6 +458,26 @@ class TestCanvasGroupWiring:
         d._canvas.delete_pressed.emit()
         assert d._tmpl.get("elements", []) == []
 
+    def test_reselect_current_item_does_not_rebuild_property_panel(self, qt_app, monkeypatch):
+        d = _dlg(qt_app)
+        d._select("field", 0, 0)
+        calls = []
+        monkeypatch.setattr(d._panel, "show_for", lambda *args: calls.append(args))
+        d._select("field", 0, 0)
+        assert calls == []
+
+    def test_drag_frames_defer_inspector_rebuild_until_release(self, qt_app, monkeypatch):
+        d = _dlg(qt_app)
+        d._add_element("rect")
+        calls = []
+        monkeypatch.setattr(d, "_refresh_inspectors", lambda: calls.append(True))
+        d._on_drag_start()
+        for x in range(10):
+            d._on_dragged(float(x), 0.0)
+        assert calls == []
+        d._finish_interaction()
+        assert calls == [True]
+
 
 class TestRowFieldEditing:
     def test_add_row_with_field(self, qt_app):
@@ -496,6 +516,21 @@ class TestRowFieldEditing:
         d = _dlg(qt_app)
         n = len(d._tmpl["rows"])
         d._apply_edit({"op": "field_del", "row": 0, "field": 0})  # row 0 has 1 field
+        assert len(d._tmpl["rows"]) == n - 1
+
+    def test_toolbar_delete_removes_selected_field(self, qt_app):
+        d = _dlg(qt_app)
+        d._apply_edit({"op": "field_add", "row": 0})
+        d._select("field", 0, 1)
+        d._delete_selection()
+        assert len(d._tmpl["rows"][0]["fields"]) == 1
+        assert d._delete_btn.text() == "删除字段"
+
+    def test_toolbar_delete_last_field_removes_its_row(self, qt_app):
+        d = _dlg(qt_app)
+        n = len(d._tmpl["rows"])
+        d._select("field", 0, 0)
+        d._delete_selection()
         assert len(d._tmpl["rows"]) == n - 1
 
     def test_row_dup_del_move(self, qt_app):
@@ -549,6 +584,75 @@ class TestQrEditing:
         qr = d._tmpl["qr"]
         assert qr["position"] == "free"
         assert qr["x"] >= 0 and qr["y"] >= 0
+
+    def test_qr_size_slider_resizes_free_qr(self, qt_app):
+        """The visible slider must update the rendered free-position QR size."""
+        from PyQt6.QtWidgets import QSlider
+        from app.utils.label_core import qr_metrics
+
+        d = _dlg(qt_app)
+        d._select("qr", -1, -1)
+        d._on_drag_start()
+        d._on_dragged(5.0, 3.0)
+        before = qr_metrics(d._tmpl, d._dims)["sizeMm"]
+
+        sliders = d._panel.findChildren(QSlider)
+        assert len(sliders) == 1
+        sliders[0].setValue(60)
+
+        after = qr_metrics(d._tmpl, d._dims)["sizeMm"]
+        assert after == pytest.approx(18.0)
+        assert after > before
+
+    def test_switching_to_free_preserves_qr_location_and_size(self, qt_app):
+        from app.utils.label_core import qr_metrics
+
+        d = _dlg(qt_app)
+        before = qr_metrics(d._tmpl, d._dims)
+        d._apply_edit({"op": "qr_position", "value": "free"})
+        after = qr_metrics(d._tmpl, d._dims)
+
+        assert after["x"] == pytest.approx(before["x"])
+        assert after["y"] == pytest.approx(before["y"])
+        assert after["sizeMm"] == pytest.approx(before["sizeMm"])
+
+
+class TestLiveValueEditKeepsPanelAlive:
+    """Value edits fired from a slider/spinbox the user is actively dragging
+    must NOT rebuild the property panel. Rebuilding destroys the focused widget
+    mid-drag → the QR size slider stops after one tick and the label-size
+    spinbox refuses to step. Canvas + layers still refresh; only the property
+    panel widgets are kept alive."""
+
+    def test_qr_size_edit_does_not_rebuild_panel(self, qt_app, monkeypatch):
+        d = _dlg(qt_app)
+        d._select("qr", -1, -1)
+        calls = []
+        monkeypatch.setattr(d._panel, "show_for",
+                             lambda *a: calls.append(a))
+        d._apply_edit({"op": "qr_size", "value": 0.6})
+        assert calls == []                       # panel NOT rebuilt
+        assert abs(d._tmpl["qr"]["sizePct"] - 0.6) < 1e-6
+
+    def test_dims_edit_keeps_spinbox_widgets_alive(self, qt_app):
+        from PyQt6.QtWidgets import QDoubleSpinBox
+        d = _dlg(qt_app)
+        d._select("label", -1, -1)
+        before = [id(s) for s in d._panel.findChildren(QDoubleSpinBox)]
+        assert len(before) >= 2                   # corner + w + h
+        d._apply_edit({"op": "dims", "w": 80.0, "h": 40.0})
+        after = [id(s) for s in d._panel.findChildren(QDoubleSpinBox)]
+        assert after == before                    # same widget objects survive
+        assert d._dims["w"] == 80.0
+
+    def test_structural_edit_still_rebuilds_panel(self, qt_app, monkeypatch):
+        d = _dlg(qt_app)
+        d._add_element("text")                    # select element 0
+        calls = []
+        monkeypatch.setattr(d._panel, "show_for",
+                             lambda *a: calls.append(a))
+        d._apply_edit({"op": "element_del", "index": 0})
+        assert len(calls) == 1                    # rebuild for structural op
 
 
 class TestUndoRedo:

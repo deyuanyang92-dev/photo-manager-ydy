@@ -38,6 +38,7 @@ from PyQt6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSlider,
     QSpinBox,
     QSplitter,
@@ -46,7 +47,12 @@ from PyQt6.QtWidgets import (
 )
 
 from app.services.label_service import LabelTemplateLibrary, key_from_id, is_library_key, id_from_key
-from app.utils.label_core import normalize_template, ELEMENT_DEFAULTS, normalize_element
+from app.utils.label_core import (
+    ELEMENT_DEFAULTS,
+    normalize_element,
+    normalize_template,
+    qr_metrics,
+)
 from app.utils.label_render import render_label_onto
 
 
@@ -69,6 +75,16 @@ _BATCH_OPS = frozenset({
     "element_gradient", "element_shadow", "element_arrowStart",
     "element_arrowEnd", "element_wrap", "element_hidden", "element_locked",
     "element_rotation",
+})
+
+# Edits that change which row/field/element is selected or mutate the list
+# structure. These need a full property-panel rebuild so the inspector shows
+# the new selection / new controls. Every OTHER edit (slider drags, spinbox
+# steps, text typed into a field) is a *value* edit: the source widget already
+# reflects the new value, so the panel must be left intact — see _refresh_live.
+_STRUCTURAL_OPS = frozenset({
+    "field_add", "field_del", "row_dup", "row_del", "row_move",
+    "element_dup", "element_del", "element_z",
 })
 
 # Free-form element types offered by the "+元素" toolbar menu (type → label).
@@ -158,6 +174,7 @@ class _DesignCanvas(QWidget):
     delete_pressed = pyqtSignal()          # Del / Backspace on the canvas
     edit_requested = pyqtSignal(int)       # double-click a text element → inline edit
     element_rotated = pyqtSignal(int, float)  # index, angle(deg) — rotation handle
+    interaction_finished = pyqtSignal()       # drag/resize/rotate committed
 
     _HANDLES = ("nw", "n", "ne", "e", "se", "s", "sw", "w")
     _HANDLE_PX = 7
@@ -636,6 +653,7 @@ class _DesignCanvas(QWidget):
                 self.selected.emit("none", -1, -1)
             self.update()
             return
+        was_interacting = self._dragging
         self._press_pt = None
         self._dragging = False
         self._resize_handle = None
@@ -644,6 +662,8 @@ class _DesignCanvas(QWidget):
         if self._guides:
             self._guides = []
             self.update()
+        if was_interacting:
+            self.interaction_finished.emit()
 
     def snap(self, x: float, y: float, w: float, h: float, skip_index: int = -1):
         """Snap an element's (x,y) to grid + neighbour edges/centers (mm).
@@ -771,7 +791,7 @@ class _PropertyPanel(QWidget):
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setStyleSheet("background:#08161b; color:#eef3ef;")
-        self.setMinimumWidth(280)
+        self.setMinimumWidth(240)
         self._root = QVBoxLayout(self)
         self._root.setContentsMargins(12, 12, 12, 12)
         self._root.setSpacing(8)
@@ -1501,8 +1521,8 @@ class LabelDesignerDialog(QDialog):
 
     def _setup_ui(self) -> None:
         root = QVBoxLayout(self)
-        root.setContentsMargins(10, 10, 10, 10)
-        root.setSpacing(8)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(6)
 
         # Toolbar
         bar = QHBoxLayout(); bar.setSpacing(6)
@@ -1538,19 +1558,20 @@ class LabelDesignerDialog(QDialog):
                             lambda _=False, p=preset: self._apply_preset(p))
         presets_btn.setMenu(pmenu)
 
-        self._guide_btn = _btn("辅助线", True)
-        self._guide_btn.toggled.connect(self._toggle_guide_overlay)
-        self._clear_guides_btn = _btn("清参考线")
-        self._clear_guides_btn.setToolTip("从标尺拖出参考线；点此清除全部参考线")
-        self._clear_guides_btn.clicked.connect(lambda: self._canvas.clear_user_guides())
+        # Less-used canvas controls live in one menu so the primary toolbar
+        # remains usable on 1366px-wide screens.
+        view_btn = _btn("视图 ▾")
+        view_menu = QMenu(view_btn)
+        self._guide_action = view_menu.addAction("显示安全区与辅助线")
+        self._guide_action.setCheckable(True)
+        self._guide_action.toggled.connect(self._toggle_guide_overlay)
+        view_menu.addAction("清除参考线", lambda: self._canvas.clear_user_guides())
+        view_menu.addSeparator()
+        view_menu.addAction("放大", lambda: self._canvas.zoom_by(1.2))
+        view_menu.addAction("缩小", lambda: self._canvas.zoom_by(1 / 1.2))
+        view_menu.addAction("适应窗口", lambda: self._canvas.reset_zoom())
+        view_btn.setMenu(view_menu)
 
-        # zoom controls (1.0 = fit-to-window; Ctrl+滚轮 / Space拖拽平移)
-        zoom_out = _btn("－"); zoom_out.setToolTip("缩小"); zoom_out.setFixedWidth(30)
-        zoom_out.clicked.connect(lambda: self._canvas.zoom_by(1 / 1.2))
-        zoom_in = _btn("＋"); zoom_in.setToolTip("放大"); zoom_in.setFixedWidth(30)
-        zoom_in.clicked.connect(lambda: self._canvas.zoom_by(1.2))
-        zoom_fit = _btn("适应"); zoom_fit.setToolTip("还原适应窗口 (1:1)")
-        zoom_fit.clicked.connect(lambda: self._canvas.reset_zoom())
         self._fmt_btn = _btn("格式刷", True)
         self._fmt_btn.setToolTip("先选好样板元素点此，再点目标元素套用其样式")
         self._fmt_btn.toggled.connect(self._on_format_painter_toggled)
@@ -1567,9 +1588,7 @@ class LabelDesignerDialog(QDialog):
             smenu.addAction("复制当前自定义", self._duplicate_current)
             smenu.addAction("删除当前自定义", self._delete_current)
         saveas.setMenu(smenu)
-        for w in (add_field, add_row, add_el, qr_btn, presets_btn,
-                  self._guide_btn, self._clear_guides_btn,
-                  zoom_out, zoom_in, zoom_fit, self._fmt_btn):
+        for w in (add_field, add_row, add_el, qr_btn, presets_btn, view_btn):
             bar.addWidget(w)
         bar.addStretch()
         bar.addWidget(self._undo_btn)
@@ -1599,9 +1618,10 @@ class LabelDesignerDialog(QDialog):
         copy_b.clicked.connect(self._copy_selection)
         paste_b = _btn("粘贴"); paste_b.setToolTip("粘贴元素 (Ctrl+V)")
         paste_b.clicked.connect(self._paste_clipboard)
-        del_b = _btn("删除"); del_b.setToolTip("删除所选元素 (Del)")
-        del_b.clicked.connect(self._delete_selection)
-        for w in (copy_b, paste_b, del_b):
+        self._delete_btn = _btn("删除所选")
+        self._delete_btn.setToolTip("删除当前选中的字段或元素 (Del)")
+        self._delete_btn.clicked.connect(self._delete_selection)
+        for w in (self._fmt_btn, copy_b, paste_b, self._delete_btn):
             abar.addWidget(w)
         abar.addSpacing(10)
         grp_b = _btn("组合"); grp_b.setToolTip("把多选元素组合 (Ctrl+G)")
@@ -1630,6 +1650,7 @@ class LabelDesignerDialog(QDialog):
         self._canvas.nudged.connect(self._on_nudged)
         self._canvas.element_resized.connect(self._on_element_resized)
         self._canvas.element_rotated.connect(self._on_element_rotated)
+        self._canvas.interaction_finished.connect(self._finish_interaction)
         self._canvas.multi_toggle.connect(self._toggle_multi)
         self._canvas.marquee.connect(self._marquee_select)
         self._canvas.delete_pressed.connect(self._delete_selection)
@@ -1655,7 +1676,13 @@ class LabelDesignerDialog(QDialog):
             lambda _it: self._layers.toggle_hidden_at_row(self._layers.currentRow()))
 
         right = QSplitter(Qt.Orientation.Vertical)
-        right.addWidget(self._panel)
+        right.setMinimumWidth(270)
+        property_scroll = QScrollArea()
+        property_scroll.setWidgetResizable(True)
+        property_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        property_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        property_scroll.setWidget(self._panel)
+        right.addWidget(property_scroll)
         layers_box = QWidget()
         lb = QVBoxLayout(layers_box)
         lb.setContentsMargins(0, 0, 0, 0)
@@ -1679,9 +1706,11 @@ class LabelDesignerDialog(QDialog):
         split = QSplitter(Qt.Orientation.Horizontal)
         split.addWidget(self._canvas)
         split.addWidget(right)
-        split.setStretchFactor(0, 6)
-        split.setStretchFactor(1, 4)
-        split.setSizes([580, 340])
+        split.setStretchFactor(0, 7)
+        split.setStretchFactor(1, 3)
+        split.setSizes([650, 290])
+        self._main_splitter = split
+        self._property_scroll = property_scroll
         root.addWidget(split, stretch=1)
 
         buttons = QDialogButtonBox(
@@ -1721,19 +1750,50 @@ class LabelDesignerDialog(QDialog):
 
     def _refresh(self) -> None:
         self._tmpl = normalize_template(self._tmpl)
+        self._refresh_canvas()
+        self._refresh_inspectors()
+
+    def _refresh_live(self) -> None:
+        """Canvas + layers refresh, but the property panel is left intact.
+
+        Use this for value edits fired from a slider/spinbox the user is
+        actively dragging: rebuilding the panel destroys the focused widget
+        mid-drag, so the QR size slider stops after one tick and the label-size
+        spinbox refuses to step. The edited widget already shows its own value;
+        only the canvas (and the layers/float-bar state) needs to catch up.
+        """
+        self._tmpl = normalize_template(self._tmpl)
+        self._refresh_canvas()
+        self._refresh_layers()
+
+    def _refresh_canvas(self) -> None:
+        """Refresh only the WYSIWYG surface; safe for high-frequency dragging."""
         self._canvas.set_content(self._tmpl, self._dims, self._data)
         kind, row, field = self._sel
         self._canvas.set_selection(kind, row, field)
         self._canvas.set_multi(getattr(self, "_multi", set()))
+
+    def _refresh_inspectors(self) -> None:
+        """Rebuild lower-frequency property and layer inspectors."""
+        kind, row, field = self._sel
         self._panel._dims = self._dims
         self._panel.show_for(kind, row, field, self._tmpl)
+        self._refresh_layers()
+
+    def _refresh_layers(self) -> None:
+        """Update the layers panel + sync auxiliary toolbar state (no panel rebuild)."""
+        kind, _row, field = self._sel
         layers = getattr(self, "_layers", None)
         if layers is not None:
             layers.set_elements(self._tmpl.get("elements") or [],
                                 sel_index=field if kind == "element" else -1)
+        self._sync_delete_action()
         self._sync_float_bar()
 
     def _select(self, kind: str, row: int, field: int) -> None:
+        if (kind, row, field) == self._sel and not self._multi \
+                and self._fmt_pending is None:
+            return
         self._sel = (kind, row, field)
         self._multi = set()            # a plain click resets the group selection
         # selecting a grouped element pulls in its whole group (move together)
@@ -1745,6 +1805,7 @@ class LabelDesignerDialog(QDialog):
         self._canvas.set_multi(self._multi)
         self._panel._dims = self._dims
         self._panel.show_for(kind, row, field, self._tmpl)
+        self._sync_delete_action()
         self._sync_float_bar()
         # format painter: first element click captures the source style; the
         # next applies it to the target, then disarms the tool.
@@ -1821,6 +1882,7 @@ class LabelDesignerDialog(QDialog):
         self._canvas.set_selection(*self._sel)
         self._canvas.set_multi(self._multi)
         self._panel.show_for(*self._sel, self._tmpl)
+        self._sync_delete_action()
 
     def _marquee_select(self, x: float, y: float, w: float, h: float) -> None:
         """Box-select every element whose bounding box intersects the rect."""
@@ -1836,6 +1898,7 @@ class LabelDesignerDialog(QDialog):
         self._canvas.set_selection(*self._sel)
         self._canvas.set_multi(self._multi)
         self._panel.show_for(*self._sel, self._tmpl)
+        self._sync_delete_action()
 
     # ── In-place text editing (Phase 2) ───────────────────────────────────────
     def _begin_inline_edit(self, index: int) -> None:
@@ -1903,7 +1966,13 @@ class LabelDesignerDialog(QDialog):
         self._refresh()
 
     def _delete_selection(self) -> None:
-        """Delete every element in the group selection (or the single anchor)."""
+        """Delete the current field or selected free-form element(s)."""
+        kind, row, field = self._sel
+        if kind == "field":
+            rows = self._tmpl.get("rows") or []
+            if 0 <= row < len(rows) and 0 <= field < len(rows[row].get("fields") or []):
+                self._apply_edit({"op": "field_del", "row": row, "field": field})
+            return
         idx = set(self._selected_element_indices())
         if not idx:
             return
@@ -1913,6 +1982,22 @@ class LabelDesignerDialog(QDialog):
         self._multi = set()
         self._sel = ("none", -1, -1)
         self._refresh()
+
+    def _sync_delete_action(self) -> None:
+        """Make the global delete command explicit about its current target."""
+        button = getattr(self, "_delete_btn", None)
+        if button is None:
+            return
+        kind, _row, _field = self._sel
+        if kind == "field":
+            text, enabled = "删除字段", True
+        elif kind == "element":
+            count = len(self._selected_element_indices())
+            text, enabled = (f"删除元素 ({count})" if count > 1 else "删除元素"), count > 0
+        else:
+            text, enabled = "删除所选", False
+        button.setText(text)
+        button.setEnabled(enabled)
 
     # ── Presets / guides ──────────────────────────────────────────────────────
     def _apply_preset(self, preset: dict) -> None:
@@ -1970,7 +2055,7 @@ class LabelDesignerDialog(QDialog):
                 _, x1, y1, x2, y2 = self._drag_baseline
                 el["x1"], el["y1"] = round(x1 + dx_mm, 2), round(y1 + dy_mm, 2)
                 el["x2"], el["y2"] = round(x2 + dx_mm, 2), round(y2 + dy_mm, 2)
-            self._refresh()
+            self._refresh_canvas()
             return
         bx, by = self._drag_baseline
         if kind == "field":
@@ -1994,7 +2079,7 @@ class LabelDesignerDialog(QDialog):
             el["x"] = round(nx, 2)
             el["y"] = round(ny, 2)
             self._canvas.set_guides(guides)
-        self._refresh()
+        self._refresh_canvas()
 
     def _on_element_resized(self, index: int, x: float, y: float, w: float, h: float) -> None:
         el = self._element_at(index)
@@ -2003,14 +2088,18 @@ class LabelDesignerDialog(QDialog):
         nx, ny, guides = self._canvas.snap(x, y, w, h, skip_index=index)
         el["x"], el["y"], el["w"], el["h"] = round(nx, 2), round(ny, 2), round(w, 2), round(h, 2)
         self._canvas.set_guides(guides)
-        self._refresh()
+        self._refresh_canvas()
 
     def _on_element_rotated(self, index: int, angle: float) -> None:
         el = self._element_at(index)
         if el is None:
             return
         el["rotation"] = round(float(angle), 1)
-        self._refresh()
+        self._refresh_canvas()
+
+    def _finish_interaction(self) -> None:
+        """Synchronize inspectors once after a drag/resize/rotate gesture."""
+        self._refresh_inspectors()
 
     def _on_nudged(self, dx_mm: float, dy_mm: float) -> None:
         kind, row, field = self._sel
@@ -2096,9 +2185,36 @@ class LabelDesignerDialog(QDialog):
                 rows[r], rows[j] = rows[j], rows[r]
                 self._sel = ("field", j, 0)
         elif op == "qr_position":
-            self._tmpl["qr"]["position"] = ch["value"]
+            qr = self._tmpl["qr"]
+            new_position = ch["value"]
+            if new_position == "free" and qr.get("position") != "free":
+                # Convert the currently rendered placement into explicit free
+                # coordinates.  Merely changing the mode would reset x/y to
+                # zero and make the QR jump to the label's top-left corner.
+                current = qr_metrics(self._tmpl, self._dims)
+                if current is not None:
+                    qr["x"] = round(float(current["x"]), 2)
+                    qr["y"] = round(float(current["y"]), 2)
+                    qr["sizeMm"] = round(float(current["sizeMm"]), 2)
+                else:
+                    size = min(float(self._dims["w"]), float(self._dims["h"])) \
+                        * float(qr.get("sizePct") or 0.4)
+                    qr["x"] = round(max(0.0, (float(self._dims["w"]) - size) / 2), 2)
+                    qr["y"] = round(max(0.0, (float(self._dims["h"]) - size) / 2), 2)
+                    qr["sizeMm"] = round(size, 2)
+            qr["position"] = new_position
         elif op == "qr_size":
-            self._tmpl["qr"]["sizePct"] = ch["value"]
+            qr = self._tmpl["qr"]
+            size_pct = float(ch["value"])
+            qr["sizePct"] = size_pct
+            if qr.get("position") == "free":
+                # Free placement uses the explicit millimetre size, so keep it
+                # synchronized with the percentage controlled by the slider.
+                w, h = float(self._dims["w"]), float(self._dims["h"])
+                size = min(w, h) * size_pct
+                qr["sizeMm"] = round(size, 2)
+                qr["x"] = round(min(max(0.0, float(qr.get("x") or 0)), max(0.0, w - size)), 2)
+                qr["y"] = round(min(max(0.0, float(qr.get("y") or 0)), max(0.0, h - size)), 2)
         elif op == "qr_content":
             self._tmpl["qr"]["content"] = ch["value"]
         elif op == "qr_ecc":
@@ -2129,7 +2245,13 @@ class LabelDesignerDialog(QDialog):
         elif op == "dims":
             self._dims = {"w": float(ch.get("w") or self._dims.get("w", 60)),
                           "h": float(ch.get("h") or self._dims.get("h", 40))}
-        self._refresh()
+        # Structural edits (selection/list changed) rebuild the property panel;
+        # value edits (the common case — slider drag, spinbox step, typed text)
+        # only refresh the canvas + layers so the widget being edited survives.
+        if op in _STRUCTURAL_OPS:
+            self._refresh()
+        else:
+            self._refresh_live()
 
     # ── Free-form element edits ────────────────────────────────────────────────
     def _elements(self) -> list:
