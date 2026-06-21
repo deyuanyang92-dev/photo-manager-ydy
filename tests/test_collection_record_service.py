@@ -286,3 +286,94 @@ class TestMapPointsAcross:
         crs.upsert_record(a, _sample(station="NX", collection_date="20260701", lon="", lat=""))
         assert crs.map_points_across([a], "station") == []
         assert crs.map_points_across([], "station") == []
+
+
+# ── zone 采区分带（潮间带 H.39 / 潮下带 H.30）──────────────────────────────────
+
+class TestZone:
+    def test_zone_columns_has_both_zones(self):
+        assert set(crs.ZONE_COLUMNS) == {"intertidal", "subtidal"}
+
+    def test_intertidal_columns_match_H39(self):
+        keys = {k for k, _zh in crs.ZONE_COLUMNS["intertidal"]}
+        # H.39 潮间带专属
+        for must in ("quadrate_no", "air_temp", "quant_bottles", "qual_bottles",
+                     "sample_thickness", "tidal_zone", "tide", "sample_area"):
+            assert must in keys, f"潮间带缺 {must}"
+        # 不应含潮下带专属
+        for nope in ("wire_out", "net_type", "trawl_distance", "cruise"):
+            assert nope not in keys, f"潮间带不应含 {nope}"
+
+    def test_subtidal_columns_match_H30(self):
+        keys = {k for k, _zh in crs.ZONE_COLUMNS["subtidal"]}
+        # H.30 潮下带专属
+        for must in ("cruise", "vessel", "wire_out", "sampler_area", "net_type",
+                     "net_width", "trawl_distance", "trawl_start", "trawl_end",
+                     "grab_sample_total", "trawl_sample_total", "sample_thickness"):
+            assert must in keys, f"潮下带缺 {must}"
+        # 不应含潮间带专属
+        for nope in ("quadrate_no", "air_temp", "quant_bottles", "qual_bottles"):
+            assert nope not in keys, f"潮下带不应含 {nope}"
+
+    def test_zone_columns_subset_of_db_columns(self):
+        """两 zone 列序里的每个 key 都必须是真 DB 列。"""
+        dbcols = set(crs._COLUMNS)
+        for zcols in crs.ZONE_COLUMNS.values():
+            for k, _zh in zcols:
+                assert k in dbcols, f"{k} 不在 _COLUMNS（schema 缺列）"
+
+    def test_zone_columns_headers_unique_per_zone(self):
+        for z, zcols in crs.ZONE_COLUMNS.items():
+            hdrs = [zh for _k, zh in zcols]
+            assert len(hdrs) == len(set(hdrs)), f"{z} 表头重复"
+
+    def test_columns_for_zone(self):
+        assert crs.columns_for_zone("intertidal")
+        assert crs.columns_for_zone("subtidal")
+        assert crs.columns_for_zone(None) == []
+        assert crs.columns_for_zone("bogus") == []
+
+    def test_infer_zone_from_headers(self):
+        assert crs.infer_zone_from_headers(["地区", "站位", "样方号", "气温(℃)"]) == "intertidal"
+        assert crs.infer_zone_from_headers(["地区", "站位", "航次", "放绳长度(m)"]) == "subtidal"
+        assert crs.infer_zone_from_headers(["地区", "站位", "采集日期"]) is None
+        # H.30 专属优先
+        assert crs.infer_zone_from_headers(["站位", "样方号", "网型"]) == "subtidal"
+
+    def test_upsert_writes_and_reads_zone(self, db):
+        rid = crs.upsert_record(db, _sample(zone="intertidal"))
+        rec = crs.lookup_record(db, "ZJ", "SMW", "B2", "20260518")
+        assert rec["zone"] == "intertidal"
+        assert isinstance(rid, int)
+
+    def test_upsert_preserves_zone_when_incoming_empty(self, db):
+        """已分类记录再被无 zone 的 upsert 命中（如站位导入）→ 不冲掉 zone。"""
+        crs.upsert_record(db, _sample(zone="subtidal"))
+        # ON CONFLICT 路径：同 4 键、不带 zone
+        crs.upsert_record(db, _sample())  # 无 zone 键
+        rec = crs.lookup_record(db, "ZJ", "SMW", "B2", "20260518")
+        assert rec["zone"] == "subtidal"
+
+    def test_upsert_preserves_zone_by_id_when_incoming_empty(self, db):
+        rid = crs.upsert_record(db, _sample(zone="intertidal"))
+        crs.upsert_record(db, _sample(id=rid))  # 按 id 更新、无 zone
+        rec = crs.lookup_record(db, "ZJ", "SMW", "B2", "20260518")
+        assert rec["zone"] == "intertidal"
+
+    def test_intertidal_fields_roundtrip(self, db):
+        extra = {"zone": "intertidal", "quadrate_no": "B2-Q3", "air_temp": "26",
+                 "quant_bottles": "2", "qual_bottles": "1", "sample_thickness": "15"}
+        crs.upsert_record(db, _sample(**extra))
+        rec = crs.lookup_record(db, "ZJ", "SMW", "B2", "20260518")
+        for k, v in extra.items():
+            assert rec[k] == v, f"{k} 未持久化: {rec.get(k)!r}"
+
+    def test_subtidal_fields_roundtrip(self, db):
+        extra = {"zone": "subtidal", "wire_out": "32", "sampler_area": "0.1",
+                 "net_type": "阿氏网", "net_width": "2", "trawl_distance": "500",
+                 "trawl_start": "09:10", "trawl_end": "09:20",
+                 "grab_sample_total": "2", "trawl_sample_total": "1"}
+        crs.upsert_record(db, _sample(**extra))
+        rec = crs.lookup_record(db, "ZJ", "SMW", "B2", "20260518")
+        for k, v in extra.items():
+            assert rec[k] == v, f"{k} 未持久化: {rec.get(k)!r}"

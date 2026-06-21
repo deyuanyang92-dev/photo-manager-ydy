@@ -122,7 +122,7 @@ def test_grid_export_then_import_via_buttons(qapp, ctx, tmp_path, monkeypatch):
     monkeypatch.setattr(uimod, "get_save_file_name", lambda *a, **k: str(out))
     view._grid_export_template()
     assert out.exists()
-    assert "已导出模板" in view._grid_status_lbl.text()
+    assert "已导出" in view._grid_status_lbl.text()
 
     # wipe and re-import through the button handler
     db.execute("DELETE FROM collection_records")

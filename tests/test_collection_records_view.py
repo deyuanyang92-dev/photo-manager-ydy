@@ -101,7 +101,71 @@ def test_pending_record_filter_selects_matching_row(qapp, ctx):
     sel = view._table.selectedItems()
     assert sel, "no row selected"
     row = sel[0].row()
-    # station 是表格第 0 列（见 _TABLE_COLS）
-    assert view._table.item(row, 0).text() == "A1"
+    # _TABLE_COLS 首列是「采区」标签，station 在第 1 列
+    assert view._table.item(row, 1).text() == "A1"
     # 句柄被消费
     assert getattr(ctx, "pending_record_filter", None) is None
+
+
+# ── zone 分段切换 ────────────────────────────────────────────────────────────
+
+def test_zone_filter_switches_grid_columns(qapp, ctx):
+    """切潮下带 → 网格列含 水深/采泥器面积/网型；切潮间带 → 含 样方号/潮区。"""
+    view = CollectionRecordsView(ctx)
+    view.on_activate()
+    # 默认潮间带
+    hdrs_it = [view._grid.horizontalHeaderItem(i).text() for i in range(view._grid.columnCount())]
+    assert "样方号" in hdrs_it and "潮区" in hdrs_it
+    # 切潮下带
+    view._on_zone_filter("subtidal")
+    hdrs_st = [view._grid.horizontalHeaderItem(i).text() for i in range(view._grid.columnCount())]
+    assert "水深(m)" in hdrs_st and "采泥器面积(m²)" in hdrs_st and "网型" in hdrs_st
+    assert "样方号" not in hdrs_st
+
+
+def test_new_record_stamps_zone_from_filter(qapp, ctx):
+    db = ctx.get_db()
+    view = CollectionRecordsView(ctx)
+    view.on_activate()
+    view._on_zone_filter("subtidal")
+    view._new_record()
+    assert view._editor_zone == "subtidal"
+    view._fields["province"].setText("ZJ")
+    view._fields["site"].setText("SMW")
+    view._fields["station"].setText("H1")
+    view._fields["collection_date"].setText("20260601")
+    view._save_record()
+    rec = crs.lookup_record(db, "ZJ", "SMW", "H1", "20260601")
+    assert rec["zone"] == "subtidal"
+
+
+def test_editor_zone_switch_rebuilds_fields(qapp, ctx):
+    """编辑器切采区 → 字段集重建（潮间带见 样方号，潮下带见 放绳长度）。"""
+    view = CollectionRecordsView(ctx)
+    view.on_activate()
+    view._new_record()
+    assert "quadrate_no" in view._fields   # 潮间带默认
+    assert "wire_out" not in view._fields
+    view._set_editor_zone("subtidal")
+    assert "wire_out" in view._fields
+    assert "quadrate_no" not in view._fields
+
+
+def test_zone_filter_all_defaults_new_row_to_intertidal(qapp, ctx):
+    db = ctx.get_db()
+    view = CollectionRecordsView(ctx)
+    view.on_activate()
+    view._on_zone_filter("all")
+    assert view._new_row_zone() == "intertidal"
+    view._new_record()
+    assert view._editor_zone == "intertidal"
+
+
+def test_table_shows_zone_tag(qapp, ctx):
+    db = ctx.get_db()
+    crs.upsert_record(db, {"province": "ZJ", "site": "SMW", "station": "B2",
+                           "collection_date": "20260518", "zone": "subtidal"})
+    view = CollectionRecordsView(ctx)
+    view.on_activate()
+    # 首列（采区）显示「潮下带」
+    assert view._table.item(0, 0).text() == "潮下带"

@@ -316,6 +316,7 @@ CREATE TABLE IF NOT EXISTS collection_records (
   station         TEXT,
   collection_date TEXT,
   station_label   TEXT,            -- 站位中文说明
+  zone            TEXT,            -- 采区：'intertidal'(潮间带 H.39) / 'subtidal'(潮下带 H.30) / NULL(历史未分)
   lon             REAL,
   lat             REAL,
   geo_area        TEXT,            -- 采集地理区
@@ -339,6 +340,23 @@ CREATE TABLE IF NOT EXISTS collection_records (
   replicates      TEXT,            -- 取样次数 / 重复数
   sieve_mesh      TEXT,            -- 网筛孔径 mm（大型底栖常 1.0）
   sample_no       TEXT,            -- 样品编号（现场样品袋编号，DwC recordNumber）
+  -- 潮间带专属（H.39 潮间带生物野外采集记录表）
+  quadrate_no     TEXT,            -- 样方号（每站多样方，如 B2-Q3）
+  air_temp        TEXT,            -- 气温 ℃（H.39 三温并列：气温/水温/底温）
+  quant_bottles   TEXT,            -- 定量标本瓶数（现场分装）
+  qual_bottles    TEXT,            -- 定性标本瓶数（现场分装）
+  -- 两带通用
+  sample_thickness TEXT,           -- 样品厚度 cm（H.30 采泥厚度 / H.39 样品厚度）
+  -- 潮下带专属（H.30 大型底栖生物海上采样记录表）
+  wire_out        TEXT,            -- 放绳长度 m（船基水深订正）
+  sampler_area    TEXT,            -- 采泥器面积 m²（定量换算关键；sampler_spec 保留为自由文字规格）
+  net_type        TEXT,            -- 网型（拖网，如 阿氏网/双刃拖网）
+  net_width       TEXT,            -- 网宽 m（拖网）
+  trawl_distance  TEXT,            -- 拖网距离 m
+  trawl_start     TEXT,            -- 拖网起始时刻
+  trawl_end       TEXT,            -- 拖网结束时刻
+  grab_sample_total TEXT,          -- 采泥样品总数
+  trawl_sample_total TEXT,         -- 拖网样品总数
   collector       TEXT,
   recorder        TEXT,            -- 记录人（填表人，责任链）
   checker         TEXT,            -- 核对人（复核人，责任链）

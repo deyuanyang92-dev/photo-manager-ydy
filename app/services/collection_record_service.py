@@ -22,7 +22,7 @@ from typing import Any, Optional
 
 # Real columns on collection_records (id / raw_json handled separately).
 _COLUMNS: tuple[str, ...] = (
-    "province", "site", "station", "collection_date",
+    "province", "site", "station", "collection_date", "zone",
     "station_label", "lon", "lat", "geo_area", "water_body",
     "cruise", "vessel",
     "habitat", "tidal_zone", "depth",
@@ -30,14 +30,104 @@ _COLUMNS: tuple[str, ...] = (
     "dissolved_oxygen", "ph", "weather",
     "sample_type", "sampler_model", "sampler_spec", "sample_area",
     "replicates", "sieve_mesh", "sample_no",
+    # 潮间带专属 (H.39)
+    "quadrate_no", "air_temp", "quant_bottles", "qual_bottles",
+    # 两带通用
+    "sample_thickness",
+    # 潮下带专属 (H.30)
+    "wire_out", "sampler_area", "net_type", "net_width",
+    "trawl_distance", "trawl_start", "trawl_end",
+    "grab_sample_total", "trawl_sample_total",
     "collector", "recorder", "checker", "photographer", "identifier",
     "collection_time", "photo_date", "photo_location",
     "method", "remark",
 )
 
+# 采区：潮间带(H.39) / 潮下带(H.30)。'intertidal'|'subtidal'|None(历史未分类)。
+ZONES: tuple[Optional[str], ...] = ("intertidal", "subtidal")
+
 # Columns stored as REAL — empty string must become NULL, never 0
 # (mirrors the specimens lon/lat gotcha in CLAUDE.md).
 _REAL_COLUMNS: frozenset[str] = frozenset({"lon", "lat"})
+
+# ── 两套国标表样的导出/表头列序（单一真相源，io + 视图共用）──────────────────────
+# 每条 (字段 key, 中文表头)。潮间带=H.39，潮下带=H.30。共享列两集都含。
+# DB 列名不变；表头语义对齐国标（habitat→「底质」、weather→「气象」、
+# water_temp→「表层水温(℃)」、replicates 潮间带「取样次数」/潮下带「采泥次数」）。
+ZONE_COLUMNS: dict[str, list[tuple[str, str]]] = {
+    "intertidal": [
+        ("province", "地区"), ("site", "样地"), ("station", "站位"),
+        ("quadrate_no", "样方号"), ("collection_date", "采集日期"),
+        ("station_label", "站位说明"), ("lon", "经度"), ("lat", "纬度"),
+        ("geo_area", "采集地理区"),
+        ("tidal_zone", "潮区"), ("habitat", "底质"), ("depth", "水深(m)"),
+        ("air_temp", "气温(℃)"), ("water_temp", "表层水温(℃)"),
+        ("bottom_temp", "底层水温(℃)"), ("salinity", "盐度"),
+        ("dissolved_oxygen", "溶解氧"), ("ph", "pH"), ("weather", "气象"),
+        ("tide", "潮水"),
+        ("sample_type", "采集性质"), ("method", "采样方法"),
+        ("sampler_model", "采泥器型号"), ("sampler_spec", "采样器规格"),
+        ("sample_area", "取样面积(m²)"), ("replicates", "取样次数"),
+        ("sample_thickness", "样品厚度(cm)"), ("sieve_mesh", "网筛孔径(mm)"),
+        ("sample_no", "样品编号"),
+        ("quant_bottles", "定量瓶数"), ("qual_bottles", "定性瓶数"),
+        ("collector", "采集人"), ("recorder", "记录人"), ("checker", "核对人"),
+        ("photographer", "拍摄人"), ("identifier", "鉴定人"),
+        ("collection_time", "采集时刻"), ("photo_date", "拍摄日期"),
+        ("photo_location", "拍摄地点"), ("remark", "备注"),
+    ],
+    "subtidal": [
+        ("province", "地区"), ("site", "样地"), ("station", "站位"),
+        ("collection_date", "采集日期"), ("station_label", "站位说明"),
+        ("sample_no", "样品编号"),
+        ("lon", "经度"), ("lat", "纬度"), ("geo_area", "采集地理区"),
+        ("water_body", "海区"),
+        ("cruise", "航次"), ("vessel", "船号"),
+        ("depth", "水深(m)"), ("wire_out", "放绳长度(m)"),
+        ("habitat", "底质"), ("bottom_temp", "底层水温(℃)"),
+        ("salinity", "盐度(底层)"), ("weather", "气象"),
+        ("sample_type", "采集性质"), ("method", "采样方法"),
+        ("sampler_model", "采泥器型号"), ("sampler_area", "采泥器面积(m²)"),
+        ("replicates", "采泥次数"), ("sample_thickness", "样品厚度(cm)"),
+        ("grab_sample_total", "采泥样品总数"), ("collection_time", "采泥时刻"),
+        ("net_type", "网型"), ("net_width", "网宽(m)"),
+        ("trawl_distance", "拖网距离(m)"), ("trawl_start", "拖网起始"),
+        ("trawl_end", "拖网结束"), ("trawl_sample_total", "拖网样品总数"),
+        ("collector", "采集人"), ("recorder", "记录人"), ("checker", "核对人"),
+        ("photographer", "拍摄人"), ("identifier", "鉴定人"),
+        ("photo_date", "拍摄日期"), ("photo_location", "拍摄地点"),
+        ("remark", "备注"),
+    ],
+}
+
+# 表头 → 字段 key 反查（含两 zone 全部表头），io 导入按表头判 zone/列。
+_HEADER_TO_KEY: dict[str, str] = {}
+for _zcols in ZONE_COLUMNS.values():
+    for _k, _zh in _zcols:
+        _HEADER_TO_KEY.setdefault(_zh, _k)
+
+
+def columns_for_zone(zone: Optional[str]) -> list[tuple[str, str]]:
+    """Return the (key, 中文表头) column list for *zone*; [] for unknown/None."""
+    return ZONE_COLUMNS.get(zone, [])
+
+
+def infer_zone_from_headers(headers: list[str]) -> Optional[str]:
+    """判别一组表头属于哪个 zone：含 H.39 专属表头→intertidal，
+    含 H.30 专属表头→subtidal，否则 None。H.30 专属优先于通用判别。"""
+    hset = {h.strip() for h in headers}
+    # H.30 潮下带专属表头（船基/拖网/采泥器面积）
+    subtidal_only = {"航次", "船号", "放绳长度(m)", "采泥器面积(m²)",
+                     "网型", "网宽(m)", "拖网距离(m)", "拖网起始", "拖网结束",
+                     "采泥样品总数", "拖网样品总数", "海区"}
+    # H.39 潮间带专属表头（样方/气温/瓶数/潮区/潮水）
+    intertidal_only = {"样方号", "气温(℃)", "定量瓶数", "定性瓶数",
+                       "潮区", "潮水", "表层水温(℃)"}
+    if hset & subtidal_only:
+        return "subtidal"
+    if hset & intertidal_only:
+        return "intertidal"
+    return None
 
 
 def _coerce(col: str, value: Any) -> Any:
@@ -243,7 +333,11 @@ def upsert_record(db: sqlite3.Connection, data: dict) -> int:
 
     rid = data.get("id")
     if rid:
-        assignments = ", ".join(f"{c}=?" for c in _COLUMNS)
+        # zone：incoming 空时保留既有分类（COALESCE 跳过空串），不冲掉已设 zone。
+        assignments = ", ".join(
+            f"{c}=COALESCE(NULLIF(?, ''), {c})" if c == "zone" else f"{c}=?"
+            for c in _COLUMNS
+        )
         db.execute(
             f"UPDATE collection_records SET {assignments}, raw_json=? WHERE id=?",
             (*values, raw_json, rid),
@@ -252,7 +346,12 @@ def upsert_record(db: sqlite3.Connection, data: dict) -> int:
         return int(rid)
 
     placeholders = ", ".join("?" for _ in _COLUMNS)
-    updates = ", ".join(f"{c}=excluded.{c}" for c in _COLUMNS)
+    # zone：ON CONFLICT 更新时，excluded.zone 空→保留本行既有 zone。
+    updates = ", ".join(
+        f"{c}=COALESCE(NULLIF(excluded.{c},''), collection_records.{c})"
+        if c == "zone" else f"{c}=excluded.{c}"
+        for c in _COLUMNS
+    )
     cur = db.execute(
         f"""INSERT INTO collection_records ({", ".join(_COLUMNS)}, raw_json)
              VALUES ({placeholders}, ?)
