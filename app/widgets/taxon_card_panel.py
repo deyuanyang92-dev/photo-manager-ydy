@@ -133,6 +133,14 @@ class TaxonCardPanel(QWidget):
         title = QLabel("分类标签")
         title.setObjectName("CardTitle")
         hdr.addWidget(title)
+
+        # WoRMS quick-fill (moved from metadata panel — fills Latin only)
+        self._worms_btn = QPushButton("WoRMS 查")
+        self._worms_btn.setObjectName("WormsFill")
+        self._worms_btn.setFixedHeight(26)
+        self._worms_btn.setToolTip("从 WoRMS 快捷查找物种，填充拉丁分类信息（不覆盖中文）")
+        self._worms_btn.clicked.connect(self._on_worms_quick_fill)
+        hdr.addWidget(self._worms_btn)
         hdr.addStretch()
 
         edit_btn = QPushButton("编辑")
@@ -222,17 +230,6 @@ class TaxonCardPanel(QWidget):
             self._row_widgets[latin_db] = [lbl, latin, cn]
 
         self._root.addLayout(self._grid)
-
-        # WoRMS quick-fill (moved from metadata panel — fills Latin only)
-        worms_row = QHBoxLayout()
-        worms_row.addStretch()
-        self._worms_btn = QPushButton("WoRMS 查")
-        self._worms_btn.setObjectName("WormsFill")
-        self._worms_btn.setFixedHeight(26)
-        self._worms_btn.setToolTip("从 WoRMS 快捷查找物种，填充拉丁分类信息（不覆盖中文）")
-        self._worms_btn.clicked.connect(self._on_worms_quick_fill)
-        worms_row.addWidget(self._worms_btn)
-        self._root.addLayout(worms_row)
 
         # 备注标签 — web renderTaxonNotesCard tail (app.js:10184).  The notes
         # field lives in 卡2 (not 卡3) to mirror the web right rail.

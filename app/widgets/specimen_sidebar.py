@@ -22,6 +22,7 @@ from PyQt6.QtWidgets import (
     QListWidgetItem,
     QMenu,
     QPushButton,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -65,6 +66,7 @@ class SpecimenSidebar(QWidget):
     edit_specimen_requested = pyqtSignal(str)
     collab_manager_requested = pyqtSignal()   # "协作管理" button clicked
     print_labels_requested = pyqtSignal(str)
+    delete_specimen_requested = pyqtSignal(str)
     print_rna_queue_requested = pyqtSignal()
     phase_mark_requested = pyqtSignal(str, str)  # (uid, status_code) — phase dot click
 
@@ -110,19 +112,9 @@ class SpecimenSidebar(QWidget):
         self._new_btn.clicked.connect(self.new_specimen_requested.emit)
         root.addWidget(self._new_btn)
 
-        self._rna_queue_btn = QPushButton("RNA 待打印")
-        self._rna_queue_btn.setObjectName("Ghost")
-        self._rna_queue_btn.setFixedHeight(30)
-        self._rna_queue_btn.setToolTip("打印已加入队列的 RNAlater 组织管标签")
-        icons.set_button_icon(self._rna_queue_btn, "mdi6.printer-outline",
-                              color=icons.TONE_MUTED, size=14)
-        self._rna_queue_btn.clicked.connect(self.print_rna_queue_requested.emit)
-        self._rna_queue_btn.setEnabled(False)
-        root.addWidget(self._rna_queue_btn)
-
         # Search box with a leading magnifier action.
         self._search = QLineEdit()
-        self._search.setPlaceholderText("搜索标本唯一编号 / voucher number")
+        self._search.setPlaceholderText("搜索编号 / voucher")
         self._search.setClearButtonEnabled(True)
         self._search.setFixedHeight(32)
         if icons.available():
@@ -156,7 +148,7 @@ class SpecimenSidebar(QWidget):
         # Section label + count
         header = QHBoxLayout()
         header.setContentsMargins(2, 0, 2, 0)
-        lbl = QLabel("已有标本唯一编号 / voucher number")
+        lbl = QLabel("已有标本编号")
         lbl.setObjectName("Section")
         header.addWidget(lbl)
         header.addStretch()
@@ -171,6 +163,7 @@ class SpecimenSidebar(QWidget):
         self._list.setAlternatingRowColors(True)
         self._list.setSpacing(1)
         self._list.itemClicked.connect(self._on_item_clicked)
+        self._list.currentItemChanged.connect(self._on_current_item_changed)
         self._list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._list.customContextMenuRequested.connect(self._on_context_menu)
         root.addWidget(self._list)
@@ -245,9 +238,9 @@ class SpecimenSidebar(QWidget):
         root.addWidget(collab_strip)
 
     def set_rna_queue_count(self, count: int) -> None:
-        count = max(0, int(count or 0))
-        self._rna_queue_btn.setText(f"RNA 待打印（{count}）" if count else "RNA 待打印")
-        self._rna_queue_btn.setEnabled(count > 0)
+        # RNAlater queue is still maintained by the workbench, but the sidebar
+        # no longer exposes a separate "RNA 待打印" control in this compact rail.
+        return
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -374,14 +367,14 @@ class SpecimenSidebar(QWidget):
             item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, uid)
             item.setToolTip(uid)
-            item.setSizeHint(QSize(0, 102 if active else 96))
+            item.setSizeHint(QSize(0, 118 if active else 110))
             self._list.addItem(item)
             self._list.setItemWidget(item, row)
             shown += 1
 
         total = len(self._all_items)
         rna_total = sum(1 for item in self._all_items if item.get("is_rna"))
-        self._count_label.setText(f"显示 {shown} / 共 {total} · RNA {rna_total}")
+        self._count_label.setText(f"{shown} / {total} · RNA {rna_total}")
 
     def _build_row_widget(
         self,
@@ -397,43 +390,26 @@ class SpecimenSidebar(QWidget):
         """Build one specimen row: UID + name + collab badge + 4 phase dots."""
         row = QFrame()
         row.setObjectName("SpecimenRowActive" if active else "SpecimenRow")
-        row.setMinimumHeight(88)
+        row.setProperty("selected", False)
+        row.setMinimumHeight(104)
         v = QVBoxLayout(row)
-        v.setContentsMargins(12, 9, 12, 9)
-        v.setSpacing(6)
+        v.setContentsMargins(10, 9, 10, 8)
+        v.setSpacing(5)
 
-        top = QHBoxLayout()
-        top.setContentsMargins(0, 0, 0, 0)
-        top.setSpacing(8)
         uid_lbl = QLabel(uid)
         uid_lbl.setObjectName("SpecimenUid")
         uid_lbl.setToolTip(uid)
+        uid_lbl.setMinimumWidth(0)
+        uid_lbl.setWordWrap(True)
+        uid_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         uid_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        top.addWidget(uid_lbl, 1)
-
-        if active:
-            active_badge = QLabel("拍摄中")
-            active_badge.setObjectName("SpecimenActivePill")
-            top.addWidget(active_badge)
-
-        print_btn = QPushButton()
-        print_btn.setObjectName("IconGhost")
-        print_btn.setFixedSize(26, 26)
-        print_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        print_btn.setToolTip("按默认模板打印该编号标签")
-        icons.set_button_icon(print_btn, "mdi6.printer-outline", color=icons.TONE_MUTED, size=15)
-        print_btn.clicked.connect(
-            lambda _=False, u=uid: self.print_labels_requested.emit(u)
-        )
-        top.addWidget(print_btn)
-
-        v.addLayout(top)
+        v.addWidget(uid_lbl)
 
         name_text = name or name_cn
         nm = QLabel(name_text or "未填写物种信息")
         nm.setObjectName("SpecimenSubtext" if name_text else "SpecimenMissingText")
         nm.setToolTip(name_text or "未填写物种信息")
-        nm.setWordWrap(True)
+        nm.setWordWrap(False)
         v.addWidget(nm)
 
         # ── Phase dots ──
@@ -451,11 +427,13 @@ class SpecimenSidebar(QWidget):
             rna_badge.setObjectName("SpecimenRnaBadge")
             rna_badge.setToolTip("该标本已取 RNA 组织，保存于 RNAlater；R 前缀保存方式")
             line.addWidget(rna_badge)
-        else:
-            storage_lbl = QLabel(storage or "未填保存方式")
-            storage_lbl.setObjectName("SpecimenStorageText")
-            storage_lbl.setToolTip("标本保存方式")
-            line.addWidget(storage_lbl)
+        # 保存方式段（如 T95E）已是 UID 的一部分，不再重复显示，避免冗余。
+
+        if active:
+            active_badge = QLabel("拍摄中")
+            active_badge.setObjectName("SpecimenActivePill")
+            active_badge.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            line.addWidget(active_badge)
 
         if badge:
             bd = QLabel(badge)
@@ -482,6 +460,19 @@ class SpecimenSidebar(QWidget):
             dots_row.addWidget(dot)
             self._phase_dots[uid][code] = dot
         line.addLayout(dots_row)
+
+        print_btn = QPushButton()
+        print_btn.setObjectName("SpecimenPrintButton")
+        print_btn.setFixedSize(22, 22)
+        print_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        print_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        print_btn.setToolTip("按默认模板打印该编号标签")
+        icons.set_button_icon(print_btn, "mdi6.printer-outline", color=icons.TONE_ACCENT, size=13)
+        print_btn.clicked.connect(
+            lambda _=False, u=uid: self.print_labels_requested.emit(u)
+        )
+        line.addWidget(print_btn)
+
         v.addLayout(line)
         return row
 
@@ -609,6 +600,24 @@ class SpecimenSidebar(QWidget):
         if uid:
             self.specimen_selected.emit(uid)
 
+    def _on_current_item_changed(
+        self,
+        current: Optional[QListWidgetItem],
+        previous: Optional[QListWidgetItem],
+    ) -> None:
+        """Make selection visible on the embedded card, not the transparent list item."""
+        for item, selected in ((previous, False), (current, True)):
+            if item is None:
+                continue
+            row = self._list.itemWidget(item)
+            if row is None:
+                continue
+            row.setProperty("selected", selected)
+            style = row.style()
+            style.unpolish(row)
+            style.polish(row)
+            row.update()
+
     def _on_activate_clicked(self) -> None:
         """Emit activate_requested for the currently selected specimen."""
         uid = self.current_uid()
@@ -639,6 +648,8 @@ class SpecimenSidebar(QWidget):
         menu.addSeparator()
         activate_act = menu.addAction("激活")
         deactivate_act = menu.addAction("去激活")
+        menu.addSeparator()
+        delete_act = menu.addAction("删除编号…")
 
         chosen = menu.exec(self._list.viewport().mapToGlobal(pos))
         if chosen == copy_act:
@@ -651,6 +662,8 @@ class SpecimenSidebar(QWidget):
             self.activate_requested.emit(uid)
         elif chosen == deactivate_act:
             self.deactivate_requested.emit(uid)
+        elif chosen == delete_act:
+            self.delete_specimen_requested.emit(uid)
 
     def copy_current_uid(self) -> bool:
         """Copy selected UID to clipboard. Returns False when nothing selected."""
