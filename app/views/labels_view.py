@@ -12,7 +12,6 @@ template-library, paper, and output contracts.
 """
 from __future__ import annotations
 
-import tempfile
 from typing import TYPE_CHECKING
 from pathlib import Path
 
@@ -20,7 +19,6 @@ from typing import Optional
 
 from PyQt6.QtCore import Qt, QPoint, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QPainter, QPen, QPixmap
-from PyQt6.QtPrintSupport import QPrinter, QPrintDialog, QAbstractPrintDialog
 from PyQt6.QtWidgets import (
     QButtonGroup,
     QApplication,
@@ -71,6 +69,7 @@ from app.utils.label_core import (
     unique_id,
 )
 from app.utils.label_print import build_printer, paint_jobs
+from app.widgets.print_dialog import PrintJobDialog
 from app.utils.label_sheet import (
     compute_sheet_geometry,
     draw_crop_marks,
@@ -1593,22 +1592,21 @@ QPushButton#PrintBtn:disabled {{
         self._run_print_dialog(jobs)
 
     def _run_print_dialog(self, jobs: list[dict]) -> None:
-        """Open ONE QPrintDialog and paint all *jobs* onto the chosen printer.
+        """Open PrintJobDialog and paint all *jobs* onto the chosen printer.
 
         Paper is configured from the first job; subsequent jobs are appended
         after a page break (see :func:`label_print.paint_jobs`).
         """
+        dlg = PrintJobDialog(jobs, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        printer_name = dlg.selected_printer()
+
         printer = build_printer(
             jobs[0], jobs[0].get("gridOpts") or self._grid_opts())
-        printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
-        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
-            tmp_path = f.name
-        printer.setOutputFileName(tmp_path)
-
-        dialog = QPrintDialog(printer, self)
-        dialog.setOption(QAbstractPrintDialog.PrintDialogOption.PrintToFile, True)
-        if dialog.exec() != QPrintDialog.DialogCode.Accepted:
-            return
+        if printer_name:
+            printer.setPrinterName(printer_name)
 
         ok = paint_jobs(
             printer, jobs,
@@ -1623,7 +1621,7 @@ QPushButton#PrintBtn:disabled {{
                     self.ctx.get_db(),
                     jobs,
                     actor=default_actor(self.ctx),
-                    printer_name=printer.printerName() or printer.outputFileName(),
+                    printer_name=printer_name or printer.printerName() or "default",
                 )
             except Exception:
                 pass

@@ -1186,10 +1186,14 @@ class WorkbenchView(BaseView):
         )
 
     def _quick_print_labels(self, uid: str) -> bool:
-        """Send *uid*'s labels straight to the default printer (no dialog).
+        """Send *uid*'s labels to printer per ``quick_print_mode`` setting.
 
-        Returns ``False`` (caller falls back to the studio) when there is no
-        default printer, no specimen/template to print, or any error.
+        ``quick_print_mode``:
+          - ``"direct"`` — send straight to configured printer (no dialog)
+          - ``"dialog"`` — show PrintJobDialog for printer selection
+          - ``"studio"`` — return False, caller falls back to label studio
+
+        Returns ``False`` when the caller should open the studio instead.
         """
         try:
             from PyQt6.QtPrintSupport import QPrinterInfo
@@ -1213,7 +1217,12 @@ class WorkbenchView(BaseView):
             local_print_settings = pss.load_setting_if_present(db, "print_settings")
             if local_print_settings is not None:
                 print_settings = pss.merge_print_settings(print_settings, local_print_settings)
-            if not print_settings.get("quick_print", True):
+
+            # read quick_print_mode with backward compat for old quick_print bool
+            quick_mode = str(print_settings.get("quick_print_mode") or "")
+            if not quick_mode:
+                quick_mode = "direct" if bool(print_settings.get("quick_print", True)) else "studio"
+            if quick_mode == "studio":
                 return False
 
             default_printer = QPrinterInfo.defaultPrinterName()
@@ -1278,6 +1287,12 @@ class WorkbenchView(BaseView):
                         continue
                 direct_jobs.append(job)
 
+            if not direct_jobs:
+                if queued_tissue:
+                    from app.services import rna_label_queue_service as rna_queue
+                    self._status_message(f"RNAlater 标签已加入合版队列：当前 {rna_queue.pending_count(db)} 张")
+                return True
+
             printed = 0
             printers_used: list[str] = []
             printed_details: list[str] = []
@@ -1287,23 +1302,57 @@ class WorkbenchView(BaseView):
             except Exception:
                 record_print_jobs = None
                 actor = ""
-            for job in direct_jobs:
-                target = tissue_printer if job.get("bucket") == "tissue" else sample_printer
-                if not target:
+
+            if quick_mode == "dialog":
+                # ── Dialog path: user picks printer, all jobs printed together ──
+                from app.widgets.print_dialog import PrintJobDialog
+                dlg = PrintJobDialog(direct_jobs, self)
+                if dlg.exec() != QDialog.DialogCode.Accepted:
+                    if queued_tissue:
+                        from app.services import rna_label_queue_service as rna_queue
+                        self._status_message(f"RNAlater 标签已加入合版队列：当前 {rna_queue.pending_count(db)} 张")
                     return False
-                printer = label_print.build_printer(job)
-                printer.setPrinterName(target)
-                if not label_print.paint_jobs(printer, [job]):
+
+                printer_name = dlg.selected_printer()
+                printer = label_print.build_printer(direct_jobs[0])
+                if printer_name:
+                    printer.setPrinterName(printer_name)
+
+                if not label_print.paint_jobs(printer, direct_jobs):
                     return False
                 if record_print_jobs is not None:
                     try:
-                        record_print_jobs(db, [job], actor=actor, printer_name=target)
+                        record_print_jobs(
+                            db, direct_jobs, actor=actor,
+                            printer_name=printer_name or printer.printerName() or "default",
+                        )
                     except Exception:
                         pass
-                printed += len(job.get("labels") or [])
-                if target not in printers_used:
-                    printers_used.append(target)
-                printed_details.append(self._quick_print_job_label(job, target))
+                printed = sum(len(j.get("labels") or []) for j in direct_jobs)
+                printer_display = printer_name or printer.printerName() or "默认打印机"
+                printers_used = [printer_display] if printed else []
+                printed_details = [
+                    f"{len(direct_jobs)} 个作业 → {printer_display}"
+                ]
+            else:
+                # ── Direct path: each job to its configured printer ──
+                for job in direct_jobs:
+                    target = tissue_printer if job.get("bucket") == "tissue" else sample_printer
+                    if not target:
+                        return False
+                    printer = label_print.build_printer(job)
+                    printer.setPrinterName(target)
+                    if not label_print.paint_jobs(printer, [job]):
+                        return False
+                    if record_print_jobs is not None:
+                        try:
+                            record_print_jobs(db, [job], actor=actor, printer_name=target)
+                        except Exception:
+                            pass
+                    printed += len(job.get("labels") or [])
+                    if target not in printers_used:
+                        printers_used.append(target)
+                    printed_details.append(self._quick_print_job_label(job, target))
 
             msg_parts = []
             if printed:

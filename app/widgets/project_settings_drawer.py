@@ -591,8 +591,9 @@ class ProjectSettingsDrawer(QWidget):
         # ── 单张打印 ──────────────────────────────────────────────────────────
         self._quick_print_mode = QComboBox()
         self._quick_print_mode.setFixedHeight(30)
-        self._quick_print_mode.addItem("直接打印到指定打印机", True)
-        self._quick_print_mode.addItem("打开标签打印页", False)
+        self._quick_print_mode.addItem("直接打印到指定打印机", "direct")
+        self._quick_print_mode.addItem("弹出打印机选择对话框", "dialog")
+        self._quick_print_mode.addItem("打开标签打印页", "studio")
         self._quick_print_mode.currentIndexChanged.connect(self._save_print_settings)
 
         self._print_tissue_cb = QCheckBox("RNA 编号同时打印 RNAlater 组织管标签")
@@ -959,8 +960,12 @@ class ProjectSettingsDrawer(QWidget):
         local_print_settings = load_setting_if_present(db, "print_settings")
         if local_print_settings is not None:
             pr = merge_print_settings(pr, local_print_settings)
-        quick = bool(pr.get("quick_print", DEFAULT_PRINT_SETTINGS["quick_print"]))
-        idx = self._quick_print_mode.findData(quick)
+        # backward compat: new quick_print_mode string wins;
+        # old quick_print bool maps True→"direct", False→"studio"
+        quick_mode = str(pr.get("quick_print_mode") or "")
+        if not quick_mode:
+            quick_mode = "direct" if bool(pr.get("quick_print", True)) else "studio"
+        idx = self._quick_print_mode.findData(quick_mode)
         if idx < 0:
             idx = 0
         self._quick_print_mode.blockSignals(True)
@@ -1086,8 +1091,10 @@ class ProjectSettingsDrawer(QWidget):
         save_setting(db, "print_settings", self._collect_print_settings())
 
     def _collect_print_settings(self) -> dict:
+        quick_mode = str(self._quick_print_mode.currentData() or "direct")
         return {
-            "quick_print": bool(self._quick_print_mode.currentData()),
+            "quick_print": quick_mode == "direct",
+            "quick_print_mode": quick_mode,
             "include_tissue": self._print_tissue_cb.isChecked(),
             "sample_printer": str(self._sample_printer_combo.currentData() or ""),
             "tissue_printer": str(self._tissue_printer_combo.currentData() or ""),

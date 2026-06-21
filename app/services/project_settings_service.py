@@ -94,6 +94,11 @@ DEFAULT_PRINT_SETTINGS: dict[str, Any] = {
     # 有默认打印机就直出；普通标本打印样品瓶标签，R 前缀标本额外打印
     # RNAlater 组织管标签。完整批量/模板调整仍在标签打印页。
     "quick_print": True,
+    # quick_print_mode controls workbench print-button behavior:
+    #   "direct" — print directly to configured printer (current behavior)
+    #   "dialog" — show printer-selection dialog
+    #   "studio" — open the Labels print page (legacy quick_print=False)
+    "quick_print_mode": "direct",
     "include_tissue": True,
     # Empty printer name = use the current system default.  Separate fields let
     # sample-bottle and RNAlater tube labels go to different devices/papers.

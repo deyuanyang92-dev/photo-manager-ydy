@@ -577,6 +577,7 @@ class TestPrintBothButton:
 
     def test_print_both_runs_two_jobs_one_dialog(self, qt_app, monkeypatch):
         import app.views.labels_view as lv
+        from PyQt6.QtWidgets import QDialog
 
         captured = {}
 
@@ -585,20 +586,16 @@ class TestPrintBothButton:
             captured["kw"] = kw
             return True
 
-        _Code = lv.QPrintDialog.DialogCode
-
         class _FakeDialog:
-            DialogCode = _Code
-
-            def __init__(self, *a, **k):
-                pass
-            def setOption(self, *a, **k):
-                pass
+            def __init__(self, jobs, parent=None):
+                self._jobs = jobs
             def exec(self):
-                return _Code.Accepted
+                return QDialog.DialogCode.Accepted
+            def selected_printer(self):
+                return ""
 
         monkeypatch.setattr(lv, "paint_jobs", _fake_paint)
-        monkeypatch.setattr(lv, "QPrintDialog", _FakeDialog)
+        monkeypatch.setattr(lv, "PrintJobDialog", _FakeDialog)
 
         v = _studio(qt_app, [_rna_sp()], paper="label")
         v._print_both()
@@ -607,19 +604,17 @@ class TestPrintBothButton:
 
     def test_print_both_skips_empty_tissue(self, qt_app, monkeypatch):
         import app.views.labels_view as lv
+        from PyQt6.QtWidgets import QDialog
         captured = {}
         monkeypatch.setattr(lv, "paint_jobs",
                             lambda p, jobs, **k: captured.setdefault(
                                 "buckets", [j.get("bucket") for j in jobs]))
 
-        _Code = lv.QPrintDialog.DialogCode
-
         class _FakeDialog:
-            DialogCode = _Code
-            def __init__(self, *a, **k): pass
-            def setOption(self, *a, **k): pass
-            def exec(self): return _Code.Accepted
-        monkeypatch.setattr(lv, "QPrintDialog", _FakeDialog)
+            def __init__(self, jobs, parent=None): pass
+            def exec(self): return QDialog.DialogCode.Accepted
+            def selected_printer(self): return ""
+        monkeypatch.setattr(lv, "PrintJobDialog", _FakeDialog)
 
         v = _studio(qt_app, [_sp()], paper="label")   # no RNA
         v._print_both()
@@ -865,6 +860,7 @@ class TestImpositionDesigner:
 
     def test_print_dialog_passes_grid_opts_to_build_printer(self, qt_app, monkeypatch):
         import app.views.labels_view as lv
+        from PyQt6.QtWidgets import QDialog
 
         captured = {}
         real_build = lv.build_printer
@@ -873,16 +869,13 @@ class TestImpositionDesigner:
             captured["grid_opts"] = grid_opts
             return real_build(job, grid_opts)
 
-        _Code = lv.QPrintDialog.DialogCode
-
         class _FakeDialog:
-            DialogCode = _Code
-            def __init__(self, *a, **k): pass
-            def setOption(self, *a, **k): pass
-            def exec(self): return _Code.Accepted
+            def __init__(self, jobs, parent=None): pass
+            def exec(self): return QDialog.DialogCode.Accepted
+            def selected_printer(self): return ""
 
         monkeypatch.setattr(lv, "build_printer", _fake_build)
-        monkeypatch.setattr(lv, "QPrintDialog", _FakeDialog)
+        monkeypatch.setattr(lv, "PrintJobDialog", _FakeDialog)
         monkeypatch.setattr(lv, "paint_jobs", lambda p, jobs, **k: True)
 
         v = _studio(qt_app, [_sp()], paper="a4")
