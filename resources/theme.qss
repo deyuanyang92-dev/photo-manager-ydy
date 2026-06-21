@@ -306,6 +306,36 @@ QFrame#BatchIdentBar {
 }
 QFrame#Divider { background-color: rgba(15,23,42,0.08); max-height: 1px; min-height: 1px; border: none; }
 
+/* ── Grouping tool popup (分组工具) ─────────────────────────────────── */
+/* Soft-gray dialog bg lets the inner WorkbenchSection card's shadow breathe
+   (the popup host pads the layout so the shadow is no longer clipped). */
+QDialog#GroupingDialog { background-color: #f4f6f8; }
+/* Draft-group JPG drop zone: dashed inset when empty, hairline white when filled. */
+QListWidget#GroupDropZoneEmpty {
+    background-color: #eef2f6;
+    border: 1px dashed rgba(15,23,42,0.22);
+    border-radius: 6px;
+}
+QListWidget#GroupDropZone {
+    background-color: #ffffff;
+    border: 1px solid rgba(15,23,42,0.08);
+    border-radius: 6px;
+}
+/* Per-group accent chips (cycle blue/green/teal/amber by index). Light-tint
+   literal convention matches the existing ChipRaw/ChipAttribated rules; the
+   objectName GroupChipN is set in _DraftGroupRow._setup_ui. */
+QLabel#GroupChip0, QLabel#GroupChip1, QLabel#GroupChip2, QLabel#GroupChip3 {
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 10px;
+    letter-spacing: 0.2px;
+}
+QLabel#GroupChip0 { background-color: rgba(37,99,235,0.10); color: #2563eb; }
+QLabel#GroupChip1 { background-color: rgba(21,128,61,0.11); color: #15803d; }
+QLabel#GroupChip2 { background-color: rgba(15,118,110,0.12); color: #0f766e; }
+QLabel#GroupChip3 { background-color: rgba(180,83,9,0.11); color: #b45309; }
+
 /* ── Project settings drawer (right-edge overlay) + backdrop scrim ─── */
 QWidget#SettingsDrawer {
     background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #ffffff, stop:0.06 #ffffff, stop:1 #fbfcfd);

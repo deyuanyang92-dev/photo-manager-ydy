@@ -474,13 +474,40 @@ class WorkspaceBreadcrumb(QWidget):
             cur = menu.addAction(f"当前：{cur_name}")
             cur.setEnabled(False)
             menu.addSeparator()
+        self._add_peer_dirs_flat(menu)
         self._add_siblings_menu(menu)
-        self._add_peer_dirs_menu(menu)
         self._add_recent_menu(menu)
         menu.addSeparator()
         new_act = menu.addAction(f"➕ {tr('新建文件夹…')}")
         new_act.triggered.connect(self._on_new_section)
         return menu
+
+    def _add_peer_dirs_flat(self, menu: QMenu) -> None:
+        """同盘兄弟项目(原「同级目录」子菜单)平铺到顶层。
+
+        点当前号即可直接见 ceshi5/ceshi6 等兄弟项目,无需再钻一层子菜单
+        (docs/design/workspace_navigator_prototype.py 的 project_menu 同款取舍)。
+        """
+        from app.services.project_tree_service import is_workspace, is_workspace_candidate
+        root = getattr(self._ctx, "current_project_root", None)
+        current_root = str(Path(root).resolve()) if root else ""
+        header = menu.addAction(tr("同盘项目"))
+        header.setEnabled(False)
+        for path in self._peer_dirs:
+            name = os.path.basename(path)
+            if is_workspace(path):
+                label = f"📷 {name}"
+            elif is_workspace_candidate(path):
+                label = f"📁 {name} · 可导入"
+            else:
+                label = f"📁 {name}"
+            act = menu.addAction(label)
+            act.setToolTip(path)
+            act.setCheckable(True)
+            act.setChecked(bool(current_root) and path == current_root)
+            act.triggered.connect(
+                lambda _=False, p=path: self._switch_to_peer_root(p))
+        menu.addSeparator()
 
     def _add_siblings_menu(self, menu: QMenu) -> None:
         from app.services.project_tree_service import is_workspace, is_workspace_candidate
@@ -501,27 +528,6 @@ class WorkspaceBreadcrumb(QWidget):
                            if self._sib_index >= 0 else False)
             act.triggered.connect(
                 lambda _=False, p=path: self._switch_to(p))
-
-    def _add_peer_dirs_menu(self, menu: QMenu) -> None:
-        from app.services.project_tree_service import is_workspace, is_workspace_candidate
-        root = getattr(self._ctx, "current_project_root", None)
-        current_root = str(Path(root).resolve()) if root else ""
-        peer_menu = menu.addMenu("同级目录")
-        peer_menu.setEnabled(bool(self._peer_dirs))
-        for path in self._peer_dirs:
-            name = os.path.basename(path)
-            if is_workspace(path):
-                label = f"📷 {name}"
-            elif is_workspace_candidate(path):
-                label = f"📁 {name} · 可导入"
-            else:
-                label = f"📁 {name}"
-            act = peer_menu.addAction(label)
-            act.setToolTip(path)
-            act.setCheckable(True)
-            act.setChecked(bool(current_root) and path == current_root)
-            act.triggered.connect(
-                lambda _=False, p=path: self._switch_to_peer_root(p))
 
     def _switch_to_peer_root(self, path: str) -> None:
         """Switch to a sibling project folder and make it its own root."""

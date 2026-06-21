@@ -422,11 +422,11 @@ def test_dropdown_lists_peer_project_dirs(tmp_path):
     w = WorkspaceBreadcrumb(_Ctx(str(proj), str(proj)))
     w.refresh()
     menu = w._build_sibling_menu()
-    peer_menu = next(a.menu() for a in menu.actions() if a.menu() and "同级目录" in a.text())
-    labels = [a.text() for a in peer_menu.actions()]
-    assert any("proj_x" in s for s in labels)
+    # 同级项目现在平铺在菜单顶层(不再藏「同级目录」子菜单)→ 点当前号直接见兄弟
+    labels = [a.text() for a in menu.actions()]
     assert any("ceshi7" in s for s in labels)
     assert any("📷" in s and "ceshi8" in s for s in labels)
+    assert any("proj_x" in s for s in labels)
 
 
 def test_switch_peer_root_uses_peer_as_root(tmp_path, monkeypatch):
@@ -454,7 +454,7 @@ def test_dropdown_groups_current_project_tree_recent_and_new(tmp_path):
     labels = [a.text() for a in menu.actions() if not a.isSeparator()]
     assert labels[0] == "当前：B2"
     assert any("项目目录" in s for s in labels)
-    assert any("同级目录" in s for s in labels)
+    assert any("同盘项目" in s for s in labels)   # 平铺段(原「同级目录」子菜单)
     assert any("最近使用" in s for s in labels)
     assert labels[-1].endswith("新建文件夹…")
 
