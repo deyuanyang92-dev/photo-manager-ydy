@@ -1218,10 +1218,14 @@ class WorkbenchView(BaseView):
             if local_print_settings is not None:
                 print_settings = pss.merge_print_settings(print_settings, local_print_settings)
 
-            # read quick_print_mode with backward compat for old quick_print bool
+            # read quick_print_mode with backward compat for old quick_print bool.
+            # DEFAULT_PRINT_SETTINGS now carries quick_print_mode="direct", so a
+            # legacy project with only quick_print=False needs an explicit remap.
             quick_mode = str(print_settings.get("quick_print_mode") or "")
             if not quick_mode:
                 quick_mode = "direct" if bool(print_settings.get("quick_print", True)) else "studio"
+            elif quick_mode == "direct" and not bool(print_settings.get("quick_print", True)):
+                quick_mode = "studio"
             if quick_mode == "studio":
                 return False
 

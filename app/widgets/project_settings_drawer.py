@@ -961,10 +961,14 @@ class ProjectSettingsDrawer(QWidget):
         if local_print_settings is not None:
             pr = merge_print_settings(pr, local_print_settings)
         # backward compat: new quick_print_mode string wins;
-        # old quick_print bool maps True→"direct", False→"studio"
+        # old quick_print bool maps True→"direct", False→"studio".
+        # DEFAULT_PRINT_SETTINGS now carries quick_print_mode="direct", so
+        # default must be remapped when legacy quick_print=False is present.
         quick_mode = str(pr.get("quick_print_mode") or "")
         if not quick_mode:
             quick_mode = "direct" if bool(pr.get("quick_print", True)) else "studio"
+        elif quick_mode == "direct" and not bool(pr.get("quick_print", True)):
+            quick_mode = "studio"
         idx = self._quick_print_mode.findData(quick_mode)
         if idx < 0:
             idx = 0

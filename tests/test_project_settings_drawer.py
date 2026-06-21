@@ -136,7 +136,7 @@ def test_print_settings_roundtrip(qtbot, db):
     d = ProjectSettingsDrawer(ctx)
     qtbot.addWidget(d)
     d.refresh()
-    d._quick_print_mode.setCurrentIndex(d._quick_print_mode.findData(False))
+    d._quick_print_mode.setCurrentIndex(d._quick_print_mode.findData("studio"))
     d._print_tissue_cb.setChecked(True)
     d._save_print_settings()
     data = load_setting(db, "print_settings", DEFAULT_PRINT_SETTINGS)
