@@ -23,6 +23,7 @@ grouping_changed()
 from __future__ import annotations
 
 from pathlib import Path
+import re
 from typing import TYPE_CHECKING, Optional
 
 from PyQt6.QtCore import Qt, QSize, pyqtSignal
@@ -132,11 +133,13 @@ class _ComposedRow(QFrame):
         parent: Optional[QWidget] = None,
         *,
         selected: bool = False,
+        display_number: Optional[int] = None,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("Card")
         self._group = group
         self._selected = selected
+        self._display_number = display_number or (group.group_index + 1)
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -153,7 +156,7 @@ class _ComposedRow(QFrame):
         lay.addWidget(sel)
 
         # Composed-state chip + angle label
-        chip = QLabel(self._group.angle_label or f"组 {self._group.group_index}")
+        chip = QLabel(self._group.angle_label or f"组{self._display_number}")
         chip.setObjectName("ChipTiff")
         lay.addWidget(chip)
 
@@ -221,12 +224,14 @@ class _DraftGroupRow(QFrame):
 
     def __init__(self, group: "Group", parent: Optional[QWidget] = None,
                  panel: Optional["GroupingPanel"] = None,
-                 selected: bool = False) -> None:
+                 selected: bool = False,
+                 display_number: Optional[int] = None) -> None:
         super().__init__(parent)
         self.setObjectName("Panel")
         self._group = group
         self._panel = panel
         self._selected = selected
+        self._display_number = display_number or (group.group_index + 1)
         self._setup_ui()
 
     # 横向胶片条：每组一个固定宽度的窄竖卡片，卡内 = 角度名 / JPG缩略图网格 /
@@ -236,7 +241,7 @@ class _DraftGroupRow(QFrame):
     def _setup_ui(self) -> None:
         self.setFixedWidth(self.CARD_W)
         root = QVBoxLayout(self)
-        root.setContentsMargins(10, 10, 10, 10)
+        root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(6)
 
         # Row1: 组chip + 角度label
@@ -249,8 +254,9 @@ class _DraftGroupRow(QFrame):
             lambda checked: self.selected_changed.emit(self._group.group_index, checked)
         )
         top.addWidget(sel)
-        chip = QLabel(f"组 {self._group.group_index}")
-        chip.setObjectName("ChipArchived")
+        chip = QLabel(f"组{self._display_number}")
+        chip.setObjectName(f"GroupChip{(self._display_number - 1) % 4}")
+        self._group_number_chip = chip
         top.addWidget(chip)
         self._label_edit = QLineEdit(self._group.angle_label or "")
         self._label_edit.setPlaceholderText("角度")
@@ -267,15 +273,19 @@ class _DraftGroupRow(QFrame):
             group_index=self._group.group_index,
             parent=self,
         )
+        # Dashed drop-zone look when empty, hairline card when filled (theme QSS).
+        self._jpg_list.setObjectName(
+            "GroupDropZoneEmpty" if not self._group.jpg_paths else "GroupDropZone"
+        )
         self._jpg_list.setViewMode(QListWidget.ViewMode.IconMode)
-        self._jpg_list.setIconSize(QSize(58, 58))
-        self._jpg_list.setGridSize(QSize(68, 70))
+        self._jpg_list.setIconSize(QSize(50, 50))
+        self._jpg_list.setGridSize(QSize(58, 60))
         self._jpg_list.setResizeMode(QListWidget.ResizeMode.Adjust)
         self._jpg_list.setMovement(QListWidget.Movement.Snap)
         self._jpg_list.setWrapping(True)
         self._jpg_list.setSpacing(3)
         self._jpg_list.setUniformItemSizes(True)
-        self._jpg_list.setFixedHeight(150)  # 固定高，不 stretch —— 否则把下方按钮挤出视口
+        self._jpg_list.setFixedHeight(124)  # 2 行 50px 缩略图；不 stretch —— 否则把下方按钮挤出视口
         self._jpg_list.setToolTip("拖拽可重新排序；右键 → 移除此 JPG；可在组间拖动")
         for p in self._group.jpg_paths:
             item = QListWidgetItem(self._thumb_icon(p), "")
@@ -474,6 +484,7 @@ class GroupingPanel(QWidget):
     add_selection_to_group_requested = pyqtSignal(int)  # group_index
     free_compose_requested = pyqtSignal()
     retroactive_requested = pyqtSignal()
+    helicon_params_requested = pyqtSignal()
     import_tiff_requested = pyqtSignal(str, int)  # uid, group_index  #cursor groupingImportTiff
     archive_zip_registered = pyqtSignal(str, int)  # uid, group_index
     # 补处理 (supplementary archival) — independent of the active-specimen gate.
@@ -501,7 +512,7 @@ class GroupingPanel(QWidget):
 
         root = QVBoxLayout(section)
         root.setContentsMargins(20, 16, 20, 16)
-        root.setSpacing(12)
+        root.setSpacing(14)
 
         # ── capture-main-actions row (web parity: ⚡合成/合成+整理/🗜整理/⋯更多) ──
         # Hidden when no specimen active (mirrors app.js:7374-7378 early return)
@@ -644,6 +655,7 @@ class GroupingPanel(QWidget):
         """Display all groups for *uid*."""
         self._uid = uid
         self._grouping = grouping
+        self._renumber_default_angle_labels()
         valid = {g.group_index for g in grouping.groups}
         self._selected_group_indexes &= valid
         short = uid[:30] + ("…" if len(uid) > 30 else "")
@@ -747,6 +759,7 @@ class GroupingPanel(QWidget):
         if target.composed_tiff_path:
             return  # composed groups: caller must undo-compose first
         self._grouping.groups = [g for g in self._grouping.groups if g.group_index != group_index]
+        self._renumber_default_angle_labels()
         self._selected_group_indexes.discard(group_index)
         self._rebuild()
         self.grouping_changed.emit()
@@ -790,7 +803,18 @@ class GroupingPanel(QWidget):
         free_act.triggered.connect(self.free_compose_requested.emit)
         retro_act = menu.addAction("存量整理…")
         retro_act.triggered.connect(self.retroactive_requested.emit)
+        menu.addSeparator()
+        helicon_act = menu.addAction("Helicon 合成参数")
+        helicon_act.triggered.connect(self.helicon_params_requested.emit)
         return menu
+
+    def _renumber_default_angle_labels(self) -> None:
+        """只重排系统默认的“角度N”；用户自定义角度名保持不变。"""
+        if not self._grouping:
+            return
+        for display_number, group in enumerate(self._grouping.groups, start=1):
+            if re.fullmatch(r"角度\d+", (group.angle_label or "").strip()):
+                group.angle_label = f"角度{display_number}"
 
     def _rebuild(self) -> None:
         self._clear_content()
@@ -800,12 +824,13 @@ class GroupingPanel(QWidget):
 
         self._empty_lbl.hide()
         groups = self._grouping.groups
+        display_numbers = {id(g): n for n, g in enumerate(groups, start=1)}
 
         draft = [g for g in groups if not g.composed_tiff_path]
         composed = [g for g in groups if g.composed_tiff_path]
 
         if draft:
-            sec_lbl = QLabel("未合成组")
+            sec_lbl = QLabel(f"未合成组 · {len(draft)}")
             sec_lbl.setObjectName("Section")
             self._content_lay.addWidget(sec_lbl)
             # 横向胶片条：草稿卡片并排，横向滚动；多角度组也不挤。
@@ -814,7 +839,7 @@ class GroupingPanel(QWidget):
             hscroll.setWidgetResizable(True)
             hscroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
             hscroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-            hscroll.setFixedHeight(316)  # 恰好一张卡片(≈296)+横向滚动条，下方按钮不被裁
+            hscroll.setFixedHeight(286)  # 一张卡片(≈266)+横向滚动条，下方按钮不被裁
             strip = QWidget()
             strip_lay = QHBoxLayout(strip)
             strip_lay.setContentsMargins(0, 0, 0, 0)
@@ -826,6 +851,7 @@ class GroupingPanel(QWidget):
                     strip,
                     panel=self,
                     selected=g.group_index in self._selected_group_indexes,
+                    display_number=display_numbers[id(g)],
                 )
                 row.compose_clicked.connect(self._on_compose)
                 row.label_changed.connect(self._on_label_changed)
@@ -853,6 +879,7 @@ class GroupingPanel(QWidget):
                     g,
                     self,
                     selected=g.group_index in self._selected_group_indexes,
+                    display_number=display_numbers[id(g)],
                 )
                 row2.organise_clicked.connect(self._on_organise)
                 row2.undo_clicked.connect(self._on_undo)
@@ -877,9 +904,10 @@ class GroupingPanel(QWidget):
             return
         from app.services.grouping_service import Group
         new_index = max((g.group_index for g in self._grouping.groups), default=-1) + 1
+        display_number = len(self._grouping.groups) + 1
         new_group = Group(
             group_index=new_index,
-            angle_label=f"角度{new_index + 1}",  # 角度1 / 角度2 …，省手敲
+            angle_label=f"角度{display_number}",
             jpg_paths=[],
         )
         self._grouping.groups.append(new_group)

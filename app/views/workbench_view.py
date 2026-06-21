@@ -481,6 +481,7 @@ class WorkbenchView(BaseView):
         self._sidebar.new_specimen_requested.connect(self._on_new_specimen)
         self._sidebar.collab_manager_requested.connect(self._on_open_collab_panel)
         self._sidebar.print_labels_requested.connect(self._on_print_labels)
+        self._sidebar.delete_specimen_requested.connect(self._confirm_delete_specimen)
         self._sidebar.print_rna_queue_requested.connect(self._on_print_rna_queue)
         self._sidebar.phase_mark_requested.connect(self._on_phase_mark)
         outer.addWidget(self._sidebar)
@@ -538,6 +539,7 @@ class WorkbenchView(BaseView):
         self._grouping.add_selection_to_group_requested.connect(self._on_add_selection_to_group)
         self._grouping.free_compose_requested.connect(self._on_free_compose)
         self._grouping.retroactive_requested.connect(self._on_retroactive_scan)
+        self._grouping.helicon_params_requested.connect(self._open_grouping_helicon_params)
         self._grouping.import_tiff_requested.connect(self._on_import_tiff)  # #cursor
         self._grouping.archive_zip_registered.connect(self._on_archive_zip_registered)
         self._grouping.supp_process_requested.connect(self._on_supplementary_process)
@@ -552,8 +554,7 @@ class WorkbenchView(BaseView):
         self._grouping.compose_and_organise_all_requested.connect(
             lambda uid: self._start_compose_batch(uid, organise=True))
         self._grouping.organise_all_requested.connect(self._organise_all_batch)
-        # Helicon 合成参数 — web 把参数放合成流程（app.js:6698/6881），不在右栏。
-        # 移入分组工具弹窗（compose 触发处）。compose 仍读 get_params()，逻辑不变。
+        # 参数对象依然为合成流程提供 get_params()，但 UI 只从“更多”弹出。
         self._helicon_params = HeliconParamsPanel()
         self._seed_helicon_defaults()
         self._grouping_dialog = self._build_grouping_dialog(self._grouping)
@@ -600,6 +601,7 @@ class WorkbenchView(BaseView):
         # 卡1 照片编号
         self._naming = NamingPanel(self.ctx)
         self._naming.save_requested.connect(self._on_naming_save)
+        self._naming.delete_requested.connect(self._confirm_delete_specimen)
         self._naming.uid_corrected.connect(self._on_uid_corrected)
         self._naming.open_project_settings.connect(self._on_open_settings)
         self._naming.keys_committed.connect(self._apply_collection_autofill)
@@ -625,6 +627,7 @@ class WorkbenchView(BaseView):
             lambda: self._on_save_metadata(self._current_uid) if self._current_uid else None
         )
         self._taxon_card.taxon_changed.connect(lambda *_: self._schedule_rail_save())
+        self._taxon_card.taxon_changed.connect(lambda *_: self._sync_uid_display_summary())
         self._taxon_card.open_edit_requested.connect(self._on_open_taxon_edit)
         right_lay.addWidget(self._taxon_card)
 
@@ -632,6 +635,7 @@ class WorkbenchView(BaseView):
         self._metadata = MetadataPanel(self.ctx)
         self._metadata.save_requested.connect(self._on_save_metadata)
         self._metadata.metadata_changed.connect(lambda *_: self._schedule_rail_save())
+        self._metadata.metadata_changed.connect(lambda *_: self._sync_uid_display_summary())
         right_lay.addWidget(self._metadata)
 
         # 卡4 协作状态（默认折叠）
@@ -681,6 +685,9 @@ class WorkbenchView(BaseView):
         self._settings_drawer = ProjectSettingsDrawer(self.ctx, parent=self)
         self._settings_drawer.setFixedWidth(380)
         self._settings_drawer.closed.connect(self._settings_scrim.hide)
+        self._settings_drawer.personnel_changed.connect(
+            self._on_project_personnel_changed
+        )
 
         # ── Collab panel drawer (overlay, hidden by default) ───────────────
         from app.widgets.collab_panel import CollabPanel
@@ -916,6 +923,22 @@ class WorkbenchView(BaseView):
             return
         self._on_specimen_selected(uid)
 
+    def _confirm_delete_specimen(self, uid: str) -> None:
+        """Confirm before deleting a specimen record from the workbench DB."""
+        uid = str(uid or "").strip()
+        if not uid:
+            return
+        ret = QMessageBox.question(
+            self,
+            "删除标本编号",
+            f"确定删除这个标本编号吗？\n\n{uid}\n\n"
+            "只删除工作台中的编号记录和关联状态，不删除磁盘上的照片或成果文件。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if ret == QMessageBox.StandardButton.Yes:
+            self._on_delete_specimen(uid)
+
     def _on_delete_specimen(self, uid: str) -> None:
         """Delete a specimen and local DB references owned by the workbench."""
         uid = str(uid or "").strip()
@@ -1045,18 +1068,38 @@ class WorkbenchView(BaseView):
         采集/拍摄日期沿用上一号(sticky): 同一断面连拍时日期通常不变, 新编号继承当前
         命名卡上的日期而非留空, 减手输; 用户仍可改。无上一号(首次新增)则留空。 (2026-06-14)
         """
-        # Capture the currently-shown specimen's dates BEFORE clearing the draft —
-        # they carry over into the new 编号.
-        prev_collection = self._naming._collection_date.text().strip()
-        prev_photo = self._naming._photo_date.text().strip()
+        # Capture the currently-shown collection context BEFORE clearing the
+        # draft. 新增编号通常是同一工作区/同一站位连续拍摄：地点、站位、
+        # 日期、保存方式、人员和坐标应沿用；物种编号/备注/分类仍按新标本清空。
+        prev_naming_context = {
+            "province": self._naming._province.text().strip(),
+            "site": self._naming._site.text().strip(),
+            "station": self._naming._station.text().strip(),
+            "storage": self._naming._storage.text().strip(),
+            "collectionDate": self._naming._collection_date.text().strip(),
+            "photoDate": self._naming._photo_date.text().strip(),
+        }
+        try:
+            # Personnel are project defaults for every new specimen, not sticky
+            # values from the previous specimen. Location context may carry over
+            # and remains auto-marked so a station record can replace it.
+            prev_meta_context = {
+                key: str(value or "").strip()
+                for key, value in self._metadata.current_values().items()
+                if key in ("lon", "lat", "geo_area")
+            }
+        except Exception:
+            prev_meta_context = {}
 
         self._current_uid = None
         prefill = self._effective_prefill()
         self._naming.load_specimen({
-            "province": prefill.get("province", ""),
-            "site": prefill.get("site", ""),
-            "collectionDate": prev_collection,
-            "photoDate": prev_photo,
+            "province": prev_naming_context["province"] or prefill.get("province", ""),
+            "site": prev_naming_context["site"] or prefill.get("site", ""),
+            "station": prev_naming_context["station"],
+            "storage": prev_naming_context["storage"],
+            "collectionDate": prev_naming_context["collectionDate"],
+            "photoDate": prev_naming_context["photoDate"],
         })
         try:
             self._metadata.clear()
@@ -1070,8 +1113,29 @@ class WorkbenchView(BaseView):
                           "lon", "lat", "geo_area")
                 if prefill.get(k)
             })
+            self._metadata.apply_autofill({
+                k: v
+                for k, v in prev_meta_context.items()
+                if v
+            }, override_auto=True)
         except Exception:
             pass
+
+    def _on_project_personnel_changed(self, personnel: dict) -> None:
+        """Apply changed project defaults to a draft, never to a saved specimen.
+
+        Existing specimen values are specimen facts and remain editable per
+        record. In a draft, only empty/automatic values are replaced; manual
+        overrides are protected by MetadataPanel's auto-field tracking.
+        """
+        if self._current_uid is not None:
+            return
+        values = {
+            key: str(personnel.get(key) or "").strip()
+            for key in ("collector", "photographer", "identifier")
+        }
+        self._metadata.apply_autofill(values, override_auto=True)
+        self._sync_uid_display_summary()
 
     def _effective_prefill(self) -> dict:
         """Inherited new-specimen defaults for the current project, or empties."""
@@ -1107,12 +1171,19 @@ class WorkbenchView(BaseView):
         self.ctx.pending_label_uid = uid
         win = self.window()
         nav = getattr(win, "navigate_to", None)
+        navigated = False
         if callable(nav):
             nav("labels")
+            navigated = True
             labels_view = getattr(win, "_views", {}).get("labels")
             selector = getattr(labels_view, "select_uid", None)
             if callable(selector):
                 selector(uid)
+        self._status_message(
+            f"已发送到标签打印：{uid}"
+            if navigated else
+            f"已准备标签打印：{uid}；请打开「标签打印」页"
+        )
 
     def _quick_print_labels(self, uid: str) -> bool:
         """Send *uid*'s labels straight to the default printer (no dialog).
@@ -1455,6 +1526,18 @@ class WorkbenchView(BaseView):
         if not uid:
             self._status_message("编号尚未填写完整。")
             return
+        missing_required = [
+            field for field in self._naming.missing_required_fields()
+            if field not in ("采集日期", "拍照日期")
+        ]
+        if missing_required:
+            QMessageBox.warning(
+                self,
+                "编号信息未填写完整",
+                "请先补全必填字段：" + "、".join(missing_required),
+            )
+            self._naming._check_compliance(uid)
+            return
         old_uid = (
             self._current_uid
             if self._current_uid and self._current_uid != uid
@@ -1673,33 +1756,46 @@ class WorkbenchView(BaseView):
         dlg.setWindowTitle("分组工具")
         dlg.setModal(False)
         lay = QVBoxLayout(dlg)
-        lay.setContentsMargins(0, 0, 0, 0)
+        # Pad so the inner WorkbenchSection card's drop-shadow is not clipped —
+        # the card floats on the soft-gray dialog bg (QDialog#GroupingDialog).
+        lay.setContentsMargins(14, 14, 14, 14)
         # The panel's own collapse toggle is redundant inside a dedicated popup.
         toggle = getattr(panel, "_group_toggle_btn", None)
         if toggle is not None:
             toggle.setVisible(False)
         lay.addWidget(panel)
-        # Helicon 合成参数 — 跟随合成流程放在分组工具弹窗里（web 同款位置）。
-        helicon = getattr(self, "_helicon_params", None)
-        if helicon is not None:
-            lay.addWidget(helicon)
-        dlg.resize(760, 720)  # 横向胶片条 + Helicon 参数都要竖向空间，给足
+        dlg.resize(760, 560)
         return dlg
+
+    def _open_grouping_helicon_params(self) -> None:
+        """从分组工具的“更多”按需弹出 Helicon 参数。"""
+        dlg = getattr(self, "_grouping_helicon_params_dialog", None)
+        if dlg is None:
+            dlg = QDialog(self._grouping_dialog)
+            dlg.setWindowTitle("Helicon 合成参数")
+            layout = QVBoxLayout(dlg)
+            layout.setContentsMargins(16, 16, 16, 16)
+            layout.addWidget(self._helicon_params)
+            dlg.resize(720, 330)
+            self._grouping_helicon_params_dialog = dlg
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
 
     def _on_open_grouping(self) -> None:
         """Open (or re-focus) the grouping/compose popup — web 分组工具 toggle.
 
-        智能：打开时若分组面板还没绑定标本，自动取一个编号（**无需激活**）：
-        当前选中 → 激活编号 → 右侧命名表单正在填的编号（实时预览）。这样不激活也能
-        直接点「新组」加组1/组2（web 同款 activeSpecimen || namingTargetSpecimen）。
+        智能：打开时若分组面板还没绑定标本，自动取一个编号：
+        当前载入 → 激活编号 → 连编号都没有则临时分组。**命名表单未激活的草稿编号不
+        再绑定/显示**（用户：没激活不用显示）——此前回退到命名草稿的档已砍，与 web
+        oracle `namingTargetSpecimen` 分道，桌面端有意取舍。
         """
         if not getattr(self._grouping, "_uid", None):
             from app.services.grouping_service import ADHOC_GROUPING_UID
             uid = (
                 self._current_uid
                 or self._get_active_uid()
-                or self._naming.current_uid()  # 命名表单实时编号 → 无需激活
-                or ADHOC_GROUPING_UID  # 连编号都没有 → 临时分组,输出默认 组序.tif
+                or ADHOC_GROUPING_UID  # 没载入也没激活 → 临时分组,输出默认 组序.tif
             )
             db = self.ctx.get_db()
             if not db:
@@ -1790,12 +1886,14 @@ class WorkbenchView(BaseView):
                 self._naming.load_specimen(sp_dict)
                 self._metadata.load_specimen(sp)
                 self._taxon_card.load_specimen(sp)
+                self._sync_uid_display_summary()
                 self._collab_card.load_specimen(uid)
         except Exception:
             pass
 
         # Populate ② 成果内容 column from grouping data
         self._refresh_results_column(uid, grouping)
+
         # Backfill empty capture fields from a matching 采集记录. load_specimen sets
         # the four location keys via direct setText (no keys_committed signal), so
         # _apply_collection_autofill would otherwise never run on the load path →
@@ -1806,6 +1904,22 @@ class WorkbenchView(BaseView):
         except Exception:
             pass
 
+    def _sync_uid_display_summary(self) -> None:
+        """Mirror existing metadata into the UID card's non-identity summary."""
+        values = {}
+        try:
+            values.update(self._metadata.current_values())
+        except Exception:
+            pass
+        try:
+            values.update(self._taxon_card.field_values())
+        except Exception:
+            pass
+        try:
+            values["photo_notes"] = self._naming._photo_notes.toPlainText().strip()
+            self._naming.set_display_metadata(values)
+        except Exception:
+            pass
 
     # ── Collection-record auto-fill ─────────────────────────────────────────────
 

@@ -382,6 +382,42 @@ class TestNewSpecimenDateCarryOver:
         finally:
             db.close()
 
+    def test_new_specimen_carries_collection_context_not_species(self, tmp_path):
+        """新增编号沿用工作区上下文，但清空物种编号和标本专属备注。"""
+        w, db = self._make_workbench(tmp_path)
+        try:
+            n = w._naming
+            n._province.setText("FJ")
+            n._site.setText("XM")
+            n._station.setText("B2")
+            n._species_id.setText("DLC004")
+            n._storage.setText("T95E")
+            n._collection_date.setText("20260613")
+            n._photo_date.setText("20260613")
+            n._photo_notes.setPlainText("上一号拍照备注")
+            w._metadata._collector.setText("张三")
+            w._metadata._lon.setText("119.5")
+            w._metadata._lat.setText("26.3")
+            w._metadata._geo_area.setText("三门湾")
+
+            w._on_new_specimen()
+
+            assert n._province.text() == "FJ"
+            assert n._site.text() == "XM"
+            assert n._station.text() == "B2"
+            assert n._storage.text() == "T95E"
+            assert n._collection_date.text() == "20260613"
+            assert n._photo_date.text() == "20260613"
+            assert n._species_id.text() == ""
+            assert n._photo_notes.toPlainText() == ""
+            # 人员不沿用上一标本；新号使用项目人员默认（本项目未设则空）。
+            assert w._metadata._collector.text() == ""
+            assert w._metadata._lon.text() == "119.5"
+            assert w._metadata._lat.text() == "26.3"
+            assert w._metadata._geo_area.text() == "三门湾"
+        finally:
+            db.close()
+
     def test_new_specimen_dates_blank_when_no_previous(self, tmp_path):
         """无上一号(首次新增)时日期留空, 不报错。"""
         w, db = self._make_workbench(tmp_path)
@@ -687,7 +723,8 @@ class TestSpecimenSidebar:
         w._set_filter_mode("rna")
         assert w._list.count() == 1
         assert w._list.item(0).data(Qt.ItemDataRole.UserRole) == "FJ-XM-B2-DLC002-R95E-20260601"
-        assert w._count_label.text() == "1"
+        # Count label format: "{shown} / {total} · RNA {rna_total}" (total = pre-filter).
+        assert w._count_label.text() == "1 / 2 · RNA 1"
         db.close()
 
     def test_copy_current_uid_to_clipboard(self, tmp_path, qt_app):
@@ -1118,6 +1155,27 @@ class TestWorkbenchQuickPrint:
         w, ctx, uid, db = self._wb(tmp_path, "D95E")
         w._on_print_labels(uid)
         assert ctx.pending_label_uid == uid   # studio handoff set
+        db.close()
+
+    def test_sidebar_print_button_fallback_shows_status(self, tmp_path, monkeypatch):
+        from PyQt6.QtPrintSupport import QPrinterInfo
+        from PyQt6.QtWidgets import QPushButton
+        monkeypatch.setattr(QPrinterInfo, "defaultPrinterName",
+                            staticmethod(lambda: ""))   # no printer → fallback
+        w, ctx, uid, db = self._wb(tmp_path, "D95E")
+        messages = []
+        monkeypatch.setattr(w, "_status_message", lambda text, msec=4000: messages.append(text))
+        w._sidebar.refresh()
+        row = w._sidebar._list.itemWidget(w._sidebar._list.item(0))
+        print_btn = next(
+            b for b in row.findChildren(QPushButton)
+            if b.toolTip() == "按默认模板打印该编号标签"
+        )
+
+        print_btn.click()
+
+        assert ctx.pending_label_uid == uid
+        assert messages and "标签打印" in messages[-1]
         db.close()
 
     def test_on_print_labels_quick_path_no_fallback(self, tmp_path, monkeypatch):
@@ -2509,6 +2567,30 @@ class TestSaveButtonPersistsMetadata:
         assert row["station"] == "B2"
         assert row["storage"] == "T95E"
 
+    def test_save_blocks_incomplete_hard_required_uid(self, tmp_path, monkeypatch):
+        """只填地区/日期生成的短 UID 不得写入标本列表。"""
+        from PyQt6.QtWidgets import QMessageBox
+        w, ctx, db = self._make_view(tmp_path)
+        n = w._naming
+        n._province.setText("FJ")
+        n._collection_date.setText("20260601")
+        n._photo_date.setText("20260601")
+        n._update_preview()
+        warnings = []
+        monkeypatch.setattr(
+            QMessageBox,
+            "warning",
+            staticmethod(lambda *args, **kwargs: warnings.append(args)),
+        )
+
+        w._on_naming_save()
+
+        assert db.execute("SELECT count(*) FROM specimens").fetchone()[0] == 0
+        assert warnings
+        assert "样地" in warnings[0][2]
+        assert "物种编号" in warnings[0][2]
+        assert "保存方式" in warnings[0][2]
+
 
 # ── 场景1 修复3：新建即激活开关（默认关，opt-in） ──────────────────────────────
 
@@ -2741,10 +2823,15 @@ class TestOpenGroupingLoadsActive:
 
         assert w._grouping._uid == "FJ-XM-B2-DLC001-T95E-20260601"  # 自动载入了激活号
 
-    def test_open_uses_naming_draft_without_activation(self, tmp_path):
-        """不激活、不选中——只在右侧命名表单填了编号 → 开工具也能绑定它、可加组。"""
+    def test_open_without_activation_ignores_naming_draft(self, tmp_path):
+        """不激活、不选中——命名表单填了编号也**不显示/不绑定**它;落到临时分组。
+
+        未激活的编号不该出现在分组工具(用户:没激活不用显示)。砍掉命名草稿回退档
+        后,无激活+无载入 → ADHOC,草稿编号既不进 _uid 也不进 _uid_label。
+        """
         from app.views.workbench_view import WorkbenchView
         from app.services import activation_service
+        from app.services.grouping_service import ADHOC_GROUPING_UID
         project_dir = str(tmp_path / "proj")
         Path(project_dir, "_data").mkdir(parents=True)
         db = _make_db(str(tmp_path / "proj" / "_data" / "project.db"))
@@ -2763,8 +2850,9 @@ class TestOpenGroupingLoadsActive:
         assert uid
 
         w._on_open_grouping()
-        assert w._grouping._uid == uid                            # 绑到命名草稿编号
-        # 且能加组
+        assert w._grouping._uid == ADHOC_GROUPING_UID             # 落到临时,不绑草稿编号
+        assert uid not in w._grouping._uid_label.text()           # 草稿编号不显示
+        # 临时分组仍能加组
         w._grouping._add_group()
         assert len(w._grouping._grouping.groups) == 1
 
@@ -3806,13 +3894,17 @@ class TestRestoreLastProject:
 
     def test_restores_valid_workspace(self, tmp_path):
         import main
-        (tmp_path / "_data").mkdir()
-        (tmp_path / "_data" / "project.db").write_bytes(b"x")
+        root = tmp_path / "survey"
+        workspace = root / "section-a"
+        (workspace / "_data").mkdir(parents=True)
+        (workspace / "_data" / "project.db").write_bytes(b"x")
         ctx = MagicMock()
-        ctx.settings.last_project_dir = str(tmp_path)
+        ctx.settings.last_project_dir = str(workspace)
+        ctx.settings.project_tree_root = str(root)
         win = MagicMock()
         assert main._restore_last_project(ctx, win) is True
-        assert ctx.current_project_dir == str(tmp_path)
+        assert ctx.current_project_dir == str(workspace)
+        assert ctx.current_project_root == str(root)
         win.refresh_context_bar.assert_called_once()
 
     def test_skips_invalid_dir(self, tmp_path):

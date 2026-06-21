@@ -1299,6 +1299,36 @@ QFrame#BatchIdentBar {{
 }}
 QFrame#Divider {{ background-color: {t["border"]}; max-height: 1px; min-height: 1px; border: none; }}
 
+/* ── Grouping tool popup (分组工具) ─────────────────────────────────── */
+/* Soft-gray dialog bg lets the inner WorkbenchSection card's shadow breathe
+   (the popup host pads the layout so the shadow is no longer clipped). */
+QDialog#GroupingDialog {{ background-color: {t["bg"]}; }}
+/* Draft-group JPG drop zone: dashed inset when empty, hairline white when filled. */
+QListWidget#GroupDropZoneEmpty {{
+    background-color: {t["panel_inset"]};
+    border: 1px dashed {t["border_strong"]};
+    border-radius: {t["radius_sm"]};
+}}
+QListWidget#GroupDropZone {{
+    background-color: {t["panel"]};
+    border: 1px solid {t["border"]};
+    border-radius: {t["radius_sm"]};
+}}
+/* Per-group accent chips (cycle blue/green/teal/amber by index). Light-tint
+   literal convention matches the existing ChipRaw/ChipAttribated rules; the
+   objectName GroupChipN is set in _DraftGroupRow._setup_ui. */
+QLabel#GroupChip0, QLabel#GroupChip1, QLabel#GroupChip2, QLabel#GroupChip3 {{
+    border-radius: 999px;
+    font-size: {t["font_xs"]};
+    font-weight: 600;
+    padding: 2px 10px;
+    letter-spacing: 0.2px;
+}}
+QLabel#GroupChip0 {{ background-color: rgba(37,99,235,0.10); color: #2563eb; }}
+QLabel#GroupChip1 {{ background-color: rgba(21,128,61,0.11); color: #15803d; }}
+QLabel#GroupChip2 {{ background-color: rgba(15,118,110,0.12); color: #0f766e; }}
+QLabel#GroupChip3 {{ background-color: rgba(180,83,9,0.11); color: #b45309; }}
+
 /* ── Project settings drawer (right-edge overlay) + backdrop scrim ─── */
 QWidget#SettingsDrawer {{
     background: {panel_grad};
@@ -1702,10 +1732,16 @@ QFrame#SpecimenRowActive:hover {{
     border-color: {t["accent_glow"]};
     border-left: 4px solid {t["accent"]};
 }}
+QFrame#SpecimenRow[selected="true"],
+QFrame#SpecimenRowActive[selected="true"] {{
+    background-color: {t["nav_selected_bg"]};
+    border: 2px solid {t["accent"]};
+    border-left: 6px solid {t["accent"]};
+}}
 QLabel#SpecimenUid {{
     font-family: {mono};
     color: {t["text"]};
-    font-size: {t["font_body"]};
+    font-size: {t["font_sm"]};
     font-weight: 700;
     letter-spacing: 0;
 }}
@@ -1715,12 +1751,11 @@ QLabel#SpecimenSubtext {{
     font-weight: 500;
 }}
 QLabel#SpecimenMissingText {{
-    color: {t["warn"]};
-    background-color: rgba(245, 158, 11, 0.10);
-    border: 1px solid rgba(245, 158, 11, 0.22);
-    border-radius: {t["radius_sm"]};
-    padding: 3px 7px;
-    font-size: {t["font_sm"]};
+    color: {t["muted"]};
+    background-color: transparent;
+    border: none;
+    padding: 0px;
+    font-size: {t["font_xs"]};
     font-weight: 600;
 }}
 QLabel#SpecimenBadge {{
@@ -1750,9 +1785,22 @@ QLabel#SpecimenActivePill {{
     color: {t["bg"]};
     background-color: {t["accent"]};
     border-radius: {t["radius_pill"]};
-    padding: 2px 8px;
+    padding: 1px 7px;
     font-size: {t["font_xs"]};
     font-weight: 700;
+}}
+QPushButton#SpecimenPrintButton {{
+    background-color: transparent;
+    border: 1px solid {t["border_medium"]};
+    border-radius: {t["radius_sm"]};
+    padding: 0px;
+}}
+QPushButton#SpecimenPrintButton:hover {{
+    background-color: {t["accent_soft"]};
+    border-color: {t["accent"]};
+}}
+QPushButton#SpecimenPrintButton:pressed {{
+    background-color: {t["accent"]};
 }}
 
 /* ── Generic list ────────────────────────────────────────────────── */

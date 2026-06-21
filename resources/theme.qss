@@ -709,21 +709,30 @@ QFrame#SpecimenRowActive:hover {
     border-color: rgba(15,118,110,0.24);
     border-left: 4px solid #0f766e;
 }
+QFrame#SpecimenRow[selected="true"],
+QFrame#SpecimenRowActive[selected="true"] {
+    background-color: #e6f5f3;
+    border: 2px solid #0f766e;
+    border-left: 6px solid #0f766e;
+}
 QLabel#SpecimenUid {
     font-family: "JetBrains Mono", "Cascadia Code", "SF Mono", Consolas, "Courier New", "DejaVu Sans Mono", monospace;
     color: #17212b;
-    font-size: 13px;
+    font-size: 12px;
     font-weight: 700;
     letter-spacing: 0;
 }
 QLabel#SpecimenSubtext {
-    color: #64748b;
-    font-size: 12px;
+    color: #334155;
+    font-size: 13px;
     font-weight: 500;
 }
 QLabel#SpecimenMissingText {
     color: #64748b;
-    font-size: 12px;
+    background-color: transparent;
+    border: none;
+    padding: 0px;
+    font-size: 11px;
     font-weight: 600;
 }
 QLabel#SpecimenBadge {
@@ -735,13 +744,40 @@ QLabel#SpecimenBadge {
     font-size: 11px;
     font-weight: 600;
 }
-QLabel#SpecimenActivePill {
-    color: #f4f6f8;
-    background-color: #0f766e;
+QLabel#SpecimenRnaBadge {
+    color: #0f766e;
+    background-color: rgba(20, 184, 166, 0.14);
+    border: 1px solid rgba(15, 118, 110, 0.28);
     border-radius: 999px;
     padding: 2px 8px;
     font-size: 11px;
     font-weight: 700;
+}
+QLabel#SpecimenStorageText {
+    color: #64748b;
+    font-size: 11px;
+    font-weight: 600;
+}
+QLabel#SpecimenActivePill {
+    color: #f4f6f8;
+    background-color: #0f766e;
+    border-radius: 999px;
+    padding: 1px 7px;
+    font-size: 11px;
+    font-weight: 700;
+}
+QPushButton#SpecimenPrintButton {
+    background-color: transparent;
+    border: 1px solid rgba(15,23,42,0.13);
+    border-radius: 6px;
+    padding: 0px;
+}
+QPushButton#SpecimenPrintButton:hover {
+    background-color: rgba(15,118,110,0.11);
+    border-color: #0f766e;
+}
+QPushButton#SpecimenPrintButton:pressed {
+    background-color: #0f766e;
 }
 
 /* ── Generic list ────────────────────────────────────────────────── */
