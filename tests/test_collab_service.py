@@ -438,6 +438,16 @@ class TestSubnetScan:
             found = svc.scan_lan(hosts=["10.0.0.9"], ports=[5050])
         assert found == []
 
+    def test_scan_skips_self_on_another_port(self):
+        """A stale second instance on this host is not a LAN teammate."""
+        svc = CollabService()
+        svc._port = 5051
+        from app.services import collab_service as _cs
+        with patch.object(_cs, "_get_local_ip", return_value="10.0.0.9"), \
+             patch("httpx.get", return_value=self._resp()):
+            found = svc.scan_lan(hosts=["10.0.0.9"], ports=[5050])
+        assert found == []
+
 
 # ── mDNS peer enrichment (regression: group_code must be populated) ───────────
 
@@ -468,6 +478,29 @@ class TestMdnsEnrich:
         svc.peers_changed.connect(lambda: fired.append(1))
         svc._on_peer_found("5.6.7.8", 5050, "h")
         assert fired
+
+    def test_on_peer_found_skips_same_host_on_another_port(self):
+        """mDNS must not list another local process as an online member."""
+        svc = CollabService()
+        svc._port = 5051
+        svc._fetch_peer_info = MagicMock()
+        from app.services import collab_service as _cs
+        with patch.object(_cs, "_get_local_ip", return_value="10.0.0.9"):
+            svc._on_peer_found("10.0.0.9", 5050, "this-host")
+        assert svc.peers() == []
+        svc._fetch_peer_info.assert_not_called()
+
+
+class TestSelfPeerFiltering:
+    def test_manual_connection_rejects_same_host_on_another_port(self):
+        svc = CollabService()
+        svc._port = 5051
+        svc._fetch_peer_info = MagicMock()
+        from app.services import collab_service as _cs
+        with patch.object(_cs, "_get_local_ip", return_value="10.0.0.9"):
+            svc.add_manual_peer("10.0.0.9", 5050)
+        assert svc.peers() == []
+        svc._fetch_peer_info.assert_not_called()
 
 
 # ── Collaboration-group code (group-scoped sync) ─────────────────────────────

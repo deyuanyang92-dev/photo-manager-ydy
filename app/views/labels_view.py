@@ -1597,6 +1597,29 @@ QPushButton#PrintBtn:disabled {{
         Paper is configured from the first job; subsequent jobs are appended
         after a page break (see :func:`label_print.paint_jobs`).
         """
+        from app.utils import windows_print
+        if windows_print.is_available():
+            try:
+                ok, printer_name = windows_print.print_jobs_with_windows_dialog(
+                    jobs,
+                    document_name="标本标签",
+                    cut_marks=bool(self._imposition.get("cutMarks")),
+                    draw_crop_marks=self._draw_crop_marks,
+                )
+            except Exception as exc:
+                QMessageBox.critical(self, "打印失败", str(exc))
+                return
+            if ok:
+                try:
+                    from app.services.activity_audit_service import default_actor, record_print_jobs
+                    record_print_jobs(
+                        self.ctx.get_db(), jobs, actor=default_actor(self.ctx),
+                        printer_name=printer_name or "Windows 打印机",
+                    )
+                except Exception:
+                    pass
+            return
+
         dlg = PrintJobDialog(jobs, self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return

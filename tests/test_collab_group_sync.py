@@ -23,42 +23,56 @@ from app.services.collab_service import (
 )
 
 
+def _post(app, path: str, payload: dict):
+    """Call an ASGI app without Starlette's thread-based TestClient.
+
+    Starlette 1.0 + AnyIO 4.12 can deadlock TestClient's blocking portal under
+    Python 3.13 before the request reaches the endpoint.  ASGITransport tests
+    the same application directly and has no background lifecycle thread.
+    """
+    import asyncio
+    import httpx
+
+    async def request():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post(path, json=payload)
+
+    return asyncio.run(request())
+
+
 # ── FastAPI create endpoint: reject cross-group ──────────────────────────────
 
 class TestCreateEndpointGroupGuard:
     """POST /api/collab/tasks/create must reject claims from a foreign group."""
 
     def _client(self, local_group: str):
-        from fastapi.testclient import TestClient
         store = TaskStore()
         app = _build_fastapi_app(store, lambda: {"groupCode": local_group})
-        return TestClient(app), store
+        return app, store
 
     def test_same_group_create_accepted(self):
-        client, store = self._client("G1")
-        r = client.post("/api/collab/tasks/create",
-                        json={"uid": "U1", "groupCode": "G1"})
+        app, store = self._client("G1")
+        r = _post(app, "/api/collab/tasks/create", {"uid": "U1", "groupCode": "G1"})
         assert r.status_code == 201
         assert store.exists("U1")
 
     def test_foreign_group_create_rejected_403(self):
-        client, store = self._client("G1")
-        r = client.post("/api/collab/tasks/create",
-                        json={"uid": "U2", "groupCode": "G2"})
+        app, store = self._client("G1")
+        r = _post(app, "/api/collab/tasks/create", {"uid": "U2", "groupCode": "G2"})
         assert r.status_code == 403
         assert not store.exists("U2")
 
     def test_missing_group_create_rejected_403(self):
-        client, store = self._client("G1")
-        r = client.post("/api/collab/tasks/create", json={"uid": "U3"})
+        app, store = self._client("G1")
+        r = _post(app, "/api/collab/tasks/create", {"uid": "U3"})
         assert r.status_code == 403
         assert not store.exists("U3")
 
     def test_node_with_empty_group_rejects_everyone(self):
         """A node not in any group must not accept foreign claims."""
-        client, store = self._client("")
-        r = client.post("/api/collab/tasks/create",
-                        json={"uid": "U4", "groupCode": "G1"})
+        app, store = self._client("")
+        r = _post(app, "/api/collab/tasks/create", {"uid": "U4", "groupCode": "G1"})
         assert r.status_code == 403
         assert not store.exists("U4")
 
@@ -67,24 +81,21 @@ class TestCreateEndpointGroupGuard:
 
 class TestReleaseEndpointGroupGuard:
     def _client(self, local_group: str):
-        from fastapi.testclient import TestClient
         store = TaskStore()
         app = _build_fastapi_app(store, lambda: {"groupCode": local_group})
-        return TestClient(app), store
+        return app, store
 
     def test_same_group_release_deletes(self):
-        client, store = self._client("G1")
+        app, store = self._client("G1")
         store.create("U1")
-        r = client.post("/api/collab/tasks/release",
-                        json={"uid": "U1", "groupCode": "G1"})
+        r = _post(app, "/api/collab/tasks/release", {"uid": "U1", "groupCode": "G1"})
         assert r.status_code == 200
         assert not store.exists("U1")
 
     def test_foreign_group_release_rejected_403(self):
-        client, store = self._client("G1")
+        app, store = self._client("G1")
         store.create("U1")
-        r = client.post("/api/collab/tasks/release",
-                        json={"uid": "U1", "groupCode": "G2"})
+        r = _post(app, "/api/collab/tasks/release", {"uid": "U1", "groupCode": "G2"})
         assert r.status_code == 403
         assert store.exists("U1")  # untouched
 
@@ -93,28 +104,27 @@ class TestReleaseEndpointGroupGuard:
 
 class TestReachbackEndpoint:
     def _client(self):
-        from fastapi.testclient import TestClient
-        return TestClient(_build_fastapi_app(TaskStore(), lambda: {"groupCode": "G1"}))
+        return _build_fastapi_app(TaskStore(), lambda: {"groupCode": "G1"})
 
     def test_reachback_reports_reachable(self):
         from unittest.mock import patch, MagicMock
-        client = self._client()
+        app = self._client()
         with patch("httpx.get", return_value=MagicMock(status_code=200)):
-            r = client.post("/api/node/reachback", json={"ip": "1.2.3.4", "port": 5050})
+            r = _post(app, "/api/node/reachback", {"ip": "1.2.3.4", "port": 5050})
         assert r.status_code == 200
         assert r.json()["reachable"] is True
 
     def test_reachback_reports_unreachable_on_error(self):
         from unittest.mock import patch
         import httpx
-        client = self._client()
+        app = self._client()
         with patch("httpx.get", side_effect=httpx.ConnectError("no")):
-            r = client.post("/api/node/reachback", json={"ip": "1.2.3.4", "port": 5050})
+            r = _post(app, "/api/node/reachback", {"ip": "1.2.3.4", "port": 5050})
         assert r.json()["reachable"] is False
 
     def test_reachback_requires_ip_port(self):
-        client = self._client()
-        r = client.post("/api/node/reachback", json={})
+        app = self._client()
+        r = _post(app, "/api/node/reachback", {})
         assert r.status_code == 400
 
 

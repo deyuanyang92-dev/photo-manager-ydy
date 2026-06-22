@@ -654,10 +654,13 @@ class LabelStep2Templates(QWidget):
         )
         if dlg.exec() == QDialog.DialogCode.Accepted and dlg.selected_key() is None:
             new_tmpl = dlg.edited_template()
+            new_dims = dlg.edited_dims()
+            new_tmpl["minSize"] = {
+                "w": float(new_dims["w"]), "h": float(new_dims["h"])
+            }
             lib.upsert({"id": rec_id, "name": rec.get("name") or "自定义", "template": new_tmpl})
             lib.set_selected_key(key_from_id(rec_id))
             # persist a dimension edited inside the designer as the custom size
-            new_dims = dlg.edited_dims()
             if (round(float(new_dims.get("w", 0)), 2) != round(float(dims.get("w", 0)), 2)
                     or round(float(new_dims.get("h", 0)), 2) != round(float(dims.get("h", 0)), 2)):
                 lib.set_custom_dims(float(new_dims["w"]), float(new_dims["h"]))

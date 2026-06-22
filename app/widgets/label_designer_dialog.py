@@ -2546,7 +2546,11 @@ class LabelDesignerDialog(QDialog):
         if not ok or not name.strip():
             return
         if self._lib is not None:
-            rec = self._lib.upsert({"name": name.strip(), "template": copy.deepcopy(self._tmpl)})
+            saved = copy.deepcopy(self._tmpl)
+            saved["minSize"] = {
+                "w": float(self._dims["w"]), "h": float(self._dims["h"])
+            }
+            rec = self._lib.upsert({"name": name.strip(), "template": saved})
             self._lib.set_selected_key(key_from_id(rec["id"]))
             self._selected_key = key_from_id(rec["id"])
         QMessageBox.information(self, "已保存", f"已保存模板「{name.strip()}」。")

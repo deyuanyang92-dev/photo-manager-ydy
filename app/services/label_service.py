@@ -471,7 +471,18 @@ class LabelService:
                 else lib.selected_key()
             )
             tmpl = resolve_template_key(lib, template_key)
-            dims = resolve_dims(lib, lib.selected_custom_dims())
+            # Project quick-print pins a template, so its physical label size
+            # must travel with that template.  Using the label studio's last
+            # selected size made a 60×40 template print on (for example) a
+            # 25×10 page.
+            template_size = tmpl.get("minSize") or {}
+            if template_size.get("w") and template_size.get("h"):
+                dims = {
+                    "w": float(template_size["w"]),
+                    "h": float(template_size["h"]),
+                }
+            else:
+                dims = resolve_dims(lib, lib.selected_custom_dims())
             ptype = (
                 (paper_types or {}).get(bucket)
                 if paper_types is not None

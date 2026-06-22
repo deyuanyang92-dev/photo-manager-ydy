@@ -1058,6 +1058,18 @@ class TestQuickPrintJobs:
         assert [j["bucket"] for j in jobs] == ["sample", "tissue"]
         assert jobs[0]["items"][0]["data"]["speciesId"] == "R2"
 
+    def test_explicit_template_uses_its_own_physical_size(self):
+        specs = [_sp()]
+        jobs = LabelService.quick_print_jobs_for_specimen(
+            specs,
+            unique_id(specs[0]),
+            copies=1,
+            paper_types=self._PAPERS,
+            template_keys={"sample": "detailed", "tissue": "tissueMini"},
+        )
+        assert jobs[0]["template"]["name"] == "详细"
+        assert jobs[0]["dims"] == {"w": 60.0, "h": 40.0}
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # QR error-correction level Q (hard rule)

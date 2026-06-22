@@ -1194,22 +1194,7 @@ class WorkbenchView(BaseView):
             return
         if self._quick_print_labels(uid):
             return
-        self.ctx.pending_label_uid = uid
-        win = self.window()
-        nav = getattr(win, "navigate_to", None)
-        navigated = False
-        if callable(nav):
-            nav("labels")
-            navigated = True
-            labels_view = getattr(win, "_views", {}).get("labels")
-            selector = getattr(labels_view, "select_uid", None)
-            if callable(selector):
-                selector(uid)
-        self._status_message(
-            f"已发送到标签打印：{uid}"
-            if navigated else
-            f"已准备标签打印：{uid}；请打开「标签打印」页"
-        )
+        self._status_message("未能开始打印，请检查项目设置中的打印机、模板和纸张。")
 
     def _quick_print_labels(self, uid: str) -> bool:
         """Send *uid*'s labels to printer per ``quick_print_mode`` setting.
@@ -1243,6 +1228,13 @@ class WorkbenchView(BaseView):
             local_print_settings = pss.load_setting_if_present(db, "print_settings")
             if local_print_settings is not None:
                 print_settings = pss.merge_print_settings(print_settings, local_print_settings)
+                if (
+                    "quick_print_mode" not in local_print_settings
+                    and "quick_print" in local_print_settings
+                ):
+                    print_settings["quick_print_mode"] = (
+                        "direct" if bool(local_print_settings["quick_print"]) else "studio"
+                    )
 
             # read quick_print_mode with backward compat for old quick_print bool.
             # DEFAULT_PRINT_SETTINGS now carries quick_print_mode="direct", so a
@@ -1255,12 +1247,17 @@ class WorkbenchView(BaseView):
             if quick_mode == "studio":
                 return False
 
-            default_printer = QPrinterInfo.defaultPrinterName()
-            available = {
-                p.printerName()
-                for p in QPrinterInfo.availablePrinters()
-                if p.printerName()
-            }
+            from app.utils import windows_print
+            if windows_print.is_available():
+                default_printer = windows_print.windows_default_printer_name()
+                available = set(windows_print.windows_printer_names())
+            else:
+                default_printer = QPrinterInfo.defaultPrinterName()
+                available = {
+                    p.printerName()
+                    for p in QPrinterInfo.availablePrinters()
+                    if p.printerName()
+                }
             sample_printer = self._resolve_quick_printer(
                 str(print_settings.get("sample_printer") or ""),
                 default_printer,
@@ -1271,7 +1268,7 @@ class WorkbenchView(BaseView):
                 default_printer,
                 available,
             )
-            if not sample_printer:
+            if quick_mode == "direct" and not sample_printer:
                 return False
 
             sample_paper_type = str(print_settings.get("sample_paper_type") or "")
@@ -1302,7 +1299,7 @@ class WorkbenchView(BaseView):
             queued_tissue = 0
             for job in jobs:
                 if job.get("bucket") == "tissue":
-                    if not tissue_printer:
+                    if quick_mode == "direct" and not tissue_printer:
                         return False
                     effective_tissue_paper = tissue_paper_type or label_service.persisted_paper_type("tissue")
                     if self._should_queue_tissue_label(
@@ -1335,45 +1332,73 @@ class WorkbenchView(BaseView):
 
             if quick_mode == "dialog":
                 # ── Dialog path: user picks printer, all jobs printed together ──
-                from app.widgets.print_dialog import PrintJobDialog
-                dlg = PrintJobDialog(direct_jobs, self)
-                if dlg.exec() != QDialog.DialogCode.Accepted:
-                    if queued_tissue:
-                        from app.services import rna_label_queue_service as rna_queue
-                        self._status_message(f"RNAlater 标签已加入合版队列：当前 {rna_queue.pending_count(db)} 张")
-                    return False
+                if windows_print.is_available():
+                    ok, printer_name = windows_print.print_jobs_with_windows_dialog(
+                        direct_jobs, document_name=f"标本标签 {uid}"
+                    )
+                    if not ok:
+                        # User cancelled the system dialog; this is handled and
+                        # must not navigate to the template-design workspace.
+                        return True
+                    if record_print_jobs is not None:
+                        try:
+                            record_print_jobs(
+                                db, direct_jobs, actor=actor,
+                                printer_name=printer_name or "Windows 打印机",
+                            )
+                        except Exception:
+                            pass
+                    printed = sum(len(j.get("labels") or []) for j in direct_jobs)
+                    printer_display = printer_name or "Windows 打印机"
+                    printers_used = [printer_display] if printed else []
+                    printed_details = [f"{len(direct_jobs)} 个作业 → {printer_display}"]
+                else:
+                    from app.widgets.print_dialog import PrintJobDialog
+                    dlg = PrintJobDialog(direct_jobs, self)
+                    if dlg.exec() != QDialog.DialogCode.Accepted:
+                        if queued_tissue:
+                            from app.services import rna_label_queue_service as rna_queue
+                            self._status_message(f"RNAlater 标签已加入合版队列：当前 {rna_queue.pending_count(db)} 张")
+                        return False
 
-                printer_name = dlg.selected_printer()
-                printer = label_print.build_printer(direct_jobs[0])
-                if printer_name:
-                    printer.setPrinterName(printer_name)
+                    printer_name = dlg.selected_printer()
+                    printer = label_print.build_printer(direct_jobs[0])
+                    if printer_name:
+                        printer.setPrinterName(printer_name)
 
-                if not label_print.paint_jobs(printer, direct_jobs):
-                    return False
-                if record_print_jobs is not None:
-                    try:
-                        record_print_jobs(
-                            db, direct_jobs, actor=actor,
-                            printer_name=printer_name or printer.printerName() or "default",
-                        )
-                    except Exception:
-                        pass
-                printed = sum(len(j.get("labels") or []) for j in direct_jobs)
-                printer_display = printer_name or printer.printerName() or "默认打印机"
-                printers_used = [printer_display] if printed else []
-                printed_details = [
-                    f"{len(direct_jobs)} 个作业 → {printer_display}"
-                ]
+                    if not label_print.paint_jobs(printer, direct_jobs):
+                        return False
+                    if record_print_jobs is not None:
+                        try:
+                            record_print_jobs(
+                                db, direct_jobs, actor=actor,
+                                printer_name=printer_name or printer.printerName() or "default",
+                            )
+                        except Exception:
+                            pass
+                    printed = sum(len(j.get("labels") or []) for j in direct_jobs)
+                    printer_display = printer_name or printer.printerName() or "默认打印机"
+                    printers_used = [printer_display] if printed else []
+                    printed_details = [f"{len(direct_jobs)} 个作业 → {printer_display}"]
             else:
                 # ── Direct path: each job to its configured printer ──
                 for job in direct_jobs:
                     target = tissue_printer if job.get("bucket") == "tissue" else sample_printer
                     if not target:
                         return False
-                    printer = label_print.build_printer(job)
-                    printer.setPrinterName(target)
-                    if not label_print.paint_jobs(printer, [job]):
-                        return False
+                    if windows_print.is_available():
+                        ok, used_printer = windows_print.print_jobs_with_windows_dialog(
+                            [job], document_name=f"标本标签 {uid}",
+                            printer_name=target, show_dialog=False,
+                        )
+                        if not ok:
+                            return False
+                        target = used_printer or target
+                    else:
+                        printer = label_print.build_printer(job)
+                        printer.setPrinterName(target)
+                        if not label_print.paint_jobs(printer, [job]):
+                            return False
                     if record_print_jobs is not None:
                         try:
                             record_print_jobs(db, [job], actor=actor, printer_name=target)
@@ -3085,14 +3110,22 @@ class WorkbenchView(BaseView):
         )
 
     def _batch_group_done(self, success: bool, uid: str, group_index: int) -> None:
-        """单组合成回调:成功且需整理 → 同步整理该组,然后链到下一组。"""
+        """单组合成回调：需要整理时，等待后台归档结束再处理下一组。"""
         if self._batch is None:
             return
         self._batch["done"] = int(self._batch.get("done", 0)) + 1
         if success and self._batch.get("organise"):
             # 一条龙:批量整理走静默模式——跳过激活拦截/TIF改名框/同名确认/成功提示,
             # 但 JPG删除四闸 + TIFF永不自动删 红线照常(都在 archive_group 内,未碰)。
-            self._on_organise_requested(uid, group_index, silent_batch=True)
+            started = self._on_organise_requested(
+                uid,
+                group_index,
+                silent_batch=True,
+                on_complete=lambda _ok: self._compose_next_in_batch(),
+            )
+            if not started:
+                self._compose_next_in_batch()
+            return
         elif not success:
             done = int(self._batch.get("done", 0))
             total = int(self._batch.get("total", done))
@@ -3328,6 +3361,7 @@ class WorkbenchView(BaseView):
         group_index: int,
         silent_batch: bool = False,
         allow_single_jpg: bool = False,
+        on_complete=None,
     ) -> bool:
         """Organise (archive) the composed group.
 
@@ -3494,7 +3528,10 @@ class WorkbenchView(BaseView):
             def _archive_failed(message: str) -> None:
                 _release_worker()
                 self._batch_status(f"整理失败：{message}")
-                QMessageBox.warning(self, "整理失败", message or "归档过程出现错误。")
+                if not silent_batch:
+                    QMessageBox.warning(self, "整理失败", message or "归档过程出现错误。")
+                if on_complete is not None:
+                    on_complete(False)
 
             def _archive_finished(result) -> None:
                 if not result.ok:
@@ -3555,6 +3592,8 @@ class WorkbenchView(BaseView):
                     self._batch_status(
                         f"整理完成：{Path(group.archive_zip).name}（{result.file_count} 张 JPG）"
                     )
+                if on_complete is not None:
+                    on_complete(True)
 
             worker.progress.connect(_archive_progress)
             worker.finished.connect(_archive_finished)

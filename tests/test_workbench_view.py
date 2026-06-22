@@ -987,6 +987,16 @@ class TestWorkbenchQuickPrint:
              "20260601", "20260601", project_dir),
         )
         db.commit()
+        from app.services.project_settings_service import save_setting
+        save_setting(db, "print_settings", {
+            "quick_print": True,
+            "quick_print_mode": "direct",
+            "sample_printer": "",
+            "tissue_printer": "",
+            "sample_paper_type": "label",
+            "tissue_paper_type": "label",
+            "tissue_strategy": "direct",
+        })
         ctx = _make_ctx(project_dir=project_dir, db=db)
         return WorkbenchView(ctx), ctx, uid, db
 
@@ -1029,7 +1039,10 @@ class TestWorkbenchQuickPrint:
         w, ctx, uid, db = self._wb(tmp_path, "RD75E")
         save_setting(db, "print_settings", {
             "quick_print": True,
+            "quick_print_mode": "direct",
             "include_tissue": False,
+            "sample_printer": "",
+            "tissue_printer": "",
         })
         assert w._quick_print_labels(uid) is True
         assert captured["buckets"] == ["sample"]
@@ -1056,7 +1069,13 @@ class TestWorkbenchQuickPrint:
         monkeypatch.setattr(w, "_status_message", lambda text, msec=4000: messages.append(text))
         save_setting(db, "print_settings", {
             "quick_print": True,
+            "quick_print_mode": "direct",
             "include_tissue": True,
+            "sample_printer": "",
+            "tissue_printer": "",
+            "sample_paper_type": "label",
+            "tissue_paper_type": "label",
+            "tissue_strategy": "direct",
             "sample_template_key": "detailed",
             "tissue_template_key": "tissueMini",
         })
@@ -1118,6 +1137,16 @@ class TestWorkbenchQuickPrint:
         monkeypatch.setattr(lp, "build_printer", lambda job, **kw: MagicMock())
         monkeypatch.setattr(lp, "paint_jobs", _fake_paint)
         w, ctx, uid, db = self._wb(tmp_path, "RD75E")
+        from app.services.project_settings_service import save_setting
+        save_setting(db, "print_settings", {
+            "quick_print": True,
+            "quick_print_mode": "direct",
+            "sample_printer": "",
+            "tissue_printer": "",
+            "sample_paper_type": "label",
+            "tissue_paper_type": "a4",
+            "tissue_strategy": "auto",
+        })
         assert w._quick_print_labels(uid) is True
         assert captured["buckets"] == ["sample"]
         assert rna_queue.pending_uids(db) == [uid]
@@ -1148,13 +1177,14 @@ class TestWorkbenchQuickPrint:
         assert w._quick_print_labels(uid) is False
         db.close()
 
-    def test_on_print_labels_falls_back_to_studio(self, tmp_path, monkeypatch):
+    def test_on_print_labels_does_not_fall_back_to_studio(self, tmp_path, monkeypatch):
         from PyQt6.QtPrintSupport import QPrinterInfo
         monkeypatch.setattr(QPrinterInfo, "defaultPrinterName",
                             staticmethod(lambda: ""))   # no printer → fallback
         w, ctx, uid, db = self._wb(tmp_path, "D95E")
+        ctx.pending_label_uid = None
         w._on_print_labels(uid)
-        assert ctx.pending_label_uid == uid   # studio handoff set
+        assert ctx.pending_label_uid is None
         db.close()
 
     def test_sidebar_print_button_fallback_shows_status(self, tmp_path, monkeypatch):
@@ -1163,6 +1193,7 @@ class TestWorkbenchQuickPrint:
         monkeypatch.setattr(QPrinterInfo, "defaultPrinterName",
                             staticmethod(lambda: ""))   # no printer → fallback
         w, ctx, uid, db = self._wb(tmp_path, "D95E")
+        ctx.pending_label_uid = None
         messages = []
         monkeypatch.setattr(w, "_status_message", lambda text, msec=4000: messages.append(text))
         w._sidebar.refresh()
@@ -1174,8 +1205,8 @@ class TestWorkbenchQuickPrint:
 
         print_btn.click()
 
-        assert ctx.pending_label_uid == uid
-        assert messages and "标签打印" in messages[-1]
+        assert ctx.pending_label_uid is None
+        assert messages and "未能开始打印" in messages[-1]
         db.close()
 
     def test_on_print_labels_quick_path_no_fallback(self, tmp_path, monkeypatch):
@@ -3560,7 +3591,7 @@ class TestBatchComposeOrganise:
     ):
         """已有 TIF 的组点[合成+整理]应直接归档，不应被 Helicon 检查拦截。"""
         from app.services.grouping_service import Group, save_grouping, load_grouping
-        from app.workers import supp_compression_worker
+        from app.services import archive_service
         from PyQt6.QtWidgets import QMessageBox
 
         w, ctx, uid, db = self._build(tmp_path)
@@ -3601,7 +3632,7 @@ class TestBatchComposeOrganise:
             Path(result.zip_path).write_bytes(b"zip")
             return result
 
-        monkeypatch.setattr(supp_compression_worker, "archive_group", _fake_archive)
+        monkeypatch.setattr(archive_service, "archive_group", _fake_archive)
 
         w._start_compose_batch(uid, organise=True)
 
@@ -3794,7 +3825,7 @@ class TestAdhocGrouping:
         assert Path(captured["out"]).name == "2.tif"  # 组1 → 2.tif
         db.close()
 
-    def test_batch_adhoc_one_shot_silent_no_prompts(self, tmp_path, monkeypatch):
+    def test_batch_adhoc_one_shot_silent_no_prompts(self, qtbot, tmp_path, monkeypatch):
         """无编号 [合成+整理] 一条龙:两组都 合成→打包→移results,全程零确认框。"""
         from app.services.grouping_service import (
             ADHOC_GROUPING_UID, load_grouping,
@@ -3813,12 +3844,13 @@ class TestAdhocGrouping:
 
         class _R:
             ok = True
+            file_count = 3
             saved_percent = 10
             delete_jpg = False
             requested_delete_jpg = False
             deletion_skipped_reason = ""
 
-        def _fake_archive(jpg_paths, tiff_path, project_dir, delete_jpg):
+        def _fake_archive(jpg_paths, tiff_path, project_dir, delete_jpg, **kwargs):
             z = str(Path(tiff_path).with_suffix(".zip"))
             Path(z).write_bytes(b"zip")
             r = _R()
@@ -3838,6 +3870,14 @@ class TestAdhocGrouping:
                             staticmethod(lambda *a, **k: prompts.append(a)))
 
         w._start_compose_batch(ADHOC_GROUPING_UID, organise=True)
+
+        qtbot.waitUntil(
+            lambda: all(
+                g.status == "organized"
+                for g in load_grouping(db, ADHOC_GROUPING_UID).groups
+            ),
+            timeout=5000,
+        )
 
         # 两组都已整理 → status organized
         groups = {g.group_index: g for g in load_grouping(db, ADHOC_GROUPING_UID).groups}

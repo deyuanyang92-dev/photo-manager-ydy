@@ -98,7 +98,7 @@ DEFAULT_PRINT_SETTINGS: dict[str, Any] = {
     #   "direct" — print directly to configured printer (current behavior)
     #   "dialog" — show printer-selection dialog
     #   "studio" — open the Labels print page (legacy quick_print=False)
-    "quick_print_mode": "direct",
+    "quick_print_mode": "dialog",
     "include_tissue": True,
     # Empty printer name = use the current system default.  Separate fields let
     # sample-bottle and RNAlater tube labels go to different devices/papers.
@@ -106,12 +106,12 @@ DEFAULT_PRINT_SETTINGS: dict[str, Any] = {
     "tissue_printer": "",
     # Empty = follow the paper mode last chosen in 标签打印. Otherwise one of
     # "label", "a4", "a5".
-    "sample_paper_type": "",
-    "tissue_paper_type": "",
+    "sample_paper_type": "label",
+    "tissue_paper_type": "label",
     # Empty = follow the template last chosen in 标签打印. Otherwise a built-in
     # template key or "custom:<template_id>" from the per-bucket library.
-    "sample_template_key": "",
-    "tissue_template_key": "",
+    "sample_template_key": "standard",
+    "tissue_template_key": "tissueCompact",
     # auto: direct print when the tissue route is a dedicated/small-label path;
     # queue when tissue uses a sheet paper on the same printer.
     "tissue_strategy": "auto",  # auto/direct/queue

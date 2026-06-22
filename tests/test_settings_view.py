@@ -13,6 +13,9 @@ Checks:
 from __future__ import annotations
 
 import os
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
 import pytest
 
 # ── Ensure offscreen platform is set before Qt is imported ───────────────────
@@ -159,6 +162,18 @@ class TestCollabTab:
         assert view._collab_pairing_show_btn is not None
         assert view._collab_pairing_input is not None
         assert view._collab_health_light is not None
+
+    def test_health_status_shows_diagnostic_reason(self, view: SettingsView) -> None:
+        svc = MagicMock()
+        svc.overall_health.return_value = "yellow"
+        svc.diagnostics.return_value = [
+            SimpleNamespace(code="config_no_group", title="未设置协作组码")
+        ]
+        view.ctx.collab_service = svc
+
+        view._refresh_collab_health()
+
+        assert view._collab_health_text.text() == "有注意事项：未设置协作组码"
 
 
 # ── Product workflow: verified archive replaces loose JPGs ──────────────────

@@ -136,22 +136,25 @@ def test_print_settings_roundtrip(qtbot, db):
     d = ProjectSettingsDrawer(ctx)
     qtbot.addWidget(d)
     d.refresh()
-    d._quick_print_mode.setCurrentIndex(d._quick_print_mode.findData("studio"))
+    assert d._quick_print_mode.findData("studio") == -1
+    d._quick_print_mode.setCurrentIndex(d._quick_print_mode.findData("dialog"))
     d._print_tissue_cb.setChecked(True)
     d._save_print_settings()
     data = load_setting(db, "print_settings", DEFAULT_PRINT_SETTINGS)
-    assert data["quick_print"] is False
+    assert data["quick_print"] is True
     assert data["include_tissue"] is True
-    assert data["sample_printer"] == ""
-    assert data["tissue_printer"] == ""
-    assert data["sample_paper_type"] == ""
-    assert data["tissue_paper_type"] == ""
-    assert data["sample_template_key"] == ""
-    assert data["tissue_template_key"] == ""
-    assert data["tissue_strategy"] == "auto"
+    assert data["sample_printer"] == str(d._sample_printer_combo.currentData() or "")
+    assert data["tissue_printer"] == str(d._tissue_printer_combo.currentData() or "")
+    assert data["sample_paper_type"] == str(d._sample_paper_combo.currentData())
+    assert data["tissue_paper_type"] == str(d._tissue_paper_combo.currentData())
+    assert data["sample_template_key"] == str(d._sample_template_combo.currentData())
+    assert data["tissue_template_key"] == str(d._tissue_template_combo.currentData())
+    assert data["tissue_strategy"] == str(d._tissue_strategy_combo.currentData())
     assert d._save_print_default_btn.text() == "设为全局默认"
-    assert "酒精标签排版设计" in d._sample_imposition_btn.text()
-    assert "RNA 标签排版设计" in d._tissue_imposition_btn.text()
+    if d._sample_paper_combo.currentData() == "label":
+        assert "无需排版" in d._sample_imposition_btn.text()
+    else:
+        assert "多标签排版" in d._sample_imposition_btn.text()
 
 
 def test_imposition_buttons_follow_sheet_paper_selection(qtbot, db):
@@ -165,7 +168,7 @@ def test_imposition_buttons_follow_sheet_paper_selection(qtbot, db):
     d._tissue_paper_combo.setCurrentIndex(d._tissue_paper_combo.findData("label"))
     assert not d._sample_imposition_btn.isEnabled()
     assert not d._tissue_imposition_btn.isEnabled()
-    assert "选择 A4/A5" in d._sample_imposition_btn.text()
+    assert "无需排版" in d._sample_imposition_btn.text()
     assert "直接打印" in d._sample_imposition_btn.toolTip()
 
     d._sample_paper_combo.setCurrentIndex(d._sample_paper_combo.findData("a4"))
@@ -275,3 +278,41 @@ def test_storage_save_emits_change_and_supports_multiline(qtbot, db):
     d._load_storage_edit_form("D95E", "第一行\n第二行详细说明")
     with qtbot.waitSignal(d.storages_changed, timeout=1000):
         d._on_save_storage()
+    assert "已保存" in d._storage_save_status.text()
+    assert d._new_code_edit.text() == "D95E"
+
+
+def test_builtin_override_remains_visible_in_custom_list(qtbot, db):
+    """Editing a built-in code is a project override and must not disappear."""
+    from PyQt6.QtWidgets import QPushButton
+    from app.widgets.project_settings_drawer import ProjectSettingsDrawer
+
+    d = ProjectSettingsDrawer(_make_ctx(db=db))
+    qtbot.addWidget(d)
+    d.refresh()
+    d._load_storage_edit_form("T79", "项目修正说明")
+    d._on_save_storage()
+
+    texts = []
+    for i in range(d._custom_list_lay.count()):
+        widget = d._custom_list_lay.itemAt(i).widget()
+        if widget:
+            texts.extend(btn.text() for btn in widget.findChildren(QPushButton))
+    assert any("T79" in text and "修改内置" in text for text in texts)
+
+
+def test_new_storage_has_explicit_add_mode(qtbot, db):
+    from app.widgets.project_settings_drawer import ProjectSettingsDrawer
+
+    d = ProjectSettingsDrawer(_make_ctx(db=db))
+    qtbot.addWidget(d)
+    d.refresh()
+    d._load_storage_edit_form("RD79", "旧说明")
+    assert d._storage_save_btn.text() == "保存修改"
+    assert d._new_code_edit.isReadOnly()
+
+    d._new_storage_btn.click()
+    assert d._storage_editor_title.text() == "新增保存方式"
+    assert d._storage_save_btn.text() == "添加"
+    assert d._new_code_edit.text() == ""
+    assert not d._new_code_edit.isReadOnly()

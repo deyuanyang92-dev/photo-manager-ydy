@@ -123,7 +123,7 @@ class TestConstruction:
 
     def test_nav_title(self):
         from app.views.overview_view import OverviewView
-        assert OverviewView.nav_title == "最近工作区"
+        assert OverviewView.nav_title == "最近使用"
 
     def test_nav_icon(self):
         from app.views.overview_view import OverviewView
@@ -167,12 +167,12 @@ class TestHeaderButtons:
     def test_new_project_button_exists(self):
         w = self._make_view()
         assert w._btn_new is not None
-        assert "新建项目" in w._btn_new.text()
+        assert "新建工作区" in w._btn_new.text()
 
     def test_open_workspace_button_exists(self):
         w = self._make_view()
         assert w._btn_open is not None
-        assert "打开工作区" in w._btn_open.text()
+        assert "打开文件夹" in w._btn_open.text()
 
     def test_new_project_button_is_primary(self):
         w = self._make_view()

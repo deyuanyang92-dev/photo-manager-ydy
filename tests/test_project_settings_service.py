@@ -59,12 +59,12 @@ def test_tiff_defaults_match_oracle():
 
 
 def test_builtin_storages_count():
-    assert len(BUILTIN_STORAGES) == 15
+    assert len(BUILTIN_STORAGES) == 14
     codes = [s["code"] for s in BUILTIN_STORAGES]
     assert "T95E" in codes
-    assert "RGLU" in codes
+    assert "RD79" in codes
     rna = [s for s in BUILTIN_STORAGES if s["transcriptome"]]
-    assert len(rna) == 8
+    assert len(rna) == 7
 
 
 def test_resolve_storage_detail_prefers_project_override(db):

@@ -299,11 +299,23 @@ class ProjectSettingsDrawer(QWidget):
 
         lay.addWidget(_divider())
 
-        custom_lbl = QLabel("自定义保存方式")
+        custom_head = QWidget()
+        custom_head_lay = QHBoxLayout(custom_head)
+        custom_head_lay.setContentsMargins(0, 0, 0, 0)
+        custom_lbl = QLabel("新增的保存方式")
         custom_lbl.setObjectName("Section")
-        lay.addWidget(custom_lbl)
+        custom_head_lay.addWidget(custom_lbl)
+        custom_head_lay.addStretch()
+        self._new_storage_btn = QPushButton("＋ 新增保存方式")
+        self._new_storage_btn.setObjectName("Outline")
+        self._new_storage_btn.setFixedHeight(28)
+        self._new_storage_btn.clicked.connect(self._start_new_storage)
+        custom_head_lay.addWidget(self._new_storage_btn)
+        lay.addWidget(custom_head)
 
-        pick_hint = QLabel("点击内置或自定义条目，可在下方编辑后保存。")
+        pick_hint = QLabel(
+            "修改已有方式：点击上方表格。新增成功后，新编码会显示在这里。"
+        )
         pick_hint.setObjectName("MutedSmall")
         pick_hint.setWordWrap(True)
         lay.addWidget(pick_hint)
@@ -316,9 +328,9 @@ class ProjectSettingsDrawer(QWidget):
         lay.addWidget(_divider())
 
         # Add / edit form
-        add_lbl = QLabel("编辑保存方式")
-        add_lbl.setObjectName("MutedSmall")
-        lay.addWidget(add_lbl)
+        self._storage_editor_title = QLabel("新增保存方式")
+        self._storage_editor_title.setObjectName("Section")
+        lay.addWidget(self._storage_editor_title)
 
         self._new_code_edit = QLineEdit()
         self._new_code_edit.setPlaceholderText("编码（如 T95E、RD79）")
@@ -341,21 +353,27 @@ class ProjectSettingsDrawer(QWidget):
         )
 
         add_btn_row = QHBoxLayout()
-        clear_btn = QPushButton("清空")
+        clear_btn = QPushButton("取消")
         clear_btn.setObjectName("Ghost")
         clear_btn.setFixedHeight(28)
         clear_btn.clicked.connect(self._on_clear_custom_form)
         add_btn_row.addWidget(clear_btn)
-        add_new_btn = QPushButton("保存")
-        add_new_btn.setObjectName("Primary")
-        add_new_btn.setFixedHeight(28)
-        add_new_btn.clicked.connect(self._on_save_storage)
-        add_btn_row.addWidget(add_new_btn)
+        self._storage_save_btn = QPushButton("添加")
+        self._storage_save_btn.setObjectName("Primary")
+        self._storage_save_btn.setFixedHeight(28)
+        self._storage_save_btn.clicked.connect(self._on_save_storage)
+        add_btn_row.addWidget(self._storage_save_btn)
         add_btn_row.addStretch()
         lay.addLayout(add_btn_row)
 
+        self._storage_save_status = QLabel("")
+        self._storage_save_status.setObjectName("MutedSmall")
+        self._storage_save_status.setWordWrap(True)
+        lay.addWidget(self._storage_save_status)
+
         lay.addStretch()
         tbl.itemSelectionChanged.connect(self._on_builtin_storage_selected)
+        self._storage_edit_mode = "new"
         return w
 
     # ── Tab 3: 人员预设 ───────────────────────────────────────────────────────
@@ -596,9 +614,8 @@ class ProjectSettingsDrawer(QWidget):
         # ── 单张打印 ──────────────────────────────────────────────────────────
         self._quick_print_mode = QComboBox()
         self._quick_print_mode.setFixedHeight(30)
-        self._quick_print_mode.addItem("直接打印到指定打印机", "direct")
-        self._quick_print_mode.addItem("弹出打印机选择对话框", "dialog")
-        self._quick_print_mode.addItem("打开标签打印页", "studio")
+        self._quick_print_mode.addItem("打开 Windows 打印窗口（推荐）", "dialog")
+        self._quick_print_mode.addItem("直接发送到指定打印机", "direct")
         self._quick_print_mode.currentIndexChanged.connect(self._save_print_settings)
 
         self._print_tissue_cb = QCheckBox("RNA 编号同时打印 RNAlater 组织管标签")
@@ -618,6 +635,10 @@ class ProjectSettingsDrawer(QWidget):
         self._sample_template_combo = QComboBox()
         self._sample_template_combo.setFixedHeight(30)
         self._sample_template_combo.currentIndexChanged.connect(self._save_print_settings)
+        self._sample_template_btn = QPushButton("管理 / 刷新…")
+        self._sample_template_btn.setObjectName("Outline")
+        self._sample_template_btn.setFixedHeight(28)
+        self._sample_template_btn.clicked.connect(lambda: self._open_template_manager("sample"))
 
         self._sample_paper_combo = QComboBox()
         self._sample_paper_combo.setFixedHeight(30)
@@ -634,8 +655,9 @@ class ProjectSettingsDrawer(QWidget):
         sample_grp = _settings_group("样品瓶 / 酒精", [
             _row("打印机", self._sample_printer_combo, width=64),
             _row("模板",   self._sample_template_combo, width=64),
+            _row("",       self._sample_template_btn, width=64),
             _row("纸张",   self._sample_paper_combo, width=64),
-            _row("合版",   self._sample_imposition_btn, width=64),
+            _row("排版",   self._sample_imposition_btn, width=64),
         ])
         sample_grp.setToolTip("需要设计或修改模板时，进入「标签打印」页编辑。")
         lay.addWidget(sample_grp)
@@ -648,6 +670,10 @@ class ProjectSettingsDrawer(QWidget):
         self._tissue_template_combo = QComboBox()
         self._tissue_template_combo.setFixedHeight(30)
         self._tissue_template_combo.currentIndexChanged.connect(self._save_print_settings)
+        self._tissue_template_btn = QPushButton("管理 / 刷新…")
+        self._tissue_template_btn.setObjectName("Outline")
+        self._tissue_template_btn.setFixedHeight(28)
+        self._tissue_template_btn.clicked.connect(lambda: self._open_template_manager("tissue"))
 
         self._tissue_paper_combo = QComboBox()
         self._tissue_paper_combo.setFixedHeight(30)
@@ -671,8 +697,9 @@ class ProjectSettingsDrawer(QWidget):
         tissue_grp = _settings_group("RNAlater 组织管", [
             _row("打印机", self._tissue_printer_combo, width=64),
             _row("模板",   self._tissue_template_combo, width=64),
+            _row("",       self._tissue_template_btn, width=64),
             _row("纸张",   self._tissue_paper_combo, width=64),
-            _row("合版",   self._tissue_imposition_btn, width=64),
+            _row("排版",   self._tissue_imposition_btn, width=64),
             _row("策略",   self._tissue_strategy_combo, width=64),
         ])
         tissue_grp.setToolTip(
@@ -696,18 +723,21 @@ class ProjectSettingsDrawer(QWidget):
 
     @staticmethod
     def _populate_quick_paper_combo(combo: QComboBox) -> None:
-        combo.addItem("跟随标签打印页", "")
-        combo.addItem("标签卷纸 / 单张标签", "label")
-        combo.addItem("A4 合版", "a4")
-        combo.addItem("A5 合版", "a5")
+        combo.addItem("标签纸（每张标签单独打印）", "label")
+        combo.addItem("A4 纸（多张标签合版）", "a4")
+        combo.addItem("A5 纸（多张标签合版）", "a5")
 
     def _refresh_printer_combo(self, combo: QComboBox, selected: str) -> None:
         combo.blockSignals(True)
         combo.clear()
         combo.addItem("系统默认打印机", "")
         try:
-            from PyQt6.QtPrintSupport import QPrinterInfo
-            names = [p.printerName() for p in QPrinterInfo.availablePrinters()]
+            from app.utils import windows_print
+            if windows_print.is_available():
+                names = windows_print.windows_printer_names()
+            else:
+                from PyQt6.QtPrintSupport import QPrinterInfo
+                names = [p.printerName() for p in QPrinterInfo.availablePrinters()]
         except Exception:
             names = []
         for name in sorted({n for n in names if n}):
@@ -721,20 +751,33 @@ class ProjectSettingsDrawer(QWidget):
     def _refresh_template_combo(self, combo: QComboBox, bucket: str, selected: str) -> None:
         combo.blockSignals(True)
         combo.clear()
-        combo.addItem("跟随标签打印页", "")
         try:
             from app.services import label_service
+            lib = label_service.LabelTemplateLibrary(bucket)
+            selected = (
+                selected
+                or lib.selected_key()
+                or label_service.DEFAULT_TEMPLATE_KEY[bucket]
+            )
             for key, tmpl in label_service.BUILTIN_TEMPLATES.items():
                 if bucket == "tissue" and tmpl.get("flavor") != "tissue":
                     continue
                 if bucket == "sample" and tmpl.get("flavor") == "tissue":
                     continue
-                combo.addItem(f"内置：{tmpl.get('code', '?')} · {tmpl.get('name') or key}", key)
-            lib = label_service.LabelTemplateLibrary(bucket)
+                size = tmpl.get("minSize") or {}
+                size_text = f" · {size.get('w')}×{size.get('h')} mm" if size else ""
+                combo.addItem(
+                    f"内置：{tmpl.get('code', '?')} · {tmpl.get('name') or key}{size_text}", key
+                )
             for rec in lib.records():
                 tid = rec.get("id")
                 if tid:
-                    combo.addItem(f"自定义：{rec.get('name') or tid}", label_service.key_from_id(tid))
+                    size = (rec.get("template") or {}).get("minSize") or {}
+                    size_text = f" · {size.get('w')}×{size.get('h')} mm" if size else ""
+                    combo.addItem(
+                        f"自定义：{rec.get('name') or tid}{size_text}",
+                        label_service.key_from_id(tid),
+                    )
         except Exception:
             pass
         if selected and combo.findData(selected) < 0:
@@ -742,6 +785,44 @@ class ProjectSettingsDrawer(QWidget):
         idx = combo.findData(selected or "")
         combo.setCurrentIndex(idx if idx >= 0 else 0)
         combo.blockSignals(False)
+
+    def _open_template_manager(self, bucket: str) -> None:
+        """Edit/create templates, then bind the chosen template to this project."""
+        from app.services import label_service
+        from app.widgets.label_step2_templates import LabelStep2Templates
+
+        libs = {
+            "sample": label_service.LabelTemplateLibrary("sample"),
+            "tissue": label_service.LabelTemplateLibrary("tissue"),
+        }
+        dlg = QDialog(self)
+        dlg.setWindowTitle("管理标签模板")
+        dlg.resize(900, 700)
+        layout = QVBoxLayout(dlg)
+        manager = LabelStep2Templates(libs, dlg)
+        try:
+            specimens = label_service.load_specimen_dicts(self.ctx.get_db())
+        except Exception:
+            specimens = []
+        # The settings dialog must always allow configuring both routes, even
+        # before the current project contains its first RNA specimen.
+        if not any(str(item.get("storage") or "").upper().startswith("R") for item in specimens):
+            specimens.append(self._demo_specimen_for_bucket("tissue"))
+        manager.set_data(specimens, [])
+        layout.addWidget(manager)
+        close_btn = QPushButton("完成")
+        close_btn.setObjectName("Primary")
+        close_btn.clicked.connect(dlg.accept)
+        row = QHBoxLayout()
+        row.addStretch()
+        row.addWidget(close_btn)
+        layout.addLayout(row)
+        dlg.exec()
+
+        combo = self._sample_template_combo if bucket == "sample" else self._tissue_template_combo
+        chosen = libs[bucket].selected_key() or label_service.DEFAULT_TEMPLATE_KEY[bucket]
+        self._refresh_template_combo(combo, bucket, chosen)
+        self._save_print_settings()
 
     def _paper_type_for_imposition(self, bucket: str) -> str:
         return self._effective_sheet_paper_for_bucket(bucket)
@@ -770,10 +851,10 @@ class ProjectSettingsDrawer(QWidget):
             btn.setEnabled(enabled)
             label = "酒精标签" if bucket == "sample" else "RNA 标签"
             if paper_type:
-                btn.setText(f"{label}排版设计…")
+                btn.setText(f"设置 {paper_type.upper()} 多标签排版…")
                 btn.setToolTip(f"编辑 {paper_type.upper()} 合版的边距、间距、行列、方向和起始格。")
             else:
-                btn.setText(f"{label}排版设计（选择 A4/A5 后可用）")
+                btn.setText("无需排版（每张标签单独打印）")
                 btn.setToolTip("标签卷纸/单张标签是一张一张直接打印，不使用整页合版排版。")
 
     def _template_key_for_bucket(self, bucket: str) -> str:
@@ -801,13 +882,19 @@ class ProjectSettingsDrawer(QWidget):
         from app.services import label_service
         lib = label_service.LabelTemplateLibrary(bucket)
         tmpl = label_service.resolve_template_key(lib, self._template_key_for_bucket(bucket))
+        size = tmpl.get("minSize") or {}
+        dims = (
+            {"w": float(size["w"]), "h": float(size["h"])}
+            if size.get("w") and size.get("h")
+            else label_service.resolve_dims(lib, lib.selected_custom_dims())
+        )
         paper_type = self._paper_type_for_imposition(bucket)
         return label_service.LabelService.build_print_job(
             [self._demo_specimen_for_bucket(bucket)],
             tmpl,
             bucket,
             selected_indices=[0],
-            dims=label_service.resolve_dims(lib, lib.selected_custom_dims()),
+            dims=dims,
             copies=12,
             paper_type=paper_type,
             paper=label_service.PAPER_SIZES.get(paper_type),
@@ -968,6 +1055,10 @@ class ProjectSettingsDrawer(QWidget):
         local_print_settings = load_setting_if_present(db, "print_settings")
         if local_print_settings is not None:
             pr = merge_print_settings(pr, local_print_settings)
+            if "quick_print_mode" not in local_print_settings and "quick_print" in local_print_settings:
+                pr["quick_print_mode"] = (
+                    "direct" if bool(local_print_settings["quick_print"]) else "studio"
+                )
         # backward compat: new quick_print_mode string wins;
         # old quick_print bool maps True→"direct", False→"studio".
         # DEFAULT_PRINT_SETTINGS now carries quick_print_mode="direct", so
@@ -977,6 +1068,12 @@ class ProjectSettingsDrawer(QWidget):
             quick_mode = "direct" if bool(pr.get("quick_print", True)) else "studio"
         elif quick_mode == "direct" and not bool(pr.get("quick_print", True)):
             quick_mode = "studio"
+        # Older versions exposed "open label studio" as a print action.  A
+        # print button must print; template design now has its own explicit
+        # management button.
+        migrated_studio_mode = quick_mode == "studio"
+        if migrated_studio_mode:
+            quick_mode = "dialog"
         idx = self._quick_print_mode.findData(quick_mode)
         if idx < 0:
             idx = 0
@@ -1010,7 +1107,8 @@ class ProjectSettingsDrawer(QWidget):
             (self._sample_paper_combo, "sample_paper_type"),
             (self._tissue_paper_combo, "tissue_paper_type"),
         ):
-            idx = combo.findData(str(pr.get(key, DEFAULT_PRINT_SETTINGS[key]) or ""))
+            value = str(pr.get(key, DEFAULT_PRINT_SETTINGS[key]) or "label")
+            idx = combo.findData(value)
             combo.blockSignals(True)
             combo.setCurrentIndex(idx if idx >= 0 else 0)
             combo.blockSignals(False)
@@ -1020,6 +1118,8 @@ class ProjectSettingsDrawer(QWidget):
         self._tissue_strategy_combo.setCurrentIndex(idx if idx >= 0 else 0)
         self._tissue_strategy_combo.blockSignals(False)
         self._sync_imposition_buttons()
+        if migrated_studio_mode:
+            self._save_print_settings()
 
     def _save_project_meta(self) -> None:
         db = self.ctx.get_db()
@@ -1103,9 +1203,10 @@ class ProjectSettingsDrawer(QWidget):
         save_setting(db, "print_settings", self._collect_print_settings())
 
     def _collect_print_settings(self) -> dict:
-        quick_mode = str(self._quick_print_mode.currentData() or "direct")
+        quick_mode = str(self._quick_print_mode.currentData() or "dialog")
         return {
-            "quick_print": quick_mode == "direct",
+            # Kept true for old readers: both modern modes are printing modes.
+            "quick_print": True,
             "quick_print_mode": quick_mode,
             "include_tissue": self._print_tissue_cb.isChecked(),
             "sample_printer": str(self._sample_printer_combo.currentData() or ""),
@@ -1169,11 +1270,29 @@ class ProjectSettingsDrawer(QWidget):
         tbl.setColumnWidth(0, 72)
 
     def _load_storage_edit_form(self, code: str, detail: str) -> None:
+        self._storage_edit_mode = "edit"
+        self._storage_editor_title.setText(f"修改保存方式：{code}")
+        self._storage_save_btn.setText("保存修改")
+        self._new_code_edit.setReadOnly(True)
         self._new_code_edit.setText(code)
         self._new_detail_edit.setPlainText(detail)
         self._rna_hint_lbl.setText(
             "已取 RNA / RNAlater" if str(code).startswith("R") else ""
         )
+        self._storage_save_status.clear()
+
+    def _start_new_storage(self) -> None:
+        """Enter an explicit blank form for creating a new storage code."""
+        self._storage_edit_mode = "new"
+        self._storage_editor_title.setText("新增保存方式")
+        self._storage_save_btn.setText("添加")
+        self._new_code_edit.setReadOnly(False)
+        self._new_code_edit.clear()
+        self._new_detail_edit.clear()
+        self._rna_hint_lbl.clear()
+        self._storage_save_status.setText("新增模式：填写新编码和详细说明，然后点击“添加”。")
+        self._builtin_storage_table.clearSelection()
+        self._new_code_edit.setFocus()
 
     def _on_builtin_storage_selected(self) -> None:
         row = self._builtin_storage_table.currentRow()
@@ -1197,21 +1316,26 @@ class ProjectSettingsDrawer(QWidget):
                 item.widget().deleteLater()
 
         builtin_codes = builtin_storage_codes()
+        if not custom:
+            empty = QLabel("还没有新增保存方式。")
+            empty.setObjectName("MutedSmall")
+            empty.setWordWrap(True)
+            self._custom_list_lay.addWidget(empty)
+            return
         for entry in custom:
-            code = entry.get("code", "")
-            if code in builtin_codes:
-                continue
+            code = str(entry.get("code", "")).upper()
             detail = entry.get("detail", "")
             prefix = "[RNA] " if entry.get("transcriptome") else ""
+            kind = "修改内置" if code in builtin_codes else "自定义"
             row_w = QWidget()
             h = QHBoxLayout(row_w)
             h.setContentsMargins(0, 0, 0, 0)
             h.setSpacing(6)
-            pick_btn = QPushButton(f"{code}　{prefix}{detail}")
+            pick_btn = QPushButton(f"{code}　[{kind}]　{prefix}{detail}")
             pick_btn.setObjectName("Ghost")
             pick_btn.setFlat(True)
             pick_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            pick_btn.setToolTip("选中到下方编辑")
+            pick_btn.setToolTip("点击后在下方继续编辑；× 表示撤销该项目修改")
             pick_btn.clicked.connect(
                 lambda _, c=code, d=detail: self._load_storage_edit_form(c, d)
             )
@@ -1228,10 +1352,13 @@ class ProjectSettingsDrawer(QWidget):
     def _on_save_storage(self) -> None:
         db = self.ctx.get_db()
         if db is None:
+            self._storage_save_status.setText("保存失败：当前项目数据库未打开。")
+            QMessageBox.warning(self, "保存方式", "保存失败：当前项目数据库未打开。")
             return
         code = self._new_code_edit.text().strip().upper()
         detail = self._new_detail_edit.toPlainText().strip()
         if not code or not detail:
+            self._storage_save_status.setText("保存失败：编码和详细说明都必须填写。")
             return
         from app.services.project_settings_service import (
             load_custom_storages,
@@ -1252,10 +1379,32 @@ class ProjectSettingsDrawer(QWidget):
                 break
         if not replaced:
             custom.append(payload)
-        save_setting(db, "custom_storages", custom)
-        self._on_clear_custom_form()
+        try:
+            save_setting(db, "custom_storages", custom)
+            saved = load_custom_storages(db)
+            verified = next(
+                (
+                    entry for entry in saved
+                    if str(entry.get("code", "")).upper() == code
+                    and str(entry.get("detail", "")) == detail
+                ),
+                None,
+            )
+            if verified is None:
+                raise RuntimeError("数据库回读结果与保存内容不一致")
+        except Exception as exc:
+            self._storage_save_status.setText(f"保存失败：{exc}")
+            QMessageBox.warning(self, "保存方式", f"保存失败：{exc}")
+            return
+
+        # Keep the edited values visible so the user can verify exactly what
+        # was saved; the project list above is rebuilt from the DB read-back.
         self._refresh_builtin_storage_table(db)
-        self._rebuild_custom_list(custom, db)
+        self._rebuild_custom_list(saved, db)
+        action = "已添加" if self._storage_edit_mode == "new" else "已保存修改"
+        self._storage_save_status.setText(f"{action}：{code}")
+        self._load_storage_edit_form(code, detail)
+        self._storage_save_status.setText(f"{action}：{code}")
         self.storages_changed.emit()
 
     def _on_add_custom_storage(self) -> None:
@@ -1277,11 +1426,7 @@ class ProjectSettingsDrawer(QWidget):
         self.storages_changed.emit()
 
     def _on_clear_custom_form(self) -> None:
-        self._new_code_edit.clear()
-        self._new_detail_edit.clear()
-        self._rna_hint_lbl.setText("")
-        if hasattr(self, "_builtin_storage_table"):
-            self._builtin_storage_table.clearSelection()
+        self._start_new_storage()
 
     # ── Field enable/disable ──────────────────────────────────────────────────
 
@@ -1308,6 +1453,8 @@ class ProjectSettingsDrawer(QWidget):
         self._tissue_printer_combo.setEnabled(enabled)
         self._sample_template_combo.setEnabled(enabled)
         self._tissue_template_combo.setEnabled(enabled)
+        self._sample_template_btn.setEnabled(enabled)
+        self._tissue_template_btn.setEnabled(enabled)
         self._sample_paper_combo.setEnabled(enabled)
         self._tissue_paper_combo.setEnabled(enabled)
         self._sample_imposition_btn.setEnabled(enabled)

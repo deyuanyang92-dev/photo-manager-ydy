@@ -159,29 +159,29 @@ class TestMessageBoxHelpers:
     def test_warn_calls_qmessagebox_warning(self, qapp):
         from app.utils.ui import warn
         from PyQt6.QtWidgets import QMessageBox
-        with mock.patch.object(QMessageBox, "warning", return_value=QMessageBox.StandardButton.Ok) as m:
-            warn(None, "警告", "这是一条警告")
+        with mock.patch.object(QMessageBox, "exec", return_value=QMessageBox.StandardButton.Ok) as m:
+            assert warn(None, "警告", "这是一条警告") == QMessageBox.StandardButton.Ok
         m.assert_called_once()
 
     def test_info_calls_qmessagebox_information(self, qapp):
         from app.utils.ui import info
         from PyQt6.QtWidgets import QMessageBox
-        with mock.patch.object(QMessageBox, "information", return_value=QMessageBox.StandardButton.Ok) as m:
-            info(None, "提示", "操作成功")
+        with mock.patch.object(QMessageBox, "exec", return_value=QMessageBox.StandardButton.Ok) as m:
+            assert info(None, "提示", "操作成功") == QMessageBox.StandardButton.Ok
         m.assert_called_once()
 
     def test_question_calls_qmessagebox_question(self, qapp):
         from app.utils.ui import question
         from PyQt6.QtWidgets import QMessageBox
-        with mock.patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.No) as m:
+        with mock.patch.object(QMessageBox, "exec", return_value=QMessageBox.StandardButton.No) as m:
             result = question(None, "确认", "确定要删除吗？")
         m.assert_called_once()
 
     def test_critical_calls_qmessagebox_critical(self, qapp):
         from app.utils.ui import critical
         from PyQt6.QtWidgets import QMessageBox
-        with mock.patch.object(QMessageBox, "critical", return_value=QMessageBox.StandardButton.Ok) as m:
-            critical(None, "错误", "出现严重错误")
+        with mock.patch.object(QMessageBox, "exec", return_value=QMessageBox.StandardButton.Ok) as m:
+            assert critical(None, "错误", "出现严重错误") == QMessageBox.StandardButton.Ok
         m.assert_called_once()
 
     def test_warn_with_widget_parent_uses_top_window(self, qapp):
@@ -191,7 +191,7 @@ class TestMessageBoxHelpers:
         root = QWidget()
         child = QWidget(root)
         with mock.patch.object(QMessageBox, "warning", return_value=QMessageBox.StandardButton.Ok) as m:
-            warn(child, "标题", "内容")
+            warn(child, "标题", "内容", buttons=QMessageBox.StandardButton.Ok)
         # First arg to warning() should be the root, not child
         called_parent = m.call_args.args[0]
         assert called_parent is root

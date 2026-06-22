@@ -59,7 +59,7 @@ if TYPE_CHECKING:
 
 # ── App version constant ──────────────────────────────────────────────────────
 
-APP_VERSION = "0.1.0-dev"
+APP_VERSION = "v0.01"
 
 # ── QSettings key constants ───────────────────────────────────────────────────
 
@@ -1619,11 +1619,20 @@ class SettingsView(BaseView):
         try:
             svc.run_diagnostics()
             health = svc.overall_health()
+            diagnostics = svc.diagnostics()
         except Exception:  # noqa: BLE001
             health = "red"
+            diagnostics = []
         self._collab_health_light.setStyleSheet(
             f"color: {self._HEALTH_COLOR.get(health, '#999')};")
-        self._collab_health_text.setText(self._HEALTH_LABEL.get(health, "—"))
+        label = self._HEALTH_LABEL.get(health, "—")
+        reasons = [
+            d.title for d in diagnostics
+            if getattr(d, "code", "") != "ok" and getattr(d, "title", "")
+        ]
+        if reasons:
+            label = f"{label}：{'；'.join(reasons[:2])}"
+        self._collab_health_text.setText(label)
 
     def _on_collab_diagnose(self) -> None:
         from app.widgets.collab_diagnostics_dialog import CollabDiagnosticsDialog

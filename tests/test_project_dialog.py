@@ -122,9 +122,9 @@ class TestProjectDialogLight:
         from app.views.project_dialog import ProjectDialog
         from PyQt6.QtWidgets import QPushButton
         dlg = ProjectDialog(mode="new", light=True)
-        assert dlg.windowTitle() == "新建项目"
+        assert dlg.windowTitle() == "新建工作区"
         labels = {b.text() for b in dlg.findChildren(QPushButton)}
-        assert "创建项目（留在采集地图）" in labels
+        assert "创建工作区（留在采集地图）" in labels
         assert "创建并进入照片工作区" not in labels
 
     def test_accepts_with_only_name_and_dir(self, qapp, tmp_path):

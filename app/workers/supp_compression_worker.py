@@ -15,9 +15,6 @@ from pathlib import Path
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
-from app.services.archive_service import archive_group
-
-
 class SuppCompressionWorker(QThread):
     started_archiving = pyqtSignal(int, str)  # (jpg_count, tiff_stem) → initial toast
     progress = pyqtSignal(int, int, str)       # current, total, JPG filename
@@ -44,10 +41,12 @@ class SuppCompressionWorker(QThread):
 
     def run(self) -> None:
         try:
+            from app.services import archive_service
+
             self.started_archiving.emit(
                 len(self._jpg_paths), Path(self._tiff_path).stem
             )
-            result = archive_group(
+            result = archive_service.archive_group(
                 self._jpg_paths,
                 self._tiff_path,
                 self._project_dir,

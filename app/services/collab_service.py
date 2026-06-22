@@ -686,8 +686,11 @@ class _BrowserHandler:
             return
         ip = ips[0]
         port = info.port
-        if ip == self._local_ip and port == self._local_port:
-            return   # skip self
+        # A host may have another/stale app instance listening on a neighbouring
+        # port (for example current=5051 while an old process still owns 5050).
+        # It is still this machine, not a collaboration peer.
+        if ip == self._local_ip:
+            return   # skip self on every port
         hostname = (info.properties.get(b"hostname") or b"").decode("utf-8", errors="replace")
         self._on_found(ip, port, hostname)
 
@@ -840,6 +843,15 @@ class CollabService(QObject):
 
     def _on_server_started(self, port: int) -> None:
         self._port = port
+        local_ip = _get_local_ip()
+        with self._peers_lock:
+            removed_self = any(p.ip == local_ip for p in self._peers.values())
+            self._peers = {
+                key: peer for key, peer in self._peers.items()
+                if peer.ip != local_ip
+            }
+        if removed_self:
+            self.peers_changed.emit()
         self.server_ready.emit(port)
         # Now start mDNS with the real port
         self._discovery_thread = CollabDiscoveryThread(
@@ -1073,8 +1085,7 @@ class CollabService(QObject):
             return []
 
         local_ip = _get_local_ip()
-        targets = [(h, p) for h in hosts for p in ports
-                   if not (h == local_ip and p == self._port)]
+        targets = [(h, p) for h in hosts for p in ports if h != local_ip]
 
         def _probe(target: tuple[str, int]) -> Optional[PeerInfo]:
             host, port = target
@@ -1116,6 +1127,8 @@ class CollabService(QObject):
         threading.Thread(target=fn, daemon=True).start()
 
     def _on_peer_found(self, ip: str, port: int, hostname: str) -> None:
+        if ip == _get_local_ip():
+            return
         key = f"{ip}:{port}"
         with self._peers_lock:
             self._peers[key] = PeerInfo(ip=ip, port=port, hostname=hostname)
@@ -1138,6 +1151,8 @@ class CollabService(QObject):
 
     def add_manual_peer(self, ip: str, port: int) -> None:
         """Manually register a peer (fallback when mDNS fails across VLANs)."""
+        if ip == _get_local_ip():
+            return
         key = f"{ip}:{port}"
         with self._peers_lock:
             self._peers[key] = PeerInfo(ip=ip, port=port, manual=True)
@@ -1535,5 +1550,4 @@ class CollabService(QObject):
             self.tasks_changed.emit()
         except ValueError as exc:
             logger.warning("resolve_conflict failed uid=%s: %s", uid, exc)
-
 

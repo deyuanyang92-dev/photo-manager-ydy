@@ -59,6 +59,8 @@ _TIFF_EXTS = {".tif", ".tiff"}
 
 
 def _paths_from_mime(event) -> list[str]:
+    from app.utils.path_utils import normalize_path
+
     md = event.mimeData()
     if md is None or not md.hasUrls():
         return []
@@ -68,7 +70,7 @@ def _paths_from_mime(event) -> list[str]:
             continue
         p = url.toLocalFile()
         if p and Path(p).is_file():
-            paths.append(p)
+            paths.append(normalize_path(p))
     return paths
 
 
@@ -566,12 +568,18 @@ class _SuppDropButton(QPushButton):
             event.ignore()
 
     def dropEvent(self, event) -> None:  # noqa: N802 (Qt override)
+        from app.utils.path_utils import normalize_path
+
         md = event.mimeData()
         if md is None or not md.hasUrls():
             event.ignore()
             return
-        paths = [u.toLocalFile() for u in md.urls() if u.isLocalFile()]
-        paths = [p for p in paths if p]
+        paths = [
+            normalize_path(u.toLocalFile())
+            for u in md.urls()
+            if u.isLocalFile() and u.toLocalFile()
+        ]
+        paths = [p for p in paths if Path(p).is_file()]
         event.acceptProposedAction()
         if paths:
             self.files_dropped.emit(paths)
