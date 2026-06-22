@@ -151,6 +151,8 @@ class TileMapWidget(QWidget):
     marker_moved = pyqtSignal(float, float)
     location_failed = pyqtSignal()
     point_clicked = pyqtSignal(int)   # index into the multi-point layer
+    point_create_requested = pyqtSignal(float, float)  # click-empty in edit mode → (lon, lat)
+    point_moved = pyqtSignal(int, float, float)        # drag-existing-point → (idx, lon, lat)
     zoom_changed = pyqtSignal(int)    # new zoom level
 
     _TILE_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
@@ -179,10 +181,13 @@ class TileMapWidget(QWidget):
         self._point_pix: list[tuple[int, int]] = []  # per-frame screen coords for hit-test
         self._point_style: dict = {}                  # 站位样式（空 = v1 默认外观）
         self.interactive_marker: bool = True          # False → click never places a marker
+        # 编辑模式（采集地图）：True 时点空白发 point_create_requested、拖已有点发 point_moved。
+        self.interactive_points: bool = False
 
         self._drag_start: Optional[QPoint] = None
         self._drag_center_start: Optional[tuple[float, float]] = None
         self._marker_drag: bool = False
+        self._point_drag_idx: Optional[int] = None    # 编辑模式下正在拖动的多点索引
         self._press_pos: Optional[QPoint] = None
 
         self._cache = _TileCache(200)
@@ -737,6 +742,13 @@ class TileMapWidget(QWidget):
         if event.button() != Qt.MouseButton.LeftButton:
             return
         self._press_pos = event.pos()
+        # 编辑模式：按在已有点上 → 进入点拖动（移动站位坐标）。
+        if self.interactive_points and self._points:
+            idx = self._point_at(event.pos())
+            if idx is not None:
+                self._point_drag_idx = idx
+                self.setCursor(Qt.CursorShape.SizeAllCursor)
+                return
         if self._near_marker(event.pos()):
             self._marker_drag = True
             self.setCursor(Qt.CursorShape.SizeAllCursor)
@@ -746,7 +758,16 @@ class TileMapWidget(QWidget):
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
-        if self._marker_drag and self._marker_lon is not None:
+        if self._point_drag_idx is not None and 0 <= self._point_drag_idx < len(self._points):
+            lon, lat = pixel_to_lon_lat(
+                event.pos().x(), event.pos().y(),
+                self._center_lon, self._center_lat,
+                self._zoom, self.width(), self.height(),
+            )
+            p = self._points[self._point_drag_idx]
+            p["lon"], p["lat"] = lon, lat     # 实时橡皮筋：重绘看到点跟着走
+            self.update()
+        elif self._marker_drag and self._marker_lon is not None:
             lon, lat = pixel_to_lon_lat(
                 event.pos().x(), event.pos().y(),
                 self._center_lon, self._center_lat,
@@ -770,17 +791,38 @@ class TileMapWidget(QWidget):
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
         if event.button() != Qt.MouseButton.LeftButton:
             return
+        was_point_drag = self._point_drag_idx
+        point_idx = self._point_drag_idx
+        self._point_drag_idx = None
         was_marker_drag = self._marker_drag
         self._marker_drag = False
         self.setCursor(Qt.CursorShape.CrossCursor)
 
-        if not was_marker_drag and self._press_pos is not None:
+        # 编辑模式拖点：位移≥4px → 移动站位；否则视作点击（保留点选/信息卡）。
+        if was_point_drag is not None and self._press_pos is not None:
+            delta = event.pos() - self._press_pos
+            if math.hypot(delta.x(), delta.y()) >= 4 and point_idx is not None:
+                p = self._points[point_idx]
+                self.point_moved.emit(
+                    point_idx, float(p["lon"]), float(p["lat"])
+                )
+            else:
+                self.point_clicked.emit(point_idx)
+        elif not was_marker_drag and self._press_pos is not None:
             delta = event.pos() - self._press_pos
             if math.hypot(delta.x(), delta.y()) < 4:
                 # multi-point layer takes priority: a click on a bubble selects it
                 idx = self._point_at(event.pos()) if self._points else None
                 if idx is not None:
                     self.point_clicked.emit(idx)
+                elif self.interactive_points:
+                    # 编辑模式点空白 → 请求新建采集点（不放置单 pin）
+                    lon, lat = pixel_to_lon_lat(
+                        event.pos().x(), event.pos().y(),
+                        self._center_lon, self._center_lat,
+                        self._zoom, self.width(), self.height(),
+                    )
+                    self.point_create_requested.emit(lon, lat)
                 elif self.interactive_marker:
                     self._place_marker_at(event.pos())
 

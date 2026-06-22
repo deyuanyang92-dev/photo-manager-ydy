@@ -18,10 +18,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 from PyQt6.QtCore import QByteArray, QSettings, Qt
-from PyQt6.QtGui import QColor
+from PyQt6.QtGui import QColor, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QButtonGroup,
     QComboBox,
+    QDialog,
     QFrame,
     QGraphicsDropShadowEffect,
     QHBoxLayout,
@@ -29,6 +30,7 @@ from PyQt6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMenu,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QSlider,
@@ -94,6 +96,7 @@ class CollectionMapView(BaseView):
         self._active_basemap: Optional[dict] = None
         self._project_filter: Optional[str] = None   # None = 全部项目
         self._style: dict = {}
+        self._edit_mode: bool = False                 # 编辑模式：点空白新增 · 拖点移动
         super().__init__(ctx)
 
     # ── UI ──────────────────────────────────────────────────────────────────
@@ -373,6 +376,23 @@ class CollectionMapView(BaseView):
         self._calibrate_btn.clicked.connect(self._on_calibrate)
         self._calibrate_btn.setEnabled(False)
         bar2.addWidget(self._calibrate_btn)
+        self._add_point_btn = QPushButton("＋添加站位")
+        self._add_point_btn.setObjectName("AddPointBtn")
+        self._add_point_btn.setCheckable(True)
+        self._add_point_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        set_button_icon(self._add_point_btn, "mdi6.map-marker-plus", color=TONE_MUTED, size=15)
+        self._add_point_btn.setToolTip(
+            "编辑模式：在地图空白处点击新增采集点；拖动已有点移动站位坐标。\n"
+            "（需先在左栏选中单个项目，并使用 OSM 底图）"
+        )
+        self._add_point_btn.toggled.connect(self._on_edit_toggle)
+        bar2.addWidget(self._add_point_btn)
+        self._input_coord_btn = QPushButton("输入经纬度")
+        self._input_coord_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        set_button_icon(self._input_coord_btn, "mdi6.crosshairs", color=TONE_MUTED, size=15)
+        self._input_coord_btn.setToolTip("手动输入经纬度新增采集点（十进制 WGS-84）")
+        self._input_coord_btn.clicked.connect(self._on_input_coord)
+        bar2.addWidget(self._input_coord_btn)
         self._import_btn = QPushButton("导入经纬度")
         self._import_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         set_button_icon(self._import_btn, "mdi6.import", color=TONE_MUTED, size=15)
@@ -388,12 +408,23 @@ class CollectionMapView(BaseView):
         bar2.addWidget(self._export_btn)
         v.addWidget(tools)
 
+        # 编辑模式提示条（默认隐藏）
+        self._edit_hint = QLabel(
+            "编辑模式：点空白处 = 新增采集点  ·  拖动已有点 = 移动站位  ·  再次点击「＋添加站位」或 ESC 退出"
+        )
+        self._edit_hint.setObjectName("EditHint")
+        self._edit_hint.setWordWrap(True)
+        self._edit_hint.setVisible(False)
+        v.addWidget(self._edit_hint)
+
         # 地图堆叠
         self._stack = QStackedWidget()
         self._stack.setObjectName("MapStack")
         self._tile_map = TileMapWidget()
         self._tile_map.interactive_marker = False
         self._tile_map.point_clicked.connect(self._on_point_clicked)
+        self._tile_map.point_create_requested.connect(self._on_point_create)
+        self._tile_map.point_moved.connect(self._on_point_moved)
         self._tile_map.zoom_changed.connect(
             lambda _z: self._sync_zoom_slider())
         from app.widgets.publication_map_widget import PublicationMapWidget
@@ -412,7 +443,15 @@ class CollectionMapView(BaseView):
         self._tile_map.installEventFilter(self)
         self._pub_map.installEventFilter(self)
         self._populate_basemaps()
+        # ESC 退出编辑模式（编辑时焦点在地图上，需子树级快捷键）
+        esc = QShortcut(QKeySequence("Esc"), self)
+        esc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        esc.activated.connect(self._on_esc)
         return pane
+
+    def _on_esc(self) -> None:
+        if getattr(self, "_edit_mode", False):
+            self._set_edit_mode(False)
 
     def _build_info_card(self) -> QWidget:
         card = QFrame(self._tile_map)
@@ -587,6 +626,12 @@ class CollectionMapView(BaseView):
             f"QPushButton#CollapseBtn:hover{{background:{hover};}}"
             f"QFrame#MapHeader{{background:transparent;border:none;}}"
             f"QFrame#MapToolStrip{{background:{accent_softer};border:1px solid {border};border-radius:8px;}}"
+            # 编辑模式提示条
+            f"QLabel#EditHint{{background:{accent_soft};color:{accent};border:1px solid {accent};"
+            f"border-radius:6px;padding:6px 10px;font-size:12px;}}"
+            # 添加站位按钮：编辑模式选中态高亮
+            f"QPushButton#AddPointBtn:checked{{background:{accent};color:{accent_fg};"
+            f"border:1px solid {accent};}}"
             f"QLabel#ToolLabel{{color:{muted};font-size:12px;font-weight:600;}}"
             f"QLabel#PaneTitle{{color:{text};font-weight:600;font-size:15px;}}"
             f"QLabel#SectionTitle{{color:{muted};font-weight:600;font-size:12px;}}"
@@ -665,6 +710,7 @@ class CollectionMapView(BaseView):
         self._populate_projects()
         self._load_marker_style()
         self._reload()
+        self._update_edit_buttons()
         self._sync_zoom_slider()
         self._position_zoom_panel()
         self._zoom_panel.raise_()
@@ -749,6 +795,7 @@ class CollectionMapView(BaseView):
         self._project_filter = items[0].data(Qt.ItemDataRole.UserRole)
         self._info_card.hide()
         self._restyle_proj_selection()
+        self._update_edit_buttons()
         self._reload()
 
     def _on_add_menu(self) -> None:
@@ -975,6 +1022,145 @@ class CollectionMapView(BaseView):
             self._populate_projects()
             self._reload()
 
+    # ── 编辑模式：点空白新增 · 拖点移动 · 手输经纬度 ──────────────────────────────
+
+    def _edit_enabled(self) -> bool:
+        """编辑模式可用：选中单个项目 + OSM 底图（非出版底图）。"""
+        return bool(self._project_filter) and not self._is_publication_mode()
+
+    def _update_edit_buttons(self) -> None:
+        """按当前过滤/底图启停编辑按钮；条件不满足时强制退出编辑模式。"""
+        if not hasattr(self, "_add_point_btn"):
+            return
+        enabled = self._edit_enabled()
+        self._add_point_btn.setEnabled(enabled)
+        self._input_coord_btn.setEnabled(enabled)
+        if not enabled and self._edit_mode:
+            self._set_edit_mode(False)
+
+    def _on_edit_toggle(self, checked: bool) -> None:
+        if checked and not self._edit_enabled():
+            self._add_point_btn.setChecked(False)
+            ui.info(self, "采集地图",
+                    "编辑采集点需先在左栏选中单个项目，并使用 OSM 底图。")
+            return
+        self._set_edit_mode(checked)
+
+    def _set_edit_mode(self, on: bool) -> None:
+        self._edit_mode = on
+        self._tile_map.interactive_points = on
+        self._edit_hint.setVisible(on)
+        if self._add_point_btn.isChecked() != on:
+            self._add_point_btn.setChecked(on)
+        if on:
+            self._stack.setCurrentWidget(self._tile_map)
+            self._tile_map.setFocus()
+
+    def _on_point_create(self, lon: float, lat: float) -> None:
+        """编辑模式下点空白 → 开采集点对话框（默认新建，可切绑定）。"""
+        self._open_point_dialog(lon, lat)
+
+    def _on_point_moved(self, idx: int, lon: float, lat: float) -> None:
+        """编辑模式下拖已有点 → 确认后整站坐标刷新（map_points 按站位聚合质心）。"""
+        if not (0 <= idx < len(self._points)):
+            return
+        p = self._points[idx]
+        prov, site, station = p.get("province"), p.get("site"), p.get("station")
+        if not (prov and site and station):
+            self._reload()   # 点无站位身份（上层聚合点）→ 不支持移动，复位
+            return
+        label = p.get("label") or station
+        if ui.question(
+            self, "移动站位坐标",
+            f"把站位「{label}」的坐标更新为：\n经度 {lon:.6f}  纬度 {lat:.6f}？"
+        ) != QMessageBox.StandardButton.Yes:
+            self._reload()   # 用户取消 → 点回到原位
+            return
+        db = self.ctx.get_db(self._project_filter)
+        if db is None:
+            return
+        crs.set_station_coords(db, prov, site, station, lon, lat)
+        self._snapshot_quiet(self._project_filter)
+        self._reload()
+
+    def _on_input_coord(self) -> None:
+        """手输经纬度 → 同一对话框（坐标留空待填）。"""
+        self._open_point_dialog(None, None)
+
+    def _open_point_dialog(self, lon: Optional[float], lat: Optional[float]) -> None:
+        db = self.ctx.get_db(self._project_filter) if self._project_filter else None
+        if db is None:
+            ui.warn(self, "采集地图", "当前项目数据库不可用。")
+            return
+        prov, site = self._effective_ps_for(self._project_filter)
+        stations = self._stations_for_bind(db)
+        from app.widgets.collection_point_dialog import CollectionPointDialog
+        dlg = CollectionPointDialog(
+            self, lon=lon, lat=lat, province=prov, site=site,
+            zone="intertidal", stations=stations, mode="new",
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        r = dlg.result_point()
+        if not r:
+            return
+        if r["action"] == "new":
+            crs.upsert_record(db, {
+                "province": r["province"], "site": r["site"], "station": r["station"],
+                "collection_date": r["collection_date"], "zone": r["zone"],
+                "lon": r["lon"], "lat": r["lat"],
+            })
+        else:   # bind：把所选站位的全部行坐标刷成新值
+            crs.set_station_coords(
+                db, r["province"], r["site"], r["station"], r["lon"], r["lat"]
+            )
+        self._snapshot_quiet(self._project_filter)
+        self._reload()
+
+    def _effective_ps_for(self, directory) -> tuple[str, str]:
+        """该项目的继承 (province, site)，无则空串（与采集记录页同源）。"""
+        if not directory:
+            return ("", "")
+        try:
+            pf = pss.effective_new_specimen_prefill(
+                directory, root=self.ctx.current_project_root
+            )
+            return (pf.get("province", ""), pf.get("site", ""))
+        except Exception:
+            return ("", "")
+
+    def _stations_for_bind(self, db) -> list[dict]:
+        """本项目全部站位（去重 province/site/station，附记录数）供绑定下拉。"""
+        out: dict[tuple, dict] = {}
+        try:
+            for rec in crs.list_records(db):
+                key = (rec.get("province"), rec.get("site"), rec.get("station"))
+                if not all(key):
+                    continue
+                slot = out.get(key)
+                if slot is None:
+                    slot = {
+                        "province": rec.get("province"), "site": rec.get("site"),
+                        "station": rec.get("station"),
+                        "station_label": rec.get("station_label") or "",
+                        "count": 0,
+                    }
+                    out[key] = slot
+                slot["count"] += 1
+        except Exception:
+            return []
+        return list(out.values())
+
+    def _snapshot_quiet(self, directory) -> None:
+        """写库后静默快照元数据库（本地安全网，失败不阻塞）。"""
+        if not directory:
+            return
+        try:
+            from app.services.backup_service import snapshot_project
+            snapshot_project(directory)
+        except Exception:
+            pass
+
     def _dbs_for_filter(self) -> list:
         """当前项目过滤对应的 DB 连接列表。全部 = 所有已知项目。"""
         if self._project_filter:
@@ -1170,6 +1356,7 @@ class CollectionMapView(BaseView):
             self._zoom_slider.setRange(5, 200)
             self._zoom_slider.setValue(10)
             self._zoom_slider.blockSignals(False)
+        self._update_edit_buttons()
         self._reload()
 
     def _on_calibrate(self) -> None:

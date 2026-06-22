@@ -18,6 +18,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtWidgets import QApplication, QLabel, QLineEdit, QPushButton
+from PyQt6.QtCore import Qt
 
 _APP = QApplication.instance() or QApplication([])
 
@@ -496,6 +497,119 @@ class TestMultiPointLayer:
             (w.mousePressEvent if typ == QMouseEvent.Type.MouseButtonPress
              else w.mouseReleaseEvent)(ev)
         assert w.marker_lon is not None   # 放置成功
+
+
+# ── 交互编辑层（采集地图：点空白新增 · 拖点移动）─────────────────────────────────
+
+def _mouse(widget, etype, pos, button=Qt.MouseButton.LeftButton):
+    """合成一次鼠标事件并派发到 widget 的对应 handler。"""
+    from PyQt6.QtCore import QPointF
+    from PyQt6.QtGui import QMouseEvent
+    ev = QMouseEvent(etype, QPointF(pos), button, button, Qt.KeyboardModifier.NoModifier)
+    if etype == QMouseEvent.Type.MouseButtonPress:
+        widget.mousePressEvent(ev)
+    elif etype == QMouseEvent.Type.MouseButtonRelease:
+        widget.mouseReleaseEvent(ev)
+    elif etype == QMouseEvent.Type.MouseMove:
+        widget.mouseMoveEvent(ev)
+
+
+class TestInteractivePointsLayer:
+    """interactive_points=True：点空白发 point_create_requested；拖点发 point_moved。"""
+
+    def test_interactive_points_default_false(self):
+        TileMapWidget = _import_widget()
+        w = TileMapWidget()
+        assert w.interactive_points is False
+
+    def test_has_point_create_requested_signal(self):
+        TileMapWidget = _import_widget()
+        w = TileMapWidget()
+        assert hasattr(w, "point_create_requested")
+
+    def test_has_point_moved_signal(self):
+        TileMapWidget = _import_widget()
+        w = TileMapWidget()
+        assert hasattr(w, "point_moved")
+
+    def test_click_empty_emits_create_when_interactive(self):
+        from PyQt6.QtCore import QPoint
+        from PyQt6.QtGui import QMouseEvent
+        TileMapWidget = _import_widget()
+        w = TileMapWidget()
+        w.interactive_marker = False
+        w.interactive_points = True
+        w.resize(800, 600)
+        w.set_center(121.0, 29.0, 12)
+        received = []
+        w.point_create_requested.connect(lambda lon, lat: received.append((lon, lat)))
+        center = QPoint(400, 300)
+        _mouse(w, QMouseEvent.Type.MouseButtonPress, center)
+        _mouse(w, QMouseEvent.Type.MouseButtonRelease, center)
+        assert len(received) == 1
+        # 中心点击 → 经纬度≈地图中心
+        assert abs(received[0][0] - 121.0) < 1e-3
+        assert abs(received[0][1] - 29.0) < 1e-3
+
+    def test_click_empty_no_create_when_not_interactive(self):
+        from PyQt6.QtCore import QPoint
+        from PyQt6.QtGui import QMouseEvent
+        TileMapWidget = _import_widget()
+        w = TileMapWidget()
+        w.interactive_marker = False
+        w.interactive_points = False
+        w.resize(800, 600)
+        received = []
+        w.point_create_requested.connect(lambda lon, lat: received.append((lon, lat)))
+        center = QPoint(400, 300)
+        _mouse(w, QMouseEvent.Type.MouseButtonPress, center)
+        _mouse(w, QMouseEvent.Type.MouseButtonRelease, center)
+        assert received == []
+
+    def test_drag_point_emits_moved(self):
+        from PyQt6.QtCore import QPoint
+        from PyQt6.QtGui import QMouseEvent
+        from app.widgets.tile_map_widget import lon_lat_to_pixel
+        TileMapWidget = _import_widget()
+        w = TileMapWidget()
+        w.interactive_marker = False
+        w.interactive_points = True
+        w.resize(800, 600)
+        w.set_center(121.0, 29.0, 12)
+        w.set_points(_pts((121.0, 29.0)))
+        px, py = lon_lat_to_pixel(121.0, 29.0, w._center_lon, w._center_lat, w._zoom, 800, 600)
+        received = []
+        w.point_moved.connect(lambda idx, lon, lat: received.append((idx, lon, lat)))
+        _mouse(w, QMouseEvent.Type.MouseButtonPress, QPoint(px, py))
+        _mouse(w, QMouseEvent.Type.MouseMove, QPoint(px + 60, py + 30))
+        _mouse(w, QMouseEvent.Type.MouseButtonRelease, QPoint(px + 60, py + 30))
+        assert len(received) == 1
+        assert received[0][0] == 0
+        # 拖到右下 → 经度增大、纬度减小
+        assert received[0][1] > 121.0
+        assert received[0][2] < 29.0
+
+    def test_click_point_still_emits_clicked_under_threshold(self):
+        """编辑模式下点击（<4px）已有点仍发 point_clicked，不误判为拖动。"""
+        from PyQt6.QtCore import QPoint
+        from PyQt6.QtGui import QMouseEvent
+        from app.widgets.tile_map_widget import lon_lat_to_pixel
+        TileMapWidget = _import_widget()
+        w = TileMapWidget()
+        w.interactive_marker = False
+        w.interactive_points = True
+        w.resize(800, 600)
+        w.set_center(121.0, 29.0, 12)
+        w.set_points(_pts((121.0, 29.0)))
+        px, py = lon_lat_to_pixel(121.0, 29.0, w._center_lon, w._center_lat, w._zoom, 800, 600)
+        clicked = []
+        moved = []
+        w.point_clicked.connect(clicked.append)
+        w.point_moved.connect(lambda idx, lon, lat: moved.append(idx))
+        _mouse(w, QMouseEvent.Type.MouseButtonPress, QPoint(px, py))
+        _mouse(w, QMouseEvent.Type.MouseButtonRelease, QPoint(px, py))   # 无位移
+        assert clicked == [0]
+        assert moved == []
 
 
 # ── tile fetch hardening（网络不可达：超时 + 失败反馈，不再无限挂起） ─────────────

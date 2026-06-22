@@ -381,6 +381,30 @@ def delete_record(db: sqlite3.Connection, record_id: int) -> None:
     db.commit()
 
 
+def set_station_coords(
+    db: sqlite3.Connection,
+    province: Optional[str],
+    site: Optional[str],
+    station: Optional[str],
+    lon: Any,
+    lat: Any,
+) -> int:
+    """Update lon/lat on every record of one station (province, site, station).
+
+    The 采集地图 aggregates a station's records to their coordinate centroid, so
+    moving / binding a station pin must update ALL its rows — updating one would
+    leave the centroid unmoved. Empty lon/lat → NULL (same coercion as upsert).
+    Returns the number of rows updated.
+    """
+    cur = db.execute(
+        "UPDATE collection_records SET lon=?, lat=? "
+        "WHERE province=? AND site=? AND station=?",
+        (_coerce("lon", lon), _coerce("lat", lat), province, site, station),
+    )
+    db.commit()
+    return int(cur.rowcount or 0)
+
+
 # ── Auto-fill ─────────────────────────────────────────────────────────────────
 # The subset of record fields the workbench capture cards can hold. Habitat /
 # tide / salinity / … have no capture slot — they live only in the record and

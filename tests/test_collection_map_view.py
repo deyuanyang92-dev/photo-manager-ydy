@@ -363,3 +363,105 @@ class TestLeftPaneScroll:
         ss = self._style_scroll(v)
         assert ss.widget().sizeHint().height() > ss.viewport().height()
         assert ss.verticalScrollBar().maximum() > 0
+
+
+# ── 编辑模式：点空白新增 · 拖点移动 · 手输经纬度 ──────────────────────────────
+
+class TestEditMode:
+    def _ctx_db(self, db):
+        ctx = MagicMock()
+        ctx.get_db.return_value = db
+        ctx.current_project_root = None
+        ctx.current_project_dir = None
+        return ctx
+
+    def _view_with_project(self, db):
+        v = CollectionMapView(self._ctx_db(db))
+        v.resize(900, 600)
+        v._project_filter = "/tmp/proj-x"   # 选中单个项目
+        v._update_edit_buttons()
+        return v
+
+    def test_edit_buttons_absent_without_project(self):
+        v = _view(db=_seed_db())
+        v._project_filter = None
+        v._update_edit_buttons()
+        assert v._add_point_btn.isEnabled() is False
+        assert v._input_coord_btn.isEnabled() is False
+
+    def test_edit_buttons_enabled_with_single_project(self):
+        v = self._view_with_project(_seed_db())
+        assert v._add_point_btn.isEnabled() is True
+        assert v._input_coord_btn.isEnabled() is True
+
+    def test_toggle_sets_interactive_points_and_hint(self):
+        v = self._view_with_project(_seed_db())
+        v._set_edit_mode(True)
+        assert v._edit_mode is True
+        assert v._tile_map.interactive_points is True
+        assert v._edit_hint.isHidden() is False
+        v._set_edit_mode(False)
+        assert v._tile_map.interactive_points is False
+        assert v._edit_hint.isHidden() is True
+
+    def test_point_create_new_record_writes_db(self, monkeypatch):
+        db = _seed_db()
+        v = self._view_with_project(db)
+        # mock 对话框：返回新建动作
+        from unittest.mock import patch
+        fake = MagicMock()
+        fake.exec.return_value = 1   # QDialog.DialogCode.Accepted
+        fake.result_point.return_value = {
+            "action": "new", "province": "ZJ", "site": "SMW", "station": "B9",
+            "collection_date": "20260622", "zone": "intertidal",
+            "lon": 122.5, "lat": 30.5,
+        }
+        with patch("app.widgets.collection_point_dialog.CollectionPointDialog",
+                   return_value=fake):
+            v._on_point_create(122.5, 30.5)
+        rec = crs.lookup_record(db, "ZJ", "SMW", "B9", "20260622")
+        assert rec is not None
+        assert rec["lon"] == pytest.approx(122.5)
+        assert rec["lat"] == pytest.approx(30.5)
+
+    def test_point_create_bind_updates_station_coords(self, monkeypatch):
+        db = _seed_db()   # B2 已有 (121,29)
+        v = self._view_with_project(db)
+        from unittest.mock import patch
+        fake = MagicMock()
+        fake.exec.return_value = 1
+        fake.result_point.return_value = {
+            "action": "bind", "province": "ZJ", "site": "SMW", "station": "B2",
+            "lon": 199.0, "lat": 39.0,
+        }
+        with patch("app.widgets.collection_point_dialog.CollectionPointDialog",
+                   return_value=fake):
+            v._on_point_create(199.0, 39.0)
+        rec = crs.lookup_record(db, "ZJ", "SMW", "B2", "20260518")
+        assert rec["lon"] == pytest.approx(199.0)
+
+    def test_point_moved_updates_station_after_confirm(self, monkeypatch):
+        db = _seed_db()
+        v = self._view_with_project(db)
+        v.on_activate()
+        # 找到 B2 点的索引
+        idx = next(i for i, p in enumerate(v._points) if p.get("station") == "B2")
+        from PyQt6.QtWidgets import QMessageBox
+        monkeypatch.setattr("app.views.collection_map_view.ui.question",
+                            lambda *a, **k: QMessageBox.StandardButton.Yes)
+        v._on_point_moved(idx, 150.0, 35.0)
+        rec = crs.lookup_record(db, "ZJ", "SMW", "B2", "20260518")
+        assert rec["lon"] == pytest.approx(150.0)
+        assert rec["lat"] == pytest.approx(35.0)
+
+    def test_point_moved_cancelled_leaves_coords(self, monkeypatch):
+        db = _seed_db()
+        v = self._view_with_project(db)
+        v.on_activate()
+        idx = next(i for i, p in enumerate(v._points) if p.get("station") == "B2")
+        from PyQt6.QtWidgets import QMessageBox
+        monkeypatch.setattr("app.views.collection_map_view.ui.question",
+                            lambda *a, **k: QMessageBox.StandardButton.No)
+        v._on_point_moved(idx, 150.0, 35.0)
+        rec = crs.lookup_record(db, "ZJ", "SMW", "B2", "20260518")
+        assert rec["lon"] == pytest.approx(121.0)   # 未变

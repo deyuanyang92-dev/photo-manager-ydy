@@ -377,3 +377,46 @@ class TestZone:
         rec = crs.lookup_record(db, "ZJ", "SMW", "B2", "20260518")
         for k, v in extra.items():
             assert rec[k] == v, f"{k} 未持久化: {rec.get(k)!r}"
+
+
+# ── set_station_coords（采集地图：拖点/绑点 → 整站坐标刷新）─────────────────────
+
+class TestSetStationCoords:
+    """set_station_coords 更新一站全部行的 lon/lat。
+
+    采集地图按 (province,site,station) 聚合到质心；只改一行点不动，必须整站刷。
+    """
+
+    def test_updates_all_rows_of_station(self, db):
+        crs.upsert_record(db, _sample(station="B2", collection_date="20260518",
+                                      lon="121.0", lat="29.0"))
+        crs.upsert_record(db, _sample(station="B2", collection_date="20260519",
+                                      lon="123.0", lat="31.0"))
+        n = crs.set_station_coords(db, "ZJ", "SMW", "B2", 122.5, 30.5)
+        assert n == 2
+        for d in ("20260518", "20260519"):
+            rec = crs.lookup_record(db, "ZJ", "SMW", "B2", d)
+            assert rec["lon"] == pytest.approx(122.5)
+            assert rec["lat"] == pytest.approx(30.5)
+
+    def test_leaves_other_stations_untouched(self, db):
+        crs.upsert_record(db, _sample(station="B2", collection_date="20260518",
+                                      lon="121.0", lat="29.0"))
+        crs.upsert_record(db, _sample(station="H1", collection_date="20260518",
+                                      lon="125.0", lat="33.0"))
+        crs.set_station_coords(db, "ZJ", "SMW", "B2", 122.5, 30.5)
+        h1 = crs.lookup_record(db, "ZJ", "SMW", "H1", "20260518")
+        assert h1["lon"] == pytest.approx(125.0)
+        assert h1["lat"] == pytest.approx(33.0)
+
+    def test_returns_zero_for_unknown_station(self, db):
+        crs.upsert_record(db, _sample())
+        assert crs.set_station_coords(db, "ZJ", "SMW", "ZZZ", 1.0, 2.0) == 0
+
+    def test_empty_lon_clears_coords(self, db):
+        """传空 → 该站行 lon/lat 置 NULL（与 upsert 的 _coerce 语义一致）。"""
+        crs.upsert_record(db, _sample(station="B2", lon="121.0", lat="29.0"))
+        crs.set_station_coords(db, "ZJ", "SMW", "B2", "", "")
+        rec = crs.lookup_record(db, "ZJ", "SMW", "B2", "20260518")
+        assert rec["lon"] is None
+        assert rec["lat"] is None
