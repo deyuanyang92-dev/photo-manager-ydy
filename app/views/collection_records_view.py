@@ -680,6 +680,14 @@ class CollectionRecordsView(BaseView):
             self._grid.setRowCount(0)
             db = self.ctx.get_db()
             records = crs.list_records(db) if db is not None else []
+            # zone 分段过滤行：「全部」显所有；潮间带含 zone=NULL 老记录（迁移
+            # 默认归潮间带），潮下带只显显式 subtidal。列序由 _apply_zone_to_grid 切。
+            zf = getattr(self, "_zone_filter", "intertidal")
+            if zf == "subtidal":
+                records = [r for r in records if (r.get("zone") or "") == "subtidal"]
+            elif zf == "intertidal":
+                records = [r for r in records
+                           if (r.get("zone") or "") in ("", "intertidal")]
             for rec in records:
                 self._grid_append_row(rec)
             self._grid_append_row(None)  # trailing blank row for quick add

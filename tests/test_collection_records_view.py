@@ -123,6 +123,36 @@ def test_zone_filter_switches_grid_columns(qapp, ctx):
     assert "样方号" not in hdrs_st
 
 
+def test_zone_filter_filters_rows_by_zone(qapp, ctx):
+    """zone 分段按采区过滤行：潮间带只显潮间带(+ zone NULL 老记录归潮间带)，
+    潮下带只显潮下带，「全部」显所有。修复前 _grid_load 取全部行不过滤。"""
+    db = ctx.get_db()
+    crs.upsert_record(db, {"province": "ZJ", "site": "SMW", "station": "I1",
+                           "collection_date": "20260601", "zone": "intertidal"})
+    crs.upsert_record(db, {"province": "ZJ", "site": "SMW", "station": "S1",
+                           "collection_date": "20260602", "zone": "subtidal"})
+    crs.upsert_record(db, {"province": "ZJ", "site": "SMW", "station": "OLD",
+                           "collection_date": "20260603"})  # zone NULL → 归潮间带
+
+    view = CollectionRecordsView(ctx)
+    view.on_activate()
+
+    def stations() -> set:
+        out = set()
+        for r in range(view._grid.rowCount()):
+            it = view._grid.item(r, 0)
+            if it is not None and it.text().strip():
+                out.add(it.text().strip())
+        return out
+
+    view._on_zone_filter("intertidal")
+    assert stations() == {"I1", "OLD"}, stations()
+    view._on_zone_filter("subtidal")
+    assert stations() == {"S1"}, stations()
+    view._on_zone_filter("all")
+    assert stations() == {"I1", "S1", "OLD"}, stations()
+
+
 def test_new_record_stamps_zone_from_filter(qapp, ctx):
     db = ctx.get_db()
     view = CollectionRecordsView(ctx)
