@@ -97,7 +97,7 @@ def _is_rna_storage(storage: Optional[str]) -> bool:
 
 
 def _is_alcohol_storage(storage: Optional[str]) -> bool:
-    """Current storage codes are ethanol/TNES/FAA style unless R-prefixed RNA."""
+    """Current storage codes describe alcohol fixation unless R-prefixed RNA."""
     return bool(storage) and not _is_rna_storage(storage)
 
 

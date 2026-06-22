@@ -15,6 +15,7 @@ center_on(dialog, parent)            → None
 
 get_existing_directory(parent, caption, start="")     → str | None
 get_open_file_name(parent, caption, start="", filter="", **kw)  → str | None
+get_open_file_names(parent, caption, start="", filter="", **kw) → list[str]
 get_save_file_name(parent, caption, start="", filter="", **kw)  → str | None
 
 warn(parent, title, text, **kw)      → QMessageBox.StandardButton
@@ -131,6 +132,29 @@ def get_open_file_name(
         **kw,
     )
     return path or ""
+
+
+def get_open_file_names(
+    parent: Optional[QWidget],
+    caption: str,
+    start: str = "",
+    filter: str = "",  # noqa: A002
+    **kw,
+) -> list[str]:
+    """Open a multi-select file-open dialog.
+
+    Returns selected paths, or an empty list if cancelled.
+    """
+    top = top_window(parent)
+    paths, _ = QFileDialog.getOpenFileNames(
+        top,
+        caption,
+        start,
+        filter,
+        options=_NO_NATIVE,
+        **kw,
+    )
+    return [p for p in paths if p]
 
 
 def get_save_file_name(

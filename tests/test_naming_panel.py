@@ -164,14 +164,37 @@ class TestStorageComboDisplay:
 
     def test_method_items_show_code_only(self, panel):
         from PyQt6.QtCore import Qt
-        from app.widgets.naming_panel import STANDARD_PRESERVATION_METHODS
-        details = dict(STANDARD_PRESERVATION_METHODS)
+        from app.services.project_settings_service import BUILTIN_STORAGES
+        details = {entry["code"]: entry["detail"] for entry in BUILTIN_STORAGES}
         rows = [r for r in self._method_rows(panel)
                 if r.data(Qt.ItemDataRole.UserRole) == "T95E"]
         assert rows, "T95E row missing from storage combo"
         item = rows[0]
         assert item.text() == "T95E", f"expected code-only text, got {item.text()!r}"
         assert item.toolTip() == details["T95E"]
+
+    def test_project_override_refreshes_detail(self, qapp):
+        import sqlite3
+        from unittest.mock import MagicMock
+        from app.db.db_manager import ensure_schema
+        from app.services.project_settings_service import save_setting
+        from app.widgets.naming_panel import NamingPanel
+
+        db = sqlite3.connect(":memory:")
+        ensure_schema(db)
+        save_setting(db, "custom_storages", [{
+            "code": "T95E",
+            "detail": "项目修改后的详细说明",
+            "transcriptome": False,
+        }])
+        ctx = MagicMock()
+        ctx.get_db.return_value = db
+        p = NamingPanel(ctx)
+        p._storage.setText("T95E")
+        p.refresh_storage_methods()
+        assert p._pres_detail.text() == "项目修改后的详细说明"
+        p.close()
+        db.close()
 
     def test_all_method_rows_text_equals_userrole_code(self, panel):
         from PyQt6.QtCore import Qt

@@ -61,17 +61,10 @@ if True:  # TYPE_CHECKING guard
 
 # ── Storage helpers (mirrors export_service) ──────────────────────────────────
 
+from app.services.project_settings_service import BUILTIN_STORAGES
+
 _STORAGE_LABELS: dict[str, str] = {
-    "T95E": "梯度酒精 95%→80%→75% 脱水固定",
-    "T80E": "梯度酒精 80%→75% 脱水固定",
-    "T75E": "梯度酒精 75% 脱水固定",
-    "D75E": "直接 75% 乙醇固定",
-    "D95E": "直接 95% 乙醇固定",
-    "D70E": "直接 70% 乙醇固定",
-    "FA":   "甲醛固定",
-    "DRY":  "干燥固定",
-    "FRZ":  "冷冻保存",
-    "LIVE": "活体",
+    str(entry["code"]): str(entry["detail"]) for entry in BUILTIN_STORAGES
 }
 
 

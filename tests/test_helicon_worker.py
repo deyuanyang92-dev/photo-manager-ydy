@@ -131,3 +131,21 @@ def test_worker_cancel_kills_process(tmp_path, qapp):
     worker.cancel()
 
     assert fake_proc.kill_called, "cancel() must call proc.kill()"
+
+
+def test_worker_accepts_str_output_path(tmp_path, qapp):
+    """output_path may be str (workbench passes os.path.join result)."""
+    from app.workers.helicon_worker import HeliconWorker
+
+    output = tmp_path / "out.tif"
+    output.write_bytes(b"\x00" * 8)
+    fake_proc = _FakeProc(returncode=0)
+    finished = []
+
+    with patch("app.workers.helicon_worker.subprocess.Popen", return_value=fake_proc):
+        worker = HeliconWorker(cmd=["helicon"], output_path=str(output))
+        worker.finished.connect(lambda p: finished.append(p))
+        _run_worker(worker)
+
+    assert len(finished) == 1
+    assert finished[0] == output

@@ -28,6 +28,12 @@ class TestSpecimenDateSeg:
     def test_different_year(self):
         assert specimen_date_seg("20250601", "20260601") == "20250601-20260601"
 
+    def test_cross_year_date_parses_in_result_id(self):
+        from app.utils.naming import parse_uid
+        parsed = parse_uid("FJ-XM-B2-DLC001-1-T95E-20250601-20260601")
+        assert parsed is not None
+        assert parsed["dateSegment"] == "20250601-20260601"
+
     def test_strips_non_digits(self):
         # hyphens and slashes removed
         assert specimen_date_seg("2026-06-01", "2026-06-01") == "20260601"

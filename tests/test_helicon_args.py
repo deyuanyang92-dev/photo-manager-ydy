@@ -7,11 +7,15 @@ Critical: verify EXACT flags — not -o, -m:, -r:, -s: but -save:, -mp:, -rp:, -
 import os
 import sys
 import pytest
+from pathlib import Path
 
 from app.services.helicon_service import (
     build_helicon_args,
+    build_helicon_cmd,
     detect_helicon,
     reset_helicon_cache,
+    write_helicon_input_list,
+    resolve_existing_image_path,
     HELICON_EXE_NAMES,
 )
 from app.utils.path_utils import wsl_to_windows
@@ -167,6 +171,57 @@ class TestWslPathTranslation:
         )
         assert isinstance(args, list)
         assert all(isinstance(a, str) for a in args)
+
+
+class TestHeliconInputList:
+    def test_write_list_contains_all_jpgs(self, tmp_path):
+        j1 = tmp_path / "a.jpg"
+        j2 = tmp_path / "b.jpg"
+        j1.write_bytes(b"j")
+        j2.write_bytes(b"j")
+        list_path = write_helicon_input_list([str(j1), str(j2)], str(tmp_path))
+        lines = Path(list_path).read_text(encoding="utf-8").strip().splitlines()
+        assert len(lines) == 2
+        assert str(j1) in lines[0] or str(j1).replace("/", "\\") in lines[0]
+
+    def test_missing_jpg_raises(self, tmp_path):
+        with pytest.raises(FileNotFoundError, match="找不到 JPG"):
+            write_helicon_input_list([str(tmp_path / "nope.jpg")], str(tmp_path))
+
+    def test_build_cmd_uses_i_flag_for_multiple(self, tmp_path, monkeypatch):
+        fake_exe = tmp_path / "HeliconFocus.exe"
+        fake_exe.write_bytes(b"fake")
+        monkeypatch.setenv("HELICON_FOCUS_PATH", str(fake_exe))
+        reset_helicon_cache()
+        j1 = tmp_path / "a.jpg"
+        j2 = tmp_path / "b.jpg"
+        j1.write_bytes(b"j")
+        j2.write_bytes(b"j")
+        out = tmp_path / "out.tif"
+        cmd = build_helicon_cmd(
+            [str(j1), str(j2)],
+            str(out),
+            method="1",
+            radius="8",
+            smoothing="4",
+            input_list_dir=str(tmp_path),
+        )
+        assert "-i" in cmd
+        i_idx = cmd.index("-i")
+        list_file = cmd[i_idx + 1]
+        assert Path(list_file).is_file()
+        assert "a.jpg" in Path(list_file).read_text(encoding="utf-8")
+
+
+class TestResolveExistingImagePath:
+    def test_finds_file_by_basename_on_wsl(self, tmp_path, monkeypatch):
+        j = tmp_path / "P1280065.JPG"
+        j.write_bytes(b"j")
+        if sys.platform == "linux":
+            monkeypatch.setenv("WSL_DISTRO_NAME", "Ubuntu")
+            win = f"N:\\fake\\dir\\{j.name}"
+            assert resolve_existing_image_path(win) is None  # wrong dir
+        assert resolve_existing_image_path(str(j)) == str(j.resolve())
 
 
 # ── detect_helicon ────────────────────────────────────────────────────────────

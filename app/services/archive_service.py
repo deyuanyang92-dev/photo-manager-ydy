@@ -4,7 +4,7 @@ Oracle: archive.js:28-61, 150-168; compress.js:32-45.
 
 Safety invariants (hard rules — must never be violated):
   1. TIFF is NEVER deleted.
-  2. delete_jpg=False (default) → no JPGs are deleted.
+  2. delete_jpg=True is the product default; deletion happens only after verification.
   3. If delete_jpg=True, JPGs are deleted ONLY after ALL four checks pass:
        a. cjxl available (else compression skips to sharp fallback).
        b. ZIP file exists and size > 32 bytes.
@@ -26,9 +26,10 @@ import shutil
 import subprocess
 import tempfile
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 
 # ── Effort mapping (mirrors compress.js EFFORT_MAP) ──────────────────────────
@@ -43,6 +44,14 @@ EFFORT_MAP = {
 
 _cjxl_available: Optional[bool] = None
 _djxl_available: Optional[bool] = None
+
+
+def _sha256_file(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _check_tool(name: str) -> bool:
@@ -135,6 +144,8 @@ def verify_manifest_complete(
             return CheckResult(ok=False, reason="ZIP 清单原文件名不一致：" + f["originalName"])
         if row.get("originalSize") != f["originalSize"] or row.get("compressedSize") != f["compressedSize"]:
             return CheckResult(ok=False, reason="ZIP 清单大小不一致：" + f["originalName"])
+        if row.get("originalSha256") != f.get("originalSha256"):
+            return CheckResult(ok=False, reason="ZIP 清单哈希不一致：" + f["originalName"])
     return CheckResult(ok=True)
 
 
@@ -155,6 +166,15 @@ def verify_jxl_recoverable(
         jxl_path = f.get("jxlPath", "")
         if not os.path.isfile(jxl_path):
             return CheckResult(ok=False, reason="JXL 文件缺失：" + f["archiveName"])
+        expected_hash = f.get("originalSha256")
+        # cjxl-unavailable fallback stores the original JPEG byte-for-byte.
+        if not str(f.get("archiveName", "")).lower().endswith(".jxl"):
+            if expected_hash and _sha256_file(jxl_path) != expected_hash:
+                return CheckResult(
+                    ok=False,
+                    reason="归档内 JPEG 与原始文件不一致：" + f["originalName"],
+                )
+            continue
         restored_path = os.path.join(temp_dir, "restore-" + f["originalName"])
         try:
             subprocess.run(
@@ -165,6 +185,11 @@ def verify_jxl_recoverable(
             )
             if not os.path.isfile(restored_path) or os.path.getsize(restored_path) <= 0:
                 return CheckResult(ok=False, reason="JXL 恢复输出异常：" + f["archiveName"])
+            if expected_hash and _sha256_file(restored_path) != expected_hash:
+                return CheckResult(
+                    ok=False,
+                    reason="JXL 恢复文件与原始 JPEG 不一致：" + f["originalName"],
+                )
         except Exception as e:
             msg = str(e)
             return CheckResult(ok=False, reason="JXL 恢复校验失败：" + f["archiveName"] + " · " + msg)
@@ -194,14 +219,16 @@ def archive_group(
     jpg_paths: list[str],
     tiff_path: str,
     project_dir: str,
-    delete_jpg: bool = False,
-    method: str = "maximum",
+    delete_jpg: bool = True,
+    method: str = "standard",
+    concurrency: int = 4,
+    progress_callback: Optional[Callable[[int, int, str], None]] = None,
 ) -> ZipResult:
     """Compress JPGs to JXL, write manifest, zip, verify, maybe delete JPGs.
 
     Safety invariants enforced here:
       - TIFF is NEVER deleted (not even accepted as input for deletion).
-      - delete_jpg defaults to False.
+      - delete_jpg defaults to True, but verification failure always keeps JPGs.
       - Deletion only happens after BOTH manifest + jxl_recoverable checks pass.
       - If djxl is unavailable, jxl_recoverable check fails → no deletion.
 
@@ -227,7 +254,7 @@ def archive_group(
     zip_dir = str(Path(tiff_path).parent)
     zip_path = os.path.join(zip_dir, tiff_basename + ".zip")
 
-    effort_map = EFFORT_MAP.get(method, EFFORT_MAP["maximum"])
+    effort_map = EFFORT_MAP.get(method, EFFORT_MAP["standard"])
     effort = effort_map["jxl"]
 
     temp_dir = tempfile.mkdtemp(prefix="specimen-archive-")
@@ -236,14 +263,17 @@ def archive_group(
     total_compressed = 0
 
     try:
-        # ── Phase 1: compress each JPG to JXL ────────────────────────────────
-        for jpg_path in jpg_paths:
+        # ── Phase 1: compress JPGs to JXL ───────────────────────────────────
+        # cjxl encodes one JPEG mostly on one core.  Independent photos can be
+        # processed safely in parallel because each writes a distinct file.
+        total_files = len(jpg_paths)
+
+        def _compress_one(file_index: int, jpg_path: str) -> tuple[int, dict]:
             original_name = os.path.basename(jpg_path)
             jxl_name = Path(original_name).stem + ".jxl"
             jxl_path = os.path.join(temp_dir, jxl_name)
-
             original_size = os.path.getsize(jpg_path)
-
+            original_sha256 = _sha256_file(jpg_path)
             try:
                 compress_to_jxl(jpg_path, jxl_path, effort=effort)
             except RuntimeError:
@@ -254,18 +284,37 @@ def archive_group(
 
             if not os.path.isfile(jxl_path):
                 raise RuntimeError(f"压缩后文件不存在: {jxl_path}")
-
             compressed_size = os.path.getsize(jxl_path)
-            total_original += original_size
-            total_compressed += compressed_size
-
-            manifest_files.append({
+            return file_index, {
                 "originalName": original_name,
                 "archiveName": jxl_name,
                 "jxlPath": jxl_path,
                 "originalSize": original_size,
                 "compressedSize": compressed_size,
-            })
+                "originalSha256": original_sha256,
+            }
+
+        workers = max(1, min(8, int(concurrency), total_files))
+        indexed_results: list[Optional[dict]] = [None] * total_files
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="jxl") as pool:
+            futures = {
+                pool.submit(_compress_one, index, path): (index, path)
+                for index, path in enumerate(jpg_paths)
+            }
+            completed = 0
+            for future in as_completed(futures):
+                index, source_path = futures[future]
+                result_index, file_result = future.result()
+                indexed_results[result_index] = file_result
+                completed += 1
+                if progress_callback is not None:
+                    progress_callback(
+                        completed, total_files, os.path.basename(source_path)
+                    )
+
+        manifest_files = [item for item in indexed_results if item is not None]
+        total_original = sum(item["originalSize"] for item in manifest_files)
+        total_compressed = sum(item["compressedSize"] for item in manifest_files)
 
         # ── Phase 2: write manifest.json ──────────────────────────────────────
         manifest = {
@@ -280,6 +329,7 @@ def archive_group(
                     "archiveName": f["archiveName"],
                     "originalSize": f["originalSize"],
                     "compressedSize": f["compressedSize"],
+                    "originalSha256": f["originalSha256"],
                 }
                 for f in manifest_files
             ],

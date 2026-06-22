@@ -54,16 +54,14 @@ if TYPE_CHECKING:
 # Oracle: app.js:290-308 (standardPreservationMethods + transcriptomePreservationMethods).
 STANDARD_PRESERVATION_METHODS = [
     ("T95E", "梯度酒精固定，最终以 95% 酒精保存"),
-    ("D95E", "直接使用 95% 酒精固定并保存"),
-    ("D75E", "直接使用 75% 酒精固定并保存"),
-    ("T75E", "梯度酒精固定，最终以 75% 酒精永久保存"),
-    ("D79", "75% 酒精直接固定，之后转 95% 酒精长期保存"),
-    ("T79", "梯度固定至 75% 酒精数日，之后转 95% 酒精长期保存"),
-    ("T100", "梯度固定，最终以 100% 酒精保存"),
+    ("D95E", "直接以 95% 酒精固定并保存"),
+    ("D75E", "直接以 75% 酒精固定并保存"),
+    ("T75E", "梯度酒精固定，最终以 75% 酒精保存"),
+    ("D79", "直接以 75% 酒精固定，然后转 95% 酒精长期保存"),
+    ("T79", "梯度酒精固定至 75%，然后转 95% 酒精长期保存"),
+    ("T100", "梯度酒精固定，最终以 100% 酒精保存"),
 ]
 TRANSCRIPTOME_PRESERVATION_METHODS = [
-    ("R95E", "已取 RNA，组织保存于 RNAlater；剩余标本以 95% 酒精保存"),
-] + [
     ("R" + code, "已取 RNA，组织保存于 RNAlater；剩余标本按 " + detail)
     for code, detail in STANDARD_PRESERVATION_METHODS
 ]
@@ -116,6 +114,7 @@ class NamingPanel(QWidget):
         super().__init__(parent)
         from PyQt6.QtCore import QSettings
         self.ctx = ctx
+        self._pres_detail_map = dict(_PRES_DETAIL)
         self._ui_settings = QSettings()
         self._persisted_uid: Optional[str] = None  # UID of the currently loaded saved specimen
         self._storage_syncing = False  # re-entrancy guard between combo ↔ _storage
@@ -372,11 +371,11 @@ class NamingPanel(QWidget):
         self._collection_date = _mk("采集 YYYYMMDD")
         date_grid.addWidget(_field("采集日期", self._collection_date, required=True,
                                    key="collection_date",
-                                   help_text="采集日期 YYYYMMDD —— 核心字段，写入唯一编号"), 0, 0)
+                                   help_text="采集 YYYYMMDD；只填采集或只填拍摄时视为同一天"), 0, 0)
         self._photo_date = _mk("拍摄 YYYYMMDD")
         date_grid.addWidget(_field("拍摄日期", self._photo_date, required=True,
                                    key="photo_date",
-                                   help_text="拍摄日期 YYYYMMDD"), 0, 1)
+                                   help_text="拍摄 YYYYMMDD；只填其一则采集与拍摄同天"), 0, 1)
         form.addWidget(self._date_group)
 
         root.addLayout(form)
@@ -942,9 +941,10 @@ class NamingPanel(QWidget):
         storage = self._storage.text().strip()
         col_date = self._collection_date.text().strip()
         photo_date = self._photo_date.text().strip()
-        seq = self._seq.value()
-
+        from app.utils.naming import coalesce_specimen_dates, specimen_date_seg
+        col_date, photo_date = coalesce_specimen_dates(col_date, photo_date)
         date_seg = specimen_date_seg(col_date or None, photo_date or None)
+        seq = self._seq.value()
 
         uid = self._build_configured_uid(date_seg)
         result_id = self._build_configured_uid(date_seg, seq=seq)
@@ -953,7 +953,7 @@ class NamingPanel(QWidget):
         self._set_preview(self._result_preview, result_id)
 
         # 保存方式说明灰字 + RNA 徽标 (web pres-detail-row)
-        detail = _PRES_DETAIL.get(storage.upper(), "")
+        detail = self._pres_detail_map.get(storage.upper(), "")
         if storage.upper().startswith("R"):
             detail = (detail + "   ✓ 已取RNA · RNAlater").strip()
         self._pres_detail.setText(detail)
@@ -1233,15 +1233,58 @@ class NamingPanel(QWidget):
         placeholder.setData("", Qt.ItemDataRole.UserRole)
         model.appendRow(placeholder)
 
+        # One source of truth: project settings service. Project entries may
+        # override built-in details or add new codes.
+        try:
+            from app.services.project_settings_service import (
+                BUILTIN_STORAGES,
+                builtin_storage_codes,
+                load_custom_storages,
+                resolve_storage_detail,
+                resolve_storage_transcriptome,
+            )
+            db = self.ctx.get_db()
+            custom_entries = load_custom_storages(db) if db is not None else []
+            builtins = [
+                {
+                    "code": str(entry["code"]),
+                    "detail": resolve_storage_detail(entry["code"], custom_entries),
+                    "transcriptome": resolve_storage_transcriptome(
+                        entry["code"], custom_entries
+                    ),
+                }
+                for entry in BUILTIN_STORAGES
+            ]
+            builtin_codes = builtin_storage_codes()
+            extras = [
+                entry for entry in custom_entries
+                if str(entry.get("code", "")).upper() not in builtin_codes
+            ]
+            methods = builtins + extras
+        except Exception:
+            methods = [
+                {"code": c, "detail": d, "transcriptome": c.startswith("R")}
+                for c, d in (
+                    STANDARD_PRESERVATION_METHODS + TRANSCRIPTOME_PRESERVATION_METHODS
+                )
+            ]
+
+        self._pres_detail_map = {
+            str(entry.get("code", "")).upper(): str(entry.get("detail", ""))
+            for entry in methods if entry.get("code")
+        }
+        regular = [entry for entry in methods if not entry.get("transcriptome")]
+        transcriptome = [entry for entry in methods if entry.get("transcriptome")]
+
         _add_separator()
         _add_header("常规保存")
-        for code, detail in STANDARD_PRESERVATION_METHODS:
-            _add_method(code, detail)
+        for entry in regular:
+            _add_method(str(entry.get("code", "")), str(entry.get("detail", "")))
 
         _add_separator()
         _add_header("已取 RNA，保存于 RNAlater")
-        for code, detail in TRANSCRIPTOME_PRESERVATION_METHODS:
-            _add_method(code, detail)
+        for entry in transcriptome:
+            _add_method(str(entry.get("code", "")), str(entry.get("detail", "")))
 
         _add_separator()
         custom = QStandardItem("其他… 打开项目设置")
@@ -1250,6 +1293,13 @@ class NamingPanel(QWidget):
 
         self._storage_combo.setModel(model)
         self._storage_combo.setCurrentIndex(0)
+
+    def refresh_storage_methods(self) -> None:
+        """Reload project storage codes/details while preserving selection."""
+        current = self._storage.text().strip()
+        self._build_storage_combo()
+        self._sync_combo_to_storage(current)
+        self._update_preview()
 
     def _on_storage_combo(self, index: int) -> None:
         """Apply the dropdown pick.  Headers/separators are non-selectable so

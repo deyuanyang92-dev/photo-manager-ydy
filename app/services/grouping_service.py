@@ -288,6 +288,30 @@ def backfill_archive_zips(db: sqlite3.Connection) -> int:
 
 # ── explicitUnassigns ─────────────────────────────────────────────────────────
 
+def remove_jpg_from_all_groups(db: sqlite3.Connection, jpg_path: str) -> None:
+    """Remove *jpg_path* from every grouping row (resolved path comparison)."""
+    _ensure_grouping_table(db)
+
+    def _resolved(path: str) -> str:
+        try:
+            return str(Path(path).resolve())
+        except OSError:
+            return str(path)
+
+    target = _resolved(jpg_path)
+    uids = db.execute("SELECT DISTINCT uid FROM grouping").fetchall()
+    for (uid,) in uids:
+        sg = load_grouping(db, uid)
+        changed = False
+        for g in sg.groups:
+            kept = [p for p in g.jpg_paths if _resolved(p) != target]
+            if len(kept) != len(g.jpg_paths):
+                g.jpg_paths = kept
+                changed = True
+        if changed:
+            save_grouping(db, uid, sg.groups, clean_phantoms=False)
+
+
 def add_explicit_unassign(db: sqlite3.Connection, path: str) -> None:
     """Mark *path* as explicitly unassigned (P0 blacklist).
 

@@ -39,8 +39,11 @@ class RetroactiveModal(QDialog):
         self.ctx = ctx
         self._scan = scan_result
         self._sel: dict[str, bool] = {}  # uid#seq → selected
-        self._delete_jpg = False
-        self.setWindowTitle("存量整理 — 按时间配对 JPG → TIF")
+        self._delete_jpg = True
+        self.setWindowTitle(
+            "自动分组并整理" if scan_result.get("autoGroup")
+            else "存量整理 — 按时间配对 JPG → TIF"
+        )
         self.setMinimumSize(640, 480)
         self._setup_ui()
         self._populate()
@@ -50,10 +53,17 @@ class RetroactiveModal(QDialog):
         root.setContentsMargins(16, 16, 16, 16)
         root.setSpacing(12)
 
-        hint = QLabel(
-            "扫描 results/ 的 TIF + incoming-jpg/ 原片，"
-            "按拍摄时间把每个 TIF 之前的 JPG 配给它。"
-        )
+        if self._scan.get("autoGroup"):
+            hint_text = (
+                "已按文件时间排序：每个 TIF 结束前一批 JPG。"
+                "请核对自动分组，勾选后执行整理归档。"
+            )
+        else:
+            hint_text = (
+                "扫描 results/ 的 TIF + incoming-jpg/ 原片，"
+                "按拍摄时间把每个 TIF 之前的 JPG 配给它。"
+            )
+        hint = QLabel(hint_text)
         hint.setObjectName("Muted")
         hint.setWordWrap(True)
         root.addWidget(hint)
@@ -72,6 +82,7 @@ class RetroactiveModal(QDialog):
         # Footer: delete-jpg toggle + buttons
         foot = QHBoxLayout()
         self._del_cb = QCheckBox("打包后删除原 JPG（校验通过才删，TIFF 永久保留）")
+        self._del_cb.setChecked(True)
         self._del_cb.setChecked(False)
         self._del_cb.toggled.connect(lambda v: setattr(self, "_delete_jpg", v))
         foot.addWidget(self._del_cb)
@@ -115,6 +126,8 @@ class RetroactiveModal(QDialog):
                         f"成果 #{g['seq']}  {g['tiffName']}  ← "
                         f"{g['jpgCount']} 张原片"
                     )
+                    if g.get("tiffNameValid") is False:
+                        txt += "  ⚠ TIF 命名不符合规则"
                 else:
                     txt = (
                         f"成果 #{g['seq']}  {g['tiffName']}  ← "
@@ -140,6 +153,16 @@ class RetroactiveModal(QDialog):
         if ua:
             warn = QLabel(f"⚠ {len(ua)} 张 JPG 没配到任何 TIF（不打包、不删除）")
             warn.setObjectName("MutedSmall")
+            self._content_lay.addWidget(warn)
+
+        unnamed = self._scan.get("unnamedTiffs", [])
+        if unnamed:
+            warn = QLabel(
+                f"⚠ {len(unnamed)} 个 TIF 无法识别标本编号，已跳过；"
+                "请先规范命名或在对应标本分组中重新扫描。"
+            )
+            warn.setObjectName("MutedSmall")
+            warn.setWordWrap(True)
             self._content_lay.addWidget(warn)
 
         if not specimens:
@@ -201,6 +224,16 @@ class RetroactiveModal(QDialog):
                 file_results.append(FileResult(
                     name=tiff_name, ok=True, size_bytes=zip_size, error=""
                 ))
+                if self._scan.get("autoGroup"):
+                    db = self.ctx.get_db()
+                    if db is not None:
+                        from app.services.retroactive_service import register_auto_group
+                        register_auto_group(
+                            db,
+                            uid,
+                            g,
+                            archive_zip=ar.zip_path,
+                        )
             except Exception as exc:
                 file_results.append(FileResult(
                     name=tiff_name, ok=False, size_bytes=0, error=str(exc)

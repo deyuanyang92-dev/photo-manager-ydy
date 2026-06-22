@@ -32,6 +32,89 @@ def _make_db(tmp_path):
 
 
 class TestRetroactiveScan:
+    def test_auto_group_folder_closes_each_jpg_batch_at_next_tiff(self, tmp_path):
+        """A mixed legacy folder is split at each TIFF in file-time order."""
+        from app.services.retroactive_service import scan_folder_auto_groups
+
+        uid = "FJ-XM-B2-DLC001-T95E-20260601"
+        names = [
+            "IMG_001.jpg",
+            "IMG_002.jpg",
+            "FJ-XM-B2-DLC001-1-T95E-20260601.tif",
+            "IMG_003.jpg",
+            "FJ-XM-B2-DLC001-2-T95E-20260601.tif",
+        ]
+        base_ns = 1_700_000_000_000_000_000
+        for index, name in enumerate(names):
+            path = tmp_path / name
+            path.write_bytes(b"image")
+            stamp = base_ns + index * 1_000_000_000
+            os.utime(path, ns=(stamp, stamp))
+
+        result = scan_folder_auto_groups(str(tmp_path))
+
+        assert result["ok"] is True
+        groups = result["specimens"][0]["groups"]
+        assert [[Path(p).name for p in group["jpgPaths"]] for group in groups] == [
+            ["IMG_001.jpg", "IMG_002.jpg"],
+            ["IMG_003.jpg"],
+        ]
+        assert [group["seq"] for group in groups] == [1, 2]
+
+    def test_auto_group_folder_uses_current_uid_for_unnamed_tiffs(self, tmp_path):
+        """The active grouping UID makes ordinary Helicon TIFF names usable."""
+        from app.services.retroactive_service import scan_folder_auto_groups
+
+        jpg = tmp_path / "IMG_001.jpg"
+        tif = tmp_path / "result.tif"
+        jpg.write_bytes(b"jpg")
+        tif.write_bytes(b"tif")
+        os.utime(jpg, ns=(1_700_000_000_000_000_000,) * 2)
+        os.utime(tif, ns=(1_700_000_001_000_000_000,) * 2)
+
+        result = scan_folder_auto_groups(str(tmp_path), fallback_uid="SPECIMEN-001")
+
+        group = result["specimens"][0]["groups"][0]
+        assert result["specimens"][0]["uid"] == "SPECIMEN-001"
+        assert group["seq"] == 1
+        assert group["tiffName"] == "result.tif"
+        assert group["jpgPaths"] == [str(jpg)]
+        assert group["tiffNameValid"] is False
+        assert result["unnamedTiffs"] == []
+
+    def test_register_auto_group_persists_jpg_tiff_and_archive(self, tmp_path):
+        """A confirmed automatic batch becomes a normal editable grouping row."""
+        from app.services.grouping_service import load_grouping
+        from app.services.retroactive_service import register_auto_group
+
+        jpg = tmp_path / "a.jpg"
+        tif = tmp_path / "result.tif"
+        archive = tmp_path / "result.zip"
+        jpg.write_bytes(b"jpg")
+        tif.write_bytes(b"tif")
+        archive.write_bytes(b"zip")
+        db = _make_db(tmp_path)
+
+        register_auto_group(
+            db,
+            "SPECIMEN-001",
+            {
+                "seq": 1,
+                "tiffPath": str(tif),
+                "jpgPaths": [str(jpg)],
+            },
+            archive_zip=str(archive),
+        )
+
+        saved = load_grouping(db, "SPECIMEN-001").groups
+        assert len(saved) == 1
+        assert saved[0].jpg_paths == [str(jpg)]
+        assert saved[0].composed_tiff_path == str(tif)
+        assert saved[0].archive_zip == str(archive)
+        assert saved[0].status == "organized"
+        assert saved[0].source == "auto-time-group"
+        db.close()
+
     def test_scan_finds_named_tiffs(self, tmp_path):
         """scan_project_retroactive must return groups for each named TIFF."""
         from app.services.retroactive_service import scan_project_retroactive

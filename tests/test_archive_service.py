@@ -181,15 +181,16 @@ class TestArchiveGroup:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
         reset_tool_cache()
 
-    def test_default_delete_jpg_is_false(self):
-        """delete_jpg defaults to False → JPGs must NOT be deleted."""
+    def test_default_delete_jpg_after_verified_archive(self):
+        """Default workflow removes loose JPG after exact archive verification."""
         jpg = _make_jpg(self.tmpdir, "img001.jpg")
         tiff = _make_tiff(self.tmpdir, "result.tif")
-        with patch("app.services.archive_service.has_cjxl", return_value=False):
+        with patch("app.services.archive_service.has_cjxl", return_value=False), \
+             patch("app.services.archive_service.has_djxl", return_value=True):
             result = archive_group([jpg], tiff, self.tmpdir)
         assert result.ok
-        assert result.delete_jpg is False
-        assert os.path.isfile(jpg), "JPG must NOT be deleted when delete_jpg=False"
+        assert result.delete_jpg is True
+        assert not os.path.isfile(jpg)
 
     def test_tiff_never_deleted(self):
         """TIFF must never be deleted under any circumstances."""

@@ -67,6 +67,22 @@ def test_builtin_storages_count():
     assert len(rna) == 8
 
 
+def test_resolve_storage_detail_prefers_project_override(db):
+    from app.services.project_settings_service import (
+        resolve_storage_detail,
+        save_setting,
+    )
+
+    save_setting(db, "custom_storages", [{
+        "code": "T79",
+        "detail": "项目自定义说明",
+        "transcriptome": False,
+    }])
+    from app.services.project_settings_service import load_custom_storages
+
+    assert resolve_storage_detail("T79", load_custom_storages(db)) == "项目自定义说明"
+
+
 def test_code_labels_default_structure():
     assert "province" in DEFAULT_CODE_LABELS
     assert "stations" in DEFAULT_CODE_LABELS

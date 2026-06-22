@@ -12,10 +12,10 @@ class HeliconWorker(QThread):
     finished = pyqtSignal(object) # Path of output TIFF
     failed = pyqtSignal(str)      # error message
 
-    def __init__(self, cmd: list, output_path: Path, parent=None) -> None:
+    def __init__(self, cmd: list, output_path, parent=None) -> None:
         super().__init__(parent)
         self._cmd = cmd
-        self._output_path = output_path
+        self._output_path = Path(output_path) if output_path else Path()
         self._proc = None
 
     def cancel(self) -> None:

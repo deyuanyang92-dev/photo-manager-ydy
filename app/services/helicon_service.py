@@ -32,7 +32,94 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from app.utils.path_utils import wsl_to_windows, windows_to_wsl, is_wsl_runtime
+from app.utils.path_utils import wsl_to_windows, windows_to_wsl, is_wsl_runtime, normalize_path
+
+
+def helicon_path_for_exe(p: str) -> str:
+    """Return a path Helicon.exe can read (Windows path when running under WSL)."""
+    p = str(p or "").strip()
+    if not p:
+        return p
+    if is_wsl_runtime():
+        if re.match(r"^[A-Za-z]:[/\\]", p):
+            return p.replace("/", "\\")
+        win = wsl_to_windows(p)
+        if win:
+            return win
+    return str(Path(p).resolve())
+
+
+def resolve_existing_image_path(p: str) -> Optional[str]:
+    """Return a path that exists on disk, trying WSL ↔ Windows alternates."""
+    raw = str(p or "").strip()
+    if not raw:
+        return None
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    def _add(c: str) -> None:
+        c = str(c or "").strip()
+        if not c or c in seen:
+            return
+        seen.add(c)
+        candidates.append(c)
+
+    _add(raw)
+    try:
+        _add(normalize_path(raw))
+    except Exception:
+        pass
+    if is_wsl_runtime():
+        if re.match(r"^[A-Za-z]:[/\\]", raw):
+            wsl = windows_to_wsl(raw)
+            if wsl:
+                _add(wsl)
+                try:
+                    _add(normalize_path(wsl))
+                except Exception:
+                    pass
+        else:
+            win = wsl_to_windows(raw)
+            if win:
+                _add(win)
+
+    for c in candidates:
+        if os.path.isfile(c):
+            return str(Path(c).resolve())
+    return None
+
+
+def write_helicon_input_list(jpg_paths: list[str], directory: str) -> str:
+    """Write a Helicon -i list file; lines are Windows paths when under WSL."""
+    if not jpg_paths:
+        raise FileNotFoundError("没有 JPG 可合成")
+
+    resolved: list[str] = []
+    missing: list[str] = []
+    for p in jpg_paths:
+        r = resolve_existing_image_path(p)
+        if r:
+            resolved.append(r)
+        else:
+            missing.append(p)
+
+    if missing:
+        sample = "\n".join(missing[:5])
+        extra = f"\n…等 {len(missing)} 个" if len(missing) > 5 else ""
+        hint = ""
+        if is_wsl_runtime():
+            hint = (
+                "\n\nWSL 提示：Helicon 是 Windows 程序，JPG 必须在 Windows 盘"
+                "（如 /mnt/n/.../incoming-jpg/）真实存在。"
+            )
+        raise FileNotFoundError(f"找不到 JPG 文件：\n{sample}{extra}{hint}")
+
+    os.makedirs(directory, exist_ok=True)
+    list_path = os.path.join(directory, f".helicon-input-{os.getpid()}.txt")
+    with open(list_path, "w", encoding="utf-8", newline="\n") as fh:
+        for p in resolved:
+            fh.write(helicon_path_for_exe(p) + "\n")
+    return list_path
 
 
 # ── Known install locations (mirrors helicon.js KNOWN_INSTALL_DIRS) ──────────
@@ -102,8 +189,11 @@ def build_helicon_args(
     if input_list_path:
         args.extend(["-i", _win(input_list_path)])
     elif jpg_paths:
-        # Pass first jpg_path as the input folder (or single file treated as folder)
-        args.append(_win(jpg_paths[0]))
+        # Folder input — never pass a single .jpg file (Helicon treats it as a path
+        # and fails with "No source files found"). Prefer -i list file instead.
+        folder = os.path.dirname(_win(jpg_paths[0]) or jpg_paths[0])
+        if folder:
+            args.append(folder)
 
     # Output: -save:<out>  (Oracle: helicon.js:139)
     if output:
@@ -271,22 +361,32 @@ def build_helicon_cmd(
     quality: Optional[int] = None,
     input_list_path: Optional[str] = None,
     tiff_compression: Optional[str] = None,
+    input_list_dir: Optional[str] = None,
 ) -> list[str]:
     """Return the full command list [exe, arg, ...] for HeliconWorker.
 
     Raises RuntimeError if Helicon is not detected.
+    Raises FileNotFoundError if any JPG path does not exist.
     """
     exe = detect_helicon()
     if not exe:
         raise RuntimeError("Helicon Focus 未安装或未检测到")
+
+    list_path = input_list_path
+    if not list_path and jpg_paths:
+        base_dir = input_list_dir
+        if not base_dir:
+            base_dir = os.path.dirname(os.path.abspath(output_file)) or os.getcwd()
+        list_path = write_helicon_input_list(jpg_paths, base_dir)
+
     args = build_helicon_args(
-        jpg_paths=jpg_paths,
+        jpg_paths=[] if list_path else jpg_paths,
         output=output_file,
         method=method,
         radius=radius,
         smoothing=smoothing,
         quality=quality,
-        input_list_path=input_list_path,
+        input_list_path=list_path,
         tiff_compression=tiff_compression,
     )
     return [exe] + args

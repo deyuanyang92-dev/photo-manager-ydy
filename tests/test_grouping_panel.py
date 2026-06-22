@@ -83,6 +83,30 @@ def test_toolbar_visible_after_load(qtbot):
     assert not panel._add_btn.isHidden()
 
 
+def test_auto_group_organize_button_emits_request(qtbot):
+    """The grouping toolbar exposes the legacy-folder automation entry."""
+    from app.widgets.grouping_panel import GroupingPanel
+
+    panel = GroupingPanel(_make_app_context())
+    qtbot.addWidget(panel)
+    panel.load_grouping("test-uid", _make_grouping([]))
+
+    with qtbot.waitSignal(panel.auto_group_organize_requested, timeout=1000):
+        panel._auto_group_btn.click()
+
+
+def test_tiff_naming_check_button_emits_independent_request(qtbot):
+    """TIFF naming audit is separate from automatic grouping and organizing."""
+    from app.widgets.grouping_panel import GroupingPanel
+
+    panel = GroupingPanel(_make_app_context())
+    qtbot.addWidget(panel)
+    panel.load_grouping("test-uid", _make_grouping([]))
+
+    with qtbot.waitSignal(panel.tiff_naming_check_requested, timeout=1000):
+        panel._tiff_naming_check_btn.click()
+
+
 # ---------------------------------------------------------------------------
 # _DraftGroupRow: QListWidget drag-drop mode
 # ---------------------------------------------------------------------------
@@ -390,3 +414,110 @@ def test_register_existing_zip_updates_composed_group(qtbot, tmp_path, monkeypat
     group = panel._grouping.groups[0]
     assert group.archive_zip == str(zip_path)
     assert group.status == "organized"
+
+
+def test_drop_external_jpg_adds_to_group(qtbot, tmp_path):
+    from app.widgets.grouping_panel import GroupingPanel
+
+    jpg = tmp_path / "a.jpg"
+    jpg.write_bytes(b"j")
+    panel = GroupingPanel(_make_app_context())
+    qtbot.addWidget(panel)
+    panel.load_grouping("test-uid", _make_grouping([{"index": 0, "jpgs": []}]))
+
+    panel.drop_external_files(0, [str(jpg)], None)
+
+    assert str(jpg) in panel._grouping.groups[0].jpg_paths
+
+
+def test_drop_external_tiff_sets_output_name_and_composed(qtbot, tmp_path):
+    from app.widgets.grouping_panel import GroupingPanel
+
+    tif = tmp_path / "2019-01-17 ZS PMax.tif"
+    tif.write_bytes(b"t")
+    panel = GroupingPanel(_make_app_context())
+    qtbot.addWidget(panel)
+    panel.load_grouping("test-uid", _make_grouping([{"index": 0, "jpgs": []}]))
+
+    with qtbot.waitSignal(panel.import_tiff_requested, timeout=1000) as blocker:
+        panel.drop_external_files(0, [], str(tif))
+
+    g = panel._grouping.groups[0]
+    assert g.composed_tiff_path == str(tif)
+    assert g.output_name == "2019-01-17 ZS PMax"
+    assert g.status == "composed"
+    assert blocker.args == ["test-uid", 0]
+
+
+def test_drop_external_jpg_and_tiff_together(qtbot, tmp_path):
+    from app.widgets.grouping_panel import GroupingPanel
+
+    jpg = tmp_path / "P1130102.JPG"
+    tif = tmp_path / "2019-01-17 ZS PMax.tif"
+    jpg.write_bytes(b"j")
+    tif.write_bytes(b"t")
+    panel = GroupingPanel(_make_app_context())
+    qtbot.addWidget(panel)
+    panel.load_grouping("test-uid", _make_grouping([{"index": 0, "jpgs": []}]))
+
+    with qtbot.waitSignal(panel.import_tiff_requested, timeout=1000):
+        panel.drop_external_files(0, [str(jpg)], str(tif))
+
+    g = panel._grouping.groups[0]
+    assert str(jpg) in g.jpg_paths
+    assert g.composed_tiff_path == str(tif)
+    assert g.output_name == "2019-01-17 ZS PMax"
+
+
+def test_add_photos_from_picker(qtbot, tmp_path, monkeypatch):
+    """每组「+」选文件 → JPG 进组 + TIF 设 output_name。"""
+    import app.utils.ui as ui
+    from app.widgets.grouping_panel import GroupingPanel
+
+    jpg = tmp_path / "P1130102.JPG"
+    tif = tmp_path / "Helicon PMax.tif"
+    jpg.write_bytes(b"j")
+    tif.write_bytes(b"t")
+    panel = GroupingPanel(_make_app_context())
+    qtbot.addWidget(panel)
+    panel.load_grouping("test-uid", _make_grouping([{"index": 0, "jpgs": []}]))
+
+    monkeypatch.setattr(
+        ui, "get_open_file_names", lambda *a, **k: [str(jpg), str(tif)]
+    )
+
+    with qtbot.waitSignal(panel.import_tiff_requested, timeout=1000):
+        panel._on_add_photos_from_picker(0)
+
+    g = panel._grouping.groups[0]
+    assert str(jpg) in g.jpg_paths
+    assert g.output_name == "Helicon PMax"
+
+
+def test_draft_row_shows_linked_tiff(qtbot, tmp_path):
+    """关联 TIF 后留在组卡片内显示绿色 TIF 标记，不立刻沉到「已整理」区。"""
+    from app.services.grouping_service import Group, SpecimenGrouping
+    from app.widgets.grouping_panel import GroupingPanel, _DraftGroupRow
+
+    tif = tmp_path / "Helicon PMax.tif"
+    tif.write_bytes(b"t")
+    panel = GroupingPanel(_make_app_context())
+    qtbot.addWidget(panel)
+    grouping = SpecimenGrouping(
+        uid="test-uid",
+        groups=[
+            Group(
+                group_index=0,
+                composed_tiff_path=str(tif),
+                output_name="Helicon PMax",
+                status="composed",
+            )
+        ],
+    )
+    panel.load_grouping("test-uid", grouping)
+
+    rows = panel.findChildren(_DraftGroupRow)
+    assert len(rows) == 1
+    lw = rows[0]._jpg_list
+    tips = [lw.item(i).toolTip() for i in range(lw.count()) if lw.item(i)]
+    assert "Helicon PMax.tif" in tips

@@ -236,3 +236,42 @@ def test_naming_components_roundtrip(qtbot, db):
     data = load_setting(db, "naming_rules", DEFAULT_NAMING_RULES)
     assert "scientific_name" in data["components"]
     assert "notes" in data["components"]
+
+
+def test_storage_tab_selects_builtin_row_into_edit_form(qtbot, db):
+    from app.widgets.project_settings_drawer import ProjectSettingsDrawer
+
+    ctx = _make_ctx(db=db)
+    d = ProjectSettingsDrawer(ctx)
+    qtbot.addWidget(d)
+    d.refresh()
+    d._builtin_storage_table.selectRow(5)
+    qtbot.wait(50)
+    assert d._new_code_edit.text() == "T79"
+    assert "梯度酒精" in d._new_detail_edit.toPlainText()
+
+
+def test_storage_save_upserts_builtin_override(qtbot, db):
+    from app.services.project_settings_service import load_custom_storages
+    from app.widgets.project_settings_drawer import ProjectSettingsDrawer
+
+    ctx = _make_ctx(db=db)
+    d = ProjectSettingsDrawer(ctx)
+    qtbot.addWidget(d)
+    d.refresh()
+    d._load_storage_edit_form("T79", "新的 T79 说明")
+    d._on_save_storage()
+    custom = load_custom_storages(db)
+    assert custom[0]["code"] == "T79"
+    assert custom[0]["detail"] == "新的 T79 说明"
+
+
+def test_storage_save_emits_change_and_supports_multiline(qtbot, db):
+    from app.widgets.project_settings_drawer import ProjectSettingsDrawer
+
+    d = ProjectSettingsDrawer(_make_ctx(db=db))
+    qtbot.addWidget(d)
+    d.refresh()
+    d._load_storage_edit_form("D95E", "第一行\n第二行详细说明")
+    with qtbot.waitSignal(d.storages_changed, timeout=1000):
+        d._on_save_storage()

@@ -539,6 +539,12 @@ class WorkbenchView(BaseView):
         self._grouping.add_selection_to_group_requested.connect(self._on_add_selection_to_group)
         self._grouping.free_compose_requested.connect(self._on_free_compose)
         self._grouping.retroactive_requested.connect(self._on_retroactive_scan)
+        self._grouping.auto_group_organize_requested.connect(
+            self._on_auto_group_organize
+        )
+        self._grouping.tiff_naming_check_requested.connect(
+            self._on_tiff_naming_check
+        )
         self._grouping.helicon_params_requested.connect(self._open_grouping_helicon_params)
         self._grouping.import_tiff_requested.connect(self._on_import_tiff)  # #cursor
         self._grouping.archive_zip_registered.connect(self._on_archive_zip_registered)
@@ -687,6 +693,9 @@ class WorkbenchView(BaseView):
         self._settings_drawer.closed.connect(self._settings_scrim.hide)
         self._settings_drawer.personnel_changed.connect(
             self._on_project_personnel_changed
+        )
+        self._settings_drawer.storages_changed.connect(
+            self._naming.refresh_storage_methods
         )
 
         # ── Collab panel drawer (overlay, hidden by default) ───────────────
@@ -845,6 +854,10 @@ class WorkbenchView(BaseView):
             # province/site 等字段残留显示(用户会误以为"被默认了")。
             self._naming.load_specimen({})
             self._current_uid = None
+            try:
+                self._apply_draft_project_defaults()
+            except Exception:
+                pass
         self._refresh_batch_header()
 
         # Start filesystem watcher + fallback poll
@@ -1107,12 +1120,7 @@ class WorkbenchView(BaseView):
             # 项目级预填（自动，非手动）：人员三项 + 默认坐标/地理区。clear() 先
             # 清空，故都填进空字段并标记为「自动」。选定具体站位后，采集记录会以
             # override_auto 覆盖这里的项目默认坐标（见 _apply_collection_autofill）。
-            self._metadata.apply_autofill({
-                k: prefill[k]
-                for k in ("collector", "photographer", "identifier",
-                          "lon", "lat", "geo_area")
-                if prefill.get(k)
-            })
+            self._apply_draft_project_defaults()
             self._metadata.apply_autofill({
                 k: v
                 for k, v in prev_meta_context.items()
@@ -1121,20 +1129,38 @@ class WorkbenchView(BaseView):
         except Exception:
             pass
 
-    def _on_project_personnel_changed(self, personnel: dict) -> None:
-        """Apply changed project defaults to a draft, never to a saved specimen.
+    def _apply_draft_project_defaults(self, *, override_auto: bool = False) -> None:
+        """把项目默认人员/坐标预填进拍摄界面右栏（仅空字段或自动字段）。
 
-        Existing specimen values are specimen facts and remain editable per
-        record. In a draft, only empty/automatic values are replaced; manual
-        overrides are protected by MetadataPanel's auto-field tracking.
+        新建标本、进入工作台无激活号、项目设置里改人员时都会走这里。
+        用户仍可在右侧手改（不同站位/临时换人）；手填值不会被覆盖。
         """
-        if self._current_uid is not None:
-            return
+        prefill = self._effective_prefill()
+        self._metadata.apply_autofill({
+            k: prefill[k]
+            for k in ("collector", "photographer", "identifier",
+                      "lon", "lat", "geo_area")
+            if prefill.get(k)
+        }, override_auto=override_auto)
+        self._sync_uid_display_summary()
+
+    def _on_project_personnel_changed(self, personnel: dict) -> None:
+        """Apply project personnel defaults to empty/auto fields on the right rail.
+
+        Works for new drafts and for older specimens whose personnel columns were
+        never filled — never overwrites values already saved on the specimen.
+        """
         values = {
             key: str(personnel.get(key) or "").strip()
             for key in ("collector", "photographer", "identifier")
         }
+        if not any(values.values()):
+            return
+        before = self._metadata.current_values()
         self._metadata.apply_autofill(values, override_auto=True)
+        after = self._metadata.current_values()
+        if self._current_uid and before != after:
+            self._schedule_rail_save()
         self._sync_uid_display_summary()
 
     def _effective_prefill(self) -> dict:
@@ -1684,6 +1710,11 @@ class WorkbenchView(BaseView):
                     return
 
         n = self._naming
+        from app.utils.naming import coalesce_specimen_dates
+        collection_date, photo_date = coalesce_specimen_dates(
+            n._collection_date.text().strip(),
+            n._photo_date.text().strip(),
+        )
         try:
             db.execute(
                 """
@@ -1707,13 +1738,17 @@ class WorkbenchView(BaseView):
                     n._site.text().strip(),
                     n._station.text().strip(),
                     n._storage.text().strip(),
-                    n._collection_date.text().strip(),
-                    n._photo_date.text().strip(),
+                    collection_date,
+                    photo_date,
                     n._photo_notes.toPlainText().strip(),
                     project_dir,
                 ),
             )
             db.commit()
+            if collection_date and not n._collection_date.text().strip():
+                n._collection_date.setText(collection_date)
+            if photo_date and not n._photo_date.text().strip():
+                n._photo_date.setText(photo_date)
             # 命名行已建/更新 → 标记为当前标本，再 flush 右栏三卡。
             # 关键修复（场景1 疑点1+2）：新草稿 _current_uid 原为 None，metadata
             # autosave 整段被 _schedule_rail_save 跳过；保存只写命名段 → 用户在
@@ -1812,10 +1847,13 @@ class WorkbenchView(BaseView):
         # Pad so the inner WorkbenchSection card's drop-shadow is not clipped —
         # the card floats on the soft-gray dialog bg (QDialog#GroupingDialog).
         lay.setContentsMargins(14, 14, 14, 14)
-        # The panel's own collapse toggle is redundant inside a dedicated popup.
-        toggle = getattr(panel, "_group_toggle_btn", None)
-        if toggle is not None:
-            toggle.setVisible(False)
+        # Collapse header row is redundant inside a dedicated popup.
+        header = getattr(panel, "_group_header_widget", None)
+        if header is not None:
+            header.setVisible(False)
+        divider = getattr(panel, "_header_divider", None)
+        if divider is not None:
+            divider.setVisible(False)
         lay.addWidget(panel)
         dlg.resize(760, 560)
         return dlg
@@ -1844,34 +1882,29 @@ class WorkbenchView(BaseView):
         oracle `namingTargetSpecimen` 分道，桌面端有意取舍。
         """
         if not getattr(self._grouping, "_uid", None):
-            from app.services.grouping_service import ADHOC_GROUPING_UID
+            from app.services.grouping_service import (
+                ADHOC_GROUPING_UID,
+                SpecimenGrouping,
+                load_grouping,
+            )
             uid = (
                 self._current_uid
                 or self._get_active_uid()
                 or ADHOC_GROUPING_UID  # 没载入也没激活 → 临时分组,输出默认 组序.tif
             )
             db = self.ctx.get_db()
-            if not db:
-                # 没开项目 → 照片/合成 TIFF/归档 ZIP 都没地方落,无法分组。
-                # 明确引导去『项目树』,别再误导成"先填编号"(填了也没用)。
-                try:
-                    self._grouping._empty_lbl.setText(
-                        "请先在顶部『项目树』打开一个项目。\n"
-                        "照片、合成 TIFF、归档 ZIP 都存放在项目目录里——"
-                        "没有项目就无处分组/合成。")
-                    self._grouping._empty_lbl.show()
-                except Exception:
-                    pass
-            elif uid:
-                try:
-                    from app.services.grouping_service import load_grouping
-                    self._grouping.load_grouping(uid, load_grouping(db, uid))
-                    if uid == ADHOC_GROUPING_UID:
-                        # 临时分组:标题友好化,免得显示 "~未命名" 这个内部 key。
-                        self._grouping._uid_label.setText("未命名（临时分组）")
-                        self._grouping._target_label.setText("临时")
-                except Exception:
-                    pass
+            try:
+                if db:
+                    grouping = load_grouping(db, uid)
+                else:
+                    grouping = SpecimenGrouping(uid=uid, groups=[])
+                self._grouping.load_grouping(uid, grouping)
+                if uid == ADHOC_GROUPING_UID:
+                    # 临时分组:标题友好化,免得显示 "~未命名" 这个内部 key。
+                    self._grouping._uid_label.setText("未命名（临时分组）")
+                    self._grouping._target_label.setText("临时")
+            except Exception:
+                pass
         dlg = self._grouping_dialog
         dlg.show()
         dlg.raise_()
@@ -2304,15 +2337,25 @@ class WorkbenchView(BaseView):
             pass
 
     def _on_add_selection_to_group(self, group_index: int) -> None:
-        """Resolve monitor selection and add JPGs to the specified group.
-
-        Oracle: app.js groupingAddSelectedToGroup() app.js:5258–5271.
-        """
+        """Resolve monitor selection → add JPGs (+ optional TIFF) to a group."""
         jpg_paths = self._monitor.selected_jpg_paths()
-        if not jpg_paths:
-            self._status_message("请先在上方监控区选中要入组的 JPG。")
+        tiff_paths = self._monitor.selected_tiff_paths()
+        if not jpg_paths and not tiff_paths:
+            self._status_message("请先在上方监控区选中 JPG 或 TIFF。")
             return
-        self._on_add_to_group(group_index, jpg_paths)
+        if len(tiff_paths) > 1:
+            self._status_message("一次只能关联 1 个 TIFF。")
+            return
+        tiff_path = tiff_paths[0] if tiff_paths else None
+        self._grouping.drop_external_files(group_index, jpg_paths, tiff_path)
+        uid = self._current_uid or getattr(self._grouping, "_uid", None)
+        project_dir = self.ctx.current_project_dir
+        if uid and project_dir and jpg_paths:
+            try:
+                from app.services.activation_service import manual_assign
+                manual_assign(project_dir, uid, jpg_paths)
+            except Exception:
+                pass
         self._monitor._on_select_none()
 
     def _on_add_to_group(self, group_index: int, jpg_paths: list[str]) -> None:
@@ -2458,9 +2501,212 @@ class WorkbenchView(BaseView):
         from app.widgets.retroactive_modal import RetroactiveModal
         dlg = RetroactiveModal(self.ctx, result, parent=self)
         if dlg.exec() == RetroactiveModal.DialogCode.Accepted:
+            panel_uid = getattr(self._grouping, "_uid", None)
+            if panel_uid:
+                try:
+                    from app.services.grouping_service import load_grouping
+                    db = self.ctx.get_db()
+                    if db is not None:
+                        self._grouping.load_grouping(
+                            panel_uid, load_grouping(db, panel_uid)
+                        )
+                except Exception:
+                    pass
             self._refresh_monitor()
 
+    def _on_auto_group_organize(self) -> None:
+        """Scan a legacy mixed folder and preview JPG…TIFF time batches."""
+        project_dir = self.ctx.current_project_dir
+        if not project_dir or not self.ctx.get_db():
+            self._status_message("请先打开一个项目。")
+            return
+
+        folder = ui.get_existing_directory(
+            self,
+            "选择需要自动分组整理的 JPG / TIF 目录",
+            start=project_dir,
+        )
+        if not folder:
+            return
+
+        fallback_uid = getattr(self._grouping, "_uid", None)
+        try:
+            from app.services.grouping_service import ADHOC_GROUPING_UID
+            if fallback_uid == ADHOC_GROUPING_UID:
+                fallback_uid = None
+            from app.services.retroactive_service import scan_folder_auto_groups
+            result = scan_folder_auto_groups(
+                folder,
+                fallback_uid=fallback_uid,
+            )
+        except Exception as exc:
+            ui.warn(self, "自动分组扫描失败", str(exc))
+            return
+
+        total_groups = sum(
+            len(sp.get("groups", [])) for sp in result.get("specimens", [])
+        )
+        if not total_groups:
+            ui.info(
+                self,
+                "自动分组整理",
+                "没有识别到完整的 JPG…TIF 批次。请检查文件时间顺序。",
+            )
+            return
+
+        from app.widgets.retroactive_modal import RetroactiveModal
+        dlg = RetroactiveModal(self.ctx, result, parent=self)
+        if dlg.exec() == RetroactiveModal.DialogCode.Accepted:
+            panel_uid = getattr(self._grouping, "_uid", None)
+            if panel_uid:
+                try:
+                    from app.services.grouping_service import load_grouping
+                    db = self.ctx.get_db()
+                    if db is not None:
+                        self._grouping.load_grouping(
+                            panel_uid, load_grouping(db, panel_uid)
+                        )
+                except Exception:
+                    pass
+            self._refresh_monitor()
+            scan_folder = result.get("scanFolder") or folder
+            self._offer_tiff_naming_check(scan_folder)
+
+    def _offer_tiff_naming_check(self, folder: str | None) -> None:
+        """Ask user to run the read-only TIF naming audit on *folder*."""
+        if not folder or not os.path.isdir(folder):
+            return
+        if ui.question(
+            self,
+            "检查 TIF 命名",
+            "整理已完成。是否立即检查 TIF 命名并提取标本编号？",
+        ):
+            self._run_tiff_naming_check(folder)
+
+    def _run_tiff_naming_check(self, folder: str | None = None) -> None:
+        """Scan *folder* (or ask user) for TIF naming compliance and show audit."""
+        project_dir = self.ctx.current_project_dir
+        if not project_dir:
+            self._status_message("请先打开一个项目。")
+            return
+
+        if not folder:
+            folder = ui.get_existing_directory(
+                self,
+                "选择需要检查 TIF 命名的目录",
+                start=project_dir,
+            )
+        if not folder:
+            return
+
+        current_uid = getattr(self._grouping, "_uid", None)
+        try:
+            from app.services.grouping_service import ADHOC_GROUPING_UID
+            if current_uid == ADHOC_GROUPING_UID:
+                current_uid = None
+            from app.services.project_settings_service import (
+                DEFAULT_NAMING_RULES,
+                load_setting,
+            )
+            from app.services.tiff_naming_service import inspect_tiff_names
+            from app.utils.naming import component_values_from_specimen
+
+            db = self.ctx.get_db()
+            rules = (
+                load_setting(db, "naming_rules", DEFAULT_NAMING_RULES)
+                if db
+                else DEFAULT_NAMING_RULES
+            )
+            components = rules.get("components", DEFAULT_NAMING_RULES["components"])
+
+            specimen_values = None
+            if current_uid and db:
+                row = db.execute(
+                    "SELECT * FROM specimens WHERE uid = ?", (current_uid,)
+                ).fetchone()
+                if row:
+                    from app.models.specimen import Specimen
+
+                    sp = Specimen.from_row(row)
+                    sp_dict = sp.raw or {
+                        "province": sp.province,
+                        "site": sp.site,
+                        "station": sp.station,
+                        "id": sp.id,
+                        "storage": sp.storage,
+                        "collection_date": sp.collection_date,
+                        "photo_date": sp.photo_date,
+                    }
+                    specimen_values = component_values_from_specimen(sp_dict)
+
+            audit = inspect_tiff_names(
+                folder,
+                current_uid=current_uid,
+                naming_components=components,
+                specimen_values=specimen_values,
+            )
+        except Exception as exc:
+            ui.warn(self, "TIF 命名检查失败", str(exc))
+            return
+
+        if audit.total == 0:
+            ui.info(self, "TIF 命名检查", "所选目录中没有 TIF/TIFF 文件。")
+            return
+
+        from app.widgets.tiff_naming_audit_dialog import TiffNamingAuditDialog
+        TiffNamingAuditDialog(audit, parent=self).exec()
+
+    def _on_tiff_naming_check(self) -> None:
+        """Run the independent, read-only TIFF filename audit."""
+        self._run_tiff_naming_check()
+
     # ── Grouping ──────────────────────────────────────────────────────────────
+
+    def _get_grouping_for_uid(self, uid: str):
+        """Load grouping from DB when a project is open, else from panel memory."""
+        from app.services.grouping_service import SpecimenGrouping, load_grouping
+
+        panel = self._grouping
+        if getattr(panel, "_uid", None) == uid and panel._grouping is not None:
+            return panel._grouping
+        db = self.ctx.get_db()
+        if db:
+            return load_grouping(db, uid)
+        return SpecimenGrouping(uid=uid, groups=[])
+
+    def _save_grouping_for_uid(self, uid: str, groups: list) -> None:
+        """Persist grouping to DB when available; always refresh the open panel."""
+        from app.services.grouping_service import SpecimenGrouping, save_grouping
+
+        db = self.ctx.get_db()
+        if db:
+            save_grouping(db, uid, groups, clean_phantoms=False)
+        panel = self._grouping
+        if getattr(panel, "_uid", None) == uid:
+            panel.load_grouping(uid, SpecimenGrouping(uid=uid, groups=groups))
+
+    def _ensure_compose_incoming_dir(self, group) -> tuple[str, str]:
+        """Return (incoming_dir, results_dir) for Helicon output.
+
+        With a project: use configured incoming/results subdirs.
+        Without: write beside the group's JPGs (or a temp fallback).
+        """
+        import tempfile
+
+        project_dir = self.ctx.current_project_dir
+        if project_dir:
+            inc, res = self._resolve_capture_subdirs()
+            incoming = os.path.join(project_dir, inc)
+            results = os.path.join(project_dir, res)
+            os.makedirs(incoming, exist_ok=True)
+            return incoming, results
+        if group and group.jpg_paths:
+            incoming = os.path.dirname(os.path.abspath(group.jpg_paths[0]))
+            os.makedirs(incoming, exist_ok=True)
+            return incoming, incoming
+        incoming = os.path.join(tempfile.gettempdir(), "specimen-photo-workbench")
+        os.makedirs(incoming, exist_ok=True)
+        return incoming, incoming
 
     def _on_compose_requested(self, uid: str, group_index: int) -> None:
         """Compose the JPGs in the specified group via Helicon Focus CLI.
@@ -2476,22 +2722,40 @@ class WorkbenchView(BaseView):
         NOTE: QProcess real invocation requires a true machine with Helicon.
         """
         db = self.ctx.get_db()
-        project_dir = self.ctx.current_project_dir
-        if not db or not project_dir or not uid:
+        if not uid:
             return
 
         try:
-            from app.services.grouping_service import load_grouping, save_grouping
             from app.services.helicon_service import detect_helicon
-            from app.services.organize_service import organize_preview, build_result_basename
 
-            grouping = load_grouping(db, uid)
+            grouping = self._get_grouping_for_uid(uid)
             group = next(
                 (g for g in grouping.groups if g.group_index == group_index), None
             )
             if group is None:
                 QMessageBox.warning(self, "合成", f"找不到组 {group_index}")
                 return
+
+            from app.services.helicon_service import resolve_existing_image_path
+            resolved_jpgs: list[str] = []
+            missing_jpgs: list[str] = []
+            for p in group.jpg_paths:
+                r = resolve_existing_image_path(p)
+                if r:
+                    resolved_jpgs.append(r)
+                else:
+                    missing_jpgs.append(p)
+            if missing_jpgs:
+                sample = "\n".join(missing_jpgs[:5])
+                extra = f"\n…等 {len(missing_jpgs)} 个" if len(missing_jpgs) > 5 else ""
+                QMessageBox.warning(
+                    self,
+                    "合成",
+                    f"以下 JPG 在磁盘上找不到：\n{sample}{extra}\n\n"
+                    "请确认照片仍在 incoming-jpg 目录；WSL 下请用 /mnt/n/... 打开项目。",
+                )
+                return
+            group.jpg_paths = resolved_jpgs
 
             if len(group.jpg_paths) < 2:
                 # ── Implicit-batch fallback  #cursor ─────────────────────────
@@ -2542,11 +2806,7 @@ class WorkbenchView(BaseView):
 
             # Determine output path — TIFF lands in incoming first;
             # organize step moves it to results/ (oracle app.js:4336,8867).
-            # 用项目配置的 incoming/results 子目录，而非写死（用户可改目录名）。
-            inc, res = self._resolve_capture_subdirs()
-            results_dir = os.path.join(project_dir, res)
-            incoming_dir = os.path.join(project_dir, inc)
-            os.makedirs(incoming_dir, exist_ok=True)
+            incoming_dir, results_dir = self._ensure_compose_incoming_dir(group)
 
             # 输出名统一走 _resolve_compose_output_name:覆盖值 > 编号-序号 > 组序.tif。
             # _seq:真编号=preview.next_seq;临时分组(ad-hoc)=组序。
@@ -2597,14 +2857,15 @@ class WorkbenchView(BaseView):
                     group.status = "composed"
                     group.updated_at = now
                     group.result_sequence = _seq
-                    save_grouping(db, uid, grouping.groups)
+                    self._save_grouping_for_uid(uid, grouping.groups)
 
-                    try:
-                        from app.services.organize_service import _bump_seq_hint
-                        if _seq is not None:
-                            _bump_seq_hint(db, uid, _seq)
-                    except Exception:
-                        pass
+                    if db is not None:
+                        try:
+                            from app.services.organize_service import _bump_seq_hint
+                            if _seq is not None:
+                                _bump_seq_hint(db, uid, _seq)
+                        except Exception:
+                            pass
 
                     self._grouping.load_grouping(uid, grouping)
                     self._refresh_results_column(uid, grouping)
@@ -2693,7 +2954,11 @@ class WorkbenchView(BaseView):
                 smoothing=str(params["smoothing"]),
                 tiff_compression=opts["tiff_compression"],
                 quality=opts["quality"],
+                input_list_dir=os.path.dirname(os.path.abspath(output_path)),
             )
+        except FileNotFoundError as exc:
+            on_failed(str(exc))
+            return
         except RuntimeError as exc:
             on_failed(str(exc))
             return
@@ -2747,7 +3012,7 @@ class WorkbenchView(BaseView):
         seq:真编号取 preview.next_seq;ad-hoc 取 group_index+1。
         """
         from app.services.grouping_service import ADHOC_GROUPING_UID
-        is_adhoc = (uid == ADHOC_GROUPING_UID)
+        is_adhoc = (uid == ADHOC_GROUPING_UID) or db is None
         seq = (group.group_index + 1) if is_adhoc else None
         if is_adhoc:
             if getattr(group, "output_name", None):
@@ -2762,19 +3027,9 @@ class WorkbenchView(BaseView):
 
     def _start_compose_batch(self, uid: str, organise: bool) -> None:
         """启动批量合成队列。organise=True 时每组合成完后立即整理该组。"""
-        db = self.ctx.get_db()
-        if not db or not uid:
+        if not uid:
             return
-        from app.services.helicon_service import detect_helicon
-        from app.services.grouping_service import load_grouping
-        if not detect_helicon():
-            QMessageBox.warning(
-                self, "未检测到 Helicon Focus",
-                "未找到 Helicon Focus，无法批量合成。请安装并设置 "
-                "HELICON_FOCUS_PATH 环境变量。",
-            )
-            return
-        grouping = load_grouping(db, uid)
+        grouping = self._get_grouping_for_uid(uid)
         selected = set()
         try:
             selected = set(self._grouping.selected_group_indexes())
@@ -2788,9 +3043,19 @@ class WorkbenchView(BaseView):
         if not queue:
             # 无待合成组:合成+整理 → 退而整理已合成组;纯合成 → 状态栏提示。
             if organise:
-                self._organise_all_batch(uid)
+                self._organise_all_batch(uid, silent_batch=True)
             else:
                 self._batch_status("无待合成组。")
+            return
+        # 只有确实存在待合成组时才需要 Helicon。已有 TIF 的组点
+        # [合成+整理]应直接进入归档，不能被合成工具检测提前拦截。
+        from app.services.helicon_service import detect_helicon
+        if not detect_helicon():
+            QMessageBox.warning(
+                self, "未检测到 Helicon Focus",
+                "未找到 Helicon Focus，无法批量合成。请安装并设置 "
+                "HELICON_FOCUS_PATH 环境变量。",
+            )
             return
         self._batch = {
             "uid": uid,
@@ -2849,15 +3114,11 @@ class WorkbenchView(BaseView):
         产出名:每组 output_name 覆盖 > 否则 organize_preview 的建议成果名。
         """
         db = self.ctx.get_db()
-        project_dir = self.ctx.current_project_dir
-        if not db or not project_dir or not uid:
+        if not uid:
             on_done(False)
             return
         try:
-            from app.services.grouping_service import load_grouping, save_grouping
-            from app.services.organize_service import organize_preview
-
-            grouping = load_grouping(db, uid)
+            grouping = self._get_grouping_for_uid(uid)
             group = next(
                 (g for g in grouping.groups if g.group_index == group_index), None
             )
@@ -2865,10 +3126,7 @@ class WorkbenchView(BaseView):
                 on_done(False)  # 批量不弹隐式兜底问句,JPG 不足直接跳过
                 return
 
-            inc, res = self._resolve_capture_subdirs()
-            results_dir = os.path.join(project_dir, res)
-            incoming_dir = os.path.join(project_dir, inc)
-            os.makedirs(incoming_dir, exist_ok=True)
+            incoming_dir, results_dir = self._ensure_compose_incoming_dir(group)
 
             output_name, _seq = self._resolve_compose_output_name(
                 db, uid, group, results_dir, incoming_dir)
@@ -2888,13 +3146,14 @@ class WorkbenchView(BaseView):
                 group.status = "composed"
                 group.updated_at = now
                 group.result_sequence = _seq
-                save_grouping(db, uid, grouping.groups)
-                try:
-                    from app.services.organize_service import _bump_seq_hint
-                    if _seq is not None:
-                        _bump_seq_hint(db, uid, _seq)
-                except Exception:
-                    pass
+                self._save_grouping_for_uid(uid, grouping.groups)
+                if db is not None:
+                    try:
+                        from app.services.organize_service import _bump_seq_hint
+                        if _seq is not None:
+                            _bump_seq_hint(db, uid, _seq)
+                    except Exception:
+                        pass
                 self._grouping.load_grouping(uid, grouping)
                 self._refresh_results_column(uid, grouping)
                 self._on_helicon_finished(uid)
@@ -2907,13 +3166,11 @@ class WorkbenchView(BaseView):
         except Exception:
             on_done(False)
 
-    def _organise_all_batch(self, uid: str) -> None:
+    def _organise_all_batch(self, uid: str, silent_batch: bool = False) -> None:
         """[🗜整理] 批量:逐组同步整理「已合成未归档」组(整理本身是同步阻塞)。"""
-        db = self.ctx.get_db()
-        if not db or not uid:
+        if not uid:
             return
-        from app.services.grouping_service import load_grouping
-        grouping = load_grouping(db, uid)
+        grouping = self._get_grouping_for_uid(uid)
         selected = set()
         try:
             selected = set(self._grouping.selected_group_indexes())
@@ -2925,7 +3182,7 @@ class WorkbenchView(BaseView):
             and (not selected or g.group_index in selected)
         ]
         for idx in targets:
-            self._on_organise_requested(uid, idx)
+            self._on_organise_requested(uid, idx, silent_batch=silent_batch)
 
     def _on_organise_selected(self) -> None:
         """整理监控区选中的 JPG + TIFF，不重新合成。
@@ -3084,7 +3341,7 @@ class WorkbenchView(BaseView):
           - group must have ≥2 JPGs
           - TIFF must already be composed
 
-        delete_jpg is READ from settings; defaults to False (TIFF 永不删).
+        delete_jpg is READ from settings; defaults to True after verified archival.
         Calls archive_service.archive_group (JPG→JXL→ZIP + optional delete).
 
         Oracle: server.js:3615-3840 organizeSpecimen; archive.js:67-190.
@@ -3165,11 +3422,11 @@ class WorkbenchView(BaseView):
                     QMessageBox.warning(self, "整理", "该组无 JPG 原片，无法归档。")
                 return False
 
-            # Read delete_jpg setting (default False — TIFF 永不删，JPG 也默认保留)
-            delete_jpg: bool = False
+            # Default workflow: verified ZIP replaces loose JPGs. TIFF is never deleted.
+            delete_jpg: bool = True
             try:
                 delete_jpg = bool(
-                    getattr(self.ctx.settings, "delete_jpg_after_archive", False)
+                    getattr(self.ctx.settings, "delete_jpg_after_archive", True)
                 )
             except Exception:
                 pass
@@ -3196,15 +3453,54 @@ class WorkbenchView(BaseView):
                 if reply_col != QMessageBox.StandardButton.Yes:
                     return False
 
-            # Run archive
-            result = archive_group(
+            # Archive in a worker thread.  A 60-photo lossless JXL archive can
+            # take several minutes; doing this in the GUI thread made the whole
+            # window appear hung and gave the user no indication that work was
+            # still in progress.
+            from app.workers.supp_compression_worker import SuppCompressionWorker
+
+            progress = QProgressDialog("准备压缩 JPG…", "", 0, len(group.jpg_paths), self)
+            progress.setWindowTitle("整理 JPG 原片")
+            progress.setCancelButton(None)
+            progress.setWindowModality(Qt.WindowModality.NonModal)
+            progress.setMinimumDuration(0)
+            progress.setValue(0)
+
+            worker = SuppCompressionWorker(
                 jpg_paths=group.jpg_paths,
                 tiff_path=group.composed_tiff_path,
                 project_dir=project_dir,
                 delete_jpg=delete_jpg,
+                method=getattr(self.ctx.settings, "jxl_effort_method", "standard"),
+                concurrency=getattr(self.ctx.settings, "jxl_concurrency", 4),
+                parent=self,
             )
+            if not hasattr(self, "_archive_workers"):
+                self._archive_workers = set()
+            self._archive_workers.add(worker)
 
-            if result.ok:
+            def _release_worker() -> None:
+                progress.close()
+                self._archive_workers.discard(worker)
+                worker.deleteLater()
+
+            def _archive_progress(current: int, total: int, filename: str) -> None:
+                progress.setMaximum(total)
+                progress.setValue(max(0, current - 1))
+                progress.setLabelText(
+                    f"正在压缩第 {current}/{total} 张\n{filename}"
+                )
+
+            def _archive_failed(message: str) -> None:
+                _release_worker()
+                self._batch_status(f"整理失败：{message}")
+                QMessageBox.warning(self, "整理失败", message or "归档过程出现错误。")
+
+            def _archive_finished(result) -> None:
+                if not result.ok:
+                    _archive_failed("归档过程出现错误。")
+                    return
+                _release_worker()
                 # ── Move TIFF + ZIP from incoming → results/ (oracle app.js:4336)
                 import shutil
                 _results_dir = os.path.join(project_dir, res)
@@ -3254,11 +3550,18 @@ class WorkbenchView(BaseView):
                     msg += f"JPG 保留（{result.deletion_skipped_reason}）。"
                 if not silent_batch:
                     QMessageBox.information(self, "整理完成", msg)
-                return True
-            else:
-                if not silent_batch:
-                    QMessageBox.warning(self, "整理失败", "归档过程出现错误。")
-                return False
+                    self._offer_tiff_naming_check(_results_dir)
+                else:
+                    self._batch_status(
+                        f"整理完成：{Path(group.archive_zip).name}（{result.file_count} 张 JPG）"
+                    )
+
+            worker.progress.connect(_archive_progress)
+            worker.finished.connect(_archive_finished)
+            worker.failed.connect(_archive_failed)
+            progress.show()
+            worker.start()
+            return True
 
         except FileNotFoundError as exc:
             if not silent_batch:
@@ -3367,10 +3670,10 @@ class WorkbenchView(BaseView):
             if reply != QMessageBox.StandardButton.Yes:
                 return
 
-        delete_jpg: bool = False
+        delete_jpg: bool = True
         try:
             delete_jpg = bool(
-                getattr(self.ctx.settings, "delete_jpg_after_archive", False)
+                getattr(self.ctx.settings, "delete_jpg_after_archive", True)
             )
         except Exception:
             pass
@@ -3382,6 +3685,8 @@ class WorkbenchView(BaseView):
             grp.tiff_path,
             project_dir,
             delete_jpg=delete_jpg,
+            method=getattr(self.ctx.settings, "jxl_effort_method", "standard"),
+            concurrency=getattr(self.ctx.settings, "jxl_concurrency", 4),
             parent=self,
         )
         self._supp_worker.started_archiving.connect(self._on_supp_started)

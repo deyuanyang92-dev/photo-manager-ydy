@@ -63,10 +63,11 @@ _SUBTIDAL = [
 
 
 def _seed_records(project_dir: Path) -> None:
+    # Reuse the cached open handle; do NOT close it — ctx.get_db() in the view
+    # returns the same cached connection and would get a dead handle otherwise.
     db = open_project_db(str(project_dir), create=True)
     for rec in _INTERTIDAL + _SUBTIDAL:
         crs.upsert_record(db, rec)
-    db.close()
 
 
 def main() -> int:
@@ -79,8 +80,9 @@ def main() -> int:
     project_dir = tmp / "FJ-YGLZ-2026"
     project_dir.mkdir(parents=True, exist_ok=True)
     # _seed_project uses a strict open (create=False), so materialise the
-    # workspace DB first; ensure_schema is idempotent so re-opening is safe.
-    open_project_db(str(project_dir), create=True).close()
+    # workspace DB first. open_project_db caches the connection by path —
+    # do NOT close it here, or _seed_project reopens a dead cached handle.
+    open_project_db(str(project_dir), create=True)
     _seed_project(project_dir)
     _seed_records(project_dir)
 

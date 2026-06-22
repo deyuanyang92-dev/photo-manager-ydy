@@ -255,6 +255,36 @@ class TestPersonnelDefaultPrecedence:
         wb._on_project_personnel_changed({"collector": "又一个默认"})
         assert wb._metadata._collector.text() == "手动覆盖"
 
+    def test_settings_change_backfills_empty_saved_specimen(self, qapp, ctx):
+        """旧标本（如 ceshi7）采集人/拍摄人为空时，改项目人员设置也应立即回填。"""
+        from app.services import project_settings_service as pss
+        from app.views.workbench_view import WorkbenchView
+
+        uid = "ZJ-SMW-B2-ceshi7-T95E-20260518"
+        db = ctx.get_db()
+        import json
+        db.execute(
+            """
+            INSERT INTO specimens (
+                uid, id, province, site, station, storage, collection_date,
+                collector, photographer, owner_project_dir, raw_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (uid, "ceshi7", "ZJ", "SMW", "B2", "T95E", "20260518",
+             "", "", ctx.current_project_dir, json.dumps({"uid": uid})),
+        )
+        db.commit()
+
+        wb = WorkbenchView(ctx)
+        wb._load_specimen(uid)
+        assert wb._metadata._collector.text() == ""
+
+        wb._on_project_personnel_changed({
+            "collector": "yang et al", "photographer": "yang", "identifier": "",
+        })
+        assert wb._metadata._collector.text() == "yang et al"
+        assert wb._metadata._photographer.text() == "yang"
+
     def test_settings_change_never_overwrites_saved_specimen(self, qapp, ctx):
         from app.views.workbench_view import WorkbenchView
         wb = WorkbenchView(ctx)
@@ -262,6 +292,22 @@ class TestPersonnelDefaultPrecedence:
         wb._metadata._collector.setText("该标本实际采集人")
         wb._on_project_personnel_changed({"collector": "项目新默认"})
         assert wb._metadata._collector.text() == "该标本实际采集人"
+
+    def test_on_activate_prefills_project_personnel_on_draft(self, qapp, ctx):
+        """进入拍摄界面（无激活标本）时，右栏应自动带入项目人员默认，不必手填。"""
+        from app.services import project_settings_service as pss
+        pss.save_setting(ctx.get_db(), "personnel", {
+            "collector": "yang et al", "photographer": "yang",
+            "identifier": "", "verifier": "", "logistics": "",
+        })
+        from app.views.workbench_view import WorkbenchView
+        wb = WorkbenchView(ctx)
+        wb.on_activate()
+        assert wb._metadata._collector.text() == "yang et al"
+        assert wb._metadata._photographer.text() == "yang"
+        # 仍可手改，不被锁定
+        wb._metadata._collector.setText("站位B临时采集人")
+        assert wb._metadata._collector.text() == "站位B临时采集人"
 
 
 class TestLoadExistingSpecimenTriggersAutofill:

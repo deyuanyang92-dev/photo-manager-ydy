@@ -54,6 +54,42 @@ if TYPE_CHECKING:
 
 # ── Cross-group drag list ─────────────────────────────────────────────────────
 
+_JPG_EXTS = {".jpg", ".jpeg"}
+_TIFF_EXTS = {".tif", ".tiff"}
+
+
+def _paths_from_mime(event) -> list[str]:
+    md = event.mimeData()
+    if md is None or not md.hasUrls():
+        return []
+    paths: list[str] = []
+    for url in md.urls():
+        if not url.isLocalFile():
+            continue
+        p = url.toLocalFile()
+        if p and Path(p).is_file():
+            paths.append(p)
+    return paths
+
+
+def _split_media_paths(paths: list[str]) -> tuple[list[str], list[str]]:
+    jpgs: list[str] = []
+    tiffs: list[str] = []
+    for p in paths:
+        ext = Path(p).suffix.lower()
+        if ext in _JPG_EXTS:
+            jpgs.append(p)
+        elif ext in _TIFF_EXTS:
+            tiffs.append(p)
+    return jpgs, tiffs
+
+
+def _resolve_path_for_group(p: str) -> Optional[str]:
+    """Normalize a path for grouping; return None if file missing."""
+    from app.services.helicon_service import resolve_existing_image_path
+    return resolve_existing_image_path(p)
+
+
 class _CrossGroupList(QListWidget):
     """QListWidget that supports cross-group JPG drag-drop.
 
@@ -74,7 +110,38 @@ class _CrossGroupList(QListWidget):
         self.setDefaultDropAction(Qt.DropAction.MoveAction)
         self.setAcceptDrops(True)
 
+    def dragEnterEvent(self, event) -> None:  # noqa: N802 (Qt override)
+        if isinstance(event.source(), _CrossGroupList):
+            event.acceptProposedAction()
+            return
+        jpgs, tiffs = _split_media_paths(_paths_from_mime(event))
+        if jpgs or tiffs:
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event) -> None:  # noqa: N802 (Qt override)
+        self.dragEnterEvent(event)
+
     def dropEvent(self, event) -> None:
+        if not isinstance(event.source(), _CrossGroupList):
+            jpgs, tiffs = _split_media_paths(_paths_from_mime(event))
+            if jpgs or tiffs:
+                if len(tiffs) > 1:
+                    from PyQt6.QtWidgets import QMessageBox
+                    QMessageBox.warning(
+                        self, "拖入文件", "一次只能拖入 1 个 TIFF。"
+                    )
+                    event.ignore()
+                    return
+                self._panel.drop_external_files(
+                    self._group_index,
+                    jpgs,
+                    tiffs[0] if tiffs else None,
+                )
+                event.acceptProposedAction()
+                return
+
         src = event.source()
         if src is self:
             # Same-list reorder — delegate to Qt's default implementation.
@@ -179,7 +246,7 @@ class _ComposedRow(QFrame):
         org_btn = QPushButton("整理")
         org_btn.setObjectName("Primary")
         org_btn.setFixedHeight(28)
-        icons.set_button_icon(org_btn, "mdi6.archive-arrow-down-outline",
+        icons.set_button_icon(org_btn, "mdi6.folder-zip-outline",
                               color=icons.TONE_ON_ACCENT, size=14)
         org_btn.setToolTip("归档 JPG → ZIP，按设置删除 JPG")
         org_btn.clicked.connect(lambda: self.organise_clicked.emit(self._group.group_index))
@@ -212,6 +279,7 @@ class _DraftGroupRow(QFrame):
     """Editable draft group card (angle label + drag-reorderable JPG list)."""
 
     compose_clicked = pyqtSignal(int)         # group_index
+    organise_clicked = pyqtSignal(int)        # group_index — 已关联 TIF 时整理
     label_changed = pyqtSignal(int, str)      # group_index, new_label
     jpg_removed = pyqtSignal(int, str)        # group_index, jpg_path (kept for compat)
     add_selected_to_group = pyqtSignal(int)   # group_index
@@ -219,6 +287,7 @@ class _DraftGroupRow(QFrame):
     clear_group_requested = pyqtSignal(int)   # group_index  #cursor
     delete_group_requested = pyqtSignal(int)  # group_index  #cursor
     import_tiff_requested = pyqtSignal(int)   # group_index  #cursor groupingImportTiff
+    add_photos_requested = pyqtSignal(int)    # group_index — 从文件夹选图加入
     output_name_changed = pyqtSignal(int, str)  # group_index, 用户编辑的输出命名
     selected_changed = pyqtSignal(int, bool)  # group_index, checked
 
@@ -274,8 +343,9 @@ class _DraftGroupRow(QFrame):
             parent=self,
         )
         # Dashed drop-zone look when empty, hairline card when filled (theme QSS).
+        has_media = bool(self._group.jpg_paths or self._group.composed_tiff_path)
         self._jpg_list.setObjectName(
-            "GroupDropZoneEmpty" if not self._group.jpg_paths else "GroupDropZone"
+            "GroupDropZoneEmpty" if not has_media else "GroupDropZone"
         )
         self._jpg_list.setViewMode(QListWidget.ViewMode.IconMode)
         self._jpg_list.setIconSize(QSize(50, 50))
@@ -286,14 +356,23 @@ class _DraftGroupRow(QFrame):
         self._jpg_list.setSpacing(3)
         self._jpg_list.setUniformItemSizes(True)
         self._jpg_list.setFixedHeight(124)  # 2 行 50px 缩略图；不 stretch —— 否则把下方按钮挤出视口
-        self._jpg_list.setToolTip("拖拽可重新排序；右键 → 移除此 JPG；可在组间拖动")
+        self._jpg_list.setToolTip(
+            "从监控区或文件夹拖入 JPG/TIF；组内可排序；右键移除；可组间拖动"
+        )
         for p in self._group.jpg_paths:
             item = QListWidgetItem(self._thumb_icon(p), "")
             item.setData(Qt.ItemDataRole.UserRole, p)
             item.setToolTip(Path(p).name)
             self._jpg_list.addItem(item)
-        if not self._group.jpg_paths:
-            empty = QListWidgetItem("空组\n从监控区拖入 JPG\n或点「← 加入所选」")
+        tiff_path = self._group.composed_tiff_path or ""
+        if tiff_path:
+            tiff_item = QListWidgetItem(self._tiff_icon(), "TIF")
+            tiff_item.setData(Qt.ItemDataRole.UserRole, None)
+            tiff_item.setToolTip(Path(tiff_path).name)
+            tiff_item.setFlags(Qt.ItemFlag.NoItemFlags)
+            self._jpg_list.addItem(tiff_item)
+        if not self._group.jpg_paths and not tiff_path:
+            empty = QListWidgetItem("空组\n+ / 拖入\nJPG+TIF")
             empty.setFlags(Qt.ItemFlag.NoItemFlags)
             empty.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self._jpg_list.addItem(empty)
@@ -304,7 +383,13 @@ class _DraftGroupRow(QFrame):
         # 张数 + 输出名（同一行，省高度）
         meta = QHBoxLayout()
         meta.setSpacing(4)
-        count_lbl = QLabel(f"{len(self._group.jpg_paths)} 张")
+        if tiff_path and not self._group.jpg_paths:
+            count_text = "TIF 已关联"
+        elif tiff_path:
+            count_text = f"{len(self._group.jpg_paths)} JPG · TIF"
+        else:
+            count_text = f"{len(self._group.jpg_paths)} 张"
+        count_lbl = QLabel(count_text)
         count_lbl.setObjectName("MutedSmall")
         meta.addWidget(count_lbl)
         out_lbl = QLabel("出")
@@ -323,23 +408,50 @@ class _DraftGroupRow(QFrame):
         meta.addWidget(self._output_edit, 1)
         root.addLayout(meta)
 
-        # [合成] 整宽主按钮
-        compose_btn = QPushButton("合成")
-        compose_btn.setObjectName("Primary")
-        compose_btn.setFixedHeight(28)
-        icons.set_button_icon(compose_btn, "fa5s.layer-group",
-                              color=icons.TONE_ON_ACCENT, size=12)
-        compose_btn.setToolTip("调用 Helicon Focus 合成该组 JPG")
-        compose_btn.clicked.connect(lambda: self.compose_clicked.emit(self._group.group_index))
-        root.addWidget(compose_btn)
+        if tiff_path:
+            action_btn = QPushButton("整理")
+            action_btn.setObjectName("Primary")
+            action_btn.setFixedHeight(28)
+            icons.set_button_icon(action_btn, "mdi6.folder-zip-outline",
+                                  color=icons.TONE_ON_ACCENT, size=12)
+            action_btn.setToolTip(
+                f"已关联 TIFF：{Path(tiff_path).name}\n"
+                "打包 JPG → 与 TIF 同名的 ZIP"
+            )
+            action_btn.clicked.connect(
+                lambda: self.organise_clicked.emit(self._group.group_index)
+            )
+        else:
+            action_btn = QPushButton("合成")
+            action_btn.setObjectName("Primary")
+            action_btn.setFixedHeight(28)
+            icons.set_button_icon(action_btn, "mdi6.layers-triple-outline",
+                                  color=icons.TONE_ON_ACCENT, size=12)
+            action_btn.setToolTip("调用 Helicon Focus 合成该组 JPG")
+            action_btn.clicked.connect(
+                lambda: self.compose_clicked.emit(self._group.group_index)
+            )
+        root.addWidget(action_btn)
 
-        # 小动作行：加入所选 / 导入TIF / 清空 / 删组
+        # 小动作行：添加照片 / 加入所选 / 导入TIF / 清空 / 删组
         actions = QHBoxLayout()
         actions.setSpacing(4)
+        add_photos_btn = QPushButton()
+        add_photos_btn.setObjectName("Ghost")
+        add_photos_btn.setFixedSize(24, 24)
+        icons.set_button_icon(add_photos_btn, "mdi6.plus",
+                              color=icons.TONE_MUTED, size=14)
+        add_photos_btn.setToolTip("从文件夹选择 JPG/TIF 加入此组（TIF → 输出/ZIP 名）")
+        add_photos_btn.clicked.connect(
+            lambda: self.add_photos_requested.emit(self._group.group_index)
+        )
+        actions.addWidget(add_photos_btn)
         add_sel_btn = QPushButton("← 加入所选")
         add_sel_btn.setObjectName("Ghost")
         add_sel_btn.setFixedHeight(24)
-        add_sel_btn.setToolTip("将监控区选中的 JPG 加入此分组（其他组自动移除）")
+        add_sel_btn.setToolTip(
+            "将监控区选中的 JPG/TIF 加入此分组（TIF 基础名 → 输出/ZIP 名）"
+        )
         add_sel_btn.clicked.connect(
             lambda: self.add_selected_to_group.emit(self._group.group_index)
         )
@@ -387,6 +499,10 @@ class _DraftGroupRow(QFrame):
         except Exception:
             pass
         return icons.icon("mdi6.image-outline")
+
+    def _tiff_icon(self):
+        """TIFF 关联项占位图标（组内显示绿色 TIF 标记）。"""
+        return icons.icon("mdi6.file-image-outline", color="#36c98f")
 
     def _effective_output_name(self) -> str:
         """当前应显示的输出名：用户覆盖 > 已合成TIF名 > 临时分组默认组序 > 空。"""
@@ -484,6 +600,8 @@ class GroupingPanel(QWidget):
     add_selection_to_group_requested = pyqtSignal(int)  # group_index
     free_compose_requested = pyqtSignal()
     retroactive_requested = pyqtSignal()
+    auto_group_organize_requested = pyqtSignal()
+    tiff_naming_check_requested = pyqtSignal()
     helicon_params_requested = pyqtSignal()
     import_tiff_requested = pyqtSignal(str, int)  # uid, group_index  #cursor groupingImportTiff
     archive_zip_registered = pyqtSignal(str, int)  # uid, group_index
@@ -514,7 +632,7 @@ class GroupingPanel(QWidget):
         root.setContentsMargins(20, 16, 20, 16)
         root.setSpacing(14)
 
-        # ── capture-main-actions row (web parity: ⚡合成/合成+整理/🗜整理/⋯更多) ──
+        # ── capture-main-actions row (web parity: ⚡合成/🗜整理/合成+整理/⋯更多) ──
         # Hidden when no specimen active (mirrors app.js:7374-7378 early return)
         self._toolbar_widget = QWidget()
         main_actions = QHBoxLayout(self._toolbar_widget)
@@ -538,29 +656,64 @@ class GroupingPanel(QWidget):
         compose_btn = QPushButton("合成")
         compose_btn.setObjectName("Primary")
         compose_btn.setFixedHeight(30)
-        icons.set_button_icon(compose_btn, "fa5s.layer-group",
-                              color=icons.TONE_ON_ACCENT, size=13)
+        icons.set_button_icon(compose_btn, "mdi6.layers-triple-outline",
+                              color=icons.TONE_ON_ACCENT, size=14)
         compose_btn.setToolTip("对所有待合成组调用 Helicon Focus")
         compose_btn.clicked.connect(self._on_compose_all)
         main_actions.addWidget(compose_btn)
 
+        org_btn = QPushButton("整理")
+        org_btn.setObjectName("Outline")
+        org_btn.setFixedHeight(30)
+        icons.set_button_icon(org_btn, "mdi6.folder-zip-outline",
+                              color=icons.TONE_ACCENT, size=14)
+        org_btn.setToolTip("整理所有已合成组（归档 JPG）")
+        org_btn.clicked.connect(self._on_organise_all)
+        main_actions.addWidget(org_btn)
+
         compose_org_btn = QPushButton("合成+整理")
         compose_org_btn.setObjectName("Primary")
         compose_org_btn.setFixedHeight(30)
-        icons.set_button_icon(compose_org_btn, "mdi6.layers-plus",
+        icons.set_button_icon(compose_org_btn, "mdi6.archive-check-outline",
                               color=icons.TONE_ON_ACCENT, size=14)
         compose_org_btn.setToolTip("合成后立即整理归档（一条龙）")
         compose_org_btn.clicked.connect(self._on_compose_and_organise_all)
         main_actions.addWidget(compose_org_btn)
 
-        org_btn = QPushButton("整理")
-        org_btn.setObjectName("Outline")
-        org_btn.setFixedHeight(30)
-        icons.set_button_icon(org_btn, "mdi6.archive-arrow-down-outline",
-                              color=icons.TONE_MUTED, size=13)
-        org_btn.setToolTip("整理所有已合成组（归档 JPG）")
-        org_btn.clicked.connect(self._on_organise_all)
-        main_actions.addWidget(org_btn)
+        self._auto_group_btn = QPushButton("自动分组整理")
+        self._auto_group_btn.setObjectName("Outline")
+        self._auto_group_btn.setFixedHeight(30)
+        icons.set_button_icon(
+            self._auto_group_btn,
+            "mdi6.auto-fix",
+            color=icons.TONE_ACCENT,
+            size=14,
+        )
+        self._auto_group_btn.setToolTip(
+            "选择历史照片目录，按 JPG…TIF 的时间边界自动分组并批量整理"
+        )
+        self._auto_group_btn.clicked.connect(
+            self.auto_group_organize_requested.emit
+        )
+        main_actions.addWidget(self._auto_group_btn)
+
+        self._tiff_naming_check_btn = QPushButton("检查 TIF")
+        self._tiff_naming_check_btn.setObjectName("Outline")
+        self._tiff_naming_check_btn.setFixedHeight(30)
+        icons.set_button_icon(
+            self._tiff_naming_check_btn,
+            "mdi6.file-search-outline",
+            color=icons.TONE_ACCENT,
+            size=14,
+        )
+        self._tiff_naming_check_btn.setToolTip(
+            "检查 TIF 是否含可识别的标本唯一编号；"
+            "编号后可有附加信息；可导出 CSV"
+        )
+        self._tiff_naming_check_btn.clicked.connect(
+            self.tiff_naming_check_requested.emit
+        )
+        main_actions.addWidget(self._tiff_naming_check_btn)
 
         more_btn = QPushButton("⋯ 更多 ▾")
         more_btn.setObjectName("Ghost")
@@ -571,15 +724,24 @@ class GroupingPanel(QWidget):
 
         main_actions.addStretch()
 
+        self._add_btn = QPushButton("新组")
+        self._add_btn.setObjectName("Outline")
+        self._add_btn.setFixedHeight(30)
+        icons.set_button_icon(self._add_btn, "mdi6.plus", color=icons.TONE_ACCENT, size=14)
+        self._add_btn.clicked.connect(self._add_group)
+        self._add_btn.hide()
+        main_actions.addWidget(self._add_btn)
+
         self._target_label = QLabel("—")
         self._target_label.setObjectName("Mono")
         self._target_label.setToolTip("当前目标标本编号")
-        main_actions.addWidget(self._target_label)
+        self._target_label.hide()
         root.addWidget(self._toolbar_widget)
         self._toolbar_widget.hide()
 
-        # ── ▸ 分组工具 collapsible header ──
-        group_toggle_row = QHBoxLayout()
+        # ── ▸ 分组工具 collapsible header (popup hides whole row — redundant) ──
+        self._group_header_widget = QWidget()
+        group_toggle_row = QHBoxLayout(self._group_header_widget)
         group_toggle_row.setContentsMargins(0, 0, 0, 0)
         group_toggle_row.setSpacing(6)
         self._group_toggle_btn = QPushButton("▸ 分组工具")
@@ -599,26 +761,19 @@ class GroupingPanel(QWidget):
         )
         self._supp_btn.clicked.connect(self.supp_process_requested.emit)
         self._supp_btn.files_dropped.connect(self.supp_files_dropped.emit)
-        group_toggle_row.addWidget(self._supp_btn)
+        self._supp_btn.hide()
         group_toggle_row.addStretch()
 
         self._uid_label = QLabel("未选择标本")
         self._uid_label.setObjectName("Mono")
-        group_toggle_row.addWidget(self._uid_label)
+        self._uid_label.hide()
 
-        self._add_btn = QPushButton("新组")
-        self._add_btn.setObjectName("Outline")
-        self._add_btn.setFixedHeight(28)
-        icons.set_button_icon(self._add_btn, "mdi6.plus", color=icons.TONE_ACCENT, size=14)
-        self._add_btn.clicked.connect(self._add_group)
-        self._add_btn.hide()
-        group_toggle_row.addWidget(self._add_btn)
-        root.addLayout(group_toggle_row)
+        root.addWidget(self._group_header_widget)
 
-        line = QFrame()
-        line.setObjectName("Divider")
-        line.setFixedHeight(1)
-        root.addWidget(line)
+        self._header_divider = QFrame()
+        self._header_divider.setObjectName("Divider")
+        self._header_divider.setFixedHeight(1)
+        root.addWidget(self._header_divider)
 
         # Collapsible body
         self._group_body = QWidget()
@@ -715,6 +870,68 @@ class GroupingPanel(QWidget):
                 target.jpg_paths.append(p)
         self._rebuild()
         self.grouping_changed.emit()
+
+    def drop_external_files(
+        self,
+        group_index: int,
+        jpg_paths: list[str],
+        tiff_path: Optional[str] = None,
+    ) -> None:
+        """监控区/文件夹拖入：JPG 进组；单个 TIF → 关联成片，output_name = TIF 基础名。"""
+        if not self._grouping:
+            return
+        target = next(
+            (g for g in self._grouping.groups if g.group_index == group_index),
+            None,
+        )
+        if target is None:
+            return
+
+        if jpg_paths:
+            jpg_paths = [r for p in jpg_paths if (r := _resolve_path_for_group(p))]
+        if tiff_path:
+            tiff_resolved = _resolve_path_for_group(tiff_path)
+            if not tiff_resolved:
+                from PyQt6.QtWidgets import QMessageBox
+                QMessageBox.warning(self, "拖入文件", f"找不到 TIFF：\n{tiff_path}")
+                return
+            tiff_path = tiff_resolved
+
+        tiff_ok = True
+        if tiff_path:
+            tiff_ok = self._associate_tiff_with_group(target, tiff_path)
+
+        if jpg_paths:
+            self.add_jpgs_to_group(group_index, jpg_paths)
+        elif tiff_ok and tiff_path:
+            self._rebuild()
+            self._on_groups_changed()
+
+        if tiff_ok and tiff_path and self._uid:
+            self.import_tiff_requested.emit(self._uid, group_index)
+
+    def _associate_tiff_with_group(self, target: "Group", tiff_path: str) -> bool:
+        """Bind TIFF to *target*; output_name = TIF stem (ZIP 整理同名)."""
+        if target.composed_tiff_path and target.composed_tiff_path != tiff_path:
+            from PyQt6.QtWidgets import QMessageBox
+            reply = QMessageBox.question(
+                self,
+                "替换 TIFF？",
+                f"本组已有 TIFF：{Path(target.composed_tiff_path).name}\n\n"
+                f"是否替换为：{Path(tiff_path).name}？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return False
+
+        from datetime import datetime, timezone
+        target.composed_tiff_path = tiff_path
+        target.output_name = Path(tiff_path).stem
+        target.status = "composed"
+        target.source = target.source or "external-tif"
+        target.updated_at = datetime.now(tz=timezone.utc).isoformat()
+        return True
 
     def remove_jpg_from_group(self, group_index: int, jpg_path: str) -> None:
         """Remove *jpg_path* from the specified group.
@@ -826,13 +1043,16 @@ class GroupingPanel(QWidget):
         groups = self._grouping.groups
         display_numbers = {id(g): n for n, g in enumerate(groups, start=1)}
 
-        draft = [g for g in groups if not g.composed_tiff_path]
-        composed = [g for g in groups if g.composed_tiff_path]
+        draft = [
+            g for g in groups
+            if g.status != "organized" and not getattr(g, "archive_zip", None)
+        ]
+        composed = [
+            g for g in groups
+            if g.status == "organized" or getattr(g, "archive_zip", None)
+        ]
 
         if draft:
-            sec_lbl = QLabel(f"未合成组 · {len(draft)}")
-            sec_lbl.setObjectName("Section")
-            self._content_lay.addWidget(sec_lbl)
             # 横向胶片条：草稿卡片并排，横向滚动；多角度组也不挤。
             hscroll = QScrollArea()
             hscroll.setObjectName("GroupStrip")
@@ -854,12 +1074,14 @@ class GroupingPanel(QWidget):
                     display_number=display_numbers[id(g)],
                 )
                 row.compose_clicked.connect(self._on_compose)
+                row.organise_clicked.connect(self._on_organise)
                 row.label_changed.connect(self._on_label_changed)
                 row.add_selected_to_group.connect(self._on_add_selected_to_group)
                 row.jpg_remove_requested.connect(self._on_jpg_remove)
                 row.clear_group_requested.connect(self._on_clear_group)      # #cursor
                 row.delete_group_requested.connect(self._on_delete_group)    # #cursor
                 row.import_tiff_requested.connect(self._on_import_tiff)      # #cursor
+                row.add_photos_requested.connect(self._on_add_photos_from_picker)
                 row.output_name_changed.connect(self._on_output_name_changed)
                 row.selected_changed.connect(self._on_group_selected_changed)
                 strip_lay.addWidget(row)
@@ -995,6 +1217,70 @@ class GroupingPanel(QWidget):
         """Handle delete-group button from _DraftGroupRow."""
         self.delete_group(group_index)
 
+    def _on_add_photos_from_picker(self, group_index: int) -> None:
+        """「+」从文件夹多选 JPG/TIF 加入指定组。"""
+        if not self._grouping:
+            return
+
+        start = ""
+        project_dir = getattr(self.ctx, "current_project_dir", None)
+        if project_dir:
+            pd = Path(project_dir)
+            s = getattr(self.ctx, "settings", None)
+            inc = getattr(s, "incoming_subdir", None) if s else None
+            inc = inc if isinstance(inc, str) and inc else "incoming-jpg"
+            candidate = pd / inc
+            if candidate.is_dir():
+                start = str(candidate)
+            elif pd.is_dir():
+                start = str(pd)
+
+        from app.utils.ui import get_open_file_names
+        paths = get_open_file_names(
+            self,
+            "选择 JPG / TIFF 加入分组",
+            start=start,
+            filter=(
+                "JPG 与 TIFF (*.jpg *.jpeg *.JPG *.JPEG *.tif *.tiff *.TIF *.TIFF);;"
+                "JPG (*.jpg *.jpeg *.JPG *.JPEG);;"
+                "TIFF (*.tif *.tiff *.TIF *.TIFF)"
+            ),
+        )
+        if not paths:
+            return
+
+        jpgs, tiffs = _split_media_paths(paths)
+        jpgs = [r for p in jpgs if (r := _resolve_path_for_group(p))]
+        tiff_path = None
+        if tiffs:
+            tiff_resolved = _resolve_path_for_group(tiffs[0])
+            if not tiff_resolved:
+                from PyQt6.QtWidgets import QMessageBox
+                QMessageBox.warning(self, "添加照片", f"找不到 TIFF：\n{tiffs[0]}")
+                return
+            tiff_path = tiff_resolved
+        if not jpgs and not tiff_path:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(
+                self, "添加照片", "未识别到 JPG 或 TIFF 文件，请检查扩展名。"
+            )
+            return
+        if len(tiffs) > 1:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "添加照片", "一次只能关联 1 个 TIFF。")
+            return
+
+        self.drop_external_files(group_index, jpgs, tiff_path)
+
+        if jpgs and self._uid:
+            project_dir = getattr(self.ctx, "current_project_dir", None)
+            if project_dir:
+                try:
+                    from app.services.activation_service import manual_assign
+                    manual_assign(project_dir, self._uid, jpgs)
+                except Exception:
+                    pass
+
     def _on_import_tiff(self, group_index: int) -> None:  # #cursor groupingImportTiff
         """Open TIFF-import dialog and update the group composedTiffPath."""
         if not self._uid or not self._grouping:
@@ -1044,28 +1330,8 @@ class GroupingPanel(QWidget):
         if not tiff_path:
             return
 
-        # Guard: group already has a different TIFF  (mirrors web check)
-        if target.composed_tiff_path and target.composed_tiff_path != tiff_path:
-            from PyQt6.QtWidgets import QMessageBox
-            reply = QMessageBox.question(
-                self,
-                "替换 TIFF？",
-                f"本组已有 TIFF：{Path(target.composed_tiff_path).name}\n\n"
-                f"是否替换为：{Path(tiff_path).name}？",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-            if reply != QMessageBox.StandardButton.Yes:
-                return
-
-        # Apply：导入外部 TIF → 用该 TIF 的名作输出命名（去 .tif/.tiff 后缀），
-        # 这样整理时 ZIP 与 TIF 同名。一键整理无需手敲（你的设计）。
-        from datetime import datetime, timezone
-        target.composed_tiff_path = tiff_path
-        target.output_name = Path(tiff_path).stem
-        target.status = "composed"
-        target.source = target.source or "external-tif"
-        target.updated_at = datetime.now(tz=timezone.utc).isoformat()
+        if not self._associate_tiff_with_group(target, tiff_path):
+            return
 
         self._rebuild()
         self.grouping_changed.emit()

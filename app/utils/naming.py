@@ -39,6 +39,20 @@ def specimen_date_seg(collection_date: Optional[str], photo_date: Optional[str])
     return c + "-" + p
 
 
+def coalesce_specimen_dates(
+    collection_date: Optional[str],
+    photo_date: Optional[str],
+) -> tuple[str, str]:
+    """When only one date is set, treat collection and photo as the same day."""
+    c = str(collection_date or "").strip()
+    p = str(photo_date or "").strip()
+    if c and not p:
+        return c, c
+    if p and not c:
+        return p, p
+    return c, p
+
+
 def derive_uid(sp: dict) -> str:
     """Derive the canonical UID for a specimen dict.
 
@@ -200,9 +214,10 @@ def species_sequence_summary(
 
 # ── Regex patterns for UID parsing ────────────────────────────────────────────
 #
-# Date segment: 8 digits optionally followed by -4digits or -8digits
+# Date segment: 8 digits optionally followed by -4digits (same year) or -8digits (cross year)
 # Examples: 20260601  /  20260506-0508  /  20250601-20260601
-_DATE_SEG_RE = r"(\d{8}(?:-\d{4}|\d{8})?)"
+_DATE_SEG_RE = r"(\d{8}(?:-\d{4}|-\d{8})?)"
+_DATE_SEG_FULL_RE = re.compile(r"^" + _DATE_SEG_RE + r"$")
 
 # Storage code: alphanumeric (e.g. T95E, RD75E, D70E)
 _STORAGE_RE = r"([A-Za-z0-9]+)"
@@ -403,3 +418,304 @@ def suggested_tiff_name(
     ]
     base = "-".join(str(p) for p in parts if p)
     return base + ".tif"
+
+
+# ── Project-configured naming rules (mirrors naming_panel._build_configured_uid) ─
+
+
+def safe_uid_segment(value: Optional[str]) -> str:
+    text = str(value or "").strip()
+    text = re.sub(r"\s+", "_", text)
+    return text.replace("-", "_")
+
+
+def normalize_naming_components(components: Optional[list]) -> list[str]:
+    defaults = [
+        "province",
+        "site",
+        "station",
+        "species_id",
+        "storage",
+        "date_seg",
+    ]
+    if not components or not isinstance(components, list):
+        return list(defaults)
+    out = [str(c) for c in components if c and str(c) != "result_seq"]
+    return out or list(defaults)
+
+
+def component_values_from_specimen(sp: dict) -> dict[str, str]:
+    collection_date, photo_date = coalesce_specimen_dates(
+        sp.get("collectionDate") or sp.get("collection_date"),
+        sp.get("photoDate") or sp.get("photo_date"),
+    )
+    date_seg = specimen_date_seg(
+        collection_date or None,
+        photo_date or None,
+    )
+    return {
+        "province": str(sp.get("province") or "").strip(),
+        "site": str(sp.get("site") or "").strip(),
+        "station": str(sp.get("station") or "").strip(),
+        "species_id": str(sp.get("id") or sp.get("species_id") or "").strip(),
+        "storage": str(sp.get("storage") or "").strip(),
+        "collection_date": collection_date,
+        "photo_date": photo_date,
+        "date_seg": date_seg,
+        "collector": str(sp.get("collector") or "").strip(),
+        "photographer": str(sp.get("photographer") or "").strip(),
+        "taxon_group": str(sp.get("taxonGroup") or sp.get("taxon_group") or "").strip(),
+        "order_name": str(sp.get("order") or sp.get("order_name") or "").strip(),
+        "family": str(sp.get("family") or "").strip(),
+        "genus": str(sp.get("genus") or "").strip(),
+        "scientific_name": str(
+            sp.get("scientificName") or sp.get("scientific_name") or ""
+        ).strip(),
+        "scientific_name_cn": str(
+            sp.get("scientificNameCn") or sp.get("scientific_name_cn") or ""
+        ).strip(),
+        "notes": str(sp.get("notes") or "").strip(),
+        "photo_notes": str(
+            sp.get("photoNotes") or sp.get("photo_notes") or ""
+        ).strip(),
+    }
+
+
+def _values_from_parsed_uid(parsed: dict) -> dict[str, str]:
+    return {
+        "province": str(parsed.get("province") or ""),
+        "site": str(parsed.get("site") or ""),
+        "station": str(parsed.get("station") or ""),
+        "species_id": str(parsed.get("speciesId") or ""),
+        "storage": str(parsed.get("storage") or ""),
+        "date_seg": str(parsed.get("dateSegment") or ""),
+    }
+
+
+def build_configured_result_id(
+    components: list[str],
+    values: dict[str, str],
+    *,
+    seq: int | None = None,
+) -> str:
+    """Assemble a result basename using project naming-rule component order."""
+    comp_list = normalize_naming_components(components)
+    parts: list[str] = []
+    for key in comp_list:
+        raw_val = values.get(key, "")
+        if key == "date_seg":
+            val = str(raw_val or "").strip()
+        else:
+            val = safe_uid_segment(raw_val)
+        if not val:
+            continue
+        if seq is not None and key == "storage":
+            parts.append(str(seq))
+        parts.append(val)
+    if seq is not None and "storage" not in comp_list:
+        insert_at = min(4, len(parts))
+        parts.insert(insert_at, str(seq))
+    return normalize_uid("-".join(parts))
+
+
+def build_configured_uid(components: list[str], values: dict[str, str]) -> str:
+    return build_configured_result_id(components, values, seq=None)
+
+
+def _post_date_component_keys(comp_list: list[str]) -> list[str]:
+    if "date_seg" not in comp_list:
+        return []
+    date_idx = comp_list.index("date_seg")
+    return comp_list[date_idx + 1:]
+
+
+def _extract_date_seg_from_parts(parts: list[str]) -> Optional[str]:
+    """Remove and return the date segment (1 or 2 dash-parts) from *parts* tail."""
+    if not parts:
+        return None
+    if len(parts) >= 2:
+        two_part = f"{parts[-2]}-{parts[-1]}"
+        if _DATE_SEG_FULL_RE.fullmatch(two_part):
+            parts.pop()
+            parts.pop()
+            return two_part
+    one_part = parts[-1]
+    if _DATE_SEG_FULL_RE.fullmatch(one_part):
+        return parts.pop()
+    return None
+
+
+def naming_rules_summary(components: list[str]) -> str:
+    labels = {
+        "province": "省",
+        "site": "样地",
+        "station": "站位",
+        "species_id": "编号",
+        "storage": "保存",
+        "date_seg": "日期",
+        "collector": "采集人",
+        "photographer": "拍摄人",
+        "taxon_group": "类群",
+        "order_name": "目",
+        "family": "科",
+        "genus": "属",
+        "scientific_name": "学名",
+        "scientific_name_cn": "中文名",
+        "notes": "备注",
+        "photo_notes": "拍照备注",
+    }
+    comp_list = normalize_naming_components(components)
+    ordered = "-".join(labels.get(key, key) for key in comp_list)
+    if "storage" in comp_list:
+        seq_hint = "序号在保存方式前"
+    else:
+        seq_hint = "序号按项目规则插入"
+    return (
+        f"项目命名规则：{ordered}（{seq_hint}；"
+        "日期段=采集/拍摄日期，只填其一视为同一天）"
+    )
+
+
+def _configured_seq_index(components: list[str]) -> int:
+    comp_list = normalize_naming_components(components)
+    dummy: dict[str, str] = {}
+    for key in comp_list:
+        if key == "date_seg":
+            dummy[key] = "20260101"
+        elif key in _post_date_component_keys(comp_list):
+            dummy[key] = "Z"
+        else:
+            dummy[key] = "A"
+    built = build_configured_result_id(comp_list, dummy, seq=0)
+    built_parts = built.split("-")
+    post_n = len(_post_date_component_keys(comp_list))
+    if post_n:
+        built_parts = built_parts[:-post_n]
+    return built_parts.index("0")
+
+
+def parse_configured_result_stem(
+    stem: str,
+    components: list[str],
+) -> tuple[str, int] | None:
+    """Parse (uid, sequence) from a basename using configured component order."""
+    comp_list = normalize_naming_components(components)
+    if not comp_list:
+        return None
+
+    parts = stem.split("-")
+    if not parts:
+        return None
+
+    values: dict[str, str] = {}
+    post_keys = _post_date_component_keys(comp_list)
+
+    for key in reversed(post_keys):
+        if not parts:
+            return None
+        values[key] = parts.pop()
+
+    if "date_seg" in comp_list:
+        if not parts:
+            return None
+        date_seg = _extract_date_seg_from_parts(parts)
+        if not date_seg:
+            return None
+        values["date_seg"] = date_seg
+
+    if not parts and "date_seg" not in values:
+        return None
+
+    try:
+        seq_idx = _configured_seq_index(comp_list)
+    except ValueError:
+        return None
+
+    if seq_idx >= len(parts):
+        return None
+    seq_part = parts[seq_idx]
+    if not seq_part.isdigit():
+        return None
+    seq = int(seq_part)
+
+    parts_no_seq = parts[:seq_idx] + parts[seq_idx + 1:]
+    pre_keys = [
+        key for key in comp_list if key != "date_seg" and key not in post_keys
+    ]
+    pi = 0
+    for key in pre_keys:
+        if pi >= len(parts_no_seq):
+            return None
+        values[key] = parts_no_seq[pi]
+        pi += 1
+    if pi != len(parts_no_seq):
+        return None
+
+    rebuilt = build_configured_result_id(comp_list, values, seq=seq)
+    if normalize_uid(rebuilt) != normalize_uid(stem):
+        return None
+    return build_configured_uid(comp_list, values), seq
+
+
+@dataclass(frozen=True)
+class ParsedTiffStem:
+    """Core specimen identity parsed from a TIFF basename.
+
+    Filenames may append arbitrary extra segments after the unique-id core,
+    e.g. ``GXHP-SL-DLC001-1-R-20260712-采集人-拍摄人-备注``.
+    """
+
+    uid: str
+    sequence: int
+    core_stem: str
+    has_extra_suffix: bool = False
+
+
+def parse_tiff_result_detail(
+    stem: str,
+    components: list[str],
+) -> Optional[ParsedTiffStem]:
+    """Parse specimen uid + sequence; ignore any trailing extra segments."""
+    comp_list = normalize_naming_components(components)
+    parts = stem.split("-")
+    if len(parts) < 3:
+        return None
+
+    for end in range(len(parts), 2, -1):
+        prefix = "-".join(parts[:end])
+        has_extra_suffix = end < len(parts)
+
+        parsed = parse_uid(prefix)
+        if parsed and parsed.get("resultSequence") is not None:
+            values = _values_from_parsed_uid(parsed)
+            seq = int(parsed["resultSequence"])
+            rebuilt = build_configured_result_id(comp_list, values, seq=seq)
+            if normalize_uid(rebuilt) == normalize_uid(prefix):
+                return ParsedTiffStem(
+                    uid=build_configured_uid(comp_list, values),
+                    sequence=seq,
+                    core_stem=prefix,
+                    has_extra_suffix=has_extra_suffix,
+                )
+
+        core = parse_configured_result_stem(prefix, comp_list)
+        if core:
+            uid, seq = core
+            return ParsedTiffStem(
+                uid=uid,
+                sequence=seq,
+                core_stem=prefix,
+                has_extra_suffix=has_extra_suffix,
+            )
+    return None
+
+
+def parse_tiff_result_stem(
+    stem: str,
+    components: list[str],
+) -> tuple[str, int] | None:
+    """Return (uid, sequence) when the specimen unique-id core is recognizable."""
+    detail = parse_tiff_result_detail(stem, components)
+    if detail is None:
+        return None
+    return detail.uid, detail.sequence

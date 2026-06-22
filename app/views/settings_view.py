@@ -17,7 +17,7 @@ Primary layout (Helicon tab) is a faithful reconstruction of the web
 Additional tabs (归档 / 项目 / 操作人 / 关于) carry settings that live in
 project-settings drawers in the web prototype and are required by the test suite.
 
-Hard rule: delete_jpg default = False.  This is enforced here and in tests.
+Default workflow: archive verified JPGs into ZIP, then remove the loose originals.
 """
 
 from __future__ import annotations
@@ -80,7 +80,8 @@ _K_HELICON_RUN_MODE = "helicon/run_mode"               # "silent" | "progress" |
 _K_HELICON_CONCURRENCY = "helicon/concurrency"          # int 1–8
 
 _K_JXL_EFFORT = "archive/jxl_effort"
-_K_DELETE_JPG = "archive/delete_jpg"  # default False — hard rule
+_K_JXL_CONCURRENCY = "archive/jxl_concurrency"
+_K_DELETE_JPG = "archive/delete_jpg"  # default True; safety checks still mandatory
 
 _K_CURRENT_USER = "user/current_user"
 
@@ -636,26 +637,39 @@ class SettingsView(BaseView):
         # JXL effort
         self._jxl_effort_combo = QComboBox()
         self._jxl_effort_combo.addItems([
-            "standard — cjxl -e 7（推荐）",
-            "maximum  — cjxl -e 9（慢，文件更小）",
+            "快速无损 — e7（约 10 倍快，体积约多 0.7%）",
+            "极限无损 — e9（最大压缩比，并行加速）",
         ])
-        self._jxl_effort_combo.setToolTip("对应 compress.js EFFORT_MAP：standard=7，maximum=9")
+        self._jxl_effort_combo.setToolTip(
+            "两种模式都可恢复原始 JPEG；差别仅为压缩耗时和归档体积"
+        )
         self._jxl_effort_combo.currentIndexChanged.connect(self._save_archive)
-        form.addRow("JXL 压缩等级", self._jxl_effort_combo)
+        form.addRow("无损压缩方案", self._jxl_effort_combo)
+
+        self._jxl_concurrency_spin = QSpinBox()
+        self._jxl_concurrency_spin.setRange(1, 8)
+        self._jxl_concurrency_spin.setValue(4)
+        self._jxl_concurrency_spin.setToolTip(
+            "同时压缩的照片数；建议 4，机械硬盘可改为 2"
+        )
+        self._jxl_concurrency_spin.valueChanged.connect(self._save_archive)
+        form.addRow("并行任务数", self._jxl_concurrency_spin)
 
         tab.body.addLayout(form)
         tab.body.addSpacing(16)
 
         # Delete-JPG section with prerequisite description
-        del_box = QGroupBox("删除原片 JPG")
+        del_box = QGroupBox("整理后的原片处理")
         del_v = QVBoxLayout(del_box)
 
         prereq_label = QLabel(
-            "⚠️ 只有同时满足以下四项前置条件，才允许开启删除：\n"
+            "默认流程：JPG 无损压缩进 ZIP，校验成功后删除散落原片。\n"
+            "只有同时满足以下条件才会删除：\n"
             "  1. cjxl 可用（JPEG XL 无损压缩工具已安装）\n"
             "  2. ZIP 已生成且大小 > 32 字节\n"
             "  3. 清单完整（文件数 + 名称 + 大小全部核验通过）\n"
-            "  4. JXL 可恢复（djxl 能重解码每一帧，输出大小 > 0）"
+            "  4. JXL 可恢复，且恢复 JPEG 的 SHA-256 与原图完全一致\n"
+            "任何一项失败都会保留原 JPG。TIFF 永远不会被删除。"
         )
         prereq_label.setObjectName("Muted")
         prereq_label.setWordWrap(True)
@@ -664,13 +678,13 @@ class SettingsView(BaseView):
 
         del_v.addSpacing(12)
 
-        # The actual checkbox — DEFAULT OFF (hard rule)
-        self._delete_jpg_chk = QCheckBox("归档完成后删除原片 JPG（危险操作，默认关闭）")
+        # Product default: the ZIP replaces loose JPGs after exact recovery checks.
+        self._delete_jpg_chk = QCheckBox("校验成功后删除散落 JPG（默认开启）")
         self._delete_jpg_chk.setObjectName("DeleteJpgCheckbox")
-        self._delete_jpg_chk.setChecked(False)  # default = False — hard rule
+        self._delete_jpg_chk.setChecked(True)
         self._delete_jpg_chk.setStyleSheet(
-            f"QCheckBox {{ color: {_C_DANGER}; font-weight: 600; }}"
-            f"QCheckBox::indicator:checked {{ background-color: {_C_DANGER}; border-color: {_C_DANGER}; }}"
+            f"QCheckBox {{ color: {_C_SUCCESS}; font-weight: 600; }}"
+            f"QCheckBox::indicator:checked {{ background-color: {_C_SUCCESS}; border-color: {_C_SUCCESS}; }}"
         )
         self._delete_jpg_chk.stateChanged.connect(self._save_archive)
         del_v.addWidget(self._delete_jpg_chk)
@@ -1272,8 +1286,11 @@ class SettingsView(BaseView):
         self._jxl_effort_combo.setCurrentIndex(
             effort_idx if 0 <= effort_idx < self._jxl_effort_combo.count() else 0
         )
-        # delete_jpg: stored as string "true"/"false" — default False (hard rule)
-        raw_del = qs.value(_K_DELETE_JPG, "false")
+        self._jxl_concurrency_spin.setValue(
+            max(1, min(8, int(qs.value(_K_JXL_CONCURRENCY, 4))))
+        )
+        # delete_jpg: product default True; safety service may still refuse deletion.
+        raw_del = qs.value(_K_DELETE_JPG, "true")
         delete_jpg = str(raw_del).lower() == "true"
         self._delete_jpg_chk.setChecked(delete_jpg)
 
@@ -1456,6 +1473,7 @@ class SettingsView(BaseView):
     def _save_archive(self) -> None:
         qs = self.ctx.settings._qs
         qs.setValue(_K_JXL_EFFORT, self._jxl_effort_combo.currentIndex())
+        qs.setValue(_K_JXL_CONCURRENCY, self._jxl_concurrency_spin.value())
         # Store as explicit "true"/"false" string for unambiguous retrieval
         qs.setValue(_K_DELETE_JPG, "true" if self._delete_jpg_chk.isChecked() else "false")
         self.ctx.settings.sync()

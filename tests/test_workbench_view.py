@@ -723,8 +723,8 @@ class TestSpecimenSidebar:
         w._set_filter_mode("rna")
         assert w._list.count() == 1
         assert w._list.item(0).data(Qt.ItemDataRole.UserRole) == "FJ-XM-B2-DLC002-R95E-20260601"
-        # Count label format: "{shown} / {total} · RNA {rna_total}" (total = pre-filter).
-        assert w._count_label.text() == "1 / 2 · RNA 1"
+        assert w._filter_all_btn.text() == "全部 1/2"
+        assert w._filter_rna_btn.text() == "RNA 1"
         db.close()
 
     def test_copy_current_uid_to_clipboard(self, tmp_path, qt_app):
@@ -3555,6 +3555,69 @@ class TestBatchComposeOrganise:
         assert w._batch is None
         db.close()
 
+    def test_compose_and_organise_archives_existing_tiff_without_helicon(
+        self, tmp_path, monkeypatch
+    ):
+        """已有 TIF 的组点[合成+整理]应直接归档，不应被 Helicon 检查拦截。"""
+        from app.services.grouping_service import Group, save_grouping, load_grouping
+        from app.workers import supp_compression_worker
+        from PyQt6.QtWidgets import QMessageBox
+
+        w, ctx, uid, db = self._build(tmp_path)
+        tif = tmp_path / "existing.tif"
+        tif.write_bytes(b"II*\x00")
+        save_grouping(db, uid, [
+            Group(
+                group_index=0,
+                jpg_paths=self._jpgs,
+                composed_tiff_path=str(tif),
+                status="composed",
+            )
+        ])
+        w._grouping.load_grouping(uid, load_grouping(db, uid))
+
+        import app.services.helicon_service as hs
+        monkeypatch.setattr(hs, "detect_helicon", lambda: None)
+        monkeypatch.setattr(
+            QMessageBox, "warning", staticmethod(lambda *a, **k: None)
+        )
+        archived_jpgs = []
+
+        class _ArchiveResult:
+            ok = True
+            saved_percent = 20
+            file_count = 4
+            delete_jpg = False
+            requested_delete_jpg = False
+            deletion_skipped_reason = ""
+
+        def _fake_archive(
+            jpg_paths, tiff_path, project_dir, delete_jpg,
+            method="maximum", concurrency=1, progress_callback=None,
+        ):
+            archived_jpgs.extend(jpg_paths)
+            result = _ArchiveResult()
+            result.zip_path = str(Path(tiff_path).with_suffix(".zip"))
+            Path(result.zip_path).write_bytes(b"zip")
+            return result
+
+        monkeypatch.setattr(supp_compression_worker, "archive_group", _fake_archive)
+
+        w._start_compose_batch(uid, organise=True)
+
+        # 整理由后台线程执行；等待完成，同时保持 Qt 事件循环运行。
+        import time
+        deadline = time.monotonic() + 3
+        while getattr(w, "_archive_workers", set()) and time.monotonic() < deadline:
+            QApplication.processEvents()
+            time.sleep(0.01)
+
+        assert archived_jpgs == self._jpgs
+        saved = load_grouping(db, uid).groups[0]
+        assert saved.status == "organized"
+        assert saved.archive_zip == str(tif.with_suffix(".zip"))
+        db.close()
+
     def test_headless_compose_uses_suggested_name_and_saves(self, tmp_path, monkeypatch):
         """_compose_group_headless:无 output_name 覆盖 → 用 suggested_tiff_name,
         合成完成持久化 status='composed' + composed_tiff_path。无确认框。"""
@@ -3655,18 +3718,18 @@ class TestAdhocGrouping:
         assert not w._grouping._toolbar_widget.isHidden()
         db.close()
 
-    def test_open_grouping_without_project_guides_to_open_project(self, tmp_path):
-        """无项目(db=None):不绑定临时编号,控件仍隐藏,提示语指向『项目树』,
-        不再误导成『先填编号』。"""
+    def test_open_grouping_without_project_binds_adhoc_in_memory(self, tmp_path):
+        """无项目(db=None):仍绑定临时分组,控件可用;分组/合成走内存+JPG同目录输出。"""
         from app.views.workbench_view import WorkbenchView
+        from app.services.grouping_service import ADHOC_GROUPING_UID
         ctx = _make_ctx(project_dir=None, db=None)
         w = WorkbenchView(ctx)
         w._current_uid = None
         w._on_open_grouping()
-        assert w._grouping._uid is None
-        assert w._grouping._add_btn.isHidden()
-        assert w._grouping._toolbar_widget.isHidden()
-        assert "项目" in w._grouping._empty_lbl.text()
+        assert w._grouping._uid == ADHOC_GROUPING_UID
+        assert not w._grouping._add_btn.isHidden()
+        assert not w._grouping._toolbar_widget.isHidden()
+        assert w._grouping._empty_lbl.isHidden()
 
     def test_resolve_output_name_adhoc_defaults_to_group_seq(self, tmp_path):
         from app.services.grouping_service import ADHOC_GROUPING_UID, Group

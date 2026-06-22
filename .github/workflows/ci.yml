@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  test:
+    runs-on: windows-latest
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Run tests
+        run: python -m pytest tests/ -q --tb=line
+
+  build-windows:
+    runs-on: windows-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build portable EXE
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File .\scripts\build_windows.ps1
+      - name: Upload Windows bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: SpecimenPhotoWorkbench-win64
+          path: |
+            dist/SpecimenPhotoWorkbench-win64.zip
+            dist/SpecimenPhotoWorkbench/SpecimenPhotoWorkbench.exe

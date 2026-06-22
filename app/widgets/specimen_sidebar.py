@@ -100,21 +100,24 @@ class SpecimenSidebar(QWidget):
         apply_card_shadow(card)
 
         root = QVBoxLayout(card)
-        root.setContentsMargins(16, 16, 16, 16)
-        root.setSpacing(12)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(8)
 
-        # New-specimen entry — vector + glyph
-        self._new_btn = QPushButton("新增标本唯一编号")
-        self._new_btn.setObjectName("Outline")
-        self._new_btn.setFixedHeight(34)
-        icons.set_button_icon(self._new_btn, "mdi6.plus", color=icons.TONE_ACCENT, size=15)
-        self._new_btn.setToolTip("开始一个新的标本唯一编号 / voucher number（右侧填写）")
+        top_row = QHBoxLayout()
+        top_row.setContentsMargins(0, 0, 0, 0)
+        top_row.setSpacing(8)
+
+        self._new_btn = QPushButton("新编号")
+        self._new_btn.setObjectName("Primary")
+        self._new_btn.setFixedHeight(32)
+        self._new_btn.setMinimumWidth(84)
+        icons.set_button_icon(self._new_btn, "mdi6.plus", color=icons.TONE_ON_ACCENT, size=14)
+        self._new_btn.setToolTip("新建标本唯一编号（右侧填写）")
         self._new_btn.clicked.connect(self.new_specimen_requested.emit)
-        root.addWidget(self._new_btn)
+        top_row.addWidget(self._new_btn)
 
-        # Search box with a leading magnifier action.
         self._search = QLineEdit()
-        self._search.setPlaceholderText("搜索编号 / voucher")
+        self._search.setPlaceholderText("搜索编号 / 物种")
         self._search.setClearButtonEnabled(True)
         self._search.setFixedHeight(32)
         if icons.available():
@@ -123,7 +126,8 @@ class SpecimenSidebar(QWidget):
                 QLineEdit.ActionPosition.LeadingPosition,
             )
         self._search.textChanged.connect(self._on_search)
-        root.addWidget(self._search)
+        top_row.addWidget(self._search, stretch=1)
+        root.addLayout(top_row)
 
         filter_row = QHBoxLayout()
         filter_row.setContentsMargins(0, 0, 0, 0)
@@ -132,30 +136,18 @@ class SpecimenSidebar(QWidget):
         self._filter_all_btn.setObjectName("Ghost")
         self._filter_all_btn.setCheckable(True)
         self._filter_all_btn.setChecked(True)
-        self._filter_all_btn.setFixedHeight(26)
+        self._filter_all_btn.setFixedHeight(24)
         self._filter_all_btn.clicked.connect(lambda: self._set_filter_mode("all"))
         filter_row.addWidget(self._filter_all_btn)
         self._filter_rna_btn = QPushButton("仅 RNA")
         self._filter_rna_btn.setObjectName("Ghost")
         self._filter_rna_btn.setCheckable(True)
-        self._filter_rna_btn.setFixedHeight(26)
+        self._filter_rna_btn.setFixedHeight(24)
         self._filter_rna_btn.setToolTip("只显示保存方式为 R 前缀、已取 RNA 组织的标本")
         self._filter_rna_btn.clicked.connect(lambda: self._set_filter_mode("rna"))
         filter_row.addWidget(self._filter_rna_btn)
         filter_row.addStretch()
         root.addLayout(filter_row)
-
-        # Section label + count
-        header = QHBoxLayout()
-        header.setContentsMargins(2, 0, 2, 0)
-        lbl = QLabel("已有标本编号")
-        lbl.setObjectName("Section")
-        header.addWidget(lbl)
-        header.addStretch()
-        self._count_label = QLabel("0")
-        self._count_label.setObjectName("MutedSmall")
-        header.addWidget(self._count_label)
-        root.addLayout(header)
 
         # List
         self._list = QListWidget()
@@ -202,11 +194,11 @@ class SpecimenSidebar(QWidget):
         collab_strip = QFrame()
         collab_strip.setObjectName("CollabStrip")
         cs_lay = QVBoxLayout(collab_strip)
-        cs_lay.setContentsMargins(10, 8, 10, 8)
-        cs_lay.setSpacing(5)
+        cs_lay.setContentsMargins(8, 6, 8, 6)
+        cs_lay.setSpacing(4)
 
-        cs_title = QLabel("协作状态")
-        cs_title.setObjectName("Section")
+        cs_title = QLabel("协作")
+        cs_title.setObjectName("MutedSmall")
         cs_lay.addWidget(cs_title)
 
         self._collab_addr = QLabel("分享地址: —")
@@ -247,7 +239,6 @@ class SpecimenSidebar(QWidget):
     def refresh(self) -> None:
         """Reload specimens from the DB for the current project."""
         self._all_items = self._load_specimens()
-        self._update_filter_counts()
         self._apply_filter(self._search.text())
 
     def select_uid(self, uid: str) -> None:
@@ -367,14 +358,12 @@ class SpecimenSidebar(QWidget):
             item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, uid)
             item.setToolTip(uid)
-            item.setSizeHint(QSize(0, 118 if active else 110))
+            item.setSizeHint(QSize(0, 96 if active else 90))
             self._list.addItem(item)
             self._list.setItemWidget(item, row)
             shown += 1
 
-        total = len(self._all_items)
-        rna_total = sum(1 for item in self._all_items if item.get("is_rna"))
-        self._count_label.setText(f"{shown} / {total} · RNA {rna_total}")
+        self._update_filter_counts(shown)
 
     def _build_row_widget(
         self,
@@ -391,16 +380,16 @@ class SpecimenSidebar(QWidget):
         row = QFrame()
         row.setObjectName("SpecimenRowActive" if active else "SpecimenRow")
         row.setProperty("selected", False)
-        row.setMinimumHeight(104)
+        row.setMinimumHeight(86)
         v = QVBoxLayout(row)
-        v.setContentsMargins(10, 9, 10, 8)
-        v.setSpacing(5)
+        v.setContentsMargins(8, 6, 8, 6)
+        v.setSpacing(3)
 
-        uid_lbl = QLabel(uid)
+        uid_lbl = QLabel(self._compact_uid(uid))
         uid_lbl.setObjectName("SpecimenUid")
         uid_lbl.setToolTip(uid)
         uid_lbl.setMinimumWidth(0)
-        uid_lbl.setWordWrap(True)
+        uid_lbl.setWordWrap(False)
         uid_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         uid_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         v.addWidget(uid_lbl)
@@ -476,12 +465,31 @@ class SpecimenSidebar(QWidget):
         v.addLayout(line)
         return row
 
-    def _update_filter_counts(self) -> None:
+    def _update_filter_counts(self, shown: Optional[int] = None) -> None:
         total = len(self._all_items)
         rna_total = sum(1 for item in self._all_items if item.get("is_rna"))
-        self._filter_all_btn.setText(f"全部 {total}")
-        self._filter_rna_btn.setText(f"RNA {rna_total}")
+        query = self._search.text().strip()
+        narrowed = (
+            shown is not None
+            and shown != total
+            and (bool(query) or self._filter_mode == "rna")
+        )
+        if narrowed:
+            self._filter_all_btn.setText(f"全部 {shown}/{total}")
+        else:
+            self._filter_all_btn.setText(f"全部 {total}")
+        if self._filter_mode == "rna" and shown is not None:
+            self._filter_rna_btn.setText(f"RNA {shown}")
+        else:
+            self._filter_rna_btn.setText(f"RNA {rna_total}")
         self._filter_rna_btn.setEnabled(rna_total > 0)
+
+    @staticmethod
+    def _compact_uid(uid: str) -> str:
+        """Single-line UID for the sidebar; full value stays in tooltip."""
+        if len(uid) <= 34:
+            return uid
+        return f"{uid[:16]}…{uid[-14:]}"
 
     def _normalize_project_specimen_uids(self, db, project_dir: str) -> None:
         """Migrate old lowercase UID rows to the canonical uppercase spelling.
@@ -592,7 +600,6 @@ class SpecimenSidebar(QWidget):
         self._filter_mode = "rna" if mode == "rna" else "all"
         self._filter_all_btn.setChecked(self._filter_mode == "all")
         self._filter_rna_btn.setChecked(self._filter_mode == "rna")
-        self._update_filter_counts()
         self._apply_filter(self._search.text())
 
     def _on_item_clicked(self, item: QListWidgetItem) -> None:

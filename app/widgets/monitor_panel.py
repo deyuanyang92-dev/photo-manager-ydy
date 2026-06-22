@@ -32,7 +32,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Optional
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, QMimeData, QUrl, pyqtSignal
+from PyQt6.QtGui import QDrag
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -104,7 +105,8 @@ class _FileCard(QFrame):
                  parent: Optional[QWidget] = None,
                  on_add_to_group: Optional[Callable[[str], None]] = None,
                  on_assign_uid: Optional[Callable[[str], None]] = None,
-                 on_unassign: Optional[Callable[[str], None]] = None) -> None:
+                 on_unassign: Optional[Callable[[str], None]] = None,
+                 drag_paths_for: Optional[Callable[[str], list[str]]] = None) -> None:
         super().__init__(parent)
         self.setObjectName("Card")
         self._entry = entry
@@ -113,6 +115,9 @@ class _FileCard(QFrame):
         self._on_add_to_group = on_add_to_group
         self._on_assign_uid = on_assign_uid
         self._on_unassign = on_unassign
+        self._drag_paths_for = drag_paths_for
+        self._press_pos = None
+        self._drag_started = False
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -208,11 +213,46 @@ class _FileCard(QFrame):
         apply_card_shadow(self, blur=16, y=3, alpha=55)
 
     def mousePressEvent(self, event) -> None:
-        """Toggle selection on left-click."""
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._press_pos = event.position().toPoint()
+            self._drag_started = False
         super().mousePressEvent(event)
-        self._selected = not self._selected
-        self._update_selection_style()
-        self.selection_toggled.emit(getattr(self._entry, "path", ""), self._selected)
+
+    def mouseMoveEvent(self, event) -> None:
+        if not (event.buttons() & Qt.MouseButton.LeftButton):
+            return
+        if self._press_pos is None or self._drag_started:
+            return
+        if (event.position().toPoint() - self._press_pos).manhattanLength() < QApplication.startDragDistance():
+            return
+        self._drag_started = True
+        self._start_file_drag()
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and not self._drag_started:
+            path = getattr(self._entry, "path", "")
+            self._selected = not self._selected
+            self._update_selection_style()
+            self.selection_toggled.emit(path, self._selected)
+        self._press_pos = None
+        super().mouseReleaseEvent(event)
+
+    def _start_file_drag(self) -> None:
+        path = getattr(self._entry, "path", "")
+        if not path:
+            return
+        if self._drag_paths_for is not None:
+            paths = self._drag_paths_for(path)
+        else:
+            paths = [path]
+        paths = [p for p in paths if p]
+        if not paths:
+            return
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(p) for p in paths])
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        drag.exec(Qt.DropAction.CopyAction)
 
     def _update_selection_style(self) -> None:
         self.setObjectName("CardSelected" if self._selected else "Card")
@@ -428,8 +468,8 @@ class MonitorPanel(QWidget):
         self._compose_btn = QPushButton("合成")
         self._compose_btn.setObjectName("Primary")
         self._compose_btn.setFixedHeight(28)
-        icons.set_button_icon(self._compose_btn, "fa5s.layer-group",
-                              color=icons.TONE_ON_ACCENT, size=13)
+        icons.set_button_icon(self._compose_btn, "mdi6.layers-triple-outline",
+                              color=icons.TONE_ON_ACCENT, size=14)
         self._compose_btn.setToolTip("合成当前激活编号下未占用的新 JPG（自动命名 编号-序号）")
         self._compose_btn.clicked.connect(self.compose_implicit_requested.emit)
         controls.addWidget(self._compose_btn)
@@ -437,8 +477,8 @@ class MonitorPanel(QWidget):
         self._organise_btn = QPushButton("整理")
         self._organise_btn.setObjectName("Outline")
         self._organise_btn.setFixedHeight(28)
-        icons.set_button_icon(self._organise_btn, "mdi6.archive-arrow-down-outline",
-                              color=icons.TONE_MUTED, size=14)
+        icons.set_button_icon(self._organise_btn, "mdi6.folder-zip-outline",
+                              color=icons.TONE_ACCENT, size=14)
         self._organise_btn.setToolTip("整理选中的 JPG + 1 个 TIFF，生成同名 ZIP 并移入 results")
         self._organise_btn.clicked.connect(self.organise_selected_requested.emit)
         controls.addWidget(self._organise_btn)
@@ -446,7 +486,7 @@ class MonitorPanel(QWidget):
         self._compose_org_btn = QPushButton("合成+整理")
         self._compose_org_btn.setObjectName("Outline")
         self._compose_org_btn.setFixedHeight(28)
-        icons.set_button_icon(self._compose_org_btn, "mdi6.layers-plus",
+        icons.set_button_icon(self._compose_org_btn, "mdi6.archive-check-outline",
                               color=icons.TONE_MUTED, size=14)
         self._compose_org_btn.setToolTip("合成当前批次后立即归档并移入 results")
         self._compose_org_btn.clicked.connect(
@@ -738,12 +778,19 @@ class MonitorPanel(QWidget):
             getattr(entry, "is_grouped", False),
         )
 
+    def _drag_paths_for(self, path: str) -> list[str]:
+        selected = self.selected_all_paths()
+        if path in selected:
+            return selected
+        return [path]
+
     def _make_card(self, entry) -> "_FileCard":
         card = _FileCard(
             entry, self._active_uid, self,
             on_add_to_group=self._on_ctx_add_to_group,
             on_assign_uid=self._on_ctx_assign_uid,
             on_unassign=self._on_ctx_unassign,
+            drag_paths_for=self._drag_paths_for,
         )
         card.assign_requested.connect(self.assign_requested)
         card.deactivate_requested.connect(self.unassign_requested)
@@ -1016,22 +1063,7 @@ class MonitorPanel(QWidget):
             return
         # P0：加入黑名单（打败 P1 分组 / P2 手动 / P3 激活时间窗）
         grouping_service.add_explicit_unassign(db, jpg_path)
-        # 同时从任何合成组移除
-        grouping_service._ensure_grouping_table(db)
-        rows = db.execute(
-            "SELECT uid FROM grouping WHERE jpg_paths LIKE ?",
-            (f'%{jpg_path}%',),
-        ).fetchall()
-        uids = {row[0] for row in rows}
-        for uid in uids:
-            sg = grouping_service.load_grouping(db, uid)
-            changed = False
-            for g in sg.groups:
-                if jpg_path in g.jpg_paths:
-                    g.jpg_paths = [p for p in g.jpg_paths if p != jpg_path]
-                    changed = True
-            if changed:
-                grouping_service.save_grouping(db, uid, sg.groups, clean_phantoms=False)
+        grouping_service.remove_jpg_from_all_groups(db, jpg_path)
         self.refresh_requested.emit()
 
     # ── Slots ─────────────────────────────────────────────────────────────────

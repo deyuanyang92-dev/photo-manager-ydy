@@ -161,30 +161,28 @@ class TestCollabTab:
         assert view._collab_health_light is not None
 
 
-# ── Hard rule: delete_jpg default = False ────────────────────────────────────
+# ── Product workflow: verified archive replaces loose JPGs ──────────────────
 
 class TestDeleteJpgDefault:
-    """Red-line invariant: delete_jpg MUST default to False."""
+    """JPG deletion defaults ON, while archive safety gates remain mandatory."""
 
-    def test_delete_jpg_checkbox_unchecked_by_default(
+    def test_delete_jpg_checkbox_checked_by_default(
         self, view: SettingsView
     ) -> None:
-        """Fresh settings → delete_jpg checkbox is OFF (False)."""
-        assert view._delete_jpg_chk.isChecked() is False
+        assert view._delete_jpg_chk.isChecked() is True
 
     def test_delete_jpg_checkbox_is_qcheckbox(self, view: SettingsView) -> None:
         assert isinstance(view._delete_jpg_chk, QCheckBox)
 
-    def test_qsettings_delete_jpg_default_not_true(self, ctx: AppContext) -> None:
-        """QSettings should not have 'true' stored for delete_jpg without user action."""
-        raw = ctx.settings._qs.value(_K_DELETE_JPG, "false")
-        assert str(raw).lower() != "true"
+    def test_qsettings_delete_jpg_default_true(self, ctx: AppContext) -> None:
+        raw = ctx.settings._qs.value(_K_DELETE_JPG, "true")
+        assert str(raw).lower() == "true"
 
     def test_delete_jpg_not_set_on_fresh_load(self, view: SettingsView) -> None:
-        """on_activate() with no prior saved value → checkbox stays OFF."""
+        """on_activate() with no saved value uses the product default ON."""
         view.ctx.settings._qs.remove(_K_DELETE_JPG)
         view.on_activate()
-        assert view._delete_jpg_chk.isChecked() is False
+        assert view._delete_jpg_chk.isChecked() is True
 
     def test_delete_jpg_explicit_false_survives_reload(
         self, view: SettingsView
@@ -195,7 +193,7 @@ class TestDeleteJpgDefault:
         assert view._delete_jpg_chk.isChecked() is False
 
     def test_delete_jpg_can_be_toggled_to_true(self, view: SettingsView) -> None:
-        """Checkbox CAN be enabled (user must be able to opt-in); just not by default."""
+        """Checkbox remains explicitly configurable."""
         view._delete_jpg_chk.setChecked(True)
         view._save_archive()
         stored = view.ctx.settings._qs.value(_K_DELETE_JPG, "false")
@@ -235,6 +233,13 @@ class TestRoundTrip:
         view._save_archive()
         view.on_activate()
         assert view._jxl_effort_combo.currentIndex() == 1
+        assert view.ctx.settings.jxl_effort_method == "maximum"
+
+        view._jxl_effort_combo.setCurrentIndex(0)  # recommended standard
+        view._jxl_concurrency_spin.setValue(4)
+        view._save_archive()
+        assert view.ctx.settings.jxl_effort_method == "standard"
+        assert view.ctx.settings.jxl_concurrency == 4
 
     def test_helicon_radius_round_trip(self, view: SettingsView) -> None:
         view._helicon_param_panel.set_params({"radius": 22.5})

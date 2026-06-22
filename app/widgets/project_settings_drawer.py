@@ -31,6 +31,7 @@ from PyQt6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -146,6 +147,7 @@ class ProjectSettingsDrawer(QWidget):
     helicon_path_changed = pyqtSignal(str)
     naming_rules_changed = pyqtSignal()
     personnel_changed = pyqtSignal(dict)
+    storages_changed = pyqtSignal()
 
     def __init__(self, ctx: "AppContext", parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -288,23 +290,23 @@ class ProjectSettingsDrawer(QWidget):
         tbl.horizontalHeader().setStretchLastSection(True)
         tbl.verticalHeader().setVisible(False)
         tbl.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        tbl.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+        tbl.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        tbl.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         tbl.setFixedHeight(min(len(BUILTIN_STORAGES) * 26 + 30, 240))
-        for i, s in enumerate(BUILTIN_STORAGES):
-            tbl.setItem(i, 0, QTableWidgetItem(s["code"]))
-            detail = s["detail"]
-            if s["transcriptome"]:
-                detail = "[RNA] " + detail
-            tbl.setItem(i, 1, QTableWidgetItem(detail))
-            tbl.setRowHeight(i, 24)
-        tbl.setColumnWidth(0, 72)
+        self._builtin_storage_table = tbl
         lay.addWidget(tbl)
+        self._refresh_builtin_storage_table(None)
 
         lay.addWidget(_divider())
 
         custom_lbl = QLabel("自定义保存方式")
         custom_lbl.setObjectName("Section")
         lay.addWidget(custom_lbl)
+
+        pick_hint = QLabel("点击内置或自定义条目，可在下方编辑后保存。")
+        pick_hint.setObjectName("MutedSmall")
+        pick_hint.setWordWrap(True)
+        lay.addWidget(pick_hint)
 
         self._custom_list_lay = QVBoxLayout()
         self._custom_list_lay.setContentsMargins(0, 0, 0, 0)
@@ -313,22 +315,22 @@ class ProjectSettingsDrawer(QWidget):
 
         lay.addWidget(_divider())
 
-        # Add-new form
-        add_lbl = QLabel("添加自定义方式")
+        # Add / edit form
+        add_lbl = QLabel("编辑保存方式")
         add_lbl.setObjectName("MutedSmall")
         lay.addWidget(add_lbl)
 
         self._new_code_edit = QLineEdit()
-        self._new_code_edit.setPlaceholderText("编码（如 RGLU）")
+        self._new_code_edit.setPlaceholderText("编码（如 T95E、RD79）")
         self._new_code_edit.setFixedHeight(28)
         self._new_code_edit.textEdited.connect(
             lambda t: self._new_code_edit.setText(t.upper())
         )
         lay.addWidget(self._new_code_edit)
 
-        self._new_detail_edit = QLineEdit()
+        self._new_detail_edit = QTextEdit()
         self._new_detail_edit.setPlaceholderText("详细说明（必填）")
-        self._new_detail_edit.setFixedHeight(28)
+        self._new_detail_edit.setFixedHeight(72)
         lay.addWidget(self._new_detail_edit)
 
         self._rna_hint_lbl = QLabel("")
@@ -344,15 +346,16 @@ class ProjectSettingsDrawer(QWidget):
         clear_btn.setFixedHeight(28)
         clear_btn.clicked.connect(self._on_clear_custom_form)
         add_btn_row.addWidget(clear_btn)
-        add_new_btn = QPushButton("添加")
+        add_new_btn = QPushButton("保存")
         add_new_btn.setObjectName("Primary")
         add_new_btn.setFixedHeight(28)
-        add_new_btn.clicked.connect(self._on_add_custom_storage)
+        add_new_btn.clicked.connect(self._on_save_storage)
         add_btn_row.addWidget(add_new_btn)
         add_btn_row.addStretch()
         lay.addLayout(add_btn_row)
 
         lay.addStretch()
+        tbl.itemSelectionChanged.connect(self._on_builtin_storage_selected)
         return w
 
     # ── Tab 3: 人员预设 ───────────────────────────────────────────────────────
@@ -452,6 +455,8 @@ class ProjectSettingsDrawer(QWidget):
             ("物种中文名", "scientific_name_cn"),
             ("备注标签", "notes"),
             ("拍照备注", "photo_notes"),
+            ("采集人", "collector"),
+            ("拍摄人", "photographer"),
         ]
         for label, key in component_fields:
             cb = QCheckBox(label)
@@ -942,7 +947,10 @@ class ProjectSettingsDrawer(QWidget):
             cb.blockSignals(False)
 
         # 自定义保存方式
-        custom = load_setting(db, "custom_storages", [])
+        from app.services.project_settings_service import load_custom_storages
+
+        custom = load_custom_storages(db)
+        self._refresh_builtin_storage_table(db)
         self._rebuild_custom_list(custom, db)
 
         # 工作台单张打印
@@ -1136,23 +1144,78 @@ class ProjectSettingsDrawer(QWidget):
 
     # ── Custom storages list ──────────────────────────────────────────────────
 
+    def _refresh_builtin_storage_table(self, db) -> None:
+        from app.services.project_settings_service import (
+            BUILTIN_STORAGES,
+            load_custom_storages,
+            resolve_storage_detail,
+            resolve_storage_transcriptome,
+        )
+
+        custom = load_custom_storages(db) if db is not None else []
+        tbl = self._builtin_storage_table
+        for i, entry in enumerate(BUILTIN_STORAGES):
+            code = entry["code"]
+            detail = resolve_storage_detail(code, custom) or entry["detail"]
+            transcriptome = resolve_storage_transcriptome(code, custom)
+            if transcriptome:
+                detail = "[RNA] " + detail
+            code_cell = QTableWidgetItem(code)
+            detail_cell = QTableWidgetItem(detail)
+            detail_cell.setToolTip(detail)
+            tbl.setItem(i, 0, code_cell)
+            tbl.setItem(i, 1, detail_cell)
+            tbl.setRowHeight(i, 24)
+        tbl.setColumnWidth(0, 72)
+
+    def _load_storage_edit_form(self, code: str, detail: str) -> None:
+        self._new_code_edit.setText(code)
+        self._new_detail_edit.setPlainText(detail)
+        self._rna_hint_lbl.setText(
+            "已取 RNA / RNAlater" if str(code).startswith("R") else ""
+        )
+
+    def _on_builtin_storage_selected(self) -> None:
+        row = self._builtin_storage_table.currentRow()
+        if row < 0:
+            return
+        code_item = self._builtin_storage_table.item(row, 0)
+        detail_item = self._builtin_storage_table.item(row, 1)
+        if code_item is None or detail_item is None:
+            return
+        detail = detail_item.text()
+        if detail.startswith("[RNA] "):
+            detail = detail[6:]
+        self._load_storage_edit_form(code_item.text(), detail)
+
     def _rebuild_custom_list(self, custom: list[dict], db) -> None:
+        from app.services.project_settings_service import builtin_storage_codes
+
         while self._custom_list_lay.count():
             item = self._custom_list_lay.takeAt(0)
             if item and item.widget():
                 item.widget().deleteLater()
 
+        builtin_codes = builtin_storage_codes()
         for entry in custom:
+            code = entry.get("code", "")
+            if code in builtin_codes:
+                continue
+            detail = entry.get("detail", "")
+            prefix = "[RNA] " if entry.get("transcriptome") else ""
             row_w = QWidget()
             h = QHBoxLayout(row_w)
             h.setContentsMargins(0, 0, 0, 0)
             h.setSpacing(6)
-            code = entry.get("code", "")
-            detail = entry.get("detail", "")
-            prefix = "[RNA] " if entry.get("transcriptome") else ""
-            lbl = QLabel(f"<b>{code}</b>　{prefix}{detail}")
-            lbl.setWordWrap(True)
-            h.addWidget(lbl, 1)
+            pick_btn = QPushButton(f"{code}　{prefix}{detail}")
+            pick_btn.setObjectName("Ghost")
+            pick_btn.setFlat(True)
+            pick_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            pick_btn.setToolTip("选中到下方编辑")
+            pick_btn.clicked.connect(
+                lambda _, c=code, d=detail: self._load_storage_edit_form(c, d)
+            )
+            h.addWidget(pick_btn, 1)
             del_btn = QPushButton("×")
             del_btn.setObjectName("Ghost")
             del_btn.setFixedSize(24, 24)
@@ -1162,41 +1225,63 @@ class ProjectSettingsDrawer(QWidget):
             h.addWidget(del_btn)
             self._custom_list_lay.addWidget(row_w)
 
-    def _on_add_custom_storage(self) -> None:
+    def _on_save_storage(self) -> None:
         db = self.ctx.get_db()
         if db is None:
             return
         code = self._new_code_edit.text().strip().upper()
-        detail = self._new_detail_edit.text().strip()
+        detail = self._new_detail_edit.toPlainText().strip()
         if not code or not detail:
             return
-        from app.services.project_settings_service import load_setting, save_setting
-        custom = load_setting(db, "custom_storages", [])
-        if any(s["code"] == code for s in custom):
-            return
-        custom.append({
+        from app.services.project_settings_service import (
+            load_custom_storages,
+            save_setting,
+        )
+
+        custom = load_custom_storages(db)
+        payload = {
             "code": code,
             "detail": detail,
             "transcriptome": code.startswith("R"),
-        })
+        }
+        replaced = False
+        for index, entry in enumerate(custom):
+            if str(entry.get("code", "")).upper() == code:
+                custom[index] = payload
+                replaced = True
+                break
+        if not replaced:
+            custom.append(payload)
         save_setting(db, "custom_storages", custom)
         self._on_clear_custom_form()
+        self._refresh_builtin_storage_table(db)
         self._rebuild_custom_list(custom, db)
+        self.storages_changed.emit()
+
+    def _on_add_custom_storage(self) -> None:
+        self._on_save_storage()
 
     def _on_delete_custom_storage(self, code: str) -> None:
         db = self.ctx.get_db()
         if db is None:
             return
-        from app.services.project_settings_service import load_setting, save_setting
-        custom = load_setting(db, "custom_storages", [])
+        from app.services.project_settings_service import (
+            load_custom_storages,
+            save_setting,
+        )
+        custom = load_custom_storages(db)
         custom = [s for s in custom if s["code"] != code]
         save_setting(db, "custom_storages", custom)
+        self._refresh_builtin_storage_table(db)
         self._rebuild_custom_list(custom, db)
+        self.storages_changed.emit()
 
     def _on_clear_custom_form(self) -> None:
         self._new_code_edit.clear()
         self._new_detail_edit.clear()
         self._rna_hint_lbl.setText("")
+        if hasattr(self, "_builtin_storage_table"):
+            self._builtin_storage_table.clearSelection()
 
     # ── Field enable/disable ──────────────────────────────────────────────────
 

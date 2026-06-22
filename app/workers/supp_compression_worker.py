@@ -20,6 +20,7 @@ from app.services.archive_service import archive_group
 
 class SuppCompressionWorker(QThread):
     started_archiving = pyqtSignal(int, str)  # (jpg_count, tiff_stem) → initial toast
+    progress = pyqtSignal(int, int, str)       # current, total, JPG filename
     finished = pyqtSignal(object)             # ZipResult
     failed = pyqtSignal(str)                  # error message
 
@@ -28,8 +29,9 @@ class SuppCompressionWorker(QThread):
         jpg_paths: list[str],
         tiff_path: str,
         project_dir: str,
-        delete_jpg: bool = False,
-        method: str = "maximum",
+        delete_jpg: bool = True,
+        method: str = "standard",
+        concurrency: int = 4,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -38,6 +40,7 @@ class SuppCompressionWorker(QThread):
         self._project_dir = project_dir
         self._delete_jpg = bool(delete_jpg)
         self._method = method
+        self._concurrency = max(1, min(8, int(concurrency)))
 
     def run(self) -> None:
         try:
@@ -50,6 +53,8 @@ class SuppCompressionWorker(QThread):
                 self._project_dir,
                 delete_jpg=self._delete_jpg,
                 method=self._method,
+                concurrency=self._concurrency,
+                progress_callback=self.progress.emit,
             )
             self.finished.emit(result)
         except Exception as exc:  # noqa: BLE001 — surface any failure to the UI

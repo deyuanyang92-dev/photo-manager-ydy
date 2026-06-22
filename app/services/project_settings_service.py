@@ -136,22 +136,69 @@ _GLOBAL_PRINT_DEFAULTS_KEY = "print/default_settings"
 
 # Built-in preservation methods — constants, never stored in DB (mirrors app.js:549)
 BUILTIN_STORAGES: list[dict[str, Any]] = [
-    {"code": "T95E",  "detail": "TNES 缓冲液（95% 乙醇 + TE）固定保存",          "transcriptome": False},
-    {"code": "D95E",  "detail": "95% 乙醇脱水固定",                              "transcriptome": False},
-    {"code": "D75E",  "detail": "75% 乙醇脱水固定",                              "transcriptome": False},
-    {"code": "T75E",  "detail": "TNES + 75% 乙醇混合固定",                       "transcriptome": False},
-    {"code": "D79",   "detail": "FAA 固定（4% 甲醛 + 70% 乙醇 + 5% 醋酸）",     "transcriptome": False},
-    {"code": "T79",   "detail": "TNES + FAA 混合固定",                           "transcriptome": False},
-    {"code": "T100",  "detail": "100% 乙醇固定（超低温长期保存）",               "transcriptome": False},
-    {"code": "RT95E", "detail": "取 RNA 后剩余以 TNES + 95% 乙醇保存",          "transcriptome": True},
-    {"code": "RD95E", "detail": "取 RNA 后剩余以 95% 乙醇保存",                  "transcriptome": True},
-    {"code": "RD75E", "detail": "取 RNA 后剩余以 75% 乙醇保存",                  "transcriptome": True},
-    {"code": "RT75E", "detail": "取 RNA 后剩余以 TNES + 75% 乙醇保存",          "transcriptome": True},
-    {"code": "RD79",  "detail": "取 RNA 后剩余以 FAA 固定",                      "transcriptome": True},
-    {"code": "RT79",  "detail": "取 RNA 后剩余以 TNES + FAA 固定",               "transcriptome": True},
-    {"code": "RT100", "detail": "取 RNA 后剩余以 100% 乙醇固定",                 "transcriptome": True},
-    {"code": "RGLU",  "detail": "取 RNA 后剩余以 0.5% 戊二醛固定",               "transcriptome": True},
+    {"code": "T95E",  "detail": "梯度酒精固定，最终以95%酒精保存",                         "transcriptome": False},
+    {"code": "D95E",  "detail": "直接以95%酒精固定并保存",                               "transcriptome": False},
+    {"code": "D75E",  "detail": "直接以75%酒精固定并保存",                               "transcriptome": False},
+    {"code": "T75E",  "detail": "梯度酒精固定，最终以75%酒精保存",                         "transcriptome": False},
+    {"code": "D79",   "detail": "直接以75%酒精固定，然后转95%酒精长期保存",                 "transcriptome": False},
+    {"code": "T79",   "detail": "梯度酒精固定至75%，然后转95%酒精长期保存",                 "transcriptome": False},
+    {"code": "T100",  "detail": "梯度酒精固定，最终以100%酒精保存",                        "transcriptome": False},
+    {"code": "RT95E", "detail": "已取RNA；剩余标本梯度酒精固定，最终以95%酒精保存",          "transcriptome": True},
+    {"code": "RD95E", "detail": "已取RNA；剩余标本直接以95%酒精固定并保存",                 "transcriptome": True},
+    {"code": "RD75E", "detail": "已取RNA；剩余标本直接以75%酒精固定并保存",                 "transcriptome": True},
+    {"code": "RT75E", "detail": "已取RNA；剩余标本梯度酒精固定，最终以75%酒精保存",          "transcriptome": True},
+    {"code": "RD79",  "detail": "已取RNA；剩余标本直接以75%酒精固定，然后转95%酒精长期保存",  "transcriptome": True},
+    {"code": "RT79",  "detail": "已取RNA；剩余标本梯度酒精固定至75%，然后转95%酒精长期保存",  "transcriptome": True},
+    {"code": "RT100", "detail": "已取RNA；剩余标本梯度酒精固定，最终以100%酒精保存",         "transcriptome": True},
 ]
+
+
+def builtin_storage_codes() -> set[str]:
+    return {str(s["code"]) for s in BUILTIN_STORAGES}
+
+
+def resolve_storage_detail(code: str, custom: list) -> str:
+    """Return detail text for *code*, with project custom/override entries first."""
+    normalized = str(code or "").strip().upper()
+    if not normalized:
+        return ""
+    for entry in custom:
+        if str(entry.get("code", "")).strip().upper() == normalized:
+            return str(entry.get("detail") or "")
+    for entry in BUILTIN_STORAGES:
+        if entry["code"] == normalized:
+            return entry["detail"]
+    return ""
+
+
+def resolve_storage_transcriptome(code: str, custom: list) -> bool:
+    normalized = str(code or "").strip().upper()
+    if normalized.startswith("R"):
+        return True
+    for entry in custom:
+        if str(entry.get("code", "")).strip().upper() == normalized:
+            return bool(entry.get("transcriptome"))
+    for entry in BUILTIN_STORAGES:
+        if entry["code"] == normalized:
+            return bool(entry.get("transcriptome"))
+    return False
+
+
+def load_custom_storages(db: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Return custom/overridden storage entries; always a list (never dict([]))."""
+    row = db.execute(
+        "SELECT value_json FROM project_settings WHERE setting_key=?",
+        ("custom_storages",),
+    ).fetchone()
+    if row:
+        try:
+            data = json.loads(row[0])
+            if isinstance(data, list):
+                return list(data)
+        except (ValueError, TypeError):
+            pass
+    return []
+
 
 # ── CRUD ───────────────────────────────────────────────────────────────────────
 

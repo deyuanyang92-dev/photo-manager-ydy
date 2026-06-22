@@ -129,6 +129,29 @@ class AppSettings:
     def results_subdir(self, name: str) -> None:
         self._qs.setValue("project/results_subdir", name or "results")
 
+    # ── JPG archive ───────────────────────────────────────────────────
+
+    @property
+    def jxl_effort_method(self) -> str:
+        """JXL effort selected in Settings: 0=standard(e7), 1=maximum(e9)."""
+        try:
+            index = int(self._qs.value("archive/jxl_effort", 0))
+        except (TypeError, ValueError):
+            index = 0
+        return "maximum" if index == 1 else "standard"
+
+    @property
+    def jxl_concurrency(self) -> int:
+        try:
+            value = int(self._qs.value("archive/jxl_concurrency", 4))
+        except (TypeError, ValueError):
+            value = 4
+        return max(1, min(8, value))
+
+    @property
+    def delete_jpg_after_archive(self) -> bool:
+        return str(self._qs.value("archive/delete_jpg", "true")).lower() == "true"
+
     # ── Appearance ────────────────────────────────────────────────────
 
     @property

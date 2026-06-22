@@ -227,7 +227,7 @@ def test_rna_filter_button_shows_count_and_filters_r_prefix(ctx, db):
 
     assert sb._list.count() == 1
     assert sb._list.item(0).data(Qt.ItemDataRole.UserRole) == "RNA-1"
-    assert "RNA 1" in sb._count_label.text()
+    assert sb._filter_rna_btn.text() == "RNA 1"
 
 
 def test_rna_badge_and_missing_species_are_visible_on_row(ctx, db):
