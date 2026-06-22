@@ -12,6 +12,36 @@
       "name": "ceshi7",
       "directory": "/mnt/n/claude/ceshi7",
       "dir": "/mnt/n/claude/ceshi7"
+    },
+    {
+      "id": "11e72938-8ff6-4e9a-8a10-e329c854ed75",
+      "name": "dsssdd",
+      "dir": "/mnt/n/claude/ceshi10",
+      "directory": "/mnt/n/claude/ceshi10",
+      "incomingJpgDir": "/mnt/n/claude/ceshi10/incoming-jpg",
+      "resultsDir": "/mnt/n/claude/ceshi10/results",
+      "projectCode": "DDD",
+      "location": "ggg",
+      "collector": "ydy",
+      "year": "2026",
+      "dateRange": "20260621",
+      "incomingJpgSubdir": "incoming-jpg",
+      "resultsSubdir": "results"
+    },
+    {
+      "id": "9234edec-d9b0-4a40-87b2-66e03ee65ef4",
+      "name": "zhengli",
+      "dir": "/mnt/n/claude/zhegnli",
+      "directory": "/mnt/n/claude/zhegnli",
+      "incomingJpgDir": "/mnt/n/claude/zhegnli/incoming-jpg",
+      "resultsDir": "/mnt/n/claude/zhegnli/results",
+      "projectCode": "PRJ-2026-02",
+      "location": "gd",
+      "collector": "ydy",
+      "year": "2026",
+      "dateRange": "20260622",
+      "incomingJpgSubdir": "incoming-jpg",
+      "resultsSubdir": "results"
     }
   ]
 }

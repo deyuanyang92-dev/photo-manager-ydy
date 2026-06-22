@@ -76,35 +76,34 @@ class TestCenterOn:
 class TestGetExistingDirectory:
     def test_returns_empty_on_cancel(self, qapp):
         from app.utils.ui import get_existing_directory
-        with mock.patch(
-            "app.utils.ui.QFileDialog.getExistingDirectory",
-            return_value="",
-        ):
+        from PyQt6.QtWidgets import QDialog
+
+        with mock.patch("app.utils.ui.QFileDialog") as MockFD:
+            inst = MockFD.return_value
+            inst.exec.return_value = QDialog.DialogCode.Rejected
             result = get_existing_directory(None, "选择目录")
         assert result == ""
 
     def test_returns_path_on_accept(self, qapp, tmp_path):
         from app.utils.ui import get_existing_directory
+        from PyQt6.QtWidgets import QDialog
+
         expected = str(tmp_path)
-        with mock.patch(
-            "app.utils.ui.QFileDialog.getExistingDirectory",
-            return_value=expected,
-        ):
+        with mock.patch("app.utils.ui.QFileDialog") as MockFD:
+            inst = MockFD.return_value
+            inst.exec.return_value = QDialog.DialogCode.Accepted
+            inst.selectedFiles.return_value = [expected]
             result = get_existing_directory(None, "选择目录")
         assert result == expected
 
     def test_passes_no_native_option(self, qapp):
         from app.utils.ui import get_existing_directory, _NO_NATIVE
-        with mock.patch(
-            "app.utils.ui.QFileDialog.getExistingDirectory",
-            return_value="",
-        ) as m:
+
+        with mock.patch("app.utils.ui.QFileDialog") as MockFD:
+            inst = MockFD.return_value
+            inst.exec.return_value = 0
             get_existing_directory(None, "选择")
-        call_kwargs = m.call_args
-        # The option _NO_NATIVE should be in the positional args
-        assert _NO_NATIVE in call_kwargs.args or (
-            call_kwargs.kwargs.get("options") == _NO_NATIVE
-        )
+        inst.setOption.assert_any_call(_NO_NATIVE, True)
 
 
 # ── get_open_file_name ────────────────────────────────────────────────────────

@@ -41,7 +41,7 @@ class RetroactiveModal(QDialog):
         self._sel: dict[str, bool] = {}  # uid#seq → selected
         self._delete_jpg = True
         self.setWindowTitle(
-            "自动分组并整理" if scan_result.get("autoGroup")
+            "执行整理归档" if scan_result.get("autoGroup")
             else "存量整理 — 按时间配对 JPG → TIF"
         )
         self.setMinimumSize(640, 480)
@@ -55,13 +55,18 @@ class RetroactiveModal(QDialog):
 
         if self._scan.get("autoGroup"):
             hint_text = (
-                "已按文件时间排序：每个 TIF 结束前一批 JPG。"
-                "请核对自动分组，勾选后执行整理归档。"
+                "以下为已预览的自动分组结果。"
+                "勾选要打包的组，点「确认整理」才会开始归档。"
             )
         else:
             hint_text = (
                 "扫描 results/ 的 TIF + incoming-jpg/ 原片，"
                 "按拍摄时间把每个 TIF 之前的 JPG 配给它。"
+            )
+        if not self.ctx.current_project_dir:
+            hint_text += (
+                "\n\n未打开项目：仍可打包归档（ZIP 写在 TIF 同目录）；"
+                "不会写入项目数据库。"
             )
         hint = QLabel(hint_text)
         hint.setObjectName("Muted")
@@ -173,9 +178,9 @@ class RetroactiveModal(QDialog):
 
     def _on_apply(self) -> None:
         from app.services.archive_service import archive_group
-        project_dir = self.ctx.current_project_dir
+        project_dir = self.ctx.current_project_dir or self._scan.get("scanFolder") or ""
         if not project_dir:
-            QMessageBox.warning(self, "整理", "未设置项目目录。")
+            QMessageBox.warning(self, "整理", "未选择扫描目录。")
             return
 
         # Collect confirmed groups
@@ -191,9 +196,12 @@ class RetroactiveModal(QDialog):
             QMessageBox.information(self, "整理", "请至少勾选一个有原片的组。")
             return
 
+        no_project = self.ctx.get_db() is None
         confirm = QMessageBox.question(
             self, "确认整理",
             f"对 {len(to_archive)} 组打包归档（JXL+ZIP）？"
+            + ("\n\n未打开项目：仅生成本地 ZIP，不写入项目数据库。"
+               if no_project else "")
             + ("\n⚠ 已开启删原片：打包校验通过后将删除这些 JPG（TIFF 永久保留）。"
                if self._delete_jpg else ""),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,

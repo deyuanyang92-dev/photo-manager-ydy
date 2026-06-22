@@ -61,6 +61,31 @@ class TestRetroactiveScan:
         ]
         assert [group["seq"] for group in groups] == [1, 2]
 
+    def test_auto_group_paths_matches_folder_scan(self, tmp_path):
+        from app.services.retroactive_service import (
+            scan_folder_auto_groups,
+            scan_paths_auto_groups,
+        )
+
+        uid = "FJ-XM-B2-DLC001-T95E-20260601"
+        names = [
+            "IMG_001.jpg",
+            "IMG_002.jpg",
+            "FJ-XM-B2-DLC001-1-T95E-20260601.tif",
+        ]
+        base_ns = 1_700_000_000_000_000_000
+        paths = []
+        for index, name in enumerate(names):
+            path = tmp_path / name
+            path.write_bytes(b"image")
+            stamp = base_ns + index * 1_000_000_000
+            os.utime(path, ns=(stamp, stamp))
+            paths.append(str(path))
+
+        folder_result = scan_folder_auto_groups(str(tmp_path))
+        paths_result = scan_paths_auto_groups(paths)
+        assert paths_result["specimens"] == folder_result["specimens"]
+
     def test_auto_group_folder_uses_current_uid_for_unnamed_tiffs(self, tmp_path):
         """The active grouping UID makes ordinary Helicon TIFF names usable."""
         from app.services.retroactive_service import scan_folder_auto_groups

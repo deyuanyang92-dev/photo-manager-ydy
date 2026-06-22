@@ -563,6 +563,59 @@ class NamingPanel(QWidget):
         self._update_preview()
         self._update_edit_actions()
 
+    def apply_recognized_fields(
+        self,
+        field_values: dict[str, str],
+        *,
+        collection_date: str = "",
+        photo_date: str = "",
+        sequence: int | None = None,
+        inline_labels: tuple[str, ...] | list[str] = (),
+        source_filename: str = "",
+    ) -> None:
+        """Fill empty naming fields from a recognized legacy TIFF basename."""
+        from app.utils.naming import coalesce_specimen_dates, legacy_filename_photo_notes
+
+        widgets = {
+            "province": self._province,
+            "site": self._site,
+            "station": self._station,
+            "species_id": self._species_id,
+            "storage": self._storage,
+        }
+        for key, widget in widgets.items():
+            val = str(field_values.get(key) or "").strip()
+            if val and not widget.text().strip():
+                widget.setText(val)
+
+        # 只有一个日期 → 采集日期与拍照日期视为同一天（历史数据常见）
+        col, photo = coalesce_specimen_dates(collection_date, photo_date)
+        if col and not self._collection_date.text().strip():
+            self._collection_date.setText(col)
+        if photo and not self._photo_date.text().strip():
+            self._photo_date.setText(photo)
+
+        if sequence is not None and sequence >= 1:
+            self._seq.setValue(int(sequence))
+        if self._storage.text().strip():
+            self._sync_combo_to_storage(self._storage.text().strip())
+
+        archive = legacy_filename_photo_notes(
+            inline_labels,
+            source_name=source_filename,
+        )
+        if archive:
+            existing = self._photo_notes.toPlainText().strip()
+            if not existing:
+                self._photo_notes.setPlainText(archive)
+            elif archive not in existing:
+                self._photo_notes.setPlainText(f"{existing}\n{archive}")
+            self._display_metadata["photo_notes"] = self._photo_notes.toPlainText().strip()
+            self._refresh_display_summary()
+
+        self._update_preview()
+        self._update_edit_actions()
+
     def set_display_metadata(self, values: dict) -> None:
         """更新 UID 下方的展示摘要；不参与 UID 构造或复制。"""
         aliases = {"photo_notes": "photoNotes"}

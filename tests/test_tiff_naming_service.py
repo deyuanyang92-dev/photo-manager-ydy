@@ -157,6 +157,68 @@ def test_parse_tiff_result_detail_allows_arbitrary_suffix_after_core():
     assert detail.core_stem == "gxhp-sl-dlc001-1-r-20260712"
 
 
+def test_parse_legacy_inline_chinese_descriptor_before_date():
+    from app.utils.naming import recognize_tiff_filename, tiff_stem_is_recognizable
+
+    stem = "GXFCG-BLW-SC001-1-260618-广西防城港-白龙尾-独齿沙蚕-20260618"
+    components = [
+        "province", "site", "station", "species_id", "storage", "date_seg",
+    ]
+    assert tiff_stem_is_recognizable(stem, components)
+    rec = recognize_tiff_filename(stem, components)
+    assert rec is not None
+    assert rec.sequence == 1
+    assert rec.field_values["species_id"] == "SC001"
+    assert rec.field_values["storage"] == "260618"
+    assert rec.inline_labels == ("广西防城港", "白龙尾", "独齿沙蚕")
+
+
+def test_tiff_stem_fully_conforms_requires_exact_core():
+    from app.utils.naming import tiff_stem_fully_conforms, tiff_stem_is_recognizable
+
+    components = [
+        "province", "site", "station", "species_id", "storage", "date_seg",
+    ]
+    legacy = "GXFCG-BLW-SC001-1-260618-广西防城港-白龙尾-独齿沙蚕-20260618"
+    core = "GXFCG-BLW-SC001-1-260618-20260618"
+    standard = "FJ-XM-B2-DLC001-1-T95E-20260601"
+
+    assert tiff_stem_is_recognizable(legacy, components)
+    assert not tiff_stem_fully_conforms(legacy, components)
+    assert tiff_stem_fully_conforms(core, components)
+    assert tiff_stem_fully_conforms(standard, components)
+
+
+def test_legacy_filename_photo_notes_archives_unmapped_segments():
+    from app.utils.naming import legacy_filename_photo_notes
+
+    text = legacy_filename_photo_notes(
+        ["广西防城港", "白龙尾", "独齿沙蚕"],
+        source_name="GXFCG-BLW-SC001-1-260618-广西防城港-白龙尾-独齿沙蚕-20260618.tif",
+    )
+    assert "【文件名附加】广西防城港 · 白龙尾 · 独齿沙蚕" in text
+    assert "【原文件名】" in text
+
+
+def test_apply_recognized_fields_single_date_fills_both(qtbot):
+    from app.widgets.naming_panel import NamingPanel
+    from unittest.mock import MagicMock
+
+    panel = NamingPanel(MagicMock())
+    qtbot.addWidget(panel)
+    panel.apply_recognized_fields(
+        {"province": "GXFCG", "site": "BLW", "species_id": "SC001", "storage": "260618"},
+        collection_date="20260618",
+        photo_date="",
+        sequence=1,
+        inline_labels=("白龙尾", "独齿沙蚕"),
+        source_filename="demo.tif",
+    )
+    assert panel._collection_date.text() == "20260618"
+    assert panel._photo_date.text() == "20260618"
+    assert "【文件名附加】" in panel._photo_notes.toPlainText()
+
+
 def test_parse_tiff_result_detail_accepts_dual_date_segment(tmp_path):
     from app.services.tiff_naming_service import inspect_tiff_names
 

@@ -95,6 +95,61 @@ def test_auto_group_organize_button_emits_request(qtbot):
         panel._auto_group_btn.click()
 
 
+def test_auto_group_drop_zone_stages_files(qtbot, tmp_path):
+    from app.widgets.grouping_panel import GroupingPanel
+
+    jpg = tmp_path / "a.jpg"
+    tif = tmp_path / "b.tif"
+    jpg.write_bytes(b"j")
+    tif.write_bytes(b"t")
+    panel = GroupingPanel(_make_app_context())
+    qtbot.addWidget(panel)
+    panel.add_auto_group_staged([str(jpg), str(tif)])
+    assert len(panel.staged_auto_group_paths()) == 2
+    panel.clear_auto_group_staging()
+    assert panel.staged_auto_group_paths() == []
+
+
+def test_auto_group_drop_zone_pick_files(qtbot, tmp_path):
+    from unittest.mock import patch
+    from app.widgets.grouping_panel import GroupingPanel
+
+    jpg = tmp_path / "pick.jpg"
+    jpg.write_bytes(b"j")
+    panel = GroupingPanel(_make_app_context())
+    qtbot.addWidget(panel)
+    with patch(
+        "app.utils.ui.get_open_file_names",
+        return_value=[str(jpg)],
+    ):
+        panel._auto_group_drop._pick_files()
+    assert panel.staged_auto_group_paths() == [str(jpg.resolve())]
+
+
+def test_auto_group_preview_toggles_action_button(qtbot):
+    from app.widgets.grouping_panel import GroupingPanel
+
+    panel = GroupingPanel(_make_app_context())
+    qtbot.addWidget(panel)
+    assert panel._auto_group_btn.text() == "自动分组整理"
+    panel.show_auto_group_preview({
+        "specimens": [{
+            "uid": "FJ-XM-B2-DLC001",
+            "groups": [{
+                "seq": 1,
+                "tiffName": "a.tif",
+                "jpgPaths": ["/tmp/a.jpg"],
+                "jpgCount": 1,
+            }],
+        }],
+    })
+    assert panel.has_auto_group_preview()
+    assert panel._auto_group_btn.text() == "执行整理归档"
+    panel.clear_auto_group_preview()
+    assert not panel.has_auto_group_preview()
+    assert panel._auto_group_btn.text() == "自动分组整理"
+
+
 def test_tiff_naming_check_button_emits_independent_request(qtbot):
     """TIFF naming audit is separate from automatic grouping and organizing."""
     from app.widgets.grouping_panel import GroupingPanel
@@ -519,5 +574,8 @@ def test_draft_row_shows_linked_tiff(qtbot, tmp_path):
     rows = panel.findChildren(_DraftGroupRow)
     assert len(rows) == 1
     lw = rows[0]._jpg_list
-    tips = [lw.item(i).toolTip() for i in range(lw.count()) if lw.item(i)]
-    assert "Helicon PMax.tif" in tips
+    shown = [
+        (lw.item(i).toolTip() or "") + (lw.item(i).text() or "")
+        for i in range(lw.count()) if lw.item(i)
+    ]
+    assert any("Helicon PMax.tif" in s for s in shown)

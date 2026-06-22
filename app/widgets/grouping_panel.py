@@ -68,9 +68,15 @@ def _paths_from_mime(event) -> list[str]:
     for url in md.urls():
         if not url.isLocalFile():
             continue
-        p = url.toLocalFile()
-        if p and Path(p).is_file():
-            paths.append(normalize_path(p))
+        raw = url.toLocalFile() or url.path()
+        if not raw:
+            continue
+        try:
+            p = normalize_path(raw)
+        except OSError:
+            p = raw
+        if Path(p).is_file():
+            paths.append(p)
     return paths
 
 
@@ -277,6 +283,46 @@ class _ComposedRow(QFrame):
 
 # ── Draft group ───────────────────────────────────────────────────────────────
 
+class _ThumbAreaResizeHandle(QFrame):
+    """Drag vertically to resize the thumbnail grid inside a group card."""
+
+    def __init__(
+        self,
+        target: QListWidget,
+        *,
+        min_h: int = 88,
+        max_h: int = 320,
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self._target = target
+        self._min_h = min_h
+        self._max_h = max_h
+        self._drag_y = 0
+        self._start_h = 0
+        self.setObjectName("ThumbResizeGrip")
+        self.setFixedHeight(8)
+        self.setCursor(Qt.CursorShape.SizeVerCursor)
+        self.setToolTip("上下拖动，调整缩略图区域高度")
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_y = int(event.globalPosition().y())
+            self._start_h = self._target.height()
+            event.accept()
+        else:
+            super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if event.buttons() & Qt.MouseButton.LeftButton:
+            delta = int(event.globalPosition().y()) - self._drag_y
+            h = max(self._min_h, min(self._max_h, self._start_h + delta))
+            self._target.setFixedHeight(h)
+            event.accept()
+        else:
+            super().mouseMoveEvent(event)
+
+
 class _DraftGroupRow(QFrame):
     """Editable draft group card (angle label + drag-reorderable JPG list)."""
 
@@ -368,9 +414,9 @@ class _DraftGroupRow(QFrame):
             self._jpg_list.addItem(item)
         tiff_path = self._group.composed_tiff_path or ""
         if tiff_path:
-            tiff_item = QListWidgetItem(self._tiff_icon(), "TIF")
+            tiff_item = QListWidgetItem(self._tiff_icon(), Path(tiff_path).name)
             tiff_item.setData(Qt.ItemDataRole.UserRole, None)
-            tiff_item.setToolTip(Path(tiff_path).name)
+            tiff_item.setToolTip(tiff_path)
             tiff_item.setFlags(Qt.ItemFlag.NoItemFlags)
             self._jpg_list.addItem(tiff_item)
         if not self._group.jpg_paths and not tiff_path:
@@ -381,8 +427,19 @@ class _DraftGroupRow(QFrame):
         self._jpg_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._jpg_list.customContextMenuRequested.connect(self._on_jpg_context_menu)
         root.addWidget(self._jpg_list)
+        root.addWidget(_ThumbAreaResizeHandle(self._jpg_list, parent=self))
 
-        # 张数 + 输出名（同一行，省高度）
+        if tiff_path:
+            tiff_name_lbl = QLabel(Path(tiff_path).name)
+            tiff_name_lbl.setObjectName("Mono")
+            tiff_name_lbl.setWordWrap(True)
+            tiff_name_lbl.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+            )
+            tiff_name_lbl.setToolTip(tiff_path)
+            root.addWidget(tiff_name_lbl)
+
+        # 张数 + 输出名（分两行，避免 TIF 命名被挤没）
         meta = QHBoxLayout()
         meta.setSpacing(4)
         if tiff_path and not self._group.jpg_paths:
@@ -394,9 +451,14 @@ class _DraftGroupRow(QFrame):
         count_lbl = QLabel(count_text)
         count_lbl.setObjectName("MutedSmall")
         meta.addWidget(count_lbl)
-        out_lbl = QLabel("出")
+        meta.addStretch()
+        root.addLayout(meta)
+
+        out_row = QHBoxLayout()
+        out_row.setSpacing(4)
+        out_lbl = QLabel("输出")
         out_lbl.setObjectName("MutedSmall")
-        meta.addWidget(out_lbl)
+        out_row.addWidget(out_lbl)
         self._output_edit = QLineEdit(self._effective_output_name())
         self._output_edit.setPlaceholderText("自动")
         self._output_edit.setFixedHeight(24)
@@ -407,8 +469,8 @@ class _DraftGroupRow(QFrame):
         self._output_edit.textEdited.connect(
             lambda t: self.output_name_changed.emit(self._group.group_index, t)
         )
-        meta.addWidget(self._output_edit, 1)
-        root.addLayout(meta)
+        out_row.addWidget(self._output_edit, 1)
+        root.addLayout(out_row)
 
         if tiff_path:
             action_btn = QPushButton("整理")
@@ -585,6 +647,117 @@ class _SuppDropButton(QPushButton):
             self.files_dropped.emit(paths)
 
 
+class _AutoGroupDropZone(QFrame):
+    """Staging area: drag JPG/TIF here, then click 自动分组整理."""
+
+    files_dropped = pyqtSignal(list)
+
+    def __init__(self, panel: "GroupingPanel", parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._panel = panel
+        self.setAcceptDrops(True)
+        self.setMinimumHeight(140)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 16, 16, 16)
+        lay.setSpacing(8)
+        self._hint = QLabel(
+            "拖入 JPG / TIF 到此处，然后点「自动分组整理」\n"
+            "WSL 下 Windows 拖入常无效，请用下方「添加文件 / 文件夹」\n"
+            "也可直接点「自动分组整理」选择来源"
+        )
+        self._hint.setObjectName("Muted")
+        self._hint.setWordWrap(True)
+        self._hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(self._hint)
+        self._count_lbl = QLabel("")
+        self._count_lbl.setObjectName("Mono")
+        self._count_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(self._count_lbl)
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        self._add_files_btn = QPushButton("添加文件…")
+        self._add_files_btn.setObjectName("Outline")
+        self._add_files_btn.setFixedHeight(26)
+        self._add_files_btn.clicked.connect(self._pick_files)
+        btn_row.addWidget(self._add_files_btn)
+        self._add_folder_btn = QPushButton("添加文件夹…")
+        self._add_folder_btn.setObjectName("Outline")
+        self._add_folder_btn.setFixedHeight(26)
+        self._add_folder_btn.clicked.connect(self._pick_folder)
+        btn_row.addWidget(self._add_folder_btn)
+        self._clear_btn = QPushButton("清空暂存")
+        self._clear_btn.setObjectName("Ghost")
+        self._clear_btn.setFixedHeight(26)
+        self._clear_btn.clicked.connect(panel.clear_auto_group_staging)
+        self._clear_btn.hide()
+        btn_row.addWidget(self._clear_btn)
+        btn_row.addStretch()
+        lay.addLayout(btn_row)
+
+    def set_staged_count(self, count: int, paths: list[str] | None = None) -> None:
+        if count > 0:
+            names = ", ".join(Path(p).name for p in (paths or [])[:8])
+            if count > 8:
+                names += f" …等 {count} 个"
+            self._count_lbl.setText(f"已暂存 {count} 个文件：{names}")
+            self._clear_btn.show()
+        else:
+            self._count_lbl.setText("")
+            self._clear_btn.hide()
+
+    def _picker_start_dir(self) -> str:
+        project_dir = getattr(self._panel.ctx, "current_project_dir", None)
+        if project_dir and Path(project_dir).is_dir():
+            return str(project_dir)
+        return str(Path.home())
+
+    def _pick_files(self) -> None:
+        from app.utils import ui
+
+        paths = ui.get_open_file_names(
+            self.window(),
+            "选择 JPG / TIF 文件",
+            start=self._picker_start_dir(),
+            filter="图片 (*.jpg *.jpeg *.tif *.tiff);;所有文件 (*.*)",
+        )
+        if paths:
+            self.files_dropped.emit(paths)
+
+    def _pick_folder(self) -> None:
+        from app.utils import ui
+
+        folder = ui.get_existing_directory(
+            self.window(),
+            "选择含 JPG / TIF 的文件夹",
+            start=self._picker_start_dir(),
+        )
+        if not folder:
+            return
+        paths = [
+            str(p) for p in Path(folder).iterdir()
+            if p.is_file() and p.suffix.lower() in (_JPG_EXTS | _TIFF_EXTS)
+        ]
+        if paths:
+            self.files_dropped.emit(paths)
+
+    def dragEnterEvent(self, event) -> None:  # noqa: N802
+        if _paths_from_mime(event):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event) -> None:  # noqa: N802
+        self.dragEnterEvent(event)
+
+    def dropEvent(self, event) -> None:  # noqa: N802
+        paths = _paths_from_mime(event)
+        if not paths:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        self.files_dropped.emit(paths)
+
+
 class GroupingPanel(QWidget):
     """Full grouping editor: draft groups above, composed rows below.
 
@@ -623,6 +796,8 @@ class GroupingPanel(QWidget):
         self._uid: Optional[str] = None
         self._grouping: Optional["SpecimenGrouping"] = None
         self._selected_group_indexes: set[int] = set()
+        self._auto_group_staged_paths: list[str] = []
+        self._auto_group_preview_result: Optional[dict] = None
         self._setup_ui()
 
     # ── UI ────────────────────────────────────────────────────────────────────
@@ -698,7 +873,8 @@ class GroupingPanel(QWidget):
             size=14,
         )
         self._auto_group_btn.setToolTip(
-            "选择历史照片目录，按 JPG…TIF 的时间边界自动分组并批量整理"
+            "第一步：扫描并预览分组（不打包）；"
+            "核对无误后再点同一按钮执行整理归档"
         )
         self._auto_group_btn.clicked.connect(
             self.auto_group_organize_requested.emit
@@ -800,15 +976,33 @@ class GroupingPanel(QWidget):
         scroll.setWidget(self._content)
         body_lay.addWidget(scroll, stretch=1)
 
-        # Empty state（无任何编号时的引导；分组无需激活，有编号即可加组）
-        self._empty_lbl = QLabel(
-            "先在右侧填写标本编号（或选中/激活一个编号），即可点「新组」按角度分组。\n"
-            "分组无需激活——隐式主流程直接用监控区上方的[合成]按钮即可。"
-        )
-        self._empty_lbl.setObjectName("Muted")
-        self._empty_lbl.setWordWrap(True)
-        self._empty_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        body_lay.addWidget(self._empty_lbl)
+        self._auto_group_drop = _AutoGroupDropZone(self)
+        self._auto_group_drop.files_dropped.connect(self._on_auto_group_files_added)
+        body_lay.addWidget(self._auto_group_drop)
+
+        self._auto_group_preview_host = QFrame()
+        self._auto_group_preview_host.setObjectName("Panel")
+        preview_lay = QVBoxLayout(self._auto_group_preview_host)
+        preview_lay.setContentsMargins(12, 10, 12, 10)
+        preview_lay.setSpacing(6)
+        self._auto_group_preview_title = QLabel("自动分组预览（尚未整理）")
+        self._auto_group_preview_title.setObjectName("Section")
+        preview_lay.addWidget(self._auto_group_preview_title)
+        self._auto_group_preview_body = QLabel("")
+        self._auto_group_preview_body.setObjectName("Muted")
+        self._auto_group_preview_body.setWordWrap(True)
+        preview_lay.addWidget(self._auto_group_preview_body)
+        preview_btn_row = QHBoxLayout()
+        preview_btn_row.addStretch()
+        self._clear_preview_btn = QPushButton("清除预览")
+        self._clear_preview_btn.setObjectName("Ghost")
+        self._clear_preview_btn.setFixedHeight(26)
+        self._clear_preview_btn.clicked.connect(self.clear_auto_group_preview)
+        preview_btn_row.addWidget(self._clear_preview_btn)
+        preview_btn_row.addStretch()
+        preview_lay.addLayout(preview_btn_row)
+        self._auto_group_preview_host.hide()
+        body_lay.addWidget(self._auto_group_preview_host)
 
         root.addWidget(self._group_body, stretch=1)
 
@@ -837,7 +1031,99 @@ class GroupingPanel(QWidget):
         self._toolbar_widget.hide()
         self._add_btn.hide()
         self._clear_content()
-        self._empty_lbl.show()
+        self._refresh_auto_group_drop_visibility()
+
+    def staged_auto_group_paths(self) -> list[str]:
+        return list(self._auto_group_staged_paths)
+
+    def has_auto_group_preview(self) -> bool:
+        return self._auto_group_preview_result is not None
+
+    def auto_group_preview_result(self) -> Optional[dict]:
+        return self._auto_group_preview_result
+
+    def _on_auto_group_files_added(self, paths: list[str]) -> None:
+        self.clear_auto_group_preview()
+        self.add_auto_group_staged(paths)
+
+    def add_auto_group_staged(self, paths: list[str]) -> None:
+        from app.utils.path_utils import normalize_path
+
+        seen = set(self._auto_group_staged_paths)
+        for raw in paths:
+            ext = Path(raw).suffix.lower()
+            if ext not in _JPG_EXTS | _TIFF_EXTS:
+                continue
+            try:
+                resolved = normalize_path(raw)
+            except OSError:
+                resolved = str(raw)
+            if resolved in seen or not Path(resolved).is_file():
+                continue
+            seen.add(resolved)
+            self._auto_group_staged_paths.append(resolved)
+        self._refresh_auto_group_drop_visibility()
+
+    def show_auto_group_preview(self, result: dict) -> None:
+        self._auto_group_preview_result = result
+        lines: list[str] = []
+        total_groups = 0
+        for sp in result.get("specimens", []):
+            uid = sp.get("uid", "")
+            for g in sp.get("groups", []):
+                total_groups += 1
+                jpg_names = ", ".join(Path(p).name for p in g.get("jpgPaths", [])[:6])
+                if len(g.get("jpgPaths", [])) > 6:
+                    jpg_names += " …"
+                lines.append(
+                    f"• {uid} / 成果 #{g.get('seq')} / {g.get('tiffName', '')}\n"
+                    f"  ← {g.get('jpgCount', 0)} 张：{jpg_names or '（无原片）'}"
+                )
+        unnamed = result.get("unnamedTiffs") or []
+        if unnamed:
+            lines.append(f"⚠ {len(unnamed)} 个 TIF 无法识别编号（预览中未纳入整理）")
+        unassigned = result.get("unassignedJpgs") or []
+        if unassigned:
+            lines.append(f"⚠ {len(unassigned)} 张 JPG 未配到 TIF")
+        if not lines:
+            lines.append("（没有识别到可整理的分组）")
+        self._auto_group_preview_body.setText("\n\n".join(lines))
+        self._auto_group_preview_title.setText(
+            f"自动分组预览（尚未整理）— 共 {total_groups} 组"
+        )
+        self._auto_group_preview_host.show()
+        self._sync_auto_group_action_button()
+
+    def clear_auto_group_preview(self) -> None:
+        if self._auto_group_preview_result is None:
+            return
+        self._auto_group_preview_result = None
+        self._auto_group_preview_body.clear()
+        self._auto_group_preview_host.hide()
+        self._sync_auto_group_action_button()
+
+    def _sync_auto_group_action_button(self) -> None:
+        if self._auto_group_preview_result is not None:
+            self._auto_group_btn.setText("执行整理归档")
+        else:
+            self._auto_group_btn.setText("自动分组整理")
+
+    def clear_auto_group_staging(self) -> None:
+        if not self._auto_group_staged_paths:
+            return
+        self._auto_group_staged_paths.clear()
+        self.clear_auto_group_preview()
+        self._refresh_auto_group_drop_visibility()
+
+    def _refresh_auto_group_drop_visibility(self) -> None:
+        has_groups = bool(self._grouping and self._grouping.groups)
+        count = len(self._auto_group_staged_paths)
+        has_preview = self._auto_group_preview_result is not None
+        show = (not has_groups) or count > 0 or has_preview
+        self._auto_group_drop.setVisible(show)
+        self._auto_group_drop.set_staged_count(count, self._auto_group_staged_paths)
+        if has_preview:
+            self._auto_group_preview_host.show()
 
     def selected_group_indexes(self) -> list[int]:
         """Return checked group indexes. Empty means bulk actions should use all."""
@@ -1044,10 +1330,9 @@ class GroupingPanel(QWidget):
     def _rebuild(self) -> None:
         self._clear_content()
         if not self._grouping or not self._uid:
-            self._empty_lbl.show()
+            self._refresh_auto_group_drop_visibility()
             return
 
-        self._empty_lbl.hide()
         groups = self._grouping.groups
         display_numbers = {id(g): n for n, g in enumerate(groups, start=1)}
 
@@ -1121,6 +1406,8 @@ class GroupingPanel(QWidget):
             no_lbl = QLabel("此标本暂无分组 — 点「+ 新组」创建")
             no_lbl.setObjectName("Muted")
             self._content_lay.addWidget(no_lbl)
+
+        self._refresh_auto_group_drop_visibility()
 
     def _clear_content(self) -> None:
         while self._content_lay.count():

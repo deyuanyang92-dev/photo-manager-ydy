@@ -657,6 +657,193 @@ def parse_configured_result_stem(
     return build_configured_uid(comp_list, values), seq
 
 
+def _is_inline_descriptor_segment(seg: str) -> bool:
+    """Human-readable label embedded before the date (legacy folder names)."""
+    if not seg:
+        return False
+    if any("\u4e00" <= c <= "\u9fff" for c in seg):
+        return True
+    if len(seg) > 12 and not re.fullmatch(r"[A-Za-z0-9]+", seg):
+        return True
+    return False
+
+
+def _peel_inline_descriptors_before_date(
+    parts: list[str],
+) -> tuple[list[str], Optional[str], list[str]]:
+    """Split *parts* into UID core, trailing date, and inline Chinese/descriptive labels."""
+    buf = list(parts)
+    date_seg = _extract_date_seg_from_parts(buf)
+    if not date_seg:
+        return parts, None, []
+    inline: list[str] = []
+    while buf and _is_inline_descriptor_segment(buf[-1]):
+        inline.insert(0, buf.pop())
+    return buf, date_seg, inline
+
+
+def _parseable_stem_candidates(stem: str) -> list[str]:
+    """Stems to try when matching project naming rules (handles inline labels)."""
+    parts = stem.split("-")
+    candidates = [stem]
+    buf, date_seg, inline = _peel_inline_descriptors_before_date(list(parts))
+    if date_seg and inline:
+        candidates.insert(0, "-".join(buf + [date_seg]))
+    return candidates
+
+
+def _parse_configured_values(
+    stem: str,
+    components: list[str],
+) -> tuple[dict[str, str], int] | None:
+    """Return (field_values, sequence) parsed from a configured result basename."""
+    comp_list = normalize_naming_components(components)
+    parts = stem.split("-")
+    if not parts:
+        return None
+
+    values: dict[str, str] = {}
+    post_keys = _post_date_component_keys(comp_list)
+
+    for key in reversed(post_keys):
+        if not parts:
+            return None
+        values[key] = parts.pop()
+
+    if "date_seg" in comp_list:
+        if not parts:
+            return None
+        date_seg = _extract_date_seg_from_parts(parts)
+        if not date_seg:
+            return None
+        values["date_seg"] = date_seg
+
+    if not parts and "date_seg" not in values:
+        return None
+
+    try:
+        seq_idx = _configured_seq_index(comp_list)
+    except ValueError:
+        return None
+
+    if seq_idx >= len(parts):
+        return None
+    seq_part = parts[seq_idx]
+    if not seq_part.isdigit():
+        return None
+    seq = int(seq_part)
+
+    parts_no_seq = parts[:seq_idx] + parts[seq_idx + 1:]
+    pre_keys = [
+        key for key in comp_list if key != "date_seg" and key not in post_keys
+    ]
+    pi = 0
+    for key in pre_keys:
+        if pi >= len(parts_no_seq):
+            return None
+        values[key] = parts_no_seq[pi]
+        pi += 1
+    if pi != len(parts_no_seq):
+        return None
+
+    rebuilt = build_configured_result_id(comp_list, values, seq=seq)
+    if normalize_uid(rebuilt) != normalize_uid(stem):
+        return None
+    return values, seq
+
+
+def _date_seg_to_collection_photo(date_seg: str) -> tuple[str, str]:
+    """Best-effort split of a date segment into collection / photo dates."""
+    seg = str(date_seg or "").strip()
+    if not seg:
+        return "", ""
+    if re.fullmatch(r"\d{8}-\d{4}", seg):
+        col, tail = seg.split("-", 1)
+        return col, col[:4] + tail
+    if re.fullmatch(r"\d{8}-\d{8}", seg):
+        col, photo = seg.split("-", 1)
+        return col, photo
+    if re.fullmatch(r"\d{8}", seg):
+        return seg, seg
+    return seg, seg
+
+
+def _inline_labels_to_metadata(labels: list[str]) -> dict[str, str]:
+    """Deprecated heuristic map — prefer ``legacy_filename_photo_notes``."""
+    return {}
+
+
+def legacy_filename_photo_notes(
+    inline_labels: list[str] | tuple[str, ...],
+    *,
+    source_name: str = "",
+) -> str:
+    """Archive unmapped filename segments into 拍照备注 for legacy data migration."""
+    parts: list[str] = []
+    labels = [str(x).strip() for x in inline_labels if str(x).strip()]
+    if labels:
+        parts.append("【文件名附加】" + " · ".join(labels))
+    if source_name and source_name.strip():
+        parts.append(f"【原文件名】{source_name.strip()}")
+    return "\n".join(parts)
+
+
+@dataclass(frozen=True)
+class ParsedTiffRecognition:
+    uid: str
+    sequence: int
+    core_stem: str
+    field_values: dict[str, str]
+    inline_labels: tuple[str, ...] = ()
+    collection_date: str = ""
+    photo_date: str = ""
+
+
+def recognize_tiff_filename(
+    stem: str,
+    components: list[str],
+) -> Optional[ParsedTiffRecognition]:
+    """Parse uid/sequence + naming fields from a legacy or standard TIFF basename."""
+    detail, matched = parse_tiff_result_detail_for_components(stem, components)
+    if detail is None:
+        return None
+    parsed_values = _parse_configured_values(detail.core_stem, matched)
+    if parsed_values is None:
+        values = _values_from_parsed_uid(parse_uid(detail.core_stem) or {})
+        seq = detail.sequence
+    else:
+        values, seq = parsed_values
+    _, _, inline = _peel_inline_descriptors_before_date(stem.split("-"))
+    date_seg = values.get("date_seg") or ""
+    col, photo = _date_seg_to_collection_photo(date_seg)
+    return ParsedTiffRecognition(
+        uid=detail.uid,
+        sequence=seq,
+        core_stem=detail.core_stem,
+        field_values=values,
+        inline_labels=tuple(inline),
+        collection_date=col,
+        photo_date=photo,
+    )
+
+
+def tiff_stem_is_recognizable(stem: str, components: list[str]) -> bool:
+    """True when the basename matches project naming rules (extra suffixes allowed)."""
+    if validate_uid(stem):
+        return True
+    return parse_tiff_result_detail(stem, components) is not None
+
+
+def tiff_stem_fully_conforms(stem: str, components: list[str]) -> bool:
+    """True when the basename exactly matches naming rules — no legacy extras."""
+    if validate_uid(stem):
+        return True
+    detail, _matched = parse_tiff_result_detail_for_components(stem, components)
+    if detail is None:
+        return False
+    return normalize_uid(detail.core_stem) == normalize_uid(stem)
+
+
 @dataclass(frozen=True)
 class ParsedTiffStem:
     """Core specimen identity parsed from a TIFF basename.
@@ -671,43 +858,85 @@ class ParsedTiffStem:
     has_extra_suffix: bool = False
 
 
-def parse_tiff_result_detail(
+def _naming_component_variants(comp_list: list[str]) -> list[list[str]]:
+    """Legacy filenames may omit station and/or storage — try sensible variants."""
+    variants: list[list[str]] = []
+    seen: set[tuple[str, ...]] = set()
+
+    def add(comp: list[str]) -> None:
+        key = tuple(comp)
+        if comp and key not in seen:
+            seen.add(key)
+            variants.append(comp)
+
+    no_station = [key for key in comp_list if key != "station"]
+    no_storage = [key for key in comp_list if key != "storage"]
+    no_both = [key for key in comp_list if key not in ("station", "storage")]
+
+    add(no_station)
+    add(comp_list)
+    add(no_storage)
+    add(no_both)
+    return variants
+
+
+def _parse_tiff_result_detail_with_components(
     stem: str,
-    components: list[str],
+    comp_list: list[str],
 ) -> Optional[ParsedTiffStem]:
-    """Parse specimen uid + sequence; ignore any trailing extra segments."""
-    comp_list = normalize_naming_components(components)
-    parts = stem.split("-")
-    if len(parts) < 3:
-        return None
+    for candidate in _parseable_stem_candidates(stem):
+        parts = candidate.split("-")
+        for end in range(len(parts), 2, -1):
+            prefix = "-".join(parts[:end])
+            has_extra_suffix = end < len(parts) or candidate != stem
 
-    for end in range(len(parts), 2, -1):
-        prefix = "-".join(parts[:end])
-        has_extra_suffix = end < len(parts)
+            parsed = parse_uid(prefix)
+            if parsed and parsed.get("resultSequence") is not None:
+                values = _values_from_parsed_uid(parsed)
+                seq = int(parsed["resultSequence"])
+                rebuilt = build_configured_result_id(comp_list, values, seq=seq)
+                if normalize_uid(rebuilt) == normalize_uid(prefix):
+                    return ParsedTiffStem(
+                        uid=build_configured_uid(comp_list, values),
+                        sequence=seq,
+                        core_stem=prefix,
+                        has_extra_suffix=has_extra_suffix,
+                    )
 
-        parsed = parse_uid(prefix)
-        if parsed and parsed.get("resultSequence") is not None:
-            values = _values_from_parsed_uid(parsed)
-            seq = int(parsed["resultSequence"])
-            rebuilt = build_configured_result_id(comp_list, values, seq=seq)
-            if normalize_uid(rebuilt) == normalize_uid(prefix):
+            core = parse_configured_result_stem(prefix, comp_list)
+            if core:
+                uid, seq = core
                 return ParsedTiffStem(
-                    uid=build_configured_uid(comp_list, values),
+                    uid=uid,
                     sequence=seq,
                     core_stem=prefix,
                     has_extra_suffix=has_extra_suffix,
                 )
-
-        core = parse_configured_result_stem(prefix, comp_list)
-        if core:
-            uid, seq = core
-            return ParsedTiffStem(
-                uid=uid,
-                sequence=seq,
-                core_stem=prefix,
-                has_extra_suffix=has_extra_suffix,
-            )
     return None
+
+
+def parse_tiff_result_detail(
+    stem: str,
+    components: list[str],
+) -> Optional[ParsedTiffStem]:
+    """Parse specimen uid + sequence; ignore trailing/extra descriptive segments."""
+    detail, _matched = parse_tiff_result_detail_for_components(stem, components)
+    return detail
+
+
+def parse_tiff_result_detail_for_components(
+    stem: str,
+    components: list[str],
+) -> tuple[Optional[ParsedTiffStem], list[str]]:
+    """Return parsed detail and the component variant that matched."""
+    comp_list = normalize_naming_components(components)
+    if len(stem.split("-")) < 3:
+        return None, comp_list
+    for variant in _naming_component_variants(comp_list):
+        detail = _parse_tiff_result_detail_with_components(stem, variant)
+        if detail is not None:
+            return detail, variant
+    return None, comp_list
 
 
 def parse_tiff_result_stem(

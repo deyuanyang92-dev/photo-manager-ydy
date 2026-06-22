@@ -34,41 +34,28 @@ class FileResult:
     error: str
 
 
-def scan_folder_auto_groups(
-    folder: str,
+_MEDIA_EXTS = {".jpg", ".jpeg", ".tif", ".tiff"}
+
+
+def _media_event(path: Path) -> Optional[tuple[int, str, Path]]:
+    if not path.is_file():
+        return None
+    if path.suffix.lower() not in _MEDIA_EXTS:
+        return None
+    try:
+        resolved = path.expanduser().resolve()
+        mtime_ns = resolved.stat().st_mtime_ns
+    except OSError:
+        return None
+    return mtime_ns, resolved.name.casefold(), resolved
+
+
+def _build_auto_group_scan_result(
+    events: list[tuple[int, str, Path]],
     *,
-    recursive: bool = False,
-    fallback_uid: Optional[str] = None,
+    fallback_uid: Optional[str],
+    scan_folder: str,
 ) -> dict:
-    """Split a legacy mixed JPG/TIFF folder into batches using TIFF boundaries.
-
-    Files are ordered by filesystem modification time (nanosecond precision),
-    then by name for deterministic handling of equal timestamps.  Every TIFF
-    closes the JPG batch immediately before it.  A TIFF with a standard result
-    name supplies the specimen UID and result sequence; unnamed TIFFs and JPGs
-    without a following named TIFF are returned for manual review.
-
-    This is intentionally read-only.  The returned structure matches
-    ``scan_project_retroactive`` so the existing preview/archive UI can be
-    reused without adding a second organizing pipeline.
-    """
-    root = Path(folder).expanduser().resolve()
-    if not root.is_dir():
-        raise ValueError(f"扫描目录不存在: {folder}")
-
-    iterator = root.rglob("*") if recursive else root.iterdir()
-    events: list[tuple[int, str, Path]] = []
-    for path in iterator:
-        if not path.is_file():
-            continue
-        suffix = path.suffix.lower()
-        if suffix not in {".jpg", ".jpeg", ".tif", ".tiff"}:
-            continue
-        try:
-            mtime_ns = path.stat().st_mtime_ns
-        except OSError:
-            continue
-        events.append((mtime_ns, path.name.casefold(), path))
     events.sort(key=lambda item: (item[0], item[1], str(item[2])))
 
     pending_jpgs: list[str] = []
@@ -117,9 +104,67 @@ def scan_folder_auto_groups(
         "specimens": specimens,
         "unassignedJpgs": pending_jpgs,
         "unnamedTiffs": unnamed_tiffs,
-        "scanFolder": str(root),
+        "scanFolder": scan_folder,
         "autoGroup": True,
     }
+
+
+def scan_paths_auto_groups(
+    paths: list[str],
+    *,
+    fallback_uid: Optional[str] = None,
+) -> dict:
+    """Auto-group from an explicit file list (e.g. drag-drop staging area)."""
+    events: list[tuple[int, str, Path]] = []
+    for raw in paths:
+        event = _media_event(Path(raw))
+        if event is not None:
+            events.append(event)
+    if not events:
+        raise ValueError("没有可扫描的 JPG / TIF 文件")
+
+    parents = {str(path.parent) for _, _, path in events}
+    scan_folder = next(iter(parents)) if len(parents) == 1 else ""
+    return _build_auto_group_scan_result(
+        events,
+        fallback_uid=fallback_uid,
+        scan_folder=scan_folder,
+    )
+
+
+def scan_folder_auto_groups(
+    folder: str,
+    *,
+    recursive: bool = False,
+    fallback_uid: Optional[str] = None,
+) -> dict:
+    """Split a legacy mixed JPG/TIFF folder into batches using TIFF boundaries.
+
+    Files are ordered by filesystem modification time (nanosecond precision),
+    then by name for deterministic handling of equal timestamps.  Every TIFF
+    closes the JPG batch immediately before it.  A TIFF with a standard result
+    name supplies the specimen UID and result sequence; unnamed TIFFs and JPGs
+    without a following named TIFF are returned for manual review.
+
+    This is intentionally read-only.  The returned structure matches
+    ``scan_project_retroactive`` so the existing preview/archive UI can be
+    reused without adding a second organizing pipeline.
+    """
+    root = Path(folder).expanduser().resolve()
+    if not root.is_dir():
+        raise ValueError(f"扫描目录不存在: {folder}")
+
+    iterator = root.rglob("*") if recursive else root.iterdir()
+    events: list[tuple[int, str, Path]] = []
+    for path in iterator:
+        event = _media_event(path)
+        if event is not None:
+            events.append(event)
+    return _build_auto_group_scan_result(
+        events,
+        fallback_uid=fallback_uid,
+        scan_folder=str(root),
+    )
 
 
 def register_auto_group(

@@ -3248,6 +3248,61 @@ class TestOrganizeRenamesNonconformingTiff:
         assert os.path.exists(tiff)
 
 
+class TestOrganiseUsesPanelMemory:
+    """整理应读分组面板内存，不能仅查 DB（否则界面「组1」→ 内部 0 会报找不到）。"""
+
+    UID = "FJ-XM-B2-DLC001-T95E-20260601"
+
+    def test_organise_finds_unsaved_panel_group(self, qtbot, tmp_path, monkeypatch):
+        from unittest.mock import patch
+        from app.services.grouping_service import Group, SpecimenGrouping
+        from app.views.workbench_view import WorkbenchView
+
+        project_dir = str(tmp_path / "proj")
+        Path(project_dir, "_data").mkdir(parents=True)
+        Path(project_dir, "incoming-jpg").mkdir()
+        Path(project_dir, "results").mkdir()
+        db = _make_db(str(tmp_path / "proj" / "_data" / "project.db"))
+        ctx = _make_ctx(project_dir=project_dir, db=db)
+
+        j1 = tmp_path / "a.jpg"
+        j2 = tmp_path / "b.jpg"
+        j1.write_bytes(b"j")
+        j2.write_bytes(b"j")
+        tiff = Path(project_dir) / "incoming-jpg" / "FJ-XM-B2-DLC001-1-T95E-20260601.tif"
+        tiff.write_bytes(b"t")
+
+        grouping = SpecimenGrouping(
+            uid=self.UID,
+            groups=[
+                Group(
+                    group_index=0,
+                    jpg_paths=[str(j1), str(j2)],
+                    composed_tiff_path=str(tiff),
+                    status="composed",
+                )
+            ],
+        )
+
+        w = WorkbenchView(ctx)
+        qtbot.addWidget(w)
+        w.on_activate()
+        w._grouping.load_grouping(self.UID, grouping)
+
+        monkeypatch.setattr(w, "_maybe_rename_tiff_before_organize", lambda *a, **k: None)
+        with patch(
+            "app.services.organize_service._check_organize_gate",
+            return_value=None,
+        ), patch(
+            "app.workers.supp_compression_worker.SuppCompressionWorker.start",
+            return_value=None,
+        ):
+            ok = w._on_organise_requested(self.UID, 0)
+
+        assert ok is True
+        db.close()
+
+
 # ── 场景10：撤销合成 = 删TIFF + JPG解关联放回自由池（带确认） ────────────────────
 
 
@@ -3760,7 +3815,7 @@ class TestAdhocGrouping:
         assert w._grouping._uid == ADHOC_GROUPING_UID
         assert not w._grouping._add_btn.isHidden()
         assert not w._grouping._toolbar_widget.isHidden()
-        assert w._grouping._empty_lbl.isHidden()
+        assert w._grouping._auto_group_drop.isVisible()
 
     def test_resolve_output_name_adhoc_defaults_to_group_seq(self, tmp_path):
         from app.services.grouping_service import ADHOC_GROUPING_UID, Group
@@ -4030,3 +4085,93 @@ class TestRestoreLastProject:
         ctx.settings.last_project_dir = None
         win = MagicMock()
         assert main._restore_last_project(ctx, win) is False
+
+
+class TestAutoGroupOrganize:
+    def test_folder_picker_parents_to_grouping_dialog(self, qtbot, tmp_path):
+        from unittest.mock import patch
+        from PyQt6.QtWidgets import QDialog
+        from app.views.workbench_view import WorkbenchView
+
+        project_dir = str(tmp_path)
+        db = _make_db(str(tmp_path / "project.db"))
+        ctx = _make_ctx(project_dir, db)
+        w = WorkbenchView(ctx)
+        qtbot.addWidget(w)
+        w.on_activate()
+        w._grouping_dialog.show()
+
+        seen = []
+
+        def fake_get_dir(parent, caption, start=""):
+            seen.append(parent)
+            return ""
+
+        with patch("app.views.workbench_view._AutoGroupSourceDialog") as MockChooser, \
+             patch("app.views.workbench_view.ui.get_existing_directory", fake_get_dir):
+            MockChooser.MODE_FOLDER = "folder"
+            MockChooser.MODE_PROJECT = "project"
+            inst = MockChooser.return_value
+            inst.exec.return_value = QDialog.DialogCode.Accepted
+            inst.mode.return_value = "folder"
+            w._on_auto_group_organize()
+
+        assert seen == [w._grouping_dialog]
+        db.close()
+
+    def test_works_without_open_project(self, qtbot):
+        from unittest.mock import patch
+        from PyQt6.QtWidgets import QDialog
+        from app.views.workbench_view import WorkbenchView
+
+        ctx = _make_ctx(None, None)
+        w = WorkbenchView(ctx)
+        qtbot.addWidget(w)
+        w.on_activate()
+        w._grouping_dialog.show()
+
+        seen = []
+
+        def fake_get_dir(parent, caption, start=""):
+            seen.append((parent, start))
+            return ""
+
+        with patch("app.views.workbench_view._AutoGroupSourceDialog") as MockChooser, \
+             patch("app.views.workbench_view.ui.get_existing_directory", fake_get_dir), \
+             patch("app.views.workbench_view.ui.warn") as mock_warn:
+            MockChooser.MODE_FOLDER = "folder"
+            MockChooser.MODE_PROJECT = "project"
+            inst = MockChooser.return_value
+            inst.exec.return_value = QDialog.DialogCode.Accepted
+            inst.mode.return_value = "folder"
+            w._on_auto_group_organize()
+
+        assert seen
+        mock_warn.assert_not_called()
+
+    def test_uses_staged_files_without_folder_picker(self, qtbot, tmp_path):
+        from unittest.mock import patch
+        from app.views.workbench_view import WorkbenchView
+
+        jpg = tmp_path / "a.jpg"
+        tif = tmp_path / "FJ-XM-B2-DLC001-1-T95E-20260601.tif"
+        jpg.write_bytes(b"j")
+        tif.write_bytes(b"t")
+        ctx = _make_ctx(None, None)
+        w = WorkbenchView(ctx)
+        qtbot.addWidget(w)
+        w.on_activate()
+        w._grouping.add_auto_group_staged([str(jpg), str(tif)])
+
+        with patch.object(w, "_pick_auto_group_source_folder") as mock_pick, \
+             patch("app.widgets.retroactive_modal.RetroactiveModal.exec") as mock_exec:
+            w._on_auto_group_organize()
+
+        mock_pick.assert_not_called()
+        mock_exec.assert_not_called()
+        assert w._grouping.has_auto_group_preview()
+        assert w._grouping._auto_group_btn.text() == "执行整理归档"
+
+        with patch("app.widgets.retroactive_modal.RetroactiveModal.exec",
+                   return_value=0):
+            w._on_auto_group_organize()

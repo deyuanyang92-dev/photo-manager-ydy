@@ -98,17 +98,19 @@ def get_existing_directory(
     """Open a directory-picker dialog.
 
     Returns the selected path (str) or an empty string if cancelled.
-    Always uses the Qt-native (non-OS-native) picker so Qt controls
-    which screen the dialog appears on.
+    Uses a non-native Qt picker, centered on *parent*'s screen so it is not
+    hidden behind non-modal popups (e.g. the grouping-tool dialog).
     """
     top = top_window(parent)
-    path = QFileDialog.getExistingDirectory(
-        top,
-        caption,
-        start,
-        _NO_NATIVE,
-    )
-    return path or ""
+    dlg = QFileDialog(top, caption, start or "")
+    dlg.setFileMode(QFileDialog.FileMode.Directory)
+    dlg.setOption(_NO_NATIVE, True)
+    dlg.setOption(QFileDialog.Option.ShowDirsOnly, True)
+    center_on(dlg, top)
+    if dlg.exec() != QDialog.DialogCode.Accepted:
+        return ""
+    files = dlg.selectedFiles()
+    return files[0] if files else ""
 
 
 def get_open_file_name(
