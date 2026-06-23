@@ -34,15 +34,18 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING, Optional
 
-from PyQt6.QtCore import QSize, Qt
+from PyQt6.QtCore import QObject, QSize, Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QAction, QCloseEvent, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
+    QApplication,
     QButtonGroup,
     QFrame,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QMenu,
+    QMessageBox,
+    QProgressDialog,
     QPushButton,
     QScrollArea,
     QStackedWidget,
@@ -54,6 +57,7 @@ from PyQt6.QtWidgets import (
 
 from app.config import icons
 from app.config.i18n import tr
+from app.config.version import APP_VERSION
 from app.utils import ui
 from app.views.base_view import BaseView
 
@@ -61,6 +65,39 @@ if TYPE_CHECKING:
     from app.app_context import AppContext
 
 _K_SCREENSHOT_TOOL_ENABLED = "ui/screenshot_tool_enabled"
+
+
+class _UpdateWorker(QObject):
+    progress = pyqtSignal(int, str)
+    ready = pyqtSignal(object)
+    failed = pyqtSignal(str)
+    finished = pyqtSignal()
+
+    def run(self) -> None:
+        try:
+            from app.services import update_service
+
+            self.progress.emit(4, "正在检查 GitHub 最新版本...")
+            release = update_service.fetch_latest_release()
+            self.progress.emit(10, f"发现 {release.tag_name}，正在下载...")
+
+            def _on_download(done: int, total: int) -> None:
+                if total > 0:
+                    pct = 10 + min(80, int(done * 80 / total))
+                else:
+                    pct = 18
+                self.progress.emit(pct, "正在下载更新包...")
+
+            prepared = update_service.prepare_update(
+                release,
+                progress_cb=_on_download,
+            )
+            self.progress.emit(100, "更新包已准备，正在重启升级...")
+            self.ready.emit(prepared)
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(str(exc))
+        finally:
+            self.finished.emit()
 
 
 class MainWindow(QMainWindow):
@@ -206,6 +243,7 @@ class MainWindow(QMainWindow):
             group_menu.setIcon(icons.icon(group["icon"], color=icons.TONE_MUTED))
             self._nav_group_menus[group_key] = group_menu
         self._build_screenshot_menu()
+        self._build_update_action()
         self._nav_menu.addSeparator()
         self._nav_pin_menu = self._nav_menu.addMenu(tr("固定到顶栏"))
         self._nav_pin_menu.setObjectName("NavSubMenu")
@@ -412,6 +450,18 @@ class MainWindow(QMainWindow):
             self._shot_actions[key] = action
         self._update_screenshot_tooltip()
 
+    def _build_update_action(self) -> None:
+        system_menu = self._nav_group_menus["system"]
+        self._update_action = QAction(
+            icons.icon("mdi6.update", color=icons.TONE_MUTED,
+                       color_active=icons.TONE_ACCENT_HOVER),
+            tr("软件更新"),
+            self,
+        )
+        self._update_action.setToolTip(tr("下载 GitHub 最新版本并自动重启升级"))
+        self._update_action.triggered.connect(self._on_upgrade_requested)
+        system_menu.addAction(self._update_action)
+
     def _keep_screenshot_last_in_tools(self) -> None:
         tools_menu = self._nav_group_menus.get("tools")
         shot_menu = getattr(self, "_shot_menu", None)
@@ -523,6 +573,9 @@ class MainWindow(QMainWindow):
 
         if getattr(self, "_shot_menu", None) is not None:
             self._shot_menu.setTitle(tr("截图"))
+        if getattr(self, "_update_action", None) is not None:
+            self._update_action.setText(tr("软件更新"))
+            self._update_action.setToolTip(tr("下载 GitHub 最新版本并自动重启升级"))
         for key, text, tip in (
             ("fullscreen", "全屏截图", "截取整个屏幕"),
             ("window", "当前窗口", "截取当前窗口"),
@@ -556,6 +609,76 @@ class MainWindow(QMainWindow):
         dlg.show()
         dlg.raise_()
         dlg.activateWindow()
+
+    def _on_upgrade_requested(self) -> None:
+        from app.services import update_service
+
+        if not update_service.can_self_update():
+            QMessageBox.information(
+                self,
+                tr("软件更新"),
+                tr("一键升级只支持 Windows 打包版。\n\n"
+                   "当前像是源码/开发环境运行，不会自动替换程序目录。"),
+            )
+            return
+
+        reply = QMessageBox.question(
+            self,
+            tr("软件更新"),
+            tr("将下载 GitHub 最新 Windows 包，准备完成后自动关闭当前程序、替换文件并重启。\n\n"
+               "当前版本：{}\n是否继续？").format(APP_VERSION),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        progress = QProgressDialog(tr("正在准备更新..."), "", 0, 100, self)
+        progress.setWindowTitle(tr("软件更新"))
+        progress.setCancelButton(None)
+        progress.setWindowModality(Qt.WindowModality.ApplicationModal)
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+        progress.show()
+
+        thread = QThread(self)
+        worker = _UpdateWorker()
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progress.connect(lambda value, text: self._set_update_progress(progress, value, text))
+        worker.ready.connect(lambda prepared: self._apply_prepared_update(prepared, progress))
+        worker.failed.connect(lambda message: self._show_update_failed(progress, message))
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        self._update_thread = thread
+        self._update_worker = worker
+        thread.start()
+
+    def _set_update_progress(self, dialog: QProgressDialog, value: int, text: str) -> None:
+        dialog.setLabelText(tr(text))
+        dialog.setValue(value)
+
+    def _show_update_failed(self, dialog: QProgressDialog, message: str) -> None:
+        dialog.close()
+        QMessageBox.warning(
+            self,
+            tr("软件更新失败"),
+            tr("未能完成自动更新：\n{}").format(message),
+        )
+
+    def _apply_prepared_update(self, prepared, dialog: QProgressDialog) -> None:
+        from app.services import update_service
+
+        try:
+            update_service.launch_update_script(prepared.script_path)
+        except Exception as exc:  # noqa: BLE001
+            self._show_update_failed(dialog, str(exc))
+            return
+        dialog.setValue(100)
+        dialog.setLabelText(tr("更新脚本已启动，正在关闭当前版本..."))
+        self.statusBar().showMessage(tr("正在升级到 {}...").format(prepared.release.tag_name), 3000)
+        QApplication.quit()
 
     def navigate_to(self, view_id: str) -> None:
         """Programmatically switch to the view with the given view_id."""

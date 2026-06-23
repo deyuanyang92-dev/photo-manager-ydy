@@ -149,6 +149,8 @@ def test_function_menu_groups_all_registered_views():
         "标签打印",
         "采集地图",
     ]
+    system_menu = win._nav_group_menus["system"]
+    assert "软件更新" in [a.text() for a in system_menu.actions()]
 
 
 def test_workspace_actions_are_integrated_into_breadcrumb():

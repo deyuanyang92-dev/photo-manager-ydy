@@ -52,14 +52,11 @@ from PyQt6.QtWidgets import (
 )
 
 from app.config.i18n import tr
+from app.config.version import APP_VERSION
 from app.views.base_view import BaseView
 
 if TYPE_CHECKING:
     from app.app_context import AppContext
-
-# ── App version constant ──────────────────────────────────────────────────────
-
-APP_VERSION = "v0.02"
 
 # ── QSettings key constants ───────────────────────────────────────────────────
 
