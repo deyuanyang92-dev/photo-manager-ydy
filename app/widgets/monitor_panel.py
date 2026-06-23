@@ -931,6 +931,7 @@ class MonitorPanel(QWidget):
         card.deactivate_requested.connect(self.unassign_requested)
         card.selection_toggled.connect(self._on_card_selection_toggled)
         card.delete_requested.connect(self._on_delete_single_requested)
+        self._register_drop_target(card)
         return card
 
     def _sync_cards(self, all_files: list) -> None:
