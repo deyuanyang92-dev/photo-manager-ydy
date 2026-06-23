@@ -60,6 +60,8 @@ from app.views.base_view import BaseView
 if TYPE_CHECKING:
     from app.app_context import AppContext
 
+_K_SCREENSHOT_TOOL_ENABLED = "ui/screenshot_tool_enabled"
+
 
 class MainWindow(QMainWindow):
     """Application shell window with modern top-bar segmented navigation.
@@ -731,6 +733,40 @@ class MainWindow(QMainWindow):
         seq = self.ctx.settings._qs.value("shortcuts/screenshot_region", "", type=str) or ""
         return seq or "Alt+A"
 
+    def screenshot_tool_enabled(self) -> bool:
+        """Whether the screenshot menu and hotkey are enabled. Default: off."""
+        raw = self.ctx.settings._qs.value(_K_SCREENSHOT_TOOL_ENABLED, "false")
+        return str(raw).lower() == "true"
+
+    def set_screenshot_tool_enabled(self, enabled: bool) -> None:
+        """Persist and apply screenshot tool visibility / hotkey binding."""
+        self.ctx.settings._qs.setValue(
+            _K_SCREENSHOT_TOOL_ENABLED,
+            "true" if enabled else "false",
+        )
+        self.ctx.settings.sync()
+        self._apply_screenshot_tool_enabled()
+
+    def _apply_screenshot_tool_enabled(self) -> None:
+        enabled = self.screenshot_tool_enabled()
+        shot_menu = getattr(self, "_shot_menu", None)
+        if shot_menu is not None:
+            shot_menu.menuAction().setVisible(enabled)
+            shot_menu.setEnabled(enabled)
+        for action in self._shot_actions.values():
+            action.setEnabled(enabled)
+
+        shortcut = getattr(self, "_screenshot_shortcut", None)
+        if shortcut is not None:
+            shortcut.setEnabled(enabled)
+
+        hotkey = getattr(self, "_global_hotkey", None)
+        if hotkey is not None:
+            if enabled:
+                hotkey.set_hotkey(self.screenshot_shortcut_seq())
+            else:
+                hotkey.stop()
+
     def _update_screenshot_tooltip(self, seq: str | None = None) -> None:
         """Keep the visible screenshot entry distinct from Settings."""
         seq = seq or self.screenshot_shortcut_seq()
@@ -777,7 +813,9 @@ class MainWindow(QMainWindow):
         self._global_hotkey.triggered.connect(
             self._shot_ctrl.capture_region, Qt.ConnectionType.QueuedConnection
         )
-        self._global_hotkey.set_hotkey(seq)
+        if self.screenshot_tool_enabled():
+            self._global_hotkey.set_hotkey(seq)
+        self._apply_screenshot_tool_enabled()
 
     def rebind_screenshot_shortcut(self, seq: str) -> None:
         """Re-apply the screenshot key (in-app + global) after a settings change."""
@@ -785,7 +823,10 @@ class MainWindow(QMainWindow):
         if getattr(self, "_screenshot_shortcut", None) is not None:
             self._screenshot_shortcut.setKey(QKeySequence(seq))
         if getattr(self, "_global_hotkey", None) is not None:
-            self._global_hotkey.set_hotkey(seq)
+            if self.screenshot_tool_enabled():
+                self._global_hotkey.set_hotkey(seq)
+            else:
+                self._global_hotkey.stop()
         self._update_screenshot_tooltip(seq)
 
     # ── Persistence ───────────────────────────────────────────────────────

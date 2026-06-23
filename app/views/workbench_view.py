@@ -628,6 +628,8 @@ class WorkbenchView(BaseView):
         self._results = ResultsColumn()
         self._results.restore_requested.connect(self._on_restore_archive)
         self._results.specimen_requested.connect(self._on_specimen_selected)
+        self._results.show_all_requested.connect(self._on_show_all_results)
+        self._results.current_requested.connect(self._on_show_current_results)
         centre.addWidget(self._results)
 
         centre.setSizes([440, 360])
@@ -1042,6 +1044,20 @@ class WorkbenchView(BaseView):
         self._status_message(
             f"已展示全部成果：{len(groups)} 个编号，{result_count} 项。"
         )
+
+    def _on_show_current_results(self) -> None:
+        """Return the results panel to the currently selected specimen."""
+        uid = self._current_uid or self._sidebar.current_uid()
+        if not uid:
+            self._results.clear()
+            self._status_message("请先选择一个编号。")
+            return
+        try:
+            from app.services.grouping_service import load_grouping
+            grouping = load_grouping(self.ctx.get_db(), uid)
+        except Exception:
+            grouping = None
+        self._refresh_results_column(uid, grouping)
 
     def _on_edit_specimen_requested(self, uid: str) -> None:
         """Compatibility entry used by the sidebar edit action."""

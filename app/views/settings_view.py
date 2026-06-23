@@ -59,7 +59,7 @@ if TYPE_CHECKING:
 
 # ── App version constant ──────────────────────────────────────────────────────
 
-APP_VERSION = "v0.01"
+APP_VERSION = "v0.02"
 
 # ── QSettings key constants ───────────────────────────────────────────────────
 
@@ -105,6 +105,7 @@ _K_UI_ICON_GPS = "ui/icon_gps"             # default "📡"
 _K_UI_ICON_MAP = "ui/icon_map"             # default "📍"
 _K_UI_ICON_FOLDER = "ui/icon_folder"       # default "📁"
 _K_UI_ICON_SEARCH = "ui/icon_search"       # default "🔍"
+_K_SCREENSHOT_TOOL_ENABLED = "ui/screenshot_tool_enabled"  # default false
 _K_DEBUG_USE_REAL_COMPRESSION = "debug/use_real_compression"  # default False
 
 _THEME_CHOICES = ("classic_light", "lab_light", "graphite_focus")
@@ -1117,6 +1118,31 @@ class SettingsView(BaseView):
         tab.body.addWidget(icon_box)
         tab.body.addSpacing(12)
 
+        # ── 截图工具 ────────────────────────────────────────────────────────
+        screenshot_box = QGroupBox(tr("截图工具"))
+        screenshot_form = QFormLayout(screenshot_box)
+        screenshot_form.setHorizontalSpacing(16)
+        screenshot_form.setVerticalSpacing(8)
+
+        self._screenshot_tool_chk = QCheckBox(tr("启用截图工具"))
+        self._screenshot_tool_chk.setToolTip(
+            tr("开启后在 工具箱 > 工具 > 截图 显示入口，并启用区域截图快捷键。")
+        )
+        self._screenshot_tool_chk.stateChanged.connect(
+            self._on_screenshot_tool_enabled_changed
+        )
+        screenshot_form.addRow(tr("截图入口"), self._screenshot_tool_chk)
+
+        screenshot_note = QLabel(
+            tr("默认关闭。需要截图时，在这里开启；关闭后菜单入口隐藏，Alt+A 不再触发截图。")
+        )
+        screenshot_note.setObjectName("MutedSmall")
+        screenshot_note.setWordWrap(True)
+        screenshot_form.addRow("", screenshot_note)
+
+        tab.body.addWidget(screenshot_box)
+        tab.body.addSpacing(12)
+
         # ── 键盘快捷键 (mirrors ensureShortcutsSettings / renderShortcutScope) ──
         shortcut_box = QGroupBox(tr("键盘快捷键"))
         shortcut_form = QFormLayout(shortcut_box)
@@ -1367,6 +1393,12 @@ class SettingsView(BaseView):
         self._icon_folder_edit.setText(qs.value(_K_UI_ICON_FOLDER, ""))
         self._icon_search_edit.setText(qs.value(_K_UI_ICON_SEARCH, ""))
 
+        raw_screenshot_tool = qs.value(_K_SCREENSHOT_TOOL_ENABLED, "false")
+        screenshot_tool_enabled = str(raw_screenshot_tool).lower() == "true"
+        self._screenshot_tool_chk.blockSignals(True)
+        self._screenshot_tool_chk.setChecked(screenshot_tool_enabled)
+        self._screenshot_tool_chk.blockSignals(False)
+
         raw_real = qs.value(_K_DEBUG_USE_REAL_COMPRESSION, "false")
         self._use_real_compression_chk.setChecked(str(raw_real).lower() == "true")
 
@@ -1382,6 +1414,7 @@ class SettingsView(BaseView):
         sc_shot = qs.value(_K_SHORTCUT_SCREENSHOT, "") or "Alt+A"
         self._sc_screenshot.blockSignals(True)
         self._sc_screenshot.setKeySequence(QKeySequence(str(sc_shot)))
+        self._sc_screenshot.setEnabled(screenshot_tool_enabled)
         self._sc_screenshot.blockSignals(False)
 
         # Preset list widget
@@ -1724,6 +1757,15 @@ class SettingsView(BaseView):
                 w.rebind_screenshot_shortcut(seq)
                 break
 
+    def _on_screenshot_tool_enabled_changed(self) -> None:
+        enabled = self._screenshot_tool_chk.isChecked()
+        self._sc_screenshot.setEnabled(enabled)
+        self._save_ui()
+        w = self.window()
+        handler = getattr(w, "set_screenshot_tool_enabled", None)
+        if callable(handler):
+            handler(enabled)
+
     def _apply_typography_live(self) -> None:
         """Push current 字体 / 字体大小 into the live theme + default font."""
         from app.config.theme import set_typography, apply_theme, apply_default_font
@@ -1744,6 +1786,10 @@ class SettingsView(BaseView):
         qs.setValue(_K_UI_ICON_MAP, self._icon_map_edit.text())
         qs.setValue(_K_UI_ICON_FOLDER, self._icon_folder_edit.text())
         qs.setValue(_K_UI_ICON_SEARCH, self._icon_search_edit.text())
+        qs.setValue(
+            _K_SCREENSHOT_TOOL_ENABLED,
+            "true" if self._screenshot_tool_chk.isChecked() else "false",
+        )
         qs.setValue(
             _K_DEBUG_USE_REAL_COMPRESSION,
             "true" if self._use_real_compression_chk.isChecked() else "false",

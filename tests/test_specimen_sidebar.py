@@ -355,13 +355,13 @@ def test_rna_filter_button_shows_count_and_filters_r_prefix(ctx, db):
     sb.refresh()
 
     assert sb._filter_all_btn.text() == "全部 2"
-    assert sb._filter_rna_btn.text() == "RNA 1"
+    assert sb._filter_rna_btn.text() == "RNA编号 1"
 
     sb._filter_rna_btn.click()
 
     assert sb._list.count() == 1
     assert sb._list.item(0).data(Qt.ItemDataRole.UserRole) == "RNA-1"
-    assert sb._filter_rna_btn.text() == "RNA 1"
+    assert sb._filter_rna_btn.text() == "RNA编号 1"
 
 
 def test_all_filter_button_requests_all_results(ctx, db, qtbot):
@@ -386,13 +386,14 @@ def test_attention_filter_shows_incomplete_specimens(ctx, db):
     sb = SpecimenSidebar(ctx)
     sb.refresh()
 
-    assert sb._filter_attention_btn.text() == "待补全 1"
+    assert sb._filter_attention_btn.text() == "资料待补 1"
+    assert "缺物种名、保存方式、采集日期或拍照日期" in sb._filter_attention_btn.toolTip()
 
     sb._filter_attention_btn.click()
 
     assert sb._list.count() == 1
     assert sb._list.item(0).data(Qt.ItemDataRole.UserRole) == "MISSING-1"
-    assert sb._filter_attention_btn.text() == "待补全 1"
+    assert sb._filter_attention_btn.text() == "资料待补 1"
 
 
 def test_rna_badge_and_missing_species_are_visible_on_row(ctx, db):

@@ -1053,7 +1053,7 @@ class TestSpecimenSidebar:
         assert w._list.count() == 1
         assert w._list.item(0).data(Qt.ItemDataRole.UserRole) == "FJ-XM-B2-DLC002-R95E-20260601"
         assert w._filter_all_btn.text() == "全部 1/2"
-        assert w._filter_rna_btn.text() == "RNA 1"
+        assert w._filter_rna_btn.text() == "RNA编号 1"
         db.close()
 
     def test_copy_current_uid_to_clipboard(self, tmp_path, qt_app):
@@ -1258,6 +1258,39 @@ class TestResultsColumn:
         tiffs = [{"path": "/fake/result.tif", "name": "result.tif"}]
         zips = [{"path": "/fake/result.zip", "name": "result.zip", "size": 12345}]
         w.load_uid("FJ-XM-B2-DLC001-T95E-20260601", tiffs, zips)
+
+    def test_results_column_mode_buttons_emit_requests(self, qtbot):
+        from app.widgets.results_column import ResultsColumn
+
+        w = ResultsColumn()
+        qtbot.addWidget(w)
+
+        with qtbot.waitSignal(w.show_all_requested, timeout=1000):
+            w._all_mode_btn.click()
+
+        with qtbot.waitSignal(w.current_requested, timeout=1000):
+            w._current_mode_btn.click()
+
+    def test_results_column_mode_buttons_track_loaded_scope(self, qtbot):
+        from app.widgets.results_column import ResultsColumn
+
+        w = ResultsColumn()
+        qtbot.addWidget(w)
+        w.load_many([
+            {
+                "uid": "UID-1",
+                "tiffs": [{"path": "/fake/a.tif", "name": "a.tif", "seq": 1}],
+                "zips": [{"path": "/fake/a.zip", "name": "a.zip", "seq": 1}],
+            }
+        ])
+
+        assert w._all_mode_btn.isChecked()
+        assert not w._current_mode_btn.isChecked()
+
+        w.load_uid("UID-1", [], [])
+
+        assert w._current_mode_btn.isChecked()
+        assert not w._all_mode_btn.isChecked()
 
     def test_workbench_view_has_results_column(self):
         """WorkbenchView must expose a _results attribute (ResultsColumn)."""

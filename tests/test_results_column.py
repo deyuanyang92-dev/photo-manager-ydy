@@ -385,6 +385,34 @@ def test_results_column_has_windows_folder_actions(qtbot, tmp_path):
     assert col._results_dir == str(tmp_path)
 
 
+def test_results_filename_mode_can_show_unique_id(qtbot):
+    """Result cards can show the specimen UID while keeping full names in data."""
+    from PyQt6.QtWidgets import QLabel
+
+    from app.widgets.results_column import ResultsColumn, _ArchiveCard, _TiffCard
+
+    result_name = "GXFCG-BLW-SC001-1-D79-260618-广西城港-白龙尾-独齿沙蚕-20260618.tif"
+    uid = "GXFCG-BLW-SC001-D79-260618-广西城港-白龙尾-独齿沙蚕-20260618"
+
+    col = ResultsColumn()
+    qtbot.addWidget(col)
+    col.load_uid(
+        "UID",
+        [{"path": f"/fake/{result_name}", "name": result_name, "seq": 1}],
+        [{"path": f"/fake/{result_name[:-4]}.zip", "name": f"{result_name[:-4]}.zip", "seq": 1}],
+    )
+
+    col._set_filename_mode("uid")
+
+    tiff_card = next(c for c in col._cards if isinstance(c, _TiffCard))
+    zip_card = next(c for c in col._cards if isinstance(c, _ArchiveCard))
+    tiff_name = next(lbl for lbl in tiff_card.findChildren(QLabel) if lbl.objectName() == "Mono")
+    zip_name = next(lbl for lbl in zip_card.findChildren(QLabel) if lbl.objectName() == "Mono")
+    assert tiff_name.text() == uid
+    assert zip_name.text() == uid
+    assert tiff_card._info["name"] == result_name
+
+
 def test_results_sort_by_name_reorders_cards(qtbot):
     """Sorting by name re-renders file cards in filename order."""
     from app.widgets.results_column import ResultsColumn, _TiffCard

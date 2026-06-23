@@ -374,6 +374,9 @@ class MonitorPanel(QWidget):
         self._card_by_key: dict[str, _FileCard] = {}
         self._card_sig_by_key: dict[str, tuple] = {}
         self._hide_archived: bool = False
+        self._view_mode: str = "tiles"
+        self._sort_key: str = "default"
+        self._sort_reverse: bool = False
         self._setup_ui()
 
     # ── UI ────────────────────────────────────────────────────────────────────
@@ -537,6 +540,25 @@ class MonitorPanel(QWidget):
         sh_hint.setObjectName("MutedSmall")
         sh.addWidget(sh_hint)
         sh.addStretch()
+        self._view_btn = QPushButton("平铺")
+        self._view_btn.setObjectName("Ghost")
+        self._view_btn.setFixedHeight(26)
+        self._view_btn.setToolTip("切换待处理照片的查看方式")
+        icons.set_button_icon(self._view_btn, "mdi6.view-grid-outline",
+                              color=icons.TONE_MUTED, size=14)
+        self._view_btn.clicked.connect(
+            lambda: self._show_view_menu(self._view_btn.mapToGlobal(self._view_btn.rect().bottomLeft()))
+        )
+        sh.addWidget(self._view_btn)
+        self._sort_btn = QPushButton("排序")
+        self._sort_btn.setObjectName("Ghost")
+        self._sort_btn.setFixedHeight(26)
+        self._sort_btn.setToolTip("按名称、类型、大小、时间或归属排序")
+        icons.set_button_icon(self._sort_btn, "mdi6.sort", color=icons.TONE_MUTED, size=14)
+        self._sort_btn.clicked.connect(
+            lambda: self._show_sort_menu(self._sort_btn.mapToGlobal(self._sort_btn.rect().bottomLeft()))
+        )
+        sh.addWidget(self._sort_btn)
         self._sel_count = QLabel("")
         self._sel_count.setObjectName("MutedSmall")
         sh.addWidget(self._sel_count)
@@ -589,7 +611,16 @@ class MonitorPanel(QWidget):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.viewport().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        scroll.viewport().customContextMenuRequested.connect(
+            lambda pos: self._show_stream_menu(scroll.viewport().mapToGlobal(pos))
+        )
+        self._stream_scroll = scroll
         self._grid_widget = QWidget()
+        self._grid_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._grid_widget.customContextMenuRequested.connect(
+            lambda pos: self._show_stream_menu(self._grid_widget.mapToGlobal(pos))
+        )
         self._grid = QGridLayout(self._grid_widget)
         self._grid.setContentsMargins(0, 4, 0, 4)
         self._grid.setHorizontalSpacing(8)
@@ -606,6 +637,10 @@ class MonitorPanel(QWidget):
         self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._empty_label.setWordWrap(True)
         self._empty_label.setMinimumHeight(160)
+        self._empty_label.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._empty_label.customContextMenuRequested.connect(
+            lambda pos: self._show_stream_menu(self._empty_label.mapToGlobal(pos))
+        )
         self._empty_label.hide()
         sec.addWidget(self._empty_label)
 
@@ -734,7 +769,7 @@ class MonitorPanel(QWidget):
                     and getattr(t, "detail", "")
                     and "incoming" not in t.detail)
         ]
-        all_files = jpgs + tiffs
+        all_files = self._sort_entries(jpgs + tiffs)
 
         if not all_files:
             self._clear_grid()
@@ -778,6 +813,34 @@ class MonitorPanel(QWidget):
             getattr(entry, "is_grouped", False),
         )
 
+    def _sort_entries(self, entries: list) -> list:
+        entries = list(entries or [])
+        if self._sort_key == "default":
+            return entries
+
+        def name_value(entry) -> str:
+            return str(
+                getattr(entry, "name", "") or Path(getattr(entry, "path", "")).name
+            ).lower()
+
+        def key(entry):
+            name = name_value(entry)
+            if self._sort_key == "name":
+                return (name,)
+            if self._sort_key == "type":
+                kind = str(getattr(entry, "kind", "") or "").lower()
+                return (kind, Path(name).suffix.lower(), name)
+            if self._sort_key == "size":
+                return (int(getattr(entry, "size", 0) or 0), name)
+            if self._sort_key == "mtime":
+                return (str(getattr(entry, "mtime", "") or ""), name)
+            if self._sort_key == "uid":
+                uid = str(getattr(entry, "attributed_specimen_id", "") or "")
+                return (uid.lower(), name)
+            return (name,)
+
+        return sorted(entries, key=key, reverse=self._sort_reverse)
+
     def _drag_paths_for(self, path: str) -> list[str]:
         selected = self.selected_all_paths()
         if path in selected:
@@ -805,7 +868,7 @@ class MonitorPanel(QWidget):
         card; everything else is repositioned in place (cheap), so the common
         "one new photo arrived" case builds a single card instead of all.
         """
-        cols = 2
+        cols = 1 if self._view_mode == "list" else 2
         desired = {getattr(f, "path", ""): f for f in all_files}
 
         # Drop cards for files that vanished.
@@ -836,6 +899,8 @@ class MonitorPanel(QWidget):
             self._cards.append(card)
         for c in range(cols):
             self._grid.setColumnStretch(c, 1)
+        for c in range(cols, 3):
+            self._grid.setColumnStretch(c, 0)
 
     def _clear_grid(self) -> None:
         while self._grid.count():
@@ -857,6 +922,92 @@ class MonitorPanel(QWidget):
                 card.hide()
             else:
                 card.show()
+
+    # ── View / sort menus ─────────────────────────────────────────────────────
+
+    def _show_view_menu(self, global_pos) -> None:
+        menu = QMenu(self)
+        self._populate_view_menu(menu)
+        menu.exec(global_pos)
+
+    def _show_sort_menu(self, global_pos) -> None:
+        menu = QMenu(self)
+        self._populate_sort_menu(menu)
+        menu.exec(global_pos)
+
+    def _show_stream_menu(self, global_pos) -> None:
+        menu = QMenu(self)
+
+        view_menu = menu.addMenu("查看")
+        self._populate_view_menu(view_menu)
+
+        sort_menu = menu.addMenu("排序方式")
+        self._populate_sort_menu(sort_menu)
+
+        menu.addSeparator()
+        refresh_action = menu.addAction("刷新")
+        refresh_action.triggered.connect(self.refresh_requested.emit)
+
+        menu.addSeparator()
+        hide_action = menu.addAction("隐藏已分组原片")
+        hide_action.setCheckable(True)
+        hide_action.setChecked(self._hide_archived_cb.isChecked())
+        hide_action.toggled.connect(self._hide_archived_cb.setChecked)
+
+        menu.exec(global_pos)
+
+    def _populate_view_menu(self, menu: QMenu) -> None:
+        for key, label in (
+            ("tiles", "平铺"),
+            ("list", "列表"),
+        ):
+            action = menu.addAction(("✓ " if self._view_mode == key else "") + label)
+            action.triggered.connect(lambda _=False, k=key: self._set_view_mode(k))
+
+    def _populate_sort_menu(self, menu: QMenu) -> None:
+        for key, label in (
+            ("default", "默认顺序"),
+            ("name", "名称"),
+            ("type", "类型"),
+            ("size", "大小"),
+            ("mtime", "修改时间"),
+            ("uid", "归属编号"),
+        ):
+            action = menu.addAction(("✓ " if self._sort_key == key else "") + label)
+            action.triggered.connect(lambda _=False, k=key: self._set_sort_key(k))
+
+        menu.addSeparator()
+        asc_action = menu.addAction(("✓ " if not self._sort_reverse else "") + "升序")
+        asc_action.triggered.connect(lambda: self._set_sort_reverse(False))
+        desc_action = menu.addAction(("✓ " if self._sort_reverse else "") + "降序")
+        desc_action.triggered.connect(lambda: self._set_sort_reverse(True))
+
+    def _set_view_mode(self, mode: str) -> None:
+        if mode not in {"tiles", "list"} or mode == self._view_mode:
+            return
+        self._view_mode = mode
+        self._view_btn.setText("列表" if mode == "list" else "平铺")
+        icon_name = "mdi6.view-list-outline" if mode == "list" else "mdi6.view-grid-outline"
+        icons.set_button_icon(self._view_btn, icon_name, color=icons.TONE_MUTED, size=14)
+        self._rebuild_grid()
+
+    def _set_sort_key(self, key: str) -> None:
+        if key not in {"default", "name", "type", "size", "mtime", "uid"}:
+            return
+        self._sort_key = key
+        self._sort_btn.setText({
+            "default": "排序",
+            "name": "名称",
+            "type": "类型",
+            "size": "大小",
+            "mtime": "修改时间",
+            "uid": "归属",
+        }[key])
+        self._rebuild_grid()
+
+    def _set_sort_reverse(self, reverse: bool) -> None:
+        self._sort_reverse = bool(reverse)
+        self._rebuild_grid()
 
     # ── Selection helpers ─────────────────────────────────────────────────────
 

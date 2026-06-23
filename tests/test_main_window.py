@@ -59,6 +59,15 @@ def _fresh_window() -> MainWindow:
     set_language("zh")
     ctx = AppContext()
     ctx.settings._qs.remove("ui/topbar_pinned_views")
+    ctx.settings._qs.remove("ui/screenshot_tool_enabled")
+    return MainWindow(ctx)
+
+
+def _window_with_screenshot_tool() -> MainWindow:
+    set_language("zh")
+    ctx = AppContext()
+    ctx.settings._qs.remove("ui/topbar_pinned_views")
+    ctx.settings._qs.setValue("ui/screenshot_tool_enabled", "true")
     return MainWindow(ctx)
 
 
@@ -136,10 +145,9 @@ def test_function_menu_groups_all_registered_views():
         "项目汇总",
     ]
     tools_menu = win._nav_group_menus["tools"]
-    assert [a.text() for a in tools_menu.actions()] == [
+    assert [a.text() for a in tools_menu.actions() if a.isVisible()] == [
         "标签打印",
         "采集地图",
-        "截图",
     ]
 
 
@@ -202,13 +210,28 @@ def test_context_bar_with_project(tmp_path):
 
 # ── Screenshot lives in the grouped tools menu, Settings only configures it ─
 
-def test_screenshot_tool_lives_in_tools_menu():
+def test_screenshot_tool_is_hidden_by_default():
     win = _fresh_window()
     for cls in ALL_VIEWS:
         win.register_view(cls)
 
     assert not hasattr(win, "_shot_btn")
+    assert not win.screenshot_tool_enabled()
+    assert not win._shot_menu.menuAction().isVisible()
+    assert not win._screenshot_shortcut.isEnabled()
+    assert win._settings_btn.toolTip() == "配置"
+
+
+def test_screenshot_tool_can_be_enabled_in_tools_menu():
+    win = _window_with_screenshot_tool()
+    for cls in ALL_VIEWS:
+        win.register_view(cls)
+
+    assert not hasattr(win, "_shot_btn")
+    assert win.screenshot_tool_enabled()
     assert win._shot_menu.title() == "截图"
+    assert win._shot_menu.menuAction().isVisible()
+    assert win._screenshot_shortcut.isEnabled()
     assert [a.text() for a in win._shot_menu.actions()] == [
         "区域截图    Alt+A",
         "全屏截图",
@@ -224,7 +247,7 @@ def test_screenshot_not_duplicated_as_nav_segment():
         win.register_view(cls)
 
     assert "截图" not in [btn.text() for btn in win._nav_buttons]
-    assert win._shot_menu.title() == "截图"
+    assert not win._shot_menu.menuAction().isVisible()
 
 
 def test_rebind_screenshot_shortcut_updates_tooltip():
@@ -245,10 +268,9 @@ def test_retranslate_ui_updates_shell_and_grouped_menu():
     assert win._brand.text() == "Specimen Imaging Manager"
     assert win._nav_menu_btn.text() == "Toolbox"
     assert win._nav_buttons[0].text() == "Photo Workspace"
-    assert [a.text() for a in win._nav_group_menus["tools"].actions()] == [
+    assert [a.text() for a in win._nav_group_menus["tools"].actions() if a.isVisible()] == [
         "Label Printing",
         "Collection Map",
-        "Screenshot",
     ]
     assert win._shot_actions["region"].text() == "Region capture    Alt+A"
 

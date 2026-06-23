@@ -1,7 +1,7 @@
 param(
     [string]$Python = "py",
     [string]$Name = "SpecimenPhotoWorkbench",
-    [string]$Version = "v0.01"
+    [string]$Version = "v0.02"
 )
 
 $ErrorActionPreference = "Stop"

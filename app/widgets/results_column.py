@@ -494,10 +494,15 @@ class _TiffCard(_ResultCardBase):
         body_lay.setContentsMargins(0, 0, 0, 0)
         body_lay.setSpacing(2)
 
-        name = self._info.get("name") or Path(self._info.get("path", "")).name
+        name = (
+            self._info.get("display_name")
+            or self._info.get("name")
+            or Path(self._info.get("path", "")).name
+        )
         name_lbl = QLabel(name)
         name_lbl.setObjectName("Mono")
-        name_lbl.setToolTip(self._info.get("path", name))
+        full_name = self._info.get("name") or Path(self._info.get("path", "")).name
+        name_lbl.setToolTip(self._info.get("path", full_name))
         body_lay.addWidget(name_lbl)
 
         row = QHBoxLayout()
@@ -558,10 +563,15 @@ class _ArchiveCard(_ResultCardBase):
         body_lay.setContentsMargins(0, 0, 0, 0)
         body_lay.setSpacing(2)
 
-        name = self._info.get("name") or Path(self._info.get("path", "")).name
+        name = (
+            self._info.get("display_name")
+            or self._info.get("name")
+            or Path(self._info.get("path", "")).name
+        )
         name_lbl = QLabel(name)
         name_lbl.setObjectName("Mono")
-        name_lbl.setToolTip(self._info.get("path", name))
+        full_name = self._info.get("name") or Path(self._info.get("path", "")).name
+        name_lbl.setToolTip(self._info.get("path", full_name))
         body_lay.addWidget(name_lbl)
 
         size_bytes = self._info.get("size", 0)
@@ -709,6 +719,24 @@ def _pair_results(composed_tiffs: list, archive_zips: list) -> list:
     return out
 
 
+def _unique_id_from_result_name(name: str, seq=None) -> str:
+    """Return the specimen UID portion of a result filename when it matches."""
+    stem = Path(name).stem
+    parts = stem.split("-")
+    if len(parts) < 7:
+        return stem
+    if seq is not None:
+        seq_text = str(seq)
+        for idx in range(3, len(parts)):
+            if parts[idx] == seq_text:
+                return "-".join(parts[:idx] + parts[idx + 1:])
+    try:
+        int(parts[4])
+    except ValueError:
+        return stem
+    return "-".join(parts[:4] + parts[5:])
+
+
 # ── ResultsColumn ──────────────────────────────────────────────────────────────
 
 class ResultsColumn(QWidget):
@@ -716,6 +744,8 @@ class ResultsColumn(QWidget):
 
     restore_requested = pyqtSignal(str)  # ZIP 绝对路径 → 还原原片 JPG
     specimen_requested = pyqtSignal(str)  # all-results group header → select UID
+    show_all_requested = pyqtSignal()
+    current_requested = pyqtSignal()
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -730,6 +760,7 @@ class ResultsColumn(QWidget):
         self._current_zips: list[dict] = []
         self._current_groups: list[dict] = []
         self._display_mode = "single"
+        self._filename_mode = "full"
         self._setup_ui()
 
     # ── UI ────────────────────────────────────────────────────────────────────
@@ -771,7 +802,33 @@ class ResultsColumn(QWidget):
         self._count = QLabel("0 项")
         self._count.setObjectName("MutedSmall")
         hdr.addWidget(self._count)
+
+        self._current_mode_btn = QPushButton("当前编号")
+        self._current_mode_btn.setObjectName("Ghost")
+        self._current_mode_btn.setCheckable(True)
+        self._current_mode_btn.setChecked(True)
+        self._current_mode_btn.setFixedHeight(28)
+        self._current_mode_btn.setToolTip("只显示当前选中编号的 TIFF 和 ZIP")
+        self._current_mode_btn.clicked.connect(lambda: self.current_requested.emit())
+        hdr.addWidget(self._current_mode_btn)
+
+        self._all_mode_btn = QPushButton("全部编号")
+        self._all_mode_btn.setObjectName("Ghost")
+        self._all_mode_btn.setCheckable(True)
+        self._all_mode_btn.setFixedHeight(28)
+        self._all_mode_btn.setToolTip("按编号分组显示当前项目全部 TIFF 和 ZIP")
+        self._all_mode_btn.clicked.connect(lambda: self.show_all_requested.emit())
+        hdr.addWidget(self._all_mode_btn)
         hdr.addStretch()
+
+        self._filename_btn = QPushButton("文件名")
+        self._filename_btn.setObjectName("Ghost")
+        self._filename_btn.setFixedHeight(28)
+        self._filename_btn.setToolTip("切换成果卡片显示完整文件名或唯一编号")
+        icons.set_button_icon(self._filename_btn, "mdi6.text-box-outline",
+                              color=icons.TONE_MUTED, size=14)
+        self._filename_btn.clicked.connect(self._show_filename_menu)
+        hdr.addWidget(self._filename_btn)
 
         self._open_folder_btn = QPushButton("打开文件夹")
         self._open_folder_btn.setObjectName("Outline")
@@ -842,6 +899,7 @@ class ResultsColumn(QWidget):
                  archive_zips: list) -> None:
         """Populate the paired rows for the given specimen UID."""
         self._display_mode = "single"
+        self._sync_mode_buttons()
         self._current_groups = []
         self._clear_rows()
         self._title.setText("成果")
@@ -861,7 +919,7 @@ class ResultsColumn(QWidget):
             zc = None
             if tinfo is not None:
                 tc = _TiffCard(
-                    tinfo,
+                    self._display_info(tinfo),
                     open_fn=self._open_in_explorer,
                     lightbox_fn=lambda p, _paths=all_tiff_paths: self._open_tiff_lightbox(p, _paths),
                     thumb_provider=self._thumb_provider,
@@ -870,7 +928,7 @@ class ResultsColumn(QWidget):
                 self._cards.append(tc)
             if zinfo is not None:
                 zc = _ArchiveCard(
-                    zinfo, open_fn=self._open_in_explorer,
+                    self._display_info(zinfo), open_fn=self._open_in_explorer,
                     restore_fn=lambda p: self.restore_requested.emit(p),
                     thumb_size=self._thumb_size,
                 )
@@ -887,6 +945,7 @@ class ResultsColumn(QWidget):
     def load_many(self, groups: list[dict]) -> None:
         """Populate results for multiple specimen UIDs, grouped by UID."""
         self._display_mode = "many"
+        self._sync_mode_buttons()
         self._title.setText("全部成果")
         self._current_groups = [
             {
@@ -925,7 +984,7 @@ class ResultsColumn(QWidget):
                 zc = None
                 if tinfo is not None:
                     tc = _TiffCard(
-                        tinfo,
+                        self._display_info(tinfo),
                         open_fn=self._open_in_explorer,
                         lightbox_fn=lambda p, _paths=all_tiff_paths: self._open_tiff_lightbox(p, _paths),
                         thumb_provider=self._thumb_provider,
@@ -934,7 +993,7 @@ class ResultsColumn(QWidget):
                     self._cards.append(tc)
                 if zinfo is not None:
                     zc = _ArchiveCard(
-                        zinfo, open_fn=self._open_in_explorer,
+                        self._display_info(zinfo), open_fn=self._open_in_explorer,
                         restore_fn=lambda p: self.restore_requested.emit(p),
                         thumb_size=self._thumb_size,
                     )
@@ -954,6 +1013,7 @@ class ResultsColumn(QWidget):
         self._current_zips = []
         self._current_groups = []
         self._display_mode = "single"
+        self._sync_mode_buttons()
         self._title.setText("成果")
         self._results_dir = ""
         self._show_empty()
@@ -983,6 +1043,40 @@ class ResultsColumn(QWidget):
         empty.setWordWrap(True)
         self._rows_lay.addWidget(empty)
 
+    def _display_info(self, info: dict) -> dict:
+        out = dict(info)
+        raw_name = out.get("name") or Path(out.get("path", "")).name
+        if self._filename_mode == "uid":
+            out["display_name"] = _unique_id_from_result_name(
+                str(raw_name), out.get("seq")
+            )
+        else:
+            out.pop("display_name", None)
+        return out
+
+    def _refresh_current_results(self) -> None:
+        if self._display_mode == "many":
+            self.load_many(self._current_groups)
+        else:
+            self.load_uid("", self._current_tiffs, self._current_zips)
+
+    def _show_filename_menu(self) -> None:
+        menu = QMenu(self)
+        for key, label in (
+            ("full", "完整文件名"),
+            ("uid", "唯一编号"),
+        ):
+            act = menu.addAction(("✓ " if self._filename_mode == key else "") + label)
+            act.triggered.connect(lambda _=False, k=key: self._set_filename_mode(k))
+        menu.exec(self._filename_btn.mapToGlobal(self._filename_btn.rect().bottomLeft()))
+
+    def _set_filename_mode(self, mode: str) -> None:
+        if mode not in {"full", "uid"} or mode == self._filename_mode:
+            return
+        self._filename_mode = mode
+        self._filename_btn.setText("唯一编号" if mode == "uid" else "文件名")
+        self._refresh_current_results()
+
     def _set_zoom(self, size: int) -> None:
         """Resize every result display-box (the 缩放 control)."""
         self._thumb_size = size
@@ -999,6 +1093,19 @@ class ResultsColumn(QWidget):
         self._body.setVisible(not collapsed)
         self._collapse_btn.setText("▸" if collapsed else "▾")
         self._collapse_btn.setChecked(collapsed)
+
+    def _sync_mode_buttons(self) -> None:
+        is_many = self._display_mode == "many"
+        for btn, checked in (
+            (self._current_mode_btn, not is_many),
+            (self._all_mode_btn, is_many),
+        ):
+            btn.blockSignals(True)
+            btn.setChecked(checked)
+            btn.setObjectName("Outline" if checked else "Ghost")
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
+            btn.blockSignals(False)
 
     def _show_sort_menu(self) -> None:
         self._show_sort_menu_at(self._sort_btn.mapToGlobal(self._sort_btn.rect().bottomLeft()))

@@ -205,6 +205,67 @@ class TestHideArchivedFilter:
         assert "隐藏已归档" not in actions_seen
 
 
+class TestPendingViewAndSort:
+    def test_pending_header_exposes_view_and_sort_controls(self, panel):
+        from PyQt6.QtWidgets import QPushButton
+
+        texts = [b.text() for b in panel.findChildren(QPushButton)]
+        assert "平铺" in texts
+        assert "排序" in texts
+
+    def test_sort_by_name_reorders_pending_cards(self, panel):
+        b = _jpg_entry("b.jpg", "/tmp/b.jpg")
+        a = _jpg_entry("a.jpg", "/tmp/a.jpg")
+        panel.load_scan(_scan([b, a]))
+
+        panel._set_sort_key("name")
+
+        assert [c._entry.name for c in panel._cards] == ["a.jpg", "b.jpg"]
+        assert panel._sort_btn.text() == "名称"
+
+    def test_sort_descending_by_size(self, panel):
+        small = _jpg_entry("small.jpg", "/tmp/small.jpg")
+        small.size = 10
+        large = _jpg_entry("large.jpg", "/tmp/large.jpg")
+        large.size = 100
+        panel.load_scan(_scan([small, large]))
+
+        panel._set_sort_key("size")
+        panel._set_sort_reverse(True)
+
+        assert [c._entry.name for c in panel._cards] == ["large.jpg", "small.jpg"]
+
+    def test_list_view_uses_single_column(self, panel):
+        panel.load_scan(_scan([
+            _jpg_entry("a.jpg", "/tmp/a.jpg"),
+            _jpg_entry("b.jpg", "/tmp/b.jpg"),
+            _jpg_entry("c.jpg", "/tmp/c.jpg"),
+        ]))
+
+        panel._set_view_mode("list")
+
+        assert panel._view_btn.text() == "列表"
+        assert panel._grid.itemAtPosition(0, 0) is not None
+        assert panel._grid.itemAtPosition(0, 1) is None
+        assert panel._grid.itemAtPosition(1, 0) is not None
+        assert panel._grid.itemAtPosition(2, 0) is not None
+
+    def test_stream_context_menu_contains_view_sort_refresh(self, panel):
+        actions_seen = []
+
+        def fake_exec(self_menu, *args, **kwargs):
+            actions_seen.extend([a.text() for a in self_menu.actions()])
+            return None
+
+        with patch.object(QMenu, "exec", fake_exec):
+            panel._show_stream_menu(QPoint(0, 0))
+
+        assert "查看" in actions_seen
+        assert "排序方式" in actions_seen
+        assert "刷新" in actions_seen
+        assert "隐藏已分组原片" in actions_seen
+
+
 # ── 2-A: enhanced context menu ───────────────────────────────────────────────
 
 class TestContextMenuAddToGroup:

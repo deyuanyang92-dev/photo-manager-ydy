@@ -142,18 +142,20 @@ class SpecimenSidebar(QWidget):
         self._filter_all_btn.setToolTip("显示全部编号，并在成果区展示全部编号对应结果")
         self._filter_all_btn.clicked.connect(lambda: self._set_filter_mode("all"))
         filter_row.addWidget(self._filter_all_btn)
-        self._filter_rna_btn = QPushButton("仅 RNA")
+        self._filter_rna_btn = QPushButton("RNA编号")
         self._filter_rna_btn.setObjectName("Ghost")
         self._filter_rna_btn.setCheckable(True)
         self._filter_rna_btn.setFixedHeight(24)
-        self._filter_rna_btn.setToolTip("只显示保存方式为 R 前缀、已取 RNA 组织的标本")
+        self._filter_rna_btn.setToolTip("筛选保存方式以 R 开头的 RNA 编号")
         self._filter_rna_btn.clicked.connect(lambda: self._set_filter_mode("rna"))
         filter_row.addWidget(self._filter_rna_btn)
-        self._filter_attention_btn = QPushButton("待补全")
+        self._filter_attention_btn = QPushButton("资料待补")
         self._filter_attention_btn.setObjectName("Ghost")
         self._filter_attention_btn.setCheckable(True)
         self._filter_attention_btn.setFixedHeight(24)
-        self._filter_attention_btn.setToolTip("只显示缺物种名、保存方式或日期的编号")
+        self._filter_attention_btn.setToolTip(
+            "筛选资料不完整的编号：缺物种名、保存方式、采集日期或拍照日期"
+        )
         self._filter_attention_btn.clicked.connect(lambda: self._set_filter_mode("attention"))
         filter_row.addWidget(self._filter_attention_btn)
         filter_row.addStretch()
@@ -653,14 +655,14 @@ class SpecimenSidebar(QWidget):
         else:
             self._filter_all_btn.setText(f"全部 {total}")
         if self._filter_mode == "rna" and shown is not None:
-            self._filter_rna_btn.setText(f"RNA {shown}")
+            self._filter_rna_btn.setText(f"RNA编号 {shown}")
         else:
-            self._filter_rna_btn.setText(f"RNA {rna_total}")
+            self._filter_rna_btn.setText(f"RNA编号 {rna_total}")
         self._filter_rna_btn.setEnabled(rna_total > 0)
         if self._filter_mode == "attention" and shown is not None:
-            self._filter_attention_btn.setText(f"待补全 {shown}")
+            self._filter_attention_btn.setText(f"资料待补 {shown}")
         else:
-            self._filter_attention_btn.setText(f"待补全 {attention_total}")
+            self._filter_attention_btn.setText(f"资料待补 {attention_total}")
         self._filter_attention_btn.setEnabled(attention_total > 0)
 
     @staticmethod
