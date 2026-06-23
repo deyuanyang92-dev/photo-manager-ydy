@@ -615,6 +615,30 @@ def test_drop_external_jpg_adds_to_group(qtbot, tmp_path):
     assert str(jpg) in panel._grouping.groups[0].jpg_paths
 
 
+def test_drop_external_jpg_with_project_copies_to_incoming_before_grouping(qtbot, tmp_path):
+    from app.widgets.grouping_panel import GroupingPanel
+
+    external = tmp_path / "camera" / "a.jpg"
+    external.parent.mkdir()
+    external.write_bytes(b"j")
+    project = tmp_path / "project"
+    incoming = project / "incoming-jpg"
+    incoming.mkdir(parents=True)
+    ctx = _make_app_context()
+    ctx.current_project_dir = str(project)
+    ctx.settings = MagicMock()
+    ctx.settings.incoming_subdir = "incoming-jpg"
+    panel = GroupingPanel(ctx)
+    qtbot.addWidget(panel)
+    panel.load_grouping("test-uid", _make_grouping([{"index": 0, "jpgs": []}]))
+
+    panel.drop_external_files(0, [str(external)], None)
+
+    imported = incoming / "a.jpg"
+    assert imported.read_bytes() == b"j"
+    assert panel._grouping.groups[0].jpg_paths == [str(imported.resolve())]
+
+
 def test_drop_external_tiff_sets_output_name_and_composed(qtbot, tmp_path):
     from app.widgets.grouping_panel import GroupingPanel
 

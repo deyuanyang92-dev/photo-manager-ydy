@@ -569,6 +569,7 @@ class WorkbenchView(BaseView):
         self._monitor.assign_requested.connect(self._on_assign_jpg)
         self._monitor.unassign_requested.connect(self._on_unassign_jpg)
         self._monitor.add_jpg_requested.connect(self._on_add_jpg_files)
+        self._monitor.external_jpgs_dropped.connect(self._on_external_jpgs_dropped)
         self._monitor.grouping_requested.connect(self._on_open_grouping)
         self._monitor.compose_implicit_requested.connect(self._on_compose_implicit)
         self._monitor.organise_selected_requested.connect(self._on_organise_selected)
@@ -2935,22 +2936,31 @@ class WorkbenchView(BaseView):
         if not paths:
             return
 
+        self._import_jpg_paths(paths, source="添加照片")
+
+    def _on_external_jpgs_dropped(self, paths: list[str]) -> None:
+        """Import JPGs dropped from Explorer/Finder/file managers."""
+        self._import_jpg_paths(paths, source="拖入照片")
+
+    def _import_jpg_paths(self, paths: list[str], *, source: str) -> list[str]:
+        project_dir = self.ctx.current_project_dir
+        if not project_dir:
+            self._status_message("请先打开一个项目。")
+            return []
+
         inc, _res = self._resolve_capture_subdirs()
         incoming_dir = os.path.join(project_dir, inc)
-        os.makedirs(incoming_dir, exist_ok=True)
-        import shutil
-        errors = []
-        for src in paths:
-            dest = os.path.join(incoming_dir, os.path.basename(src))
-            try:
-                if os.path.abspath(src) != os.path.abspath(dest):
-                    shutil.copy2(src, dest)
-            except OSError as e:
-                errors.append(str(e))
+        from app.services.photo_import_service import import_jpgs_to_incoming
+        result = import_jpgs_to_incoming(list(paths), incoming_dir)
 
-        if errors:
-            QMessageBox.warning(self, "导入部分失败", "\n".join(errors[:5]))
+        if result.errors:
+            QMessageBox.warning(self, f"{source}部分失败", "\n".join(result.errors[:5]))
+        if result.skipped_paths and not result.imported_paths:
+            self._status_message("未识别到 JPG/JPEG 文件。")
+        elif result.imported_paths:
+            self._status_message(f"已导入 {len(result.imported_paths)} 张照片到 incoming。")
         self._refresh_monitor()
+        return result.imported_paths
 
     def _on_free_compose(self) -> None:
         """Free compose: selected monitor JPGs → Helicon → incoming-jpg/.

@@ -15,7 +15,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from PyQt6.QtWidgets import QApplication, QMenu
-from PyQt6.QtCore import Qt, QPoint
+from PyQt6.QtCore import Qt, QPoint, QMimeData, QUrl
 from PyQt6.QtTest import QTest
 
 from app.services.monitor_service import FileEntry, ScanResult
@@ -137,6 +137,23 @@ class TestClipboardCopyAction:
 
         clipboard = QApplication.clipboard()
         assert clipboard.text() == path
+
+
+def test_monitor_panel_extracts_external_jpg_drop_paths(tmp_path):
+    jpg = tmp_path / "dragged.JPG"
+    tif = tmp_path / "result.tif"
+    txt = tmp_path / "notes.txt"
+    jpg.write_bytes(b"jpg")
+    tif.write_bytes(b"tif")
+    txt.write_text("notes", encoding="utf-8")
+    mime = QMimeData()
+    mime.setUrls([
+        QUrl.fromLocalFile(str(jpg)),
+        QUrl.fromLocalFile(str(tif)),
+        QUrl.fromLocalFile(str(txt)),
+    ])
+
+    assert MonitorPanel._jpg_paths_from_mime(mime) == [str(jpg)]
 
 
 # ── 1-D: hide archived filter ─────────────────────────────────────────────────

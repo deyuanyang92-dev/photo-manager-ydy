@@ -135,6 +135,17 @@ def _split_media_paths(paths: list[str]) -> tuple[list[str], list[str]]:
     return jpgs, tiffs
 
 
+def _project_incoming_dir(ctx: "AppContext") -> Path | None:
+    project_dir = getattr(ctx, "current_project_dir", None)
+    if not project_dir:
+        return None
+    settings = getattr(ctx, "settings", None)
+    incoming_subdir = getattr(settings, "incoming_subdir", None) if settings else None
+    if not isinstance(incoming_subdir, str) or not incoming_subdir:
+        incoming_subdir = "incoming-jpg"
+    return Path(project_dir) / incoming_subdir
+
+
 def _resolve_path_for_group(p: str) -> Optional[str]:
     """Normalize a path for grouping; return None if file missing."""
     from app.services.helicon_service import resolve_existing_image_path
@@ -1261,6 +1272,16 @@ class GroupingPanel(QWidget):
             return
 
         if jpg_paths:
+            incoming_dir = _project_incoming_dir(self.ctx)
+            if incoming_dir is not None:
+                from app.services.photo_import_service import import_jpgs_to_incoming
+                result = import_jpgs_to_incoming(list(jpg_paths), incoming_dir)
+                if result.errors:
+                    from PyQt6.QtWidgets import QMessageBox
+                    QMessageBox.warning(
+                        self, "拖入文件部分失败", "\n".join(result.errors[:5])
+                    )
+                jpg_paths = result.imported_paths
             jpg_paths = [r for p in jpg_paths if (r := _resolve_path_for_group(p))]
         if tiff_path:
             tiff_resolved = _resolve_path_for_group(tiff_path)

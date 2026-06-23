@@ -32,7 +32,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Optional
 
-from PyQt6.QtCore import Qt, QMimeData, QUrl, pyqtSignal
+from PyQt6.QtCore import Qt, QEvent, QMimeData, QUrl, pyqtSignal
 from PyQt6.QtGui import QDrag
 from PyQt6.QtWidgets import (
     QApplication,
@@ -53,6 +53,7 @@ from PyQt6.QtWidgets import (
 
 from app.config import icons
 from app.services import grouping_service, activation_service
+from app.services.photo_import_service import is_jpg_path
 
 if TYPE_CHECKING:
     from app.app_context import AppContext
@@ -360,6 +361,7 @@ class MonitorPanel(QWidget):
     auto_compress_toggled = pyqtSignal(bool)  # 新 TIFF 自动归档开关
     settings_requested = pyqtSignal()  # emitted from the compact "更多" menu
     phase_clicked = pyqtSignal(str)    # status code: shooting/shot_done/organizing/done
+    external_jpgs_dropped = pyqtSignal(list)  # OS drop → list[str] JPG paths
 
     def __init__(self, ctx: "AppContext", parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -377,16 +379,20 @@ class MonitorPanel(QWidget):
         self._view_mode: str = "tiles"
         self._sort_key: str = "default"
         self._sort_reverse: bool = False
+        self._drop_targets: list[QWidget] = []
         self._setup_ui()
 
     # ── UI ────────────────────────────────────────────────────────────────────
 
     def _setup_ui(self) -> None:
+        self.setAcceptDrops(True)
+        self.installEventFilter(self)
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
         section = QFrame()
+        self._register_drop_target(section)
         section.setObjectName("WorkbenchSection")
         sec = QVBoxLayout(section)
         sec.setContentsMargins(18, 16, 18, 16)
@@ -609,14 +615,19 @@ class MonitorPanel(QWidget):
 
         # ── Capture stream (scrollable grid) ──
         scroll = QScrollArea()
+        self._register_drop_target(scroll)
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.viewport().setAcceptDrops(True)
+        scroll.viewport().installEventFilter(self)
+        self._drop_targets.append(scroll.viewport())
         scroll.viewport().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         scroll.viewport().customContextMenuRequested.connect(
             lambda pos: self._show_stream_menu(scroll.viewport().mapToGlobal(pos))
         )
         self._stream_scroll = scroll
         self._grid_widget = QWidget()
+        self._register_drop_target(self._grid_widget)
         self._grid_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._grid_widget.customContextMenuRequested.connect(
             lambda pos: self._show_stream_menu(self._grid_widget.mapToGlobal(pos))
@@ -633,6 +644,7 @@ class MonitorPanel(QWidget):
         self._empty_label = QLabel(
             "等待目录中新照片\n已处理文件不再留在未整理区；TIFF 出现前不会关联原片。"
         )
+        self._register_drop_target(self._empty_label)
         self._empty_label.setObjectName("EmptyState")
         self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._empty_label.setWordWrap(True)
@@ -649,6 +661,66 @@ class MonitorPanel(QWidget):
         self._unattr_warning.setObjectName("UnattributedWarning")
         self._unattr_warning.hide()
         sec.addWidget(self._unattr_warning)
+
+    def _register_drop_target(self, widget: QWidget) -> None:
+        widget.setAcceptDrops(True)
+        widget.installEventFilter(self)
+        self._drop_targets.append(widget)
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 (Qt override)
+        if watched in self._drop_targets:
+            if event.type() in (
+                QEvent.Type.DragEnter,
+                QEvent.Type.DragMove,
+            ):
+                return self._handle_drop_probe(event)
+            if event.type() == QEvent.Type.Drop:
+                return self._handle_file_drop(event)
+        return super().eventFilter(watched, event)
+
+    def dragEnterEvent(self, event) -> None:  # noqa: N802 (Qt override)
+        if not self._handle_drop_probe(event):
+            event.ignore()
+
+    def dragMoveEvent(self, event) -> None:  # noqa: N802 (Qt override)
+        if not self._handle_drop_probe(event):
+            event.ignore()
+
+    def dropEvent(self, event) -> None:  # noqa: N802 (Qt override)
+        if not self._handle_file_drop(event):
+            event.ignore()
+
+    def _handle_drop_probe(self, event) -> bool:
+        if self._jpg_paths_from_mime(event.mimeData()):
+            event.acceptProposedAction()
+            return True
+        event.ignore()
+        return True
+
+    def _handle_file_drop(self, event) -> bool:
+        paths = self._jpg_paths_from_mime(event.mimeData())
+        if not paths:
+            event.ignore()
+            return True
+        event.acceptProposedAction()
+        self.external_jpgs_dropped.emit(paths)
+        return True
+
+    @staticmethod
+    def _jpg_paths_from_mime(mime: QMimeData | None) -> list[str]:
+        if mime is None or not mime.hasUrls():
+            return []
+        paths: list[str] = []
+        for url in mime.urls():
+            if not url.isLocalFile():
+                continue
+            raw = url.toLocalFile() or url.path()
+            if not raw:
+                continue
+            path = Path(raw)
+            if path.is_file() and is_jpg_path(path):
+                paths.append(str(path))
+        return paths
 
     def _stat_block(self, layout: QHBoxLayout, value: str, label: str):
         col = QVBoxLayout()
