@@ -28,7 +28,7 @@ from PyQt6.QtWidgets import (
 )
 
 from app.config import icons
-from app.utils.naming import normalize_uid
+from app.utils.naming import derive_uid, normalize_uid, parse_uid
 
 if TYPE_CHECKING:
     from app.app_context import AppContext
@@ -60,8 +60,10 @@ class SpecimenSidebar(QWidget):
     """
 
     specimen_selected = pyqtSignal(str)
+    show_all_requested = pyqtSignal()
     activate_requested = pyqtSignal(str)
     deactivate_requested = pyqtSignal(str)
+    activate_no_selection = pyqtSignal()
     new_specimen_requested = pyqtSignal()
     edit_specimen_requested = pyqtSignal(str)
     collab_manager_requested = pyqtSignal()   # "协作管理" button clicked
@@ -137,6 +139,7 @@ class SpecimenSidebar(QWidget):
         self._filter_all_btn.setCheckable(True)
         self._filter_all_btn.setChecked(True)
         self._filter_all_btn.setFixedHeight(24)
+        self._filter_all_btn.setToolTip("显示全部编号，并在成果区展示全部编号对应结果")
         self._filter_all_btn.clicked.connect(lambda: self._set_filter_mode("all"))
         filter_row.addWidget(self._filter_all_btn)
         self._filter_rna_btn = QPushButton("仅 RNA")
@@ -146,6 +149,13 @@ class SpecimenSidebar(QWidget):
         self._filter_rna_btn.setToolTip("只显示保存方式为 R 前缀、已取 RNA 组织的标本")
         self._filter_rna_btn.clicked.connect(lambda: self._set_filter_mode("rna"))
         filter_row.addWidget(self._filter_rna_btn)
+        self._filter_attention_btn = QPushButton("待补全")
+        self._filter_attention_btn.setObjectName("Ghost")
+        self._filter_attention_btn.setCheckable(True)
+        self._filter_attention_btn.setFixedHeight(24)
+        self._filter_attention_btn.setToolTip("只显示缺物种名、保存方式或日期的编号")
+        self._filter_attention_btn.clicked.connect(lambda: self._set_filter_mode("attention"))
+        filter_row.addWidget(self._filter_attention_btn)
         filter_row.addStretch()
         root.addLayout(filter_row)
 
@@ -273,7 +283,9 @@ class SpecimenSidebar(QWidget):
                 SELECT uid,
                        COALESCE(scientific_name, '') AS name,
                        COALESCE(scientific_name_cn, '') AS name_cn,
-                       COALESCE(storage, '') AS storage
+                       COALESCE(storage, '') AS storage,
+                       COALESCE(collection_date, '') AS collection_date,
+                       COALESCE(photo_date, '') AS photo_date
                 FROM   specimens
                 WHERE  owner_project_dir = ?
                 ORDER  BY uid
@@ -288,6 +300,12 @@ class SpecimenSidebar(QWidget):
                         "name_cn": row[2],
                         "storage": row[3],
                         "is_rna": str(row[3] or "").upper().startswith("R"),
+                        "needs_attention": (
+                            not str(row[1] or row[2] or "").strip()
+                            or not str(row[3] or "").strip()
+                            or not str(row[4] or "").strip()
+                            or not str(row[5] or "").strip()
+                        ),
                     }
                 )
         except Exception:
@@ -311,8 +329,54 @@ class SpecimenSidebar(QWidget):
 
         for r in rows:
             r["active"] = r["uid"] in active_uids
+        progress = self._load_grouping_progress(db, [r["uid"] for r in rows])
+        for r in rows:
+            r["progress"] = progress.get(r["uid"], {})
 
         return rows
+
+    def _load_grouping_progress(self, db, uids: list[str]) -> dict[str, dict]:
+        """Return per-UID grouping progress derived from persisted groups."""
+        if not uids:
+            return {}
+        progress: dict[str, dict] = {
+            uid: {"total": 0, "grouped": 0, "composed": 0, "organized": 0}
+            for uid in uids
+        }
+        try:
+            placeholders = ",".join("?" * len(uids))
+            rows = db.execute(
+                f"""
+                SELECT uid, jpg_paths, composed_tiff_path, status, archive_zip
+                FROM grouping
+                WHERE uid IN ({placeholders})
+                """,
+                uids,
+            ).fetchall()
+        except Exception:
+            return progress
+
+        for row in rows:
+            uid = normalize_uid(row["uid"] if hasattr(row, "keys") else row[0])
+            if uid not in progress:
+                continue
+            jpg_paths = row["jpg_paths"] if hasattr(row, "keys") else row[1]
+            composed = row["composed_tiff_path"] if hasattr(row, "keys") else row[2]
+            status = row["status"] if hasattr(row, "keys") else row[3]
+            archive = row["archive_zip"] if hasattr(row, "keys") else row[4]
+            p = progress[uid]
+            p["total"] += 1
+            try:
+                if len(json.loads(jpg_paths or "[]")) > 0:
+                    p["grouped"] += 1
+            except Exception:
+                if str(jpg_paths or "").strip() not in ("", "[]"):
+                    p["grouped"] += 1
+            if composed:
+                p["composed"] += 1
+            if str(status or "").lower() == "organized" or archive:
+                p["organized"] += 1
+        return progress
 
     def _apply_filter(self, text: str) -> None:
         """Rebuild list based on search text.
@@ -334,7 +398,10 @@ class SpecimenSidebar(QWidget):
             name_cn: str = entry["name_cn"]
             storage: str = entry.get("storage") or ""
             is_rna = bool(entry.get("is_rna"))
+            progress = entry.get("progress") or {}
             if self._filter_mode == "rna" and not is_rna:
+                continue
+            if self._filter_mode == "attention" and not entry.get("needs_attention"):
                 continue
             if (
                 query
@@ -354,6 +421,7 @@ class SpecimenSidebar(QWidget):
                 svc,
                 active=active,
                 is_rna=is_rna,
+                progress=progress,
             )
             item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, uid)
@@ -364,6 +432,57 @@ class SpecimenSidebar(QWidget):
             shown += 1
 
         self._update_filter_counts(shown)
+        if self._list.count() > 0 and self._list.currentItem() is None:
+            self._list.setCurrentItem(self._list.item(0))
+        self._sync_action_buttons()
+
+    def _resolve_action_uid(self) -> Optional[str]:
+        """UID for activate/deactivate: current row, or the sole visible row."""
+        uid = self.current_uid()
+        if uid:
+            return uid
+        if self._list.count() == 1:
+            item = self._list.item(0)
+            if item:
+                picked = item.data(Qt.ItemDataRole.UserRole)
+                if picked:
+                    self._list.setCurrentItem(item)
+                    return picked
+        return None
+
+    def _is_uid_active(self, uid: Optional[str]) -> bool:
+        if not uid:
+            return False
+        return any(
+            entry.get("uid") == uid and entry.get("active")
+            for entry in self._all_items
+        )
+
+    def _sync_action_buttons(self) -> None:
+        """Make bottom actions reflect the selected row's actual active state."""
+        uid = self._resolve_action_uid()
+        active = self._is_uid_active(uid)
+
+        self._activate_btn.setEnabled(bool(uid) and not active)
+        self._deactivate_btn.setEnabled(bool(uid) and active)
+
+        if not uid:
+            self._activate_btn.setText("激活")
+            self._deactivate_btn.setText("去激活")
+            self._activate_btn.setToolTip("请先选择一个编号")
+            self._deactivate_btn.setToolTip("请先选择当前激活的编号")
+            return
+
+        if active:
+            self._activate_btn.setText("已激活")
+            self._deactivate_btn.setText("取消激活")
+            self._activate_btn.setToolTip("该编号已经是当前激活编号")
+            self._deactivate_btn.setToolTip("取消当前激活编号，开始新的未激活任务")
+        else:
+            self._activate_btn.setText("激活此编号")
+            self._deactivate_btn.setText("未激活")
+            self._activate_btn.setToolTip("把选中编号设为当前拍摄编号")
+            self._deactivate_btn.setToolTip("选中编号没有激活，无需取消")
 
     def _build_row_widget(
         self,
@@ -375,6 +494,7 @@ class SpecimenSidebar(QWidget):
         *,
         active: bool = False,
         is_rna: bool = False,
+        progress: Optional[dict] = None,
     ) -> QWidget:
         """Build one specimen row: UID + name + collab badge + 4 phase dots."""
         row = QFrame()
@@ -392,7 +512,24 @@ class SpecimenSidebar(QWidget):
         uid_lbl.setWordWrap(False)
         uid_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         uid_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        v.addWidget(uid_lbl)
+
+        status_pill = QLabel("当前激活" if active else "未激活")
+        status_pill.setObjectName(
+            "SpecimenActivePill" if active else "SpecimenInactivePill"
+        )
+        status_pill.setToolTip(
+            "当前拍摄和自动归属使用这个编号"
+            if active else
+            "这个编号当前没有激活"
+        )
+        status_pill.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+
+        title_row = QHBoxLayout()
+        title_row.setContentsMargins(0, 0, 0, 0)
+        title_row.setSpacing(6)
+        title_row.addWidget(uid_lbl, stretch=1)
+        title_row.addWidget(status_pill)
+        v.addLayout(title_row)
 
         name_text = name or name_cn
         nm = QLabel(name_text or "未填写物种信息")
@@ -418,11 +555,13 @@ class SpecimenSidebar(QWidget):
             line.addWidget(rna_badge)
         # 保存方式段（如 T95E）已是 UID 的一部分，不再重复显示，避免冗余。
 
-        if active:
-            active_badge = QLabel("拍摄中")
-            active_badge.setObjectName("SpecimenActivePill")
-            active_badge.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-            line.addWidget(active_badge)
+        progress_text = self._progress_badge_text(progress or {})
+        if progress_text:
+            progress_badge = QLabel(progress_text)
+            progress_badge.setObjectName("SpecimenProgressBadge")
+            progress_badge.setToolTip(self._progress_tooltip(progress or {}))
+            progress_badge.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            line.addWidget(progress_badge)
 
         if badge:
             bd = QLabel(badge)
@@ -465,14 +604,49 @@ class SpecimenSidebar(QWidget):
         v.addLayout(line)
         return row
 
+    @staticmethod
+    def _format_angle_count(count: int, total: int) -> str:
+        if count <= 0:
+            return ""
+        if total > count:
+            return f"{count}/{total}角度"
+        return f"{count}角度"
+
+    def _progress_badge_text(self, progress: dict) -> str:
+        total = int(progress.get("total") or 0)
+        organized = int(progress.get("organized") or 0)
+        composed = int(progress.get("composed") or 0)
+        grouped = int(progress.get("grouped") or 0)
+        if organized:
+            return f"已整理 {organized}角度"
+        if composed:
+            return f"已合成 {self._format_angle_count(composed, total)}"
+        if grouped:
+            return f"已分组 {self._format_angle_count(grouped, total)}"
+        return ""
+
+    @staticmethod
+    def _progress_tooltip(progress: dict) -> str:
+        total = int(progress.get("total") or 0)
+        grouped = int(progress.get("grouped") or 0)
+        composed = int(progress.get("composed") or 0)
+        organized = int(progress.get("organized") or 0)
+        return (
+            f"整理进度：共 {total} 组；"
+            f"已分组 {grouped}，已合成 {composed}，已整理 {organized}"
+        )
+
     def _update_filter_counts(self, shown: Optional[int] = None) -> None:
         total = len(self._all_items)
         rna_total = sum(1 for item in self._all_items if item.get("is_rna"))
+        attention_total = sum(
+            1 for item in self._all_items if item.get("needs_attention")
+        )
         query = self._search.text().strip()
         narrowed = (
             shown is not None
             and shown != total
-            and (bool(query) or self._filter_mode == "rna")
+            and (bool(query) or self._filter_mode in ("rna", "attention"))
         )
         if narrowed:
             self._filter_all_btn.setText(f"全部 {shown}/{total}")
@@ -483,6 +657,11 @@ class SpecimenSidebar(QWidget):
         else:
             self._filter_rna_btn.setText(f"RNA {rna_total}")
         self._filter_rna_btn.setEnabled(rna_total > 0)
+        if self._filter_mode == "attention" and shown is not None:
+            self._filter_attention_btn.setText(f"待补全 {shown}")
+        else:
+            self._filter_attention_btn.setText(f"待补全 {attention_total}")
+        self._filter_attention_btn.setEnabled(attention_total > 0)
 
     @staticmethod
     def _compact_uid(uid: str) -> str:
@@ -502,7 +681,8 @@ class SpecimenSidebar(QWidget):
         try:
             rows = db.execute(
                 """
-                SELECT uid, province, site, station, id, storage, raw_json
+                SELECT uid, province, site, station, id, storage,
+                       collection_date, photo_date, raw_json
                 FROM specimens
                 WHERE owner_project_dir = ?
                 """,
@@ -514,7 +694,43 @@ class SpecimenSidebar(QWidget):
         for row in rows:
             old_uid = row["uid"] if hasattr(row, "keys") else row[0]
             new_uid = normalize_uid(old_uid)
-            if not old_uid or not new_uid or old_uid == new_uid:
+            if not old_uid or not new_uid:
+                continue
+            raw_text = row["raw_json"] if hasattr(row, "keys") else row[8]
+            try:
+                raw = json.loads(raw_text or "{}")
+            except Exception:
+                raw = {}
+            if not isinstance(raw, dict):
+                raw = {}
+
+            if not parse_uid(new_uid):
+                def _value(key: str, index: int, *raw_keys: str) -> str:
+                    value = row[key] if hasattr(row, "keys") else row[index]
+                    if value:
+                        return str(value)
+                    for raw_key in raw_keys:
+                        raw_value = raw.get(raw_key)
+                        if raw_value:
+                            return str(raw_value)
+                    return ""
+
+                candidate = derive_uid({
+                    "province": _value("province", 1, "province"),
+                    "site": _value("site", 2, "site"),
+                    "station": _value("station", 3, "station"),
+                    "id": _value("id", 4, "id", "speciesId", "species_id"),
+                    "storage": _value("storage", 5, "storage"),
+                    "collectionDate": _value(
+                        "collection_date", 6, "collectionDate", "collection_date"
+                    ),
+                    "photoDate": _value("photo_date", 7, "photoDate", "photo_date"),
+                })
+                if parse_uid(candidate):
+                    new_uid = candidate
+                elif new_uid == old_uid:
+                    continue
+            if old_uid == new_uid:
                 continue
             try:
                 if db.execute(
@@ -522,11 +738,6 @@ class SpecimenSidebar(QWidget):
                     (new_uid,),
                 ).fetchone():
                     continue
-                raw_text = row["raw_json"] if hasattr(row, "keys") else row[6]
-                try:
-                    raw = json.loads(raw_text or "{}")
-                except Exception:
-                    raw = {}
                 if isinstance(raw, dict):
                     for key in (
                         "uid", "uniqueId", "province", "site", "station",
@@ -534,6 +745,8 @@ class SpecimenSidebar(QWidget):
                     ):
                         if isinstance(raw.get(key), str):
                             raw[key] = raw[key].upper()
+                    raw["uid"] = new_uid
+                    raw["uniqueId"] = new_uid
                 else:
                     raw = {}
 
@@ -597,10 +810,13 @@ class SpecimenSidebar(QWidget):
         self._apply_filter(text)
 
     def _set_filter_mode(self, mode: str) -> None:
-        self._filter_mode = "rna" if mode == "rna" else "all"
+        self._filter_mode = mode if mode in ("rna", "attention") else "all"
         self._filter_all_btn.setChecked(self._filter_mode == "all")
         self._filter_rna_btn.setChecked(self._filter_mode == "rna")
+        self._filter_attention_btn.setChecked(self._filter_mode == "attention")
         self._apply_filter(self._search.text())
+        if self._filter_mode == "all":
+            self.show_all_requested.emit()
 
     def _on_item_clicked(self, item: QListWidgetItem) -> None:
         uid = item.data(Qt.ItemDataRole.UserRole)
@@ -624,18 +840,23 @@ class SpecimenSidebar(QWidget):
             style.unpolish(row)
             style.polish(row)
             row.update()
+        self._sync_action_buttons()
 
     def _on_activate_clicked(self) -> None:
         """Emit activate_requested for the currently selected specimen."""
-        uid = self.current_uid()
+        uid = self._resolve_action_uid()
         if uid:
             self.activate_requested.emit(uid)
+        else:
+            self.activate_no_selection.emit()
 
     def _on_deactivate_clicked(self) -> None:
         """Emit deactivate_requested for the currently selected specimen."""
-        uid = self.current_uid()
+        uid = self._resolve_action_uid()
         if uid:
             self.deactivate_requested.emit(uid)
+        else:
+            self.activate_no_selection.emit()
 
     def _on_context_menu(self, pos) -> None:
         """Right-click specimen actions: copy UID / print labels / activate."""

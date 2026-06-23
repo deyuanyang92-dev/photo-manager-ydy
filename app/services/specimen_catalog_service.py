@@ -10,9 +10,8 @@ from dataclasses import dataclass
 import sqlite3
 from pathlib import Path
 from typing import Iterable, Optional
+from urllib.parse import quote
 
-from app.db.db_manager import open_project_db
-from app.services.project_paths import ProjectUnavailableError
 from app.services.project_service import (
     default_user_projects_json_path,
     list_projects,
@@ -86,6 +85,54 @@ def known_workspace_dirs(
     return ordered
 
 
+def _lookup_uid_in_project(project_dir: str, uid: str) -> Optional[SpecimenUidHit]:
+    """Read one workspace DB for UID existence without running migrations."""
+    try:
+        resolved = str(Path(project_dir).resolve())
+        db_path = Path(resolved) / "_data" / "project.db"
+        if not db_path.exists():
+            return None
+        uri_path = quote(str(db_path), safe="/:\\")
+        db = sqlite3.connect(f"file:{uri_path}?mode=ro", uri=True)
+        db.row_factory = sqlite3.Row
+        try:
+            cols = {
+                str(r["name"] if isinstance(r, sqlite3.Row) else r[1])
+                for r in db.execute("PRAGMA table_info(specimens)").fetchall()
+            }
+            if "uid" not in cols:
+                return None
+            owner_expr = (
+                "COALESCE(owner_project_dir, '')"
+                if "owner_project_dir" in cols else "''"
+            )
+            sci_expr = (
+                "COALESCE(scientific_name, '')"
+                if "scientific_name" in cols else "''"
+            )
+            row = db.execute(
+                f"""
+                SELECT uid, {owner_expr} AS owner_project_dir,
+                       {sci_expr} AS scientific_name
+                FROM specimens
+                WHERE uid = ?
+                """,
+                (uid,),
+            ).fetchone()
+        finally:
+            db.close()
+    except (sqlite3.Error, OSError):
+        return None
+    if not row:
+        return None
+    return SpecimenUidHit(
+        uid=row["uid"],
+        project_dir=resolved,
+        owner_project_dir=row["owner_project_dir"] or resolved,
+        scientific_name=row["scientific_name"] or "",
+    )
+
+
 def find_uid(
     uid: str,
     *,
@@ -103,29 +150,9 @@ def find_uid(
         current_project_root=current_project_root,
         extra_dirs=extra_dirs,
     ):
-        try:
-            db = open_project_db(project_dir, create=False)
-            row = db.execute(
-                """
-                SELECT uid,
-                       COALESCE(owner_project_dir, '') AS owner_project_dir,
-                       COALESCE(scientific_name, '') AS scientific_name
-                FROM specimens
-                WHERE uid = ?
-                """,
-                (normalized,),
-            ).fetchone()
-        except (ProjectUnavailableError, sqlite3.Error, OSError):
-            continue
-        if row:
-            hits.append(
-                SpecimenUidHit(
-                    uid=row["uid"],
-                    project_dir=project_dir,
-                    owner_project_dir=row["owner_project_dir"] or project_dir,
-                    scientific_name=row["scientific_name"] or "",
-                )
-            )
+        hit = _lookup_uid_in_project(project_dir, normalized)
+        if hit is not None:
+            hits.append(hit)
     return hits
 
 

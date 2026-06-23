@@ -724,9 +724,9 @@ QFrame#SpecimenRow {
     margin: 1px 0;
 }
 QFrame#SpecimenRowActive {
-    background-color: rgba(15,118,110,0.11);
-    border: 1px solid rgba(15,118,110,0.24);
-    border-left: 4px solid #0f766e;
+    background-color: #e6f5f3;
+    border: 2px solid #0f766e;
+    border-left: 6px solid #0f766e;
     border-radius: 6px;
     margin: 1px 0;
 }
@@ -737,7 +737,7 @@ QFrame#SpecimenRow:hover {
 QFrame#SpecimenRowActive:hover {
     background-color: #e6f5f3;
     border-color: rgba(15,118,110,0.24);
-    border-left: 4px solid #0f766e;
+    border-left: 6px solid #0f766e;
 }
 QFrame#SpecimenRow[selected="true"],
 QFrame#SpecimenRowActive[selected="true"] {
@@ -783,6 +783,15 @@ QLabel#SpecimenRnaBadge {
     font-size: 11px;
     font-weight: 700;
 }
+QLabel#SpecimenProgressBadge {
+    color: #15803d;
+    background-color: rgba(21,128,61,0.11);
+    border: 1px solid #15803d;
+    border-radius: 999px;
+    padding: 1px 7px;
+    font-size: 11px;
+    font-weight: 700;
+}
 QLabel#SpecimenStorageText {
     color: #64748b;
     font-size: 11px;
@@ -792,9 +801,18 @@ QLabel#SpecimenActivePill {
     color: #f4f6f8;
     background-color: #0f766e;
     border-radius: 999px;
-    padding: 1px 7px;
+    padding: 2px 8px;
     font-size: 11px;
     font-weight: 700;
+}
+QLabel#SpecimenInactivePill {
+    color: #64748b;
+    background-color: #f8fafc;
+    border: 1px solid rgba(15,23,42,0.13);
+    border-radius: 999px;
+    padding: 2px 8px;
+    font-size: 11px;
+    font-weight: 600;
 }
 QPushButton#SpecimenPrintButton {
     background-color: transparent;

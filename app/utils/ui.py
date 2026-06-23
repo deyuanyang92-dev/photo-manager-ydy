@@ -31,7 +31,15 @@ from typing import Optional
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QGuiApplication
-from PyQt6.QtWidgets import QApplication, QDialog, QFileDialog, QMessageBox, QWidget
+from PyQt6.QtWidgets import (
+    QApplication,
+    QDialog,
+    QFileDialog,
+    QListView,
+    QMessageBox,
+    QTreeView,
+    QWidget,
+)
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
@@ -90,6 +98,22 @@ def center_on(dialog: QDialog, parent: Optional[QWidget]) -> None:
 _NO_NATIVE = QFileDialog.Option.DontUseNativeDialog
 
 
+def _sort_dialog_by_mtime_desc(dialog: QFileDialog) -> None:
+    """Sort a non-native file dialog by Date Modified, newest first."""
+    dialog.setViewMode(QFileDialog.ViewMode.Detail)
+    for view in dialog.findChildren(QTreeView) + dialog.findChildren(QListView):
+        model = view.model()
+        if model is None or model.columnCount() < 4:
+            continue
+        try:
+            view.setSortingEnabled(True)
+            view.sortByColumn(3, Qt.SortOrder.DescendingOrder)
+            model.sort(3, Qt.SortOrder.DescendingOrder)
+        except Exception:
+            continue
+    dialog.resize(max(dialog.width(), 820), max(dialog.height(), 560))
+
+
 def get_existing_directory(
     parent: Optional[QWidget],
     caption: str,
@@ -124,7 +148,20 @@ def get_open_file_name(
 
     Returns the selected path (str) or an empty string if cancelled.
     """
+    sort_by_mtime = bool(kw.pop("sort_by_mtime", False))
     top = top_window(parent)
+    if sort_by_mtime:
+        dlg = QFileDialog(top, caption, start or "")
+        dlg.setOption(_NO_NATIVE, True)
+        dlg.setFileMode(QFileDialog.FileMode.ExistingFile)
+        if filter:
+            dlg.setNameFilter(filter)
+        _sort_dialog_by_mtime_desc(dlg)
+        center_on(dlg, top)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return ""
+        files = dlg.selectedFiles()
+        return files[0] if files else ""
     path, _ = QFileDialog.getOpenFileName(
         top,
         caption,
@@ -147,7 +184,19 @@ def get_open_file_names(
 
     Returns selected paths, or an empty list if cancelled.
     """
+    sort_by_mtime = bool(kw.pop("sort_by_mtime", False))
     top = top_window(parent)
+    if sort_by_mtime:
+        dlg = QFileDialog(top, caption, start or "")
+        dlg.setOption(_NO_NATIVE, True)
+        dlg.setFileMode(QFileDialog.FileMode.ExistingFiles)
+        if filter:
+            dlg.setNameFilter(filter)
+        _sort_dialog_by_mtime_desc(dlg)
+        center_on(dlg, top)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return []
+        return [p for p in dlg.selectedFiles() if p]
     paths, _ = QFileDialog.getOpenFileNames(
         top,
         caption,

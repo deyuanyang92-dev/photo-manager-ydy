@@ -8,7 +8,7 @@
 （crs.map_points / map_points_across）。
 
 底图两模式（QStackedWidget）：
-  交互(OSM) = TileMapWidget（v1，点击点弹信息卡 + 跳转采集记录）；
+  交互瓦片 = TileMapWidget（OSM/卫星等，点击点弹信息卡 + 跳转采集记录）；
   出版底图 = PublicationMapWidget（官方审图号图按控制点校准精确落点 / Nature·R 生成底图），
   导出论文级 PNG/PDF/SVG/EPS。底图由 basemap_registry 枚举。
 """
@@ -376,14 +376,14 @@ class CollectionMapView(BaseView):
         self._calibrate_btn.clicked.connect(self._on_calibrate)
         self._calibrate_btn.setEnabled(False)
         bar2.addWidget(self._calibrate_btn)
-        self._add_point_btn = QPushButton("＋添加站位")
+        self._add_point_btn = QPushButton("标记站位")
         self._add_point_btn.setObjectName("AddPointBtn")
         self._add_point_btn.setCheckable(True)
         self._add_point_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         set_button_icon(self._add_point_btn, "mdi6.map-marker-plus", color=TONE_MUTED, size=15)
         self._add_point_btn.setToolTip(
-            "编辑模式：在地图空白处点击新增采集点；拖动已有点移动站位坐标。\n"
-            "（需先在左栏选中单个项目，并使用 OSM 底图）"
+            "点击后进入地图落点模式：在地图空白处点击新增采集点；"
+            "选中单个项目时可拖动已有点移动站位坐标。"
         )
         self._add_point_btn.toggled.connect(self._on_edit_toggle)
         bar2.addWidget(self._add_point_btn)
@@ -393,6 +393,11 @@ class CollectionMapView(BaseView):
         self._input_coord_btn.setToolTip("手动输入经纬度新增采集点（十进制 WGS-84）")
         self._input_coord_btn.clicked.connect(self._on_input_coord)
         bar2.addWidget(self._input_coord_btn)
+        self._edit_status_lbl = QLabel("")
+        self._edit_status_lbl.setObjectName("EditStatus")
+        self._edit_status_lbl.setMinimumWidth(150)
+        self._edit_status_lbl.setToolTip("落点写入目标")
+        bar2.addWidget(self._edit_status_lbl)
         self._import_btn = QPushButton("导入经纬度")
         self._import_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         set_button_icon(self._import_btn, "mdi6.import", color=TONE_MUTED, size=15)
@@ -410,7 +415,7 @@ class CollectionMapView(BaseView):
 
         # 编辑模式提示条（默认隐藏）
         self._edit_hint = QLabel(
-            "编辑模式：点空白处 = 新增采集点  ·  拖动已有点 = 移动站位  ·  再次点击「＋添加站位」或 ESC 退出"
+            "落点模式：点空白处 = 新增采集点  ·  选中单个项目时拖动已有点 = 移动站位  ·  再次点击「标记站位」或 ESC 退出"
         )
         self._edit_hint.setObjectName("EditHint")
         self._edit_hint.setWordWrap(True)
@@ -629,6 +634,7 @@ class CollectionMapView(BaseView):
             # 编辑模式提示条
             f"QLabel#EditHint{{background:{accent_soft};color:{accent};border:1px solid {accent};"
             f"border-radius:6px;padding:6px 10px;font-size:12px;}}"
+            f"QLabel#EditStatus{{color:{muted};font-size:12px;padding:0 4px;}}"
             # 添加站位按钮：编辑模式选中态高亮
             f"QPushButton#AddPointBtn:checked{{background:{accent};color:{accent_fg};"
             f"border:1px solid {accent};}}"
@@ -846,6 +852,7 @@ class CollectionMapView(BaseView):
             self._project_filter = d
             self.ctx.current_project_dir = d
             self._populate_projects()
+            self._update_edit_buttons()
             self._reload()
         except Exception as exc:
             from app.utils.ui import warn
@@ -994,6 +1001,7 @@ class CollectionMapView(BaseView):
             if self._project_filter == directory:
                 self._project_filter = None
             self._populate_projects()
+            self._update_edit_buttons()
             self._reload()
         except Exception as exc:
             ui.warn(self, "移除失败", str(exc))
@@ -1020,21 +1028,80 @@ class CollectionMapView(BaseView):
             snapshot_project(target_dir)
             self._project_filter = target_dir
             self._populate_projects()
+            self._update_edit_buttons()
             self._reload()
 
     # ── 编辑模式：点空白新增 · 拖点移动 · 手输经纬度 ──────────────────────────────
 
+    def _edit_target_project(self) -> Optional[str]:
+        """Return the project that receives new map points.
+
+        In "全部项目" mode, users still expect the current workbench project
+        (top context bar) to be the write target.
+        """
+        if self._project_filter:
+            return str(self._project_filter)
+        cur = getattr(self.ctx, "current_project_dir", None)
+        if isinstance(cur, (str, Path)) and str(cur):
+            return str(cur)
+        return None
+
     def _edit_enabled(self) -> bool:
-        """编辑模式可用：选中单个项目 + OSM 底图（非出版底图）。"""
-        return bool(self._project_filter) and not self._is_publication_mode()
+        """落点模式可用：有写入目标项目 + 交互瓦片底图。"""
+        return bool(self._edit_target_project()) and self._is_interactive_basemap()
+
+    def _edit_drag_enabled(self) -> bool:
+        """拖动只允许在单项目、站位层级下进行；聚合点没有稳定站位身份。"""
+        return bool(self._project_filter) and self._level == "station"
+
+    def _edit_target_name(self) -> str:
+        target = self._edit_target_project()
+        return Path(target).name if target else "未选择项目"
+
+    def _edit_status_text(self) -> str:
+        if not self._edit_target_project():
+            return "先选择项目"
+        if not self._is_interactive_basemap():
+            return "切到交互地图可落点"
+        prefix = f"写入：{self._edit_target_name()}"
+        if not self._project_filter:
+            return f"{prefix}（全部视图）"
+        if self._level != "station":
+            return f"{prefix} · 拖点需站位层级"
+        return f"{prefix} · 可拖点"
+
+    def _edit_hint_text(self) -> str:
+        base = (
+            f"落点模式：点地图空白处新增采集点，写入「{self._edit_target_name()}」；"
+            "保存后地图自动刷新，可连续落点。"
+        )
+        if self._edit_drag_enabled():
+            return base + " 拖动已有站位可移动坐标；再次点击「点击地图落点」或 ESC 退出。"
+        return base + " 当前视图不移动已有点；再次点击「点击地图落点」或 ESC 退出。"
 
     def _update_edit_buttons(self) -> None:
         """按当前过滤/底图启停编辑按钮；条件不满足时强制退出编辑模式。"""
         if not hasattr(self, "_add_point_btn"):
             return
         enabled = self._edit_enabled()
+        drag_enabled = self._edit_drag_enabled()
         self._add_point_btn.setEnabled(enabled)
         self._input_coord_btn.setEnabled(enabled)
+        self._tile_map.point_drag_enabled = drag_enabled
+        bm_name = (self._active_basemap or {}).get("name") or "当前底图"
+        status = self._edit_status_text()
+        self._edit_status_lbl.setText(status)
+        self._edit_status_lbl.setToolTip(status)
+        self._add_point_btn.setToolTip(
+            "点击后进入地图落点模式：在地图空白处点击新增采集点；"
+            "单项目 + 站位层级时可拖动已有点移动站位坐标。\n"
+            f"{status}；底图：{bm_name}"
+        )
+        self._input_coord_btn.setToolTip(f"手动输入经纬度新增采集点（十进制 WGS-84）。{status}")
+        if self._edit_mode:
+            self._edit_hint.setText(self._edit_hint_text())
+        if not self._edit_mode:
+            self._add_point_btn.setText("标记站位")
         if not enabled and self._edit_mode:
             self._set_edit_mode(False)
 
@@ -1042,14 +1109,19 @@ class CollectionMapView(BaseView):
         if checked and not self._edit_enabled():
             self._add_point_btn.setChecked(False)
             ui.info(self, "采集地图",
-                    "编辑采集点需先在左栏选中单个项目，并使用 OSM 底图。")
+                    "标记站位需要先打开或选择项目，并使用交互地图或卫星底图。")
             return
         self._set_edit_mode(checked)
 
     def _set_edit_mode(self, on: bool) -> None:
+        if on and not self._edit_enabled():
+            on = False
         self._edit_mode = on
         self._tile_map.interactive_points = on
+        self._tile_map.point_drag_enabled = self._edit_drag_enabled()
+        self._edit_hint.setText(self._edit_hint_text())
         self._edit_hint.setVisible(on)
+        self._add_point_btn.setText("点击地图落点" if on else "标记站位")
         if self._add_point_btn.isChecked() != on:
             self._add_point_btn.setChecked(on)
         if on:
@@ -1076,11 +1148,15 @@ class CollectionMapView(BaseView):
         ) != QMessageBox.StandardButton.Yes:
             self._reload()   # 用户取消 → 点回到原位
             return
-        db = self.ctx.get_db(self._project_filter)
+        target_dir = str(p.get("project_dir") or self._project_filter or self._edit_target_project() or "")
+        if not target_dir:
+            self._reload()
+            return
+        db = self.ctx.get_db(target_dir)
         if db is None:
             return
         crs.set_station_coords(db, prov, site, station, lon, lat)
-        self._snapshot_quiet(self._project_filter)
+        self._snapshot_quiet(target_dir)
         self._reload()
 
     def _on_input_coord(self) -> None:
@@ -1088,11 +1164,12 @@ class CollectionMapView(BaseView):
         self._open_point_dialog(None, None)
 
     def _open_point_dialog(self, lon: Optional[float], lat: Optional[float]) -> None:
-        db = self.ctx.get_db(self._project_filter) if self._project_filter else None
+        target_dir = self._edit_target_project()
+        db = self.ctx.get_db(target_dir) if target_dir else None
         if db is None:
             ui.warn(self, "采集地图", "当前项目数据库不可用。")
             return
-        prov, site = self._effective_ps_for(self._project_filter)
+        prov, site = self._effective_ps_for(target_dir)
         stations = self._stations_for_bind(db)
         from app.widgets.collection_point_dialog import CollectionPointDialog
         dlg = CollectionPointDialog(
@@ -1114,7 +1191,7 @@ class CollectionMapView(BaseView):
             crs.set_station_coords(
                 db, r["province"], r["site"], r["station"], r["lon"], r["lat"]
             )
-        self._snapshot_quiet(self._project_filter)
+        self._snapshot_quiet(target_dir)
         self._reload()
 
     def _effective_ps_for(self, directory) -> tuple[str, str]:
@@ -1187,6 +1264,7 @@ class CollectionMapView(BaseView):
         if btn is not None and not btn.isChecked():
             btn.setChecked(True)
         self._info_card.hide()
+        self._update_edit_buttons()
         self._reload()
 
     def _reload(self) -> None:
@@ -1319,13 +1397,17 @@ class CollectionMapView(BaseView):
         if entry is not None:
             self._activate_basemap(entry)
 
+    def _is_interactive_basemap(self) -> bool:
+        return not self._active_basemap or self._active_basemap.get("kind") in {"osm", "tile"}
+
     def _is_publication_mode(self) -> bool:
-        return bool(self._active_basemap) and self._active_basemap.get("kind") != "osm"
+        return bool(self._active_basemap) and not self._is_interactive_basemap()
 
     def _activate_basemap(self, entry: dict) -> None:
         self._active_basemap = entry
         kind = entry.get("kind")
-        if kind == "osm":
+        if kind in {"osm", "tile"}:
+            self._tile_map.set_tile_source(entry)
             self._stack.setCurrentWidget(self._tile_map)
             self._calibrate_btn.setEnabled(False)
             self._zoom_panel.setParent(self._tile_map)

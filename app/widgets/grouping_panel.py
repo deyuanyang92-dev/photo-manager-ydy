@@ -22,8 +22,10 @@ grouping_changed()
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import re
+import zipfile
 from typing import TYPE_CHECKING, Optional
 
 from PyQt6.QtCore import Qt, QSize, pyqtSignal
@@ -56,6 +58,47 @@ if TYPE_CHECKING:
 
 _JPG_EXTS = {".jpg", ".jpeg"}
 _TIFF_EXTS = {".tif", ".tiff"}
+
+
+def _archive_jpg_count(zip_path: str | None) -> int | None:
+    """Return archived JPG count for both plain-JPG and legacy manifest ZIPs."""
+    if not zip_path:
+        return None
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            jpg_count = sum(
+                1 for name in zf.namelist()
+                if Path(name).suffix.lower() in _JPG_EXTS
+            )
+            if jpg_count:
+                return jpg_count
+            with zf.open("manifest.json") as fh:
+                manifest = json.loads(fh.read().decode("utf-8"))
+    except Exception:
+        return None
+    files = manifest.get("files") if isinstance(manifest, dict) else None
+    return len(files) if isinstance(files, list) else None
+
+
+def _resolved_archive_zip(group: "Group") -> str | None:
+    """Return the registered ZIP or the same-stem ZIP beside the linked TIFF."""
+    explicit = getattr(group, "archive_zip", None)
+    if explicit:
+        return explicit
+    tiff_path = getattr(group, "composed_tiff_path", None)
+    if not tiff_path:
+        return None
+    candidate = Path(tiff_path).with_suffix(".zip")
+    return str(candidate) if candidate.is_file() else None
+
+
+def _is_composed_group(group: "Group") -> bool:
+    """Groups with finished output belong in the composed row workflow."""
+    return bool(
+        getattr(group, "composed_tiff_path", None)
+        or getattr(group, "archive_zip", None)
+        or getattr(group, "status", None) in {"composed", "organized"}
+    )
 
 
 def _paths_from_mime(event) -> list[str]:
@@ -244,28 +287,63 @@ class _ComposedRow(QFrame):
         tiff_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         lay.addWidget(tiff_lbl)
 
-        # JPG count badge
+        # JPG / archive state badge.  A composed row can have only a TIFF when
+        # the user imported a finished TIFF but has not linked the original JPGs.
         jpg_count = len(self._group.jpg_paths)
-        count_lbl = QLabel(f"{jpg_count} JPG")
+        archive_zip = _resolved_archive_zip(self._group)
+        archived_count = _archive_jpg_count(archive_zip)
+        if archive_zip:
+            count_text = (
+                f"已归档 {archived_count} JPG"
+                if archived_count is not None
+                else "已归档 ZIP"
+            )
+        elif jpg_count:
+            count_text = f"{jpg_count} JPG 待整理"
+        else:
+            count_text = "未关联 JPG"
+        count_lbl = QLabel(count_text)
         count_lbl.setObjectName("MutedSmall")
+        count_lbl.setToolTip(
+            "此组已关联原始 JPG，可整理归档。"
+            if jpg_count
+            else (
+                "已注册 ZIP 归档。"
+                if archive_zip
+                else "此组只有 TIF，尚未关联原始 JPG；请先把对应 JPG 加入组或注册已有 ZIP。"
+            )
+        )
         lay.addWidget(count_lbl)
 
         # Organise button
-        org_btn = QPushButton("整理")
+        org_btn = QPushButton("已整理" if archive_zip else "整理")
         org_btn.setObjectName("Primary")
         org_btn.setFixedHeight(28)
         icons.set_button_icon(org_btn, "mdi6.folder-zip-outline",
                               color=icons.TONE_ON_ACCENT, size=14)
-        org_btn.setToolTip("归档 JPG → ZIP，按设置删除 JPG")
+        org_btn.setEnabled(bool(jpg_count) and not bool(archive_zip))
+        org_btn.setToolTip(
+            "归档 JPG → ZIP，按设置删除 JPG"
+            if jpg_count and not archive_zip
+            else (
+                "本组已有 ZIP 归档。"
+                if archive_zip
+                else "无法整理：此组未关联 JPG 原片。"
+            )
+        )
         org_btn.clicked.connect(lambda: self.organise_clicked.emit(self._group.group_index))
         lay.addWidget(org_btn)
 
-        zip_btn = QPushButton()
+        zip_btn = QPushButton("换ZIP" if archive_zip else "注册ZIP")
         zip_btn.setObjectName("Ghost")
-        zip_btn.setFixedSize(30, 28)
+        zip_btn.setFixedHeight(28)
         icons.set_button_icon(zip_btn, "mdi6.folder-zip-outline",
                               color=icons.TONE_MUTED, size=15)
-        zip_btn.setToolTip("注册已有 ZIP 归档（不重新压缩）")
+        zip_btn.setToolTip(
+            "更换已注册 ZIP 归档（不重新压缩）"
+            if archive_zip
+            else "注册已有 ZIP 归档（不重新压缩）"
+        )
         zip_btn.clicked.connect(
             lambda: self.register_zip_clicked.emit(self._group.group_index)
         )
@@ -719,6 +797,7 @@ class _AutoGroupDropZone(QFrame):
             "选择 JPG / TIF 文件",
             start=self._picker_start_dir(),
             filter="图片 (*.jpg *.jpeg *.tif *.tiff);;所有文件 (*.*)",
+            sort_by_mtime=True,
         )
         if paths:
             self.files_dropped.emit(paths)
@@ -1259,16 +1338,15 @@ class GroupingPanel(QWidget):
         """Delete the group entirely (in-memory only, no file deletion).
 
         Mirrors web groupingDeleteGroup() app.js:5283–5289.
-        Composed-TIFF groups cannot be deleted without undo-compose first.
+        If a TIFF is associated, only the grouping record is removed; the
+        image file remains on disk. Use undo-compose for deliberate TIFF
+        deletion.
         """
         if not self._grouping:
             return
-        # Guard: refuse deletion of composed groups (caller should undo first)
         target = next((g for g in self._grouping.groups if g.group_index == group_index), None)
         if target is None:
             return
-        if target.composed_tiff_path:
-            return  # composed groups: caller must undo-compose first
         self._grouping.groups = [g for g in self._grouping.groups if g.group_index != group_index]
         self._renumber_default_angle_labels()
         self._selected_group_indexes.discard(group_index)
@@ -1334,16 +1412,15 @@ class GroupingPanel(QWidget):
             return
 
         groups = self._grouping.groups
-        display_numbers = {id(g): n for n, g in enumerate(groups, start=1)}
-
         draft = [
             g for g in groups
-            if g.status != "organized" and not getattr(g, "archive_zip", None)
+            if not _is_composed_group(g)
         ]
         composed = [
             g for g in groups
-            if g.status == "organized" or getattr(g, "archive_zip", None)
+            if _is_composed_group(g)
         ]
+        display_numbers = {id(g): n for n, g in enumerate(groups, start=1)}
 
         if draft:
             # 横向胶片条：草稿卡片并排，横向滚动；多角度组也不挤。
@@ -1540,6 +1617,7 @@ class GroupingPanel(QWidget):
                 "JPG (*.jpg *.jpeg *.JPG *.JPEG);;"
                 "TIFF (*.tif *.tiff *.TIF *.TIFF)"
             ),
+            sort_by_mtime=True,
         )
         if not paths:
             return

@@ -1,13 +1,13 @@
 """test_archive_service.py — TDD tests for archive_service.
 
 Tests the full archive pipeline:
-  - manifest generation
+  - plain JPG ZIP generation
   - ZIP creation + testzip
-  - djxl pre-delete safety checks
+  - SHA-256 pre-delete safety checks
   - TIFF never deleted
-  - delete_jpg=False (default) → no deletion
-  - All 4 preconditions satisfied → deletion happens
-  - djxl unavailable → no deletion even when delete_jpg=True
+  - delete_jpg=False → no deletion
+  - all ZIP preconditions satisfied → deletion happens
+  - legacy JXL restore behavior still works
 
 Oracle: archive.js:28-61, 150-168; compress.js:32-45.
 """
@@ -32,6 +32,7 @@ from app.services.archive_service import (
     reset_tool_cache,
     restore_archive,
     verify_manifest_complete,
+    verify_jpg_zip_complete,
     verify_jxl_recoverable,
     CheckResult,
     RestoreResult,
@@ -185,9 +186,7 @@ class TestArchiveGroup:
         """Default workflow removes loose JPG after exact archive verification."""
         jpg = _make_jpg(self.tmpdir, "img001.jpg")
         tiff = _make_tiff(self.tmpdir, "result.tif")
-        with patch("app.services.archive_service.has_cjxl", return_value=False), \
-             patch("app.services.archive_service.has_djxl", return_value=True):
-            result = archive_group([jpg], tiff, self.tmpdir)
+        result = archive_group([jpg], tiff, self.tmpdir)
         assert result.ok
         assert result.delete_jpg is True
         assert not os.path.isfile(jpg)
@@ -196,74 +195,60 @@ class TestArchiveGroup:
         """TIFF must never be deleted under any circumstances."""
         jpg = _make_jpg(self.tmpdir, "img001.jpg")
         tiff = _make_tiff(self.tmpdir, "result.tif")
-        # Even with delete_jpg=True, TIFF must survive
-        with patch("app.services.archive_service.has_cjxl", return_value=False):
-            with patch("app.services.archive_service.has_djxl", return_value=False):
-                result = archive_group([jpg], tiff, self.tmpdir, delete_jpg=True)
+        result = archive_group([jpg], tiff, self.tmpdir, delete_jpg=True)
         assert os.path.isfile(tiff), "TIFF must NEVER be deleted"
 
     def test_zip_created(self):
         """A ZIP file must be created."""
         jpg = _make_jpg(self.tmpdir, "img_zip_test.jpg")
         tiff = _make_tiff(self.tmpdir, "result_zip.tif")
-        with patch("app.services.archive_service.has_cjxl", return_value=False):
-            result = archive_group([jpg], tiff, self.tmpdir)
+        result = archive_group([jpg], tiff, self.tmpdir)
         assert result.ok
         assert os.path.isfile(result.zip_path)
 
-    def test_zip_contains_manifest(self):
-        """ZIP must contain manifest.json."""
+    def test_zip_contains_only_user_facing_jpgs(self):
+        """Manual ZIP extraction must show JPGs directly, not internal files."""
         jpg = _make_jpg(self.tmpdir, "img_manifest.jpg")
         tiff = _make_tiff(self.tmpdir, "result_manifest.tif")
-        with patch("app.services.archive_service.has_cjxl", return_value=False):
-            result = archive_group([jpg], tiff, self.tmpdir)
+        result = archive_group([jpg], tiff, self.tmpdir, delete_jpg=False)
         with zipfile.ZipFile(result.zip_path, "r") as zf:
-            assert "manifest.json" in zf.namelist()
+            names = zf.namelist()
+        assert names == ["img_manifest.jpg"]
+        assert "manifest.json" not in names
+        assert not any(name.lower().endswith(".jxl") for name in names)
 
     def test_manifest_contains_correct_fields(self):
-        """Manifest must have version, files, format=jxl-lossless."""
+        """In-memory manifest remains available for UI/status, but is not zipped."""
         jpg = _make_jpg(self.tmpdir, "img_mfield.jpg")
         tiff = _make_tiff(self.tmpdir, "result_mfield.tif")
-        with patch("app.services.archive_service.has_cjxl", return_value=False):
-            result = archive_group([jpg], tiff, self.tmpdir)
+        result = archive_group([jpg], tiff, self.tmpdir, delete_jpg=False)
         manifest = result.manifest
-        assert manifest["version"] == 1
-        assert manifest["format"] == "jxl-lossless"
+        assert manifest["version"] == 2
+        assert manifest["format"] == "jpg-zip"
         assert isinstance(manifest["files"], list)
         assert len(manifest["files"]) == 1
         assert manifest["files"][0]["originalName"] == "img_mfield.jpg"
+        assert manifest["files"][0]["archiveName"] == "img_mfield.jpg"
 
-    def test_djxl_unavailable_prevents_jpg_deletion(self):
-        """djxl absent → delete_jpg=True still does NOT delete JPGs."""
+    def test_djxl_unavailable_does_not_block_plain_jpg_zip_deletion(self):
+        """Plain JPG ZIP verification does not depend on djxl."""
         jpg = _make_jpg(self.tmpdir, "img_safe.jpg")
         tiff = _make_tiff(self.tmpdir, "result_safe.tif")
-        with patch("app.services.archive_service.has_cjxl", return_value=False):
-            with patch("app.services.archive_service.has_djxl", return_value=False):
-                result = archive_group([jpg], tiff, self.tmpdir, delete_jpg=True)
+        with patch("app.services.archive_service.has_djxl", return_value=False):
+            result = archive_group([jpg], tiff, self.tmpdir, delete_jpg=True)
         assert result.ok
-        assert result.delete_jpg is False, "djxl absent → must not delete"
-        assert os.path.isfile(jpg), "JPG must survive when djxl absent"
-        assert "djxl" in result.deletion_skipped_reason.lower()
+        assert result.delete_jpg is True
+        assert not os.path.isfile(jpg)
 
     def test_all_preconditions_met_deletes_jpg(self, tmp_path):
-        """All 4 preconditions satisfied → JPG is deleted."""
+        """All ZIP preconditions satisfied → JPG is deleted."""
         jpg = _make_jpg(str(tmp_path), "delete_me.jpg")
         tiff = _make_tiff(str(tmp_path), "result_del.tif")
 
-        def fake_djxl_run(cmd, **kwargs):
-            # Simulate djxl successfully restoring: create a non-empty output file
-            out_path = cmd[2]  # djxl <jxl> <out>
-            with open(out_path, "wb") as f:
-                f.write(b"\xff\xd8\xff" + b"\x00" * 50)  # fake restored JPEG
-            return MagicMock(returncode=0)
-
-        with patch("app.services.archive_service.has_cjxl", return_value=False):
-            with patch("app.services.archive_service.has_djxl", return_value=True):
-                with patch("subprocess.run", side_effect=fake_djxl_run):
-                    result = archive_group([jpg], tiff, str(tmp_path), delete_jpg=True)
+        result = archive_group([jpg], tiff, str(tmp_path), delete_jpg=True)
 
         assert result.ok
-        assert result.delete_jpg is True, "All preconditions met → should delete JPG"
+        assert result.delete_jpg is True, "All ZIP preconditions met → should delete JPG"
         assert not os.path.isfile(jpg), "JPG must be deleted after all checks pass"
         assert os.path.isfile(tiff), "TIFF must survive"
 
@@ -283,16 +268,14 @@ class TestArchiveGroup:
         """ZIP must be larger than 32 bytes."""
         jpg = _make_jpg(self.tmpdir, "img_size.jpg")
         tiff = _make_tiff(self.tmpdir, "r_size.tif")
-        with patch("app.services.archive_service.has_cjxl", return_value=False):
-            result = archive_group([jpg], tiff, self.tmpdir)
+        result = archive_group([jpg], tiff, self.tmpdir)
         assert result.zip_size > 32
 
     def test_zip_integrity_check(self):
         """ZIP must pass testzip (no corruption)."""
         jpg = _make_jpg(self.tmpdir, "img_integrity.jpg")
         tiff = _make_tiff(self.tmpdir, "r_integrity.tif")
-        with patch("app.services.archive_service.has_cjxl", return_value=False):
-            result = archive_group([jpg], tiff, self.tmpdir)
+        result = archive_group([jpg], tiff, self.tmpdir)
         with zipfile.ZipFile(result.zip_path, "r") as zf:
             bad = zf.testzip()
             assert bad is None, f"ZIP corruption detected: {bad}"
@@ -338,8 +321,6 @@ class TestRestoreArchive:
 
     def test_roundtrip_lossless(self):
         """archive_group → restore_archive must return bit-exact original JPGs."""
-        if not (has_cjxl() and has_djxl()):
-            pytest.skip("cjxl/djxl 不可用，跳过往返无损测试")
         srcdir = os.path.join(self.tmpdir, "src")
         a = _make_jpg(srcdir, "img001.jpg")
         b = _make_jpg(srcdir, "img002.jpg")

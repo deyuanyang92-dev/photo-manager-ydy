@@ -1,9 +1,8 @@
 """supp_compression_worker.py — QThread for non-blocking 补处理 archival.
 
-Wraps app.services.archive_service.archive_group so that compressing N JPGs to
-JXL never blocks the UI. Contains NO safety / sha logic of its own — every
-red-line gate (TIFF never deleted, 4 deletion preconditions, cjxl flags) lives
-inside archive_group and is reached only through it.
+Wraps app.services.archive_service.archive_group so that packing N JPGs into
+ZIP never blocks the UI. Contains NO safety / sha logic of its own — every
+delete gate lives inside archive_group and is reached only through it.
 
 Mirrors the HeliconWorker pattern (QThread + Qt signals for thread-safe
 result delivery).
@@ -29,6 +28,7 @@ class SuppCompressionWorker(QThread):
         delete_jpg: bool = True,
         method: str = "standard",
         concurrency: int = 4,
+        output_dir: str | None = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -38,6 +38,7 @@ class SuppCompressionWorker(QThread):
         self._delete_jpg = bool(delete_jpg)
         self._method = method
         self._concurrency = max(1, min(8, int(concurrency)))
+        self._output_dir = output_dir
 
     def run(self) -> None:
         try:
@@ -54,6 +55,7 @@ class SuppCompressionWorker(QThread):
                 method=self._method,
                 concurrency=self._concurrency,
                 progress_callback=self.progress.emit,
+                output_dir=self._output_dir,
             )
             self.finished.emit(result)
         except Exception as exc:  # noqa: BLE001 — surface any failure to the UI

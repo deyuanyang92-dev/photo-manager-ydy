@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 from pathlib import Path
 from typing import Optional
@@ -432,17 +433,18 @@ class _AutoGroupSourceDialog(QDialog):
         lay.setSpacing(12)
 
         hint = QLabel(
-            "暂存区没有照片。请选择 JPG / TIF 从哪里来："
+            "暂存区没有照片。可以直接整理已有照片文件夹；"
+            "只有需要项目化管理时才选择项目。"
         )
         hint.setWordWrap(True)
         lay.addWidget(hint)
 
-        folder_btn = QPushButton("选择文件夹…")
+        folder_btn = QPushButton("选择照片文件夹（默认）…")
         folder_btn.setObjectName("Outline")
         folder_btn.clicked.connect(self._choose_folder)
         lay.addWidget(folder_btn)
 
-        project_btn = QPushButton("选择项目…")
+        project_btn = QPushButton("选择或创建项目…")
         project_btn.setObjectName("Outline")
         project_btn.clicked.connect(self._choose_project)
         lay.addWidget(project_btn)
@@ -525,8 +527,12 @@ class WorkbenchView(BaseView):
         self._sidebar.setMinimumWidth(250)
         self._sidebar.setMaximumWidth(330)
         self._sidebar.specimen_selected.connect(self._on_specimen_selected)
+        self._sidebar.show_all_requested.connect(self._on_show_all_results)
         self._sidebar.activate_requested.connect(self._on_sidebar_activate)
         self._sidebar.deactivate_requested.connect(self._on_sidebar_deactivate)
+        self._sidebar.activate_no_selection.connect(
+            lambda: self._status_message("请先在左侧选中要激活的编号。")
+        )
         self._sidebar.new_specimen_requested.connect(self._on_new_specimen)
         self._sidebar.collab_manager_requested.connect(self._on_open_collab_panel)
         self._sidebar.print_labels_requested.connect(self._on_print_labels)
@@ -621,6 +627,7 @@ class WorkbenchView(BaseView):
         # at-a-glance compose/compress state.
         self._results = ResultsColumn()
         self._results.restore_requested.connect(self._on_restore_archive)
+        self._results.specimen_requested.connect(self._on_specimen_selected)
         centre.addWidget(self._results)
 
         centre.setSizes([440, 360])
@@ -656,8 +663,12 @@ class WorkbenchView(BaseView):
         # 卡1 照片编号
         self._naming = NamingPanel(self.ctx)
         self._naming.save_requested.connect(self._on_naming_save)
+        self._naming.add_requested.connect(self._on_naming_add)
+        self._naming.update_requested.connect(self._on_naming_update_results)
         self._naming.delete_requested.connect(self._confirm_delete_specimen)
+        self._naming.uid_generated.connect(self._on_naming_uid_generated)
         self._naming.uid_corrected.connect(self._on_uid_corrected)
+        self._naming.storage_applied.connect(self._on_naming_storage_applied)
         self._naming.open_project_settings.connect(self._on_open_settings)
         self._naming.keys_committed.connect(self._apply_collection_autofill)
         right_lay.addWidget(self._naming)           # natural height, no compress
@@ -978,6 +989,59 @@ class WorkbenchView(BaseView):
         self._current_uid = uid
         self._load_specimen(uid)
         self._refresh_batch_header()
+
+    def _on_show_all_results(self) -> None:
+        """Show organized results for every specimen in the current project."""
+        db = self.ctx.get_db()
+        project_dir = self.ctx.current_project_dir
+        if not db or not project_dir:
+            self._results.clear()
+            return
+        try:
+            rows = db.execute(
+                """
+                SELECT uid
+                FROM specimens
+                WHERE owner_project_dir = ?
+                ORDER BY uid
+                """,
+                (project_dir,),
+            ).fetchall()
+            uids = [
+                str(row["uid"] if hasattr(row, "keys") else row[0])
+                for row in rows
+            ]
+        except Exception:
+            uids = []
+
+        groups: list[dict] = []
+        try:
+            from app.services.grouping_service import load_grouping
+            from app.services.specimen_rename_service import (
+                repair_grouping_result_files_for_uid,
+            )
+
+            for uid in uids:
+                try:
+                    repair_grouping_result_files_for_uid(db, uid)
+                    grouping = load_grouping(db, uid)
+                except Exception:
+                    continue
+                tiffs, zips = self._result_infos_from_grouping(grouping)
+                if tiffs or zips:
+                    groups.append({"uid": uid, "tiffs": tiffs, "zips": zips})
+        except Exception:
+            groups = []
+
+        self._results.load_many(groups)
+        result_count = sum(
+            len({item.get("seq") or item.get("path") or item.get("name")
+                 for item in g.get("tiffs", []) + g.get("zips", [])})
+            for g in groups
+        )
+        self._status_message(
+            f"已展示全部成果：{len(groups)} 个编号，{result_count} 项。"
+        )
 
     def _on_edit_specimen_requested(self, uid: str) -> None:
         """Compatibility entry used by the sidebar edit action."""
@@ -1652,16 +1716,108 @@ class WorkbenchView(BaseView):
     def _status_message(self, text: str, msec: int = 4000) -> None:
         ui.show_status(self, text, msec)
 
+    def _on_naming_uid_generated(self, uid: str) -> None:
+        """Treat the current/active specimen UID as the row being edited.
+
+        The naming card emits the specimen voucher UID while the result sequence
+        can still change from 1 to 2, 3...  That must not be interpreted as a
+        duplicate specimen when the left sidebar already shows the same UID as
+        the current active/editing target.
+        """
+        text = str(uid or "").strip()
+        if not text:
+            return
+        current_uid = self._current_uid
+        active_uid = self._get_active_uid()
+        if current_uid:
+            if text != current_uid:
+                return
+        elif text != active_uid:
+            return
+        db = self.ctx.get_db()
+        if not db:
+            return
+        try:
+            row = db.execute("SELECT 1 FROM specimens WHERE uid = ?", (text,)).fetchone()
+        except Exception:
+            row = None
+        if row:
+            self._naming.acknowledge_existing_uid(text)
+
     def _on_uid_corrected(self, old_uid: str, new_uid: str) -> None:
         """Handle UID change after storage correction in NamingPanel.
 
-        Updates _current_uid and refreshes the sidebar.
+        Updates _current_uid, refreshes the sidebar, and reloads migrated results.
         """
         if self._current_uid == old_uid:
             self._current_uid = new_uid
         self._sidebar.refresh()
         if new_uid:
             self._sidebar.select_uid(new_uid)
+        db = self.ctx.get_db()
+        if db and new_uid:
+            try:
+                from app.services.specimen_rename_service import (
+                    repair_grouping_result_files_for_uid,
+                )
+                from app.services.grouping_service import load_grouping
+
+                repair_grouping_result_files_for_uid(db, new_uid)
+                grouping = load_grouping(db, new_uid)
+                self._grouping.load_grouping(new_uid, grouping)
+                self._refresh_results_column(new_uid, grouping)
+            except Exception:
+                self._refresh_results_column(new_uid, None)
+        self._naming.refresh_legacy_photo_notes()
+        self._try_bind_adhoc_to_existing_specimen(new_uid or self._naming.current_uid())
+        if self._sync_grouping_outputs_from_naming():
+            self._status_message("保存方式已写入编号，待整理输出名已同步更新。")
+        else:
+            self._status_message("保存方式已写入编号，成果文件名已同步更新。")
+
+    def _claim_current_grouping_for_saved_uid(self, uid: str) -> bool:
+        """Attach the currently-open temporary grouping to a newly saved UID.
+
+        Users often create groups before they have saved the voucher number.
+        In that flow the grouping panel is backed by the ad-hoc placeholder;
+        once the right rail is saved, the visible groups must move with the
+        new specimen so the sidebar progress and later organise actions target
+        the real UID.
+        """
+        text = str(uid or "").strip()
+        if not text:
+            return False
+        db = self.ctx.get_db()
+        if not db:
+            return False
+
+        grouping = getattr(self._grouping, "_grouping", None)
+        if grouping is None:
+            return False
+
+        panel_uid = getattr(self._grouping, "_uid", None)
+        groups = list(getattr(grouping, "groups", []) or [])
+
+        from app.services.grouping_service import (
+            ADHOC_GROUPING_UID,
+            SpecimenGrouping,
+            save_grouping,
+        )
+
+        if panel_uid == text:
+            self._sync_grouping_outputs_from_naming()
+            save_grouping(db, text, groups, clean_phantoms=False)
+            return False
+
+        if panel_uid != ADHOC_GROUPING_UID or not groups:
+            return False
+
+        self._grouping.load_grouping(text, SpecimenGrouping(uid=text, groups=groups))
+        self._sync_grouping_outputs_from_naming()
+        save_grouping(db, text, groups, clean_phantoms=False)
+        with db:
+            db.execute("DELETE FROM grouping WHERE uid = ?", (ADHOC_GROUPING_UID,))
+        return True
 
     def _on_naming_save(self) -> None:
         """Persist the naming panel's current UID into the specimens table.
@@ -1679,21 +1835,24 @@ class WorkbenchView(BaseView):
         if not uid:
             self._status_message("编号尚未填写完整。")
             return
+        dlg_parent = self._grouping_ui_parent()
         missing_required = [
             field for field in self._naming.missing_required_fields()
             if field not in ("采集日期", "拍照日期")
         ]
         if missing_required:
+            self._status_message("编号信息未填写完整：" + "、".join(missing_required))
             QMessageBox.warning(
-                self,
+                dlg_parent,
                 "编号信息未填写完整",
                 "请先补全必填字段：" + "、".join(missing_required),
             )
             self._naming._check_compliance(uid)
             return
+        persisted_uid = self._naming.persisted_uid()
         old_uid = (
-            self._current_uid
-            if self._current_uid and self._current_uid != uid
+            persisted_uid
+            if persisted_uid and persisted_uid != uid
             else None
         )
         old_raw: dict = {}
@@ -1710,7 +1869,7 @@ class WorkbenchView(BaseView):
         # （兼容采集日期确实未知的标本——编号自动少一段）。默认「返回填写」。
         if not self._naming._collection_date.text().strip():
             reply = QMessageBox.question(
-                self, "采集日期未填",
+                dlg_parent, "采集日期未填",
                 "采集日期是编号核心字段，会写入唯一编号。\n\n"
                 "未知可留空继续（编号自动少日期段），或返回填写。",
                 QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Cancel,
@@ -1733,32 +1892,39 @@ class WorkbenchView(BaseView):
             _current_resolved = str(Path(project_dir).resolve())
         except OSError:
             _current_resolved = project_dir
-        _other_hits = [
-            h for h in _catalog.find_uid(
+        _other_hits = []
+        if persisted_uid != uid:
+            for h in _catalog.find_uid(
                 uid,
                 current_project_dir=project_dir,
                 current_project_root=getattr(self.ctx, "current_project_root", None),
-            )
-            if h.project_dir != _current_resolved
-        ]
+            ):
+                try:
+                    hit_resolved = str(Path(h.project_dir).resolve())
+                except OSError:
+                    hit_resolved = h.project_dir
+                if hit_resolved != _current_resolved:
+                    _other_hits.append(h)
         _local_owner = db.execute(
             "SELECT owner_project_dir FROM specimens WHERE uid=?", (uid,)
         ).fetchone()
         _local_cover = (
             _local_owner is not None
-            and self._current_uid is not None
-            and self._current_uid != uid
+            and persisted_uid
+            and persisted_uid != uid
         )
         if _other_hits:
+            self._status_message(f"编号已被占用：{uid}")
             QMessageBox.warning(
-                self, "编号已被占用",
+                dlg_parent, "编号已被占用",
                 "⚠ " + _catalog.format_uid_conflict(uid, _other_hits),
             )
             self._naming.show_dup_warn(True)
             return
         if _local_cover:
+            self._status_message(f"编号已存在于本项目：{uid}")
             QMessageBox.warning(
-                self, "编号已被占用",
+                dlg_parent, "编号已被占用",
                 f"⚠ 编号 {uid} 已存在于本项目（另一个标本），不能覆盖。请修改字段后再保存。",
             )
             self._naming.show_dup_warn(True)
@@ -1776,8 +1942,9 @@ class WorkbenchView(BaseView):
             if not is_local:
                 ok, msg = svc.create_task(uid, assignee=self._collab_operator())
                 if not ok:
+                    self._status_message(f"协作编号占用：{uid}")
                     QMessageBox.warning(
-                        self, "编号已被占用",
+                        dlg_parent, "编号已被占用",
                         f"编号 {uid} 已被占用：{msg}\n请改用其他编号后再保存。",
                     )
                     self._naming._apply_sequence_suggestion()
@@ -1818,7 +1985,6 @@ class WorkbenchView(BaseView):
                     project_dir,
                 ),
             )
-            db.commit()
             if collection_date and not n._collection_date.text().strip():
                 n._collection_date.setText(collection_date)
             if photo_date and not n._photo_date.text().strip():
@@ -1830,9 +1996,12 @@ class WorkbenchView(BaseView):
             # _current_uid（行已存在），再调 _on_save_metadata 把右栏一并入库，
             # 使「保存」= 存全部。
             self._current_uid = uid
-            self._on_save_metadata(uid, reload=False)
+            self._on_save_metadata(uid, reload=False, commit=False)
             if old_uid:
                 self._finalize_uid_rename(old_uid, uid, old_raw)
+            claimed_grouping = self._claim_current_grouping_for_saved_uid(uid)
+            db.commit()
+            self._naming.acknowledge_existing_uid(uid)
             self._sidebar.refresh()
             self._sidebar.select_uid(uid)
             # 「新建编号后自动激活」开关（默认关，复刻 oracle
@@ -1840,8 +2009,203 @@ class WorkbenchView(BaseView):
             # 当前激活标本，省去手动点激活；关则不动激活（守 oracle 默认）。
             if bool(getattr(self.ctx.settings, "auto_activate_on_new_specimen", False)):
                 self._on_sidebar_activate(uid)
+            elif claimed_grouping:
+                self._status_message(f"已添加到左侧并绑定当前分组：{uid}")
+            else:
+                self._status_message(f"已保存编号：{uid}")
         except Exception as exc:
-            QMessageBox.warning(self, "保存失败", str(exc))
+            self._status_message(f"保存失败：{exc}")
+            QMessageBox.warning(dlg_parent, "保存失败", str(exc))
+
+    def _on_naming_add(self) -> None:
+        """Add the visible voucher as a new/current specimen, without renaming old."""
+        self._naming.mark_current_values_as_new()
+        self._current_uid = None
+        self._on_naming_save()
+
+    def _on_naming_update_results(self) -> None:
+        """Save current naming fields, then rename registered result TIFF/ZIP files."""
+        uid = self._naming.current_uid()
+        if not uid:
+            self._status_message("编号尚未填写完整，无法更新成果文件名。")
+            return
+
+        self._on_naming_save()
+        persisted_uid = self._naming.persisted_uid()
+        if persisted_uid != uid:
+            self._status_message("编号尚未成功保存，未更新成果文件名。")
+            return
+
+        try:
+            changed = self._sync_result_files_to_current_naming(persisted_uid)
+        except Exception as exc:
+            self._status_message(f"成果文件名更新失败：{exc}")
+            QMessageBox.warning(self._grouping_ui_parent(), "成果文件名更新失败", str(exc))
+            return
+
+        if changed:
+            self._status_message(f"已更新 {changed} 个成果文件名。")
+        else:
+            self._status_message("成果文件名已是当前编号，无需更新。")
+
+    def _current_naming_result_values(self) -> dict[str, str]:
+        from app.utils.naming import coalesce_specimen_dates, specimen_date_seg
+
+        collection_date, photo_date = coalesce_specimen_dates(
+            self._naming._collection_date.text().strip(),
+            self._naming._photo_date.text().strip(),
+        )
+        return {
+            "province": self._naming._province.text().strip(),
+            "site": self._naming._site.text().strip(),
+            "station": self._naming._station.text().strip(),
+            "species_id": self._naming._species_id.text().strip(),
+            "storage": self._naming._storage.text().strip(),
+            "date_seg": specimen_date_seg(collection_date, photo_date),
+            "collection_date": collection_date,
+            "photo_date": photo_date,
+        }
+
+    def _suggest_current_result_filename(
+        self,
+        path: Path,
+        *,
+        components: list[str],
+        values: dict[str, str],
+        seq: int,
+    ) -> tuple[str, str]:
+        """Return (filename, parsed_uid) for *path* under current naming fields."""
+        from app.utils.naming import recognize_tiff_filename, suggest_tiff_filename_preserve_legacy
+
+        rec = recognize_tiff_filename(path.stem, components)
+        parsed_uid = rec.uid if rec else ""
+        effective_seq = rec.sequence if rec else seq
+        if rec:
+            stem = suggest_tiff_filename_preserve_legacy(
+                path.stem,
+                components,
+                values,
+                seq=effective_seq,
+            )
+        else:
+            stem = self._naming.suggested_result_stem(seq=effective_seq)
+        return stem + path.suffix, parsed_uid
+
+    def _sync_result_files_to_current_naming(self, uid: str) -> int:
+        """Rename registered result files for *uid* to match the right-rail naming."""
+        db = self.ctx.get_db()
+        if not db:
+            return 0
+
+        grouping = self._get_grouping_for_uid(uid)
+        if grouping is None or not getattr(grouping, "groups", None):
+            return 0
+
+        components = self._load_naming_components()
+        values = self._current_naming_result_values()
+        plans: list[tuple[Path, Path, str, str]] = []
+        planned_sources: set[Path] = set()
+        group_updates: dict[int, dict[str, str]] = {}
+
+        def _plan(src: Path, dst: Path, old_uid: str = "", new_uid: str = "") -> None:
+            if src == dst:
+                return
+            if not src.is_file():
+                return
+            plans.append((src, dst, old_uid, new_uid))
+            planned_sources.add(src)
+
+        for group in grouping.groups:
+            try:
+                fallback_seq = int(
+                    getattr(group, "result_sequence", None)
+                    or getattr(group, "group_index", 0) + 1
+                )
+            except (TypeError, ValueError):
+                fallback_seq = int(getattr(group, "group_index", 0) or 0) + 1
+
+            updates: dict[str, str] = {}
+            tiff_path_text = getattr(group, "composed_tiff_path", None) or ""
+            tiff_path = Path(tiff_path_text) if tiff_path_text else None
+            new_tiff_path = None
+            old_uid_for_group = ""
+
+            if tiff_path and tiff_path.is_file():
+                new_name, old_uid_for_group = self._suggest_current_result_filename(
+                    tiff_path,
+                    components=components,
+                    values=values,
+                    seq=fallback_seq,
+                )
+                new_tiff_path = tiff_path.with_name(new_name)
+                _plan(tiff_path, new_tiff_path, old_uid_for_group, uid)
+                updates["composed_tiff_path"] = str(new_tiff_path)
+                updates["output_name"] = new_tiff_path.stem
+
+            zip_paths: list[Path] = []
+            archive_zip = getattr(group, "archive_zip", None) or ""
+            if archive_zip:
+                zip_paths.append(Path(archive_zip))
+            if tiff_path:
+                sibling_zip = tiff_path.with_suffix(".zip")
+                if sibling_zip.is_file() and sibling_zip not in zip_paths:
+                    zip_paths.append(sibling_zip)
+
+            for zip_path in zip_paths:
+                if not zip_path.is_file():
+                    continue
+                if new_tiff_path is not None and tiff_path and zip_path.stem == tiff_path.stem:
+                    new_zip_path = new_tiff_path.with_suffix(".zip")
+                else:
+                    new_zip_name, zip_old_uid = self._suggest_current_result_filename(
+                        zip_path,
+                        components=components,
+                        values=values,
+                        seq=fallback_seq,
+                    )
+                    old_uid_for_group = old_uid_for_group or zip_old_uid
+                    new_zip_path = zip_path.with_name(new_zip_name)
+                _plan(zip_path, new_zip_path, old_uid_for_group, uid)
+                updates["archive_zip"] = str(new_zip_path)
+
+            if updates:
+                group_updates[int(getattr(group, "group_index", 0) or 0)] = updates
+
+        seen_targets: set[Path] = set()
+        for src, dst, _old_uid, _new_uid in plans:
+            if dst.exists() and dst != src and dst not in planned_sources:
+                raise ValueError(f"目标文件已存在，无法更新：{dst}")
+            if dst in seen_targets:
+                raise ValueError(f"多个成果会写到同一个目标文件，已中止：{dst}")
+            seen_targets.add(dst)
+
+        from app.services.specimen_rename_service import _rewrite_zip_manifest
+
+        changed = 0
+        for src, dst, old_uid, new_uid in plans:
+            if src == dst:
+                continue
+            os.replace(str(src), str(dst))
+            changed += 1
+            if dst.suffix.lower() == ".zip" and old_uid and new_uid and old_uid != new_uid:
+                _rewrite_zip_manifest(str(dst), old_uid, new_uid)
+
+        if group_updates:
+            for group in grouping.groups:
+                updates = group_updates.get(int(getattr(group, "group_index", 0) or 0))
+                if not updates:
+                    continue
+                if "composed_tiff_path" in updates:
+                    group.composed_tiff_path = updates["composed_tiff_path"]
+                if "archive_zip" in updates:
+                    group.archive_zip = updates["archive_zip"]
+                if "output_name" in updates:
+                    group.output_name = updates["output_name"]
+            self._save_grouping_for_uid(uid, grouping.groups)
+            grouping = self._get_grouping_for_uid(uid)
+            self._refresh_results_column(uid, grouping)
+
+        return changed
 
     def _finalize_uid_rename(self, old_uid: str, new_uid: str, old_raw: Optional[dict] = None) -> None:
         """Move DB references after right-rail editing changes the generated UID."""
@@ -1954,25 +2318,31 @@ class WorkbenchView(BaseView):
         dlg.raise_()
         dlg.activateWindow()
 
+    def _load_temporary_grouping_task(self, label: str = "未命名（临时分组）") -> None:
+        """Bind the grouping editor to a fresh unassigned task."""
+        from app.services.grouping_service import ADHOC_GROUPING_UID, SpecimenGrouping
+
+        self._grouping.load_grouping(
+            ADHOC_GROUPING_UID,
+            SpecimenGrouping(uid=ADHOC_GROUPING_UID, groups=[]),
+        )
+        self._grouping._uid_label.setText(label)
+        self._grouping._target_label.setText("临时")
+
     def _on_open_grouping(self) -> None:
         """Open (or re-focus) the grouping/compose popup — web 分组工具 toggle.
 
         智能：打开时若分组面板还没绑定标本，自动取一个编号：
-        当前载入 → 激活编号 → 连编号都没有则临时分组。**命名表单未激活的草稿编号不
-        再绑定/显示**（用户：没激活不用显示）——此前回退到命名草稿的档已砍，与 web
-        oracle `namingTargetSpecimen` 分道，桌面端有意取舍。
+        当前正在右侧编辑的编号 → 激活编号 → 连编号都没有则临时分组。激活只决定
+        新拍照片归属；分组编辑应跟随用户当前选中/正在保存的编号。
         """
-        if not getattr(self._grouping, "_uid", None):
-            from app.services.grouping_service import (
-                ADHOC_GROUPING_UID,
-                SpecimenGrouping,
-                load_grouping,
-            )
-            uid = (
-                self._current_uid
-                or self._get_active_uid()
-                or ADHOC_GROUPING_UID  # 没载入也没激活 → 临时分组,输出默认 组序.tif
-            )
+        from app.services.grouping_service import (
+            ADHOC_GROUPING_UID,
+            SpecimenGrouping,
+            load_grouping,
+        )
+        uid = self._current_uid or self._get_active_uid() or ADHOC_GROUPING_UID
+        if getattr(self._grouping, "_uid", None) != uid:
             db = self.ctx.get_db()
             try:
                 if db:
@@ -1986,10 +2356,40 @@ class WorkbenchView(BaseView):
                     self._grouping._target_label.setText("临时")
             except Exception:
                 pass
+        self._recognize_first_grouping_tiff(getattr(self._grouping, "_grouping", None))
         dlg = self._grouping_dialog
         dlg.show()
         dlg.raise_()
         dlg.activateWindow()
+
+    def _reset_to_unassigned_task(self) -> None:
+        """Clear specimen-bound UI after deactivation and start a fresh temp task."""
+        self._current_uid = None
+        self._pending_grouping = None
+        try:
+            self._save_timer.stop()
+            self._rail_save_timer.stop()
+        except Exception:
+            pass
+
+        self._naming.load_specimen({})
+        try:
+            self._metadata.clear()
+            self._taxon_card.clear()
+            self._apply_draft_project_defaults()
+        except Exception:
+            pass
+
+        try:
+            self._results.clear()
+        except Exception:
+            pass
+
+        # A deactivated workspace is a new unassigned task from the user's
+        # point of view. Keep any old DB rows untouched until the user edits,
+        # but do not show/reuse them for the next "新组" action.
+        self._load_temporary_grouping_task("未命名（新任务）")
+        self._refresh_batch_header()
 
     def _toggle_right_rail(self) -> None:
         """Collapse/expand the whole naming rail (web rightPanelCollapsed)."""
@@ -2021,10 +2421,16 @@ class WorkbenchView(BaseView):
         if not db:
             return
 
-        # Load grouping
+        # Load grouping.  Group editing follows the selected/right-rail specimen;
+        # activation only controls capture attribution.
         grouping = None
         try:
+            from app.services.specimen_rename_service import (
+                repair_grouping_result_files_for_uid,
+            )
             from app.services.grouping_service import load_grouping
+
+            repair_grouping_result_files_for_uid(db, uid)
             grouping = load_grouping(db, uid)
             self._grouping.load_grouping(uid, grouping)
         except Exception:
@@ -2055,8 +2461,11 @@ class WorkbenchView(BaseView):
                 self._taxon_card.load_specimen(sp)
                 self._sync_uid_display_summary()
                 self._collab_card.load_specimen(uid)
+            else:
+                self._load_naming_from_uid(uid)
         except Exception:
             pass
+        self._recognize_first_grouping_tiff(grouping)
 
         # Populate ② 成果内容 column from grouping data
         self._refresh_results_column(uid, grouping)
@@ -2078,6 +2487,39 @@ class WorkbenchView(BaseView):
             self._backfill_personnel_defaults()
         except Exception:
             pass
+
+    def _load_naming_from_uid(self, uid: str) -> bool:
+        """Populate the naming card from a UID when no specimen row exists yet."""
+        from app.utils.naming import parse_uid
+
+        parsed = parse_uid(uid)
+        if not parsed:
+            return False
+        date_seg = str(parsed.get("dateSegment") or "")
+        collection_date = date_seg
+        photo_date = date_seg
+        if re.fullmatch(r"\d{8}-\d{4}", date_seg):
+            collection_date, tail = date_seg.split("-", 1)
+            photo_date = collection_date[:4] + tail
+        elif re.fullmatch(r"\d{8}-\d{8}", date_seg):
+            collection_date, photo_date = date_seg.split("-", 1)
+        self._naming.load_specimen({
+            "uid": uid,
+            "province": parsed.get("province") or "",
+            "site": parsed.get("site") or "",
+            "station": parsed.get("station") or "",
+            "id": parsed.get("speciesId") or "",
+            "storage": parsed.get("storage") or "",
+            "collectionDate": collection_date,
+            "photoDate": photo_date,
+            "nextResultSequenceHint": parsed.get("resultSequence") or 1,
+        })
+        try:
+            self._metadata.clear()
+            self._taxon_card.clear()
+        except Exception:
+            pass
+        return True
 
     def _sync_uid_display_summary(self) -> None:
         """Mirror existing metadata into the UID card's non-identity summary."""
@@ -2234,9 +2676,9 @@ class WorkbenchView(BaseView):
     def _on_auto_compress_toggled(self, on: bool) -> None:
         if on:
             self._auto_known_tiffs = self._pending_tiff_paths(self._last_scan_result) if self._last_scan_result else set()
-            self._status_message("自动压缩已开启：只处理之后新出现的 TIFF")
+            self._status_message("自动归档已开启：只处理之后新出现的 TIFF")
         else:
-            self._status_message("自动压缩已关闭")
+            self._status_message("自动归档已关闭")
 
     def _maybe_auto_process_new_tiff(self, scan_result) -> None:
         try:
@@ -2253,7 +2695,7 @@ class WorkbenchView(BaseView):
 
         uid = self._get_active_uid()
         if not uid:
-            self._status_message("发现新 TIFF；请先激活编号后再自动压缩")
+            self._status_message("发现新 TIFF；请先激活编号后再自动归档")
             return
         jpg_paths = self._unoccupied_jpg_paths(uid, self._get_attributed_jpg_paths(uid))
         if not jpg_paths:
@@ -2264,7 +2706,7 @@ class WorkbenchView(BaseView):
         try:
             if self._organise_jpgs_with_tiff(jpg_paths, new_paths[0], silent=True):
                 self._auto_known_tiffs.add(new_paths[0])
-                self._status_message("新 TIFF 已自动压缩归档")
+                self._status_message("新 TIFF 已自动归档")
         finally:
             self._auto_tiff_busy = False
 
@@ -2302,7 +2744,10 @@ class WorkbenchView(BaseView):
         """
         project_dir = self.ctx.current_project_dir
         db = self.ctx.get_db()
-        if not project_dir or not db or not uid:
+        if not uid:
+            return
+        if not project_dir or not db:
+            self._status_message("请先打开一个项目工作区。")
             return
         try:
             from app.services.activation_service import activate as svc_activate
@@ -2322,6 +2767,7 @@ class WorkbenchView(BaseView):
                 self._set_phase(uid, "shooting")
             else:
                 self._refresh_batch_header()
+            self._status_message(f"已激活：{uid}", 4000)
             # 切换激活号提醒：旧号在其激活期间到达的照片仍归旧号，不会改归新号
             # (oracle app.js:3517-3520)。用状态栏提示（非阻塞 toast 等价）。
             if prev_uid and prev_uid != uid:
@@ -2355,9 +2801,12 @@ class WorkbenchView(BaseView):
         try:
             from app.services.activation_service import deactivate as svc_deactivate
             svc_deactivate(project_dir, db, uid)
+            if self._current_uid == uid or self._get_active_uid() is None:
+                self._reset_to_unassigned_task()
             self._sidebar.refresh()
             self._refresh_monitor()
             self._refresh_batch_header()
+            self._status_message(f"已取消激活：{uid}", 4000)
         except Exception as exc:
             QMessageBox.warning(self, "去激活失败", str(exc))
 
@@ -2638,11 +3087,24 @@ class WorkbenchView(BaseView):
 
         start_dir = self.ctx.current_project_dir or str(Path.home())
         if chooser.mode() == _AutoGroupSourceDialog.MODE_FOLDER:
-            return ui.get_existing_directory(
+            folder = ui.get_existing_directory(
                 parent,
                 "选择需要自动分组整理的 JPG / TIF 目录",
                 start=start_dir,
             )
+            if not folder:
+                return ""
+            try:
+                from app.services.project_service import enter_photo_folder
+                enter_photo_folder(self.ctx, folder)
+            except Exception as exc:
+                ui.warn(
+                    parent,
+                    "打开照片文件夹失败",
+                    f"无法在照片目录中保存管理数据：{exc}",
+                )
+                return ""
+            return folder
 
         project_dir = self._open_project_via_dialog(parent)
         if not project_dir:
@@ -2681,9 +3143,6 @@ class WorkbenchView(BaseView):
                     except Exception:
                         pass
                 self._refresh_monitor()
-                scan_folder = result.get("scanFolder") or ""
-                if scan_folder:
-                    self._offer_tiff_naming_check(scan_folder)
             return
 
         fallback_uid = getattr(self._grouping, "_uid", None)
@@ -2721,6 +3180,21 @@ class WorkbenchView(BaseView):
                 "（按修改时间排序，每个 TIF 前一批 JPG 为一组）。",
             )
             return
+
+        # Drag-dropped legacy photos have no folder picker.  When they all come
+        # from one directory, adopt that directory as a standalone photo folder
+        # so confirmed grouping is persisted beside the photos as well.
+        if not self.ctx.current_project_dir and result.get("scanFolder"):
+            try:
+                from app.services.project_service import enter_photo_folder
+                enter_photo_folder(self.ctx, result["scanFolder"])
+            except Exception as exc:
+                ui.warn(
+                    parent,
+                    "保存分组数据失败",
+                    f"无法在照片目录中创建 _data/project.db：{exc}",
+                )
+                return
 
         self._grouping.show_auto_group_preview(result)
         self._status_message(
@@ -3028,7 +3502,7 @@ class WorkbenchView(BaseView):
                     self._on_helicon_finished(uid)
                     QMessageBox.information(self, "合成完成", f"TIFF 已生成：{output_name}")
                     # 合成永远手动；但若「合成后自动整理」开关开 → 自动把源 JPG
-                    # 打包压缩+命名+移 results（省掉手动点[整理]）。开关默认关。
+                    # 打包归档+命名+移 results（省掉手动点[整理]）。开关默认关。
                     self._maybe_auto_organize(uid, group.group_index)
 
                 def _on_failed(msg: str):
@@ -3375,7 +3849,7 @@ class WorkbenchView(BaseView):
         *,
         silent: bool,
     ) -> bool:
-        """把已有 JPG + TIFF 登记成已合成组，然后走统一整理/压缩入口。"""
+        """把已有 JPG + TIFF 登记成已合成组，然后走统一整理/归档入口。"""
         db = self.ctx.get_db()
         project_dir = self.ctx.current_project_dir
         if not db or not project_dir:
@@ -3433,8 +3907,8 @@ class WorkbenchView(BaseView):
         """合成成功后的自动整理钩子。
 
         「合成后自动整理归档」开关（`auto_organize_after_compose`，默认关）打开时，
-        直接复用手动整理入口 `_on_organise_requested`：把这组源 JPG 打包压缩
-        (JPG→JXL+ZIP) + 命名 + 移到 results/。合成本身仍是手动（软件无法判断哪些
+        直接复用手动整理入口 `_on_organise_requested`：把这组源 JPG 打包归档
+        (JPG→ZIP) + 命名 + 移到 results/。合成本身仍是手动（软件无法判断哪些
         JPG 该合成）。整理的安全闸（整理门 / 同名 ZIP 覆盖确认）照常生效；常见情况
         （标本激活、无同名冲突）会直通无弹窗。绝不在此自动删 TIFF。
         """
@@ -3456,7 +3930,52 @@ class WorkbenchView(BaseView):
         )
         return normalize_naming_components(rules.get("components"))
 
-    def _apply_tiff_filename_recognition(self, tiff_path: str) -> None:
+    def _try_bind_adhoc_to_existing_specimen(self, uid: str) -> bool:
+        """Link ad-hoc grouping to an existing voucher (no false duplicate warn)."""
+        from app.services.grouping_service import ADHOC_GROUPING_UID, SpecimenGrouping
+
+        panel_uid = getattr(self._grouping, "_uid", None)
+        if panel_uid not in (None, ADHOC_GROUPING_UID):
+            return False
+        text = str(uid or "").strip()
+        if not text:
+            return False
+        db = self.ctx.get_db()
+        if not db:
+            return False
+        row = db.execute(
+            "SELECT uid FROM specimens WHERE uid = ?", (text,)
+        ).fetchone()
+        if not row:
+            return False
+        self._current_uid = text
+        self._naming.acknowledge_existing_uid(text)
+        panel_grouping = getattr(self._grouping, "_grouping", None)
+        if panel_grouping is not None:
+            self._grouping.load_grouping(
+                text,
+                SpecimenGrouping(uid=text, groups=panel_grouping.groups),
+            )
+        return True
+
+    def _recognize_first_grouping_tiff(self, grouping) -> None:
+        """Use the first linked TIFF in the open grouping to seed right-rail fields."""
+        if grouping is None or not getattr(grouping, "groups", None):
+            return
+        if self._naming.has_result_identity():
+            return
+        for group in grouping.groups:
+            tiff_path = getattr(group, "composed_tiff_path", None)
+            if tiff_path:
+                self._apply_tiff_filename_recognition(tiff_path)
+                return
+
+    def _apply_tiff_filename_recognition(
+        self,
+        tiff_path: str,
+        *,
+        overwrite: bool = False,
+    ) -> None:
         """Parse legacy/standard TIFF names → fill right-rail fields (non-destructive)."""
         from app.services.grouping_service import ADHOC_GROUPING_UID
         from app.utils.naming import recognize_tiff_filename
@@ -3466,6 +3985,9 @@ class WorkbenchView(BaseView):
         if rec is None:
             return
 
+        if overwrite:
+            self._current_uid = None
+
         self._naming.apply_recognized_fields(
             rec.field_values,
             collection_date=rec.collection_date,
@@ -3473,31 +3995,87 @@ class WorkbenchView(BaseView):
             sequence=rec.sequence,
             inline_labels=rec.inline_labels,
             source_filename=Path(tiff_path).name,
+            overwrite=overwrite,
         )
 
         panel_uid = getattr(self._grouping, "_uid", None)
-        if panel_uid in (None, ADHOC_GROUPING_UID) and rec.uid:
-            db = self.ctx.get_db()
-            if db:
-                row = db.execute(
-                    "SELECT uid FROM specimens WHERE uid = ?", (rec.uid,)
-                ).fetchone()
-                if row:
-                    self._load_specimen(rec.uid)
-                else:
-                    self._current_uid = None
-            panel_grouping = getattr(self._grouping, "_grouping", None)
-            if panel_grouping is not None:
-                from app.services.grouping_service import SpecimenGrouping
-                self._grouping.load_grouping(
-                    rec.uid,
-                    SpecimenGrouping(uid=rec.uid, groups=panel_grouping.groups),
-                )
+        preview_uid = self._naming.current_uid()
+        target_uid = preview_uid or rec.uid
+        if panel_uid in (None, ADHOC_GROUPING_UID) and target_uid:
+            if not self._try_bind_adhoc_to_existing_specimen(target_uid):
+                db = self.ctx.get_db()
+                if db:
+                    row = db.execute(
+                        "SELECT uid FROM specimens WHERE uid = ?", (target_uid,)
+                    ).fetchone()
+                    if row:
+                        self._load_specimen(target_uid)
+                    else:
+                        self._current_uid = None
+                panel_grouping = getattr(self._grouping, "_grouping", None)
+                if panel_grouping is not None:
+                    from app.services.grouping_service import SpecimenGrouping
+                    self._grouping.load_grouping(
+                        target_uid,
+                        SpecimenGrouping(uid=target_uid, groups=panel_grouping.groups),
+                    )
 
+        self._sync_grouping_outputs_from_naming()
         self._status_message(
-            f"已从 TIF 识别编号（{rec.uid}，成果 #{rec.sequence}）。"
+            f"已从 TIF 识别编号（{target_uid or rec.uid}，成果 #{rec.sequence}）。"
             "未对应字段已写入拍照备注；保存方式等可稍后补全。"
         )
+
+    def _on_naming_storage_applied(self, old_code: str, new_code: str) -> None:
+        """保存方式选定后：刷新拍照备注 + 自动更新分组里的成果输出名（带提示）。"""
+        if not (new_code or "").strip():
+            return
+        self._naming.refresh_legacy_photo_notes()
+        updated = self._sync_grouping_outputs_from_naming()
+        self._try_bind_adhoc_to_existing_specimen(self._naming.current_uid())
+        if updated:
+            self._status_message(
+                f"已加入保存方式 {new_code.strip()}，成果文件名已同步更新。"
+                "请在分组工具「输出」栏核对。"
+            )
+        elif old_code != new_code:
+            self._status_message(
+                f"已选择保存方式 {new_code.strip()}，编号预览已更新。"
+            )
+
+    def _sync_grouping_outputs_from_naming(self) -> bool:
+        """Push standard result stems into auto-legacy group output fields."""
+        grouping = getattr(self._grouping, "_grouping", None)
+        if grouping is None or not grouping.groups:
+            return False
+        if not self._naming._storage.text().strip():
+            return False
+        if not self._naming.has_result_identity():
+            return False
+        changed = False
+        for g in grouping.groups:
+            if (
+                getattr(g, "status", None) == "organized"
+                or getattr(g, "archive_zip", None)
+            ):
+                continue
+            current = getattr(g, "output_name", None) or ""
+            if not self._naming.group_output_looks_auto_legacy(current):
+                continue
+            seq = (
+                self._naming._seq.value()
+                if len(grouping.groups) == 1
+                else g.group_index + 1
+            )
+            new_stem = self._naming.suggested_result_stem(seq=seq)
+            if not new_stem or new_stem == current:
+                continue
+            g.output_name = new_stem
+            changed = True
+        if changed:
+            self._grouping._rebuild()
+            self._grouping.grouping_changed.emit()
+        return changed
 
     def _maybe_rename_tiff_before_organize(self, db, uid, grouping, group, project_dir):
         """整理前的 TIFF 命名网关。返回 None=无需改名 / True=已改名 / False=用户取消。
@@ -3505,7 +4083,13 @@ class WorkbenchView(BaseView):
         合成 TIFF 名不符成果规范时（导入的外部 Helicon TIFF），弹确认框按本组编号的下个
         成果名建议改名（可改），确认则磁盘改名 + 更新 group.composed_tiff_path + 持久化。
         """
-        from app.utils.naming import recognize_tiff_filename, tiff_stem_fully_conforms
+        from app.utils.naming import (
+            recognize_tiff_filename,
+            suggest_tiff_filename_preserve_legacy,
+            tiff_stem_needs_rename_for_organize,
+            coalesce_specimen_dates,
+            specimen_date_seg,
+        )
         from app.services.organize_service import organize_preview, rename_tiff
         from app.services.grouping_service import save_grouping
         from app.widgets.tiff_rename_dialog import TiffRenameDialog
@@ -3517,12 +4101,36 @@ class WorkbenchView(BaseView):
 
         self._apply_tiff_filename_recognition(tiff_path)
 
-        if tiff_stem_fully_conforms(stem, components):
-            return None  # 已完全符合规范，无需确认
+        panel_uid = self._naming.current_uid()
+        panel_storage = self._naming._storage.text().strip()
+        if not tiff_stem_needs_rename_for_organize(
+            stem,
+            components,
+            panel_uid=panel_uid,
+            panel_storage=panel_storage,
+        ):
+            return None
 
         rec = recognize_tiff_filename(stem, components)
-        if rec and rec.core_stem:
-            suggested = rec.core_stem + ".tif"
+        if rec:
+            col, photo = coalesce_specimen_dates(
+                self._naming._collection_date.text().strip(),
+                self._naming._photo_date.text().strip(),
+            )
+            date_seg = specimen_date_seg(col or None, photo or None)
+            values = {
+                "province": self._naming._province.text().strip(),
+                "site": self._naming._site.text().strip(),
+                "station": self._naming._station.text().strip(),
+                "species_id": self._naming._species_id.text().strip(),
+                "storage": panel_storage,
+                "date_seg": date_seg,
+                "collection_date": col,
+                "photo_date": photo,
+            }
+            suggested = suggest_tiff_filename_preserve_legacy(
+                stem, components, values, seq=rec.sequence,
+            ) + ".tif"
         else:
             inc, res = self._resolve_capture_subdirs()
             try:
@@ -3575,20 +4183,20 @@ class WorkbenchView(BaseView):
           - TIFF must already be composed
 
         delete_jpg is READ from settings; defaults to True after verified archival.
-        Calls archive_service.archive_group (JPG→JXL→ZIP + optional delete).
+        Calls archive_service.archive_group (JPG→ZIP + optional delete).
 
         Oracle: server.js:3615-3840 organizeSpecimen; archive.js:67-190.
         """
         dlg_parent = self._grouping_ui_parent()
         db = self.ctx.get_db()
         project_dir = self.ctx.current_project_dir
-        if not db or not project_dir or not uid:
+        has_project = bool(db and project_dir)
+        if not uid:
             if not silent_batch:
-                ui.warn(dlg_parent, "整理", "请先打开项目后再整理。")
+                ui.warn(dlg_parent, "整理", "请先打开分组后再整理。")
             return False
 
         try:
-            from app.services.grouping_service import save_grouping
             from app.services.organize_service import _check_organize_gate, OrganizeGateError
             from app.services.archive_service import archive_group
 
@@ -3618,13 +4226,15 @@ class WorkbenchView(BaseView):
             # 弹「TIFF 命名需确认」框，按本组编号成果名建议改名（守 S5：默认本组号、可改）。
             # 取消则中止整理；in-app 合成的 TIFF 本就规范，此路不触发。
             # silent_batch:批量时输出名是我们自己定的(编号-序号 / 组序.tif),不弹改名。
-            if not silent_batch and self._maybe_rename_tiff_before_organize(
+            if has_project and not silent_batch and self._maybe_rename_tiff_before_organize(
                 db, uid, grouping, group, project_dir
             ) is False:
                 return False
 
             # Gate check (uid must be active)。silent_batch=允许未激活(临时分组/一条龙)。
-            if allow_single_jpg:
+            if not has_project:
+                pass
+            elif allow_single_jpg:
                 if not silent_batch:
                     try:
                         _check_organize_gate(
@@ -3670,14 +4280,20 @@ class WorkbenchView(BaseView):
             except Exception:
                 pass
 
-            # 用项目配置的 incoming/results 子目录（用户可改目录名 / 遗留 新拍JPG）。
-            inc, res = self._resolve_capture_subdirs()
+            # 有项目：归档直接进入当前项目 results/。
+            # 无项目：就地整理，ZIP 放在 TIFF 同目录，文件名等于 TIFF 基础名。
+            inc = res = ""
+            if has_project:
+                inc, res = self._resolve_capture_subdirs()
+                archive_output_dir = os.path.join(project_dir, res)
+            else:
+                archive_output_dir = str(Path(group.composed_tiff_path).parent)
+            os.makedirs(archive_output_dir, exist_ok=True)
 
             # ── Collision guard: if ZIP already exists at the target path,  #cursor
             #    warn and let user choose overwrite / skip. ──────────────
             tiff_stem = Path(group.composed_tiff_path).stem
-            results_dir_for_check = str(Path(project_dir) / res)
-            existing_zip = os.path.join(results_dir_for_check, tiff_stem + ".zip")
+            existing_zip = os.path.join(archive_output_dir, tiff_stem + ".zip")
             if os.path.isfile(existing_zip):
                 if silent_batch:
                     return False  # 已有同名归档 → 静默跳过(不静默覆盖)
@@ -3690,14 +4306,14 @@ class WorkbenchView(BaseView):
                 if reply_col != QMessageBox.StandardButton.Yes:
                     return False
 
-            # Archive in a worker thread.  A 60-photo lossless JXL archive can
-            # take several minutes; doing this in the GUI thread made the whole
+            # Archive in a worker thread.  Large photo groups can still take
+            # time; doing this in the GUI thread made the whole
             # window appear hung and gave the user no indication that work was
             # still in progress.
             from app.workers.supp_compression_worker import SuppCompressionWorker
 
             progress = QProgressDialog(
-                "准备压缩 JPG…", "", 0, len(group.jpg_paths), dlg_parent
+                "准备打包 JPG…", "", 0, len(group.jpg_paths), dlg_parent
             )
             progress.setWindowTitle("整理 JPG 原片")
             progress.setCancelButton(None)
@@ -3708,10 +4324,11 @@ class WorkbenchView(BaseView):
             worker = SuppCompressionWorker(
                 jpg_paths=group.jpg_paths,
                 tiff_path=group.composed_tiff_path,
-                project_dir=project_dir,
+                project_dir=project_dir or archive_output_dir,
                 delete_jpg=delete_jpg,
                 method=getattr(self.ctx.settings, "jxl_effort_method", "standard"),
                 concurrency=getattr(self.ctx.settings, "jxl_concurrency", 4),
+                output_dir=archive_output_dir,
                 parent=self,
             )
             if not hasattr(self, "_archive_workers"):
@@ -3727,7 +4344,7 @@ class WorkbenchView(BaseView):
                 progress.setMaximum(total)
                 progress.setValue(max(0, current - 1))
                 progress.setLabelText(
-                    f"正在压缩第 {current}/{total} 张\n{filename}"
+                    f"正在打包第 {current}/{total} 张\n{filename}"
                 )
 
             def _archive_failed(message: str) -> None:
@@ -3745,48 +4362,86 @@ class WorkbenchView(BaseView):
                     _archive_failed("归档过程出现错误。")
                     return
                 _release_worker()
-                # ── Move TIFF + ZIP from incoming → results/ (oracle app.js:4336)
+                # ── With a project, move TIFF into current project results/.
+                # ZIP was already created there via output_dir. Without a
+                # project, leave both files beside the TIFF.
                 import shutil
-                _results_dir = os.path.join(project_dir, res)
-                os.makedirs(_results_dir, exist_ok=True)
+                _results_dir = archive_output_dir
                 _tiff_src = group.composed_tiff_path
                 _zip_src = result.zip_path
                 _moved_tiff = _tiff_src
 
-                def _in_incoming(p: str) -> bool:
-                    # 路径里出现解析后的 incoming 子目录名（incoming-jpg / 新拍JPG /
-                    # 自定义）即视为在 incoming，需移到 results。比写死 "incoming-jpg"
-                    # 子串更稳（项目改了目录名也认）。
-                    return bool(p) and inc in os.path.normpath(p).split(os.sep)
+                def _move_to_results(src: str, preferred_name: str | None = None) -> str:
+                    if not src or not os.path.isfile(src):
+                        return src
+                    src_path = Path(src)
+                    results_path = Path(_results_dir)
+                    try:
+                        if src_path.resolve().parent == results_path.resolve():
+                            if preferred_name and src_path.name != preferred_name:
+                                dst = results_path / preferred_name
+                                if dst.exists():
+                                    stem = Path(preferred_name).stem
+                                    suffix = Path(preferred_name).suffix
+                                    i = 1
+                                    while True:
+                                        candidate = results_path / f"{stem}_{i}{suffix}"
+                                        if not candidate.exists():
+                                            dst = candidate
+                                            break
+                                        i += 1
+                                shutil.move(str(src_path), str(dst))
+                                return str(dst)
+                            return str(src_path)
+                    except OSError:
+                        pass
 
-                for _src in [_tiff_src, _zip_src]:
-                    if _src and os.path.isfile(_src) and _in_incoming(_src):
-                        _dst = os.path.join(_results_dir, os.path.basename(_src))
-                        if not os.path.exists(_dst):
-                            shutil.move(_src, _dst)
-                        if _src == _tiff_src:
-                            _moved_tiff = _dst
+                    dst_name = preferred_name or src_path.name
+                    dst = results_path / dst_name
+                    if dst.exists():
+                        try:
+                            if os.path.samefile(src_path, dst):
+                                return str(dst)
+                        except OSError:
+                            pass
+                        stem = Path(dst_name).stem
+                        suffix = Path(dst_name).suffix
+                        i = 1
+                        while True:
+                            candidate = results_path / f"{stem}_{i}{suffix}"
+                            if not candidate.exists():
+                                dst = candidate
+                                break
+                            i += 1
+                    shutil.move(str(src_path), str(dst))
+                    return str(dst)
+
+                if has_project:
+                    _moved_tiff = _move_to_results(_tiff_src)
+                    _moved_zip = _move_to_results(
+                        _zip_src,
+                        Path(_moved_tiff).with_suffix(".zip").name
+                        if _moved_tiff else None,
+                    )
+                else:
+                    _moved_zip = _zip_src
 
                 # Update grouping record with archive info
                 from datetime import datetime, timezone
                 now = datetime.now(tz=timezone.utc).isoformat()
                 group.status = "organized"
                 group.composed_tiff_path = _moved_tiff  # update to results/ path
-                group.archive_zip = (
-                    os.path.join(_results_dir, os.path.basename(result.zip_path))
-                    if _in_incoming(result.zip_path)
-                    else result.zip_path
-                )
+                group.archive_zip = _moved_zip
                 group.updated_at = now
-                save_grouping(db, uid, grouping.groups)
+                self._save_grouping_for_uid(uid, grouping.groups)
                 self._grouping.load_grouping(uid, grouping)
                 self._refresh_monitor()
                 self._refresh_results_column(uid, grouping)
                 self._on_organize_finished(uid)
 
                 msg = (
-                    f"归档完成：{Path(result.zip_path).name}\n"
-                    f"压缩率：{result.saved_percent}%\n"
+                    f"归档完成：{Path(group.archive_zip).name}\n"
+                    "ZIP 内为原始 JPG，可直接解压使用。\n"
                 )
                 if result.delete_jpg:
                     msg += "JPG 原片已删除。"
@@ -3794,7 +4449,6 @@ class WorkbenchView(BaseView):
                     msg += f"JPG 保留（{result.deletion_skipped_reason}）。"
                 if not silent_batch:
                     ui.info(dlg_parent, "整理完成", msg)
-                    self._offer_tiff_naming_check(_results_dir)
                 else:
                     self._batch_status(
                         f"整理完成：{Path(group.archive_zip).name}（{result.file_count} 张 JPG）"
@@ -3884,25 +4538,41 @@ class WorkbenchView(BaseView):
 
         db = self.ctx.get_db()
         project_dir = self.ctx.current_project_dir
-        if not db or not project_dir:
-            ui.info(self, "补处理", "请先打开一个项目。")
-            return
+        has_project = bool(db and project_dir)
 
-        # 激活编号兜底命名：补处理本来只从 TIF 文件名反查标本；若 TIF 是外部名(反查
-        # 不到)但当前有激活编号 → 自动按激活编号的成果名给 TIF 改名，再走补处理。
-        # 落地"激活 → 自动命名"（用户设计），免得外部 Helicon 的 TIF 因名不规范被卡。
-        paths = self._supp_autoname_tiff_by_active(db, project_dir, list(paths))
+        if has_project:
+            # 激活编号兜底命名：补处理本来只从 TIF 文件名反查标本；若 TIF 是外部名(反查
+            # 不到)但当前有激活编号 → 自动按激活编号的成果名给 TIF 改名，再走补处理。
+            # 落地"激活 → 自动命名"（用户设计），免得外部 Helicon 的 TIF 因名不规范被卡。
+            paths = self._supp_autoname_tiff_by_active(db, project_dir, list(paths))
 
-        # Validate selection → resolve specimen from TIFF name.
-        try:
-            grp = validate_supp_group(db, paths)
-        except SuppGroupError as exc:
-            ui.warn(self, "补处理", str(exc))
-            return
+            # Validate selection → resolve specimen from TIFF name.
+            try:
+                grp = validate_supp_group(db, paths)
+            except SuppGroupError as exc:
+                ui.warn(self, "补处理", str(exc))
+                return
+        else:
+            from app.services.supplementary_service import SuppGroup
+            jpgs = [
+                str(p) for p in paths
+                if str(p).lower().endswith((".jpg", ".jpeg"))
+            ]
+            tiffs = [
+                str(p) for p in paths
+                if str(p).lower().endswith((".tif", ".tiff"))
+            ]
+            if len(jpgs) < 1 or len(tiffs) != 1 or len(jpgs) + len(tiffs) != len(paths):
+                ui.warn(self, "补处理", "请选择至少 1 张 JPG 原片和 1 张 TIFF 成片后再整理")
+                return
+            grp = SuppGroup(jpg_paths=jpgs, tiff_path=tiffs[0], uid="", specimen=None)
 
-        # Collision guard: same-named result already in results/ (decision①: → results/).
-        _inc, res = self._resolve_capture_subdirs()
-        results_dir = Path(project_dir) / res
+        # Collision guard: project → results/；no project → TIFF 同目录。
+        if has_project:
+            _inc, res = self._resolve_capture_subdirs()
+            results_dir = Path(project_dir) / res
+        else:
+            results_dir = Path(grp.tiff_path).parent
         tiff_stem = Path(grp.tiff_path).stem
         existing_zip = results_dir / f"{tiff_stem}.zip"
         existing_tiff = results_dir / Path(grp.tiff_path).name
@@ -3913,7 +4583,7 @@ class WorkbenchView(BaseView):
             reply = ui.question(
                 self,
                 "归档文件已存在",
-                f"results/ 下已存在同名成果：\n{tiff_stem}.*\n\n是否覆盖并重新归档？",
+                f"{results_dir} 下已存在同名成果：\n{tiff_stem}.*\n\n是否覆盖并重新归档？",
             )
             if reply != QMessageBox.StandardButton.Yes:
                 return
@@ -3931,10 +4601,11 @@ class WorkbenchView(BaseView):
         self._supp_worker = SuppCompressionWorker(
             grp.jpg_paths,
             grp.tiff_path,
-            project_dir,
+            project_dir or str(results_dir),
             delete_jpg=delete_jpg,
             method=getattr(self.ctx.settings, "jxl_effort_method", "standard"),
             concurrency=getattr(self.ctx.settings, "jxl_concurrency", 4),
+            output_dir=str(results_dir),
             parent=self,
         )
         self._supp_worker.started_archiving.connect(self._on_supp_started)
@@ -3957,14 +4628,17 @@ class WorkbenchView(BaseView):
         grp = getattr(self, "_supp_pending", None)
         self._supp_pending = None
         project_dir = self.ctx.current_project_dir
-        if not result or not getattr(result, "ok", False) or grp is None or not project_dir:
+        if not result or not getattr(result, "ok", False) or grp is None:
             ui.warn(self, "补处理", "归档过程出现错误。")
             return
 
         import shutil
 
-        _inc, res = self._resolve_capture_subdirs()
-        results_dir = Path(project_dir) / res
+        if project_dir:
+            _inc, res = self._resolve_capture_subdirs()
+            results_dir = Path(project_dir) / res
+        else:
+            results_dir = Path(grp.tiff_path).parent
         results_dir.mkdir(exist_ok=True)
 
         # Move the ZIP into results/ (zip is not a red-line artifact; replace OK).
@@ -3993,15 +4667,16 @@ class WorkbenchView(BaseView):
         try:
             from app.services.grouping_service import load_grouping
             db = self.ctx.get_db()
-            if db is not None and getattr(self, "_current_uid", None) == grp.uid:
+            if db is not None and grp.uid and getattr(self, "_current_uid", None) == grp.uid:
                 self._refresh_results_column(grp.uid, load_grouping(db, grp.uid))
         except Exception:
             pass
-        self._on_organize_finished(grp.uid)
+        if grp.uid:
+            self._on_organize_finished(grp.uid)
 
         msg = (
             f"归档完成：{final_zip.name}\n"
-            f"压缩率：{result.saved_percent}%\n"
+            "ZIP 内为原始 JPG，可直接解压使用。\n"
         )
         if result.delete_jpg:
             msg += "JPG 原片已删除。"
@@ -4022,7 +4697,7 @@ class WorkbenchView(BaseView):
         """Recover the original JPGs from a result ZIP into a user-chosen folder.
 
         Read-only against the archive + additive (writes new JPGs, deletes
-        nothing). Heavy djxl work runs off-thread in RestoreWorker.
+        nothing). Heavy extraction/legacy decode work runs off-thread in RestoreWorker.
         """
         from app.utils import ui
         from PyQt6.QtWidgets import QMessageBox
@@ -4051,7 +4726,10 @@ class WorkbenchView(BaseView):
         try:
             import zipfile
             with zipfile.ZipFile(zip_path) as zf:
-                count = sum(1 for n in zf.namelist() if n != "manifest.json")
+                count = sum(
+                    1 for n in zf.namelist()
+                    if Path(n).suffix.lower() in {".jpg", ".jpeg", ".jxl"}
+                )
         except Exception:
             pass
 
@@ -4124,7 +4802,10 @@ class WorkbenchView(BaseView):
             None,
         )
         if group and group.composed_tiff_path:
-            self._apply_tiff_filename_recognition(group.composed_tiff_path)
+            self._apply_tiff_filename_recognition(
+                group.composed_tiff_path,
+                overwrite=True,
+            )
 
     def _on_archive_zip_registered(self, uid: str, group_index: int) -> None:
         """Persist an existing ZIP association selected in the grouping panel."""
@@ -4248,7 +4929,7 @@ class WorkbenchView(BaseView):
         if self._current_uid:
             self._on_save_metadata(self._current_uid, reload=False)
 
-    def _on_save_metadata(self, uid: str, reload: bool = True) -> None:
+    def _on_save_metadata(self, uid: str, reload: bool = True, *, commit: bool = True) -> None:
         """Persist right-rail edits to the DB specimens table.
 
         Mirrors the web whole-`sp` persist (scheduleRightPanelPersist): one save
@@ -4260,6 +4941,8 @@ class WorkbenchView(BaseView):
         db = self.ctx.get_db()
         if not db:
             return
+        if reload:
+            self._flush_grouping_save()
         panel = self._metadata
         naming = self._naming
         fields: dict[str, str] = {
@@ -4296,9 +4979,16 @@ class WorkbenchView(BaseView):
                 f"UPDATE specimens SET {set_clauses}, lon = ?, lat = ? WHERE uid = ?",
                 values + [lon_val, lat_val, uid],
             )
-            db.commit()
+            if commit:
+                db.commit()
         except Exception:
             pass
+
+        if reload:
+            try:
+                self._claim_current_grouping_for_saved_uid(uid)
+            except Exception:
+                pass
 
         # Refresh naming panel with latest values if storage changed.  Skipped
         # for autosave (reload=False) so the focused input keeps its cursor.
@@ -4371,6 +5061,11 @@ class WorkbenchView(BaseView):
 
     def _on_helicon_finished(self, uid: str) -> None:
         """Broadcast tiff photo-index to collab peers (oracle: collabPostPhotoIndex)."""
+        try:
+            self._sidebar.refresh()
+            self._sidebar.select_uid(uid)
+        except Exception:
+            pass
         svc = getattr(self.ctx, "collab_service", None)
         if svc is not None:
             try:
@@ -4380,6 +5075,11 @@ class WorkbenchView(BaseView):
 
     def _on_organize_finished(self, uid: str) -> None:
         """Broadcast zip photo-index to collab peers (oracle: collabPostPhotoIndex)."""
+        try:
+            self._sidebar.refresh()
+            self._sidebar.select_uid(uid)
+        except Exception:
+            pass
         svc = getattr(self.ctx, "collab_service", None)
         if svc is not None:
             try:
@@ -4389,12 +5089,8 @@ class WorkbenchView(BaseView):
 
     # ── Results column ────────────────────────────────────────────────────────
 
-    def _refresh_results_column(self, uid: str, grouping=None) -> None:
-        """Populate the ② 成果内容 column from the specimen's grouping data.
-
-        Collects all composed TIFF paths and archive ZIP paths from every group
-        belonging to *uid*, then passes them to ResultsColumn.load_uid().
-        """
+    def _result_infos_from_grouping(self, grouping) -> tuple[list[dict], list[dict]]:
+        """Return display-ready TIFF/ZIP info lists for one specimen grouping."""
         composed_tiffs: list[dict] = []
         archive_zips: list[dict] = []
 
@@ -4402,13 +5098,21 @@ class WorkbenchView(BaseView):
             for g in grouping.groups:
                 seq = getattr(g, "result_sequence", None)
                 tiff_path = getattr(g, "composed_tiff_path", None)
-                if tiff_path:
+                zip_path = getattr(g, "archive_zip", None)
+                if not zip_path and tiff_path:
+                    inferred_zip = Path(tiff_path).with_suffix(".zip")
+                    if inferred_zip.is_file():
+                        zip_path = str(inferred_zip)
+                is_organized = (
+                    getattr(g, "status", None) == "organized"
+                    or bool(zip_path)
+                )
+                if tiff_path and is_organized:
                     composed_tiffs.append({
                         "path": tiff_path,
                         "name": os.path.basename(tiff_path),
                         "seq": seq,
                     })
-                zip_path = getattr(g, "archive_zip", None)
                 if zip_path:
                     zip_size = 0
                     try:
@@ -4422,6 +5126,11 @@ class WorkbenchView(BaseView):
                         "seq": seq,
                     })
 
+        return composed_tiffs, archive_zips
+
+    def _refresh_results_column(self, uid: str, grouping=None) -> None:
+        """Populate the ② 成果内容 column from one specimen's grouping data."""
+        composed_tiffs, archive_zips = self._result_infos_from_grouping(grouping)
         self._results.load_uid(uid, composed_tiffs, archive_zips)
 
     # ── Helpers ───────────────────────────────────────────────────────────────

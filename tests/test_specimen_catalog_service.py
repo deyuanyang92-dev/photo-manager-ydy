@@ -1,4 +1,5 @@
 """Tests for global specimen UID lookup across workspaces."""
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -42,6 +43,24 @@ def test_find_uid_scans_project_root_workspaces(tmp_path):
     assert len(hits) == 1
     assert hits[0].project_dir == str(ws_a.resolve())
     assert hits[0].display_project == "断面A"
+
+
+def test_find_uid_reads_legacy_specimens_table_without_migrating(tmp_path):
+    root = tmp_path / "survey"
+    ws = root / "legacy"
+    (ws / "_data").mkdir(parents=True)
+    uid = "FJ-XM-B2-DLC001-T95E-20260601"
+    db = sqlite3.connect(ws / "_data" / "project.db")
+    db.execute("CREATE TABLE specimens (uid TEXT PRIMARY KEY)")
+    db.execute("INSERT INTO specimens (uid) VALUES (?)", (uid,))
+    db.commit()
+    db.close()
+
+    hits = catalog.find_uid(uid, current_project_root=str(root))
+
+    assert len(hits) == 1
+    assert hits[0].project_dir == str(ws.resolve())
+    assert hits[0].owner_project_dir == str(ws.resolve())
 
 
 def test_conflicting_uid_hits_allows_same_current_specimen(tmp_path):

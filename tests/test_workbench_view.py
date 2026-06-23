@@ -492,6 +492,335 @@ class TestRightRailSpecimenIdentityEdits:
         finally:
             db.close()
 
+    def test_add_draft_with_stale_current_uid_does_not_rename_old_specimen(self, tmp_path):
+        old_uid = "GXFCG-BLW-SC001-D79-20260618"
+        new_uid = "GXFCG-BLW-SC002-R-20260618"
+        w, db, project_dir = self._make_workbench(tmp_path)
+        try:
+            self._insert_specimen(db, old_uid, project_dir, species_id="SC001")
+
+            # The UI can still have the old row selected while the naming panel
+            # is in an unsaved draft state.  Clicking "添加" must create a new
+            # row, not migrate/delete the selected specimen.
+            w._current_uid = old_uid
+            w._naming.load_specimen({
+                "province": "GXFCG",
+                "site": "BLW",
+                "id": "SC002",
+                "storage": "R",
+                "collectionDate": "20260618",
+                "photoDate": "20260618",
+            })
+            assert w._naming.persisted_uid() == ""
+            assert w._naming.current_uid() == new_uid
+            assert w._naming._pin_btn.text() == "添加"
+
+            w._on_naming_save()
+
+            assert db.execute("SELECT 1 FROM specimens WHERE uid=?", (old_uid,)).fetchone()
+            new_row = db.execute(
+                "SELECT id, storage FROM specimens WHERE uid=?", (new_uid,)
+            ).fetchone()
+            assert new_row is not None
+            assert new_row["id"] == "SC002"
+            assert new_row["storage"] == "R"
+            assert w._naming.persisted_uid() == new_uid
+            assert w._naming._pin_btn.text() == "添加"
+            assert not w._naming._preview_save_btn.isHidden()
+            assert w._sidebar.current_uid() == new_uid
+        finally:
+            db.close()
+
+    def test_uid_correction_reload_results_with_migrated_result_names(self, tmp_path):
+        from app.services.specimen_rename_service import apply_storage_correction
+
+        old_uid = "GXFCG-BLW-SC002-R-20260618"
+        new_uid = "GXFCG-BLW-SC002-RD79-20260618"
+        w, db, project_dir = self._make_workbench(tmp_path)
+        try:
+            self._insert_specimen(db, old_uid, project_dir, species_id="SC002")
+            db.execute(
+                """
+                UPDATE specimens
+                SET province='GXFCG', site='BLW', station='', storage='R',
+                    collection_date='20260618', photo_date='20260618',
+                    raw_json=?
+                WHERE uid=?
+                """,
+                (
+                    json.dumps({
+                        "id": "SC002",
+                        "province": "GXFCG",
+                        "site": "BLW",
+                        "station": "",
+                        "storage": "R",
+                        "collectionDate": "20260618",
+                        "photoDate": "20260618",
+                    }, ensure_ascii=False),
+                    old_uid,
+                ),
+            )
+            old_stem = "GXFCG-BLW-SC002-1-R-260618-广西防城港-白龙尾-独齿沙蚕-20260618"
+            old_tif = Path(project_dir) / "results" / f"{old_stem}.tif"
+            old_zip = Path(project_dir) / "results" / f"{old_stem}.zip"
+            old_tif.write_bytes(b"tif")
+            old_zip.write_bytes(b"zip")
+            db.execute(
+                """
+                INSERT INTO grouping
+                  (uid, group_index, composed_tiff_path, archive_zip,
+                   status, result_sequence)
+                VALUES (?, 0, ?, ?, 'organized', 1)
+                """,
+                (old_uid, str(old_tif), str(old_zip)),
+            )
+            db.commit()
+
+            w._on_specimen_selected(old_uid)
+            assert w._results._current_tiffs[0]["name"] == old_tif.name
+
+            assert apply_storage_correction(db, old_uid, "RD79") == new_uid
+            w._on_uid_corrected(old_uid, new_uid)
+
+            assert w._results._current_tiffs[0]["name"].startswith(
+                "GXFCG-BLW-SC002-1-RD79-260618"
+            )
+            assert w._results._current_zips[0]["name"].startswith(
+                "GXFCG-BLW-SC002-1-RD79-260618"
+            )
+            assert "-R-" not in w._results._current_tiffs[0]["name"]
+        finally:
+            db.close()
+
+    def test_update_button_renames_stale_result_files_to_current_uid(self, tmp_path):
+        uid = "GXFCG-BLW-SC002-RD79-20260618"
+        w, db, project_dir = self._make_workbench(tmp_path)
+        try:
+            db.execute(
+                """
+                INSERT INTO specimens (
+                    uid, id, province, site, station, storage,
+                    collection_date, photo_date, owner_project_dir, raw_json
+                ) VALUES (?, 'SC002', 'GXFCG', 'BLW', '', 'RD79',
+                          '20260618', '20260618', ?, ?)
+                """,
+                (
+                    uid,
+                    project_dir,
+                    json.dumps({
+                        "id": "SC002",
+                        "province": "GXFCG",
+                        "site": "BLW",
+                        "station": "",
+                        "storage": "RD79",
+                        "collectionDate": "20260618",
+                        "photoDate": "20260618",
+                    }, ensure_ascii=False),
+                ),
+            )
+            old_stem = "GXFCG-BLW-SC002-1-R-260618-广西防城港-白龙尾-独齿沙蚕-20260618"
+            new_stem = "GXFCG-BLW-SC002-1-RD79-260618-广西防城港-白龙尾-独齿沙蚕-20260618"
+            old_tif = Path(project_dir) / "results" / f"{old_stem}.tif"
+            old_zip = Path(project_dir) / "results" / f"{old_stem}.zip"
+            old_tif.write_bytes(b"tif")
+            old_zip.write_bytes(b"zip")
+            db.execute(
+                """
+                INSERT INTO grouping
+                  (uid, group_index, composed_tiff_path, archive_zip,
+                   status, result_sequence, raw_json)
+                VALUES (?, 0, ?, ?, 'organized', 1, ?)
+                """,
+                (
+                    uid,
+                    str(old_tif),
+                    str(old_zip),
+                    json.dumps({
+                        "outputName": old_stem,
+                        "composedTiffPath": str(old_tif),
+                        "archiveZip": str(old_zip),
+                    }, ensure_ascii=False),
+                ),
+            )
+            db.commit()
+
+            w._current_uid = uid
+            w._naming.load_specimen({
+                "uid": uid,
+                "id": "SC002",
+                "province": "GXFCG",
+                "site": "BLW",
+                "station": "",
+                "storage": "RD79",
+                "collectionDate": "20260618",
+                "photoDate": "20260618",
+            })
+            assert old_tif.is_file()
+
+            w._on_naming_update_results()
+
+            new_tif = old_tif.with_name(f"{new_stem}.tif")
+            new_zip = old_zip.with_name(f"{new_stem}.zip")
+            assert new_tif.is_file()
+            assert new_zip.is_file()
+            assert not old_tif.exists()
+            assert not old_zip.exists()
+            row = db.execute(
+                "SELECT composed_tiff_path, archive_zip, raw_json FROM grouping WHERE uid=?",
+                (uid,),
+            ).fetchone()
+            assert row["composed_tiff_path"] == str(new_tif)
+            assert row["archive_zip"] == str(new_zip)
+            raw = json.loads(row["raw_json"])
+            assert raw["outputName"] == new_stem
+            assert w._results._current_tiffs[0]["name"] == new_tif.name
+            assert w._results._current_zips[0]["name"] == new_zip.name
+        finally:
+            db.close()
+
+    def test_selecting_uid_repairs_stale_result_paths(self, tmp_path):
+        uid = "GXFCG-BLW-SC002-RD79-20260618"
+        w, db, project_dir = self._make_workbench(tmp_path)
+        try:
+            self._insert_specimen(db, uid, project_dir, species_id="SC002")
+            db.execute(
+                """
+                UPDATE specimens
+                SET province='GXFCG', site='BLW', station='', storage='RD79',
+                    collection_date='20260618', photo_date='20260618',
+                    raw_json=?
+                WHERE uid=?
+                """,
+                (
+                    json.dumps({
+                        "id": "SC002",
+                        "province": "GXFCG",
+                        "site": "BLW",
+                        "station": "",
+                        "storage": "RD79",
+                        "collectionDate": "20260618",
+                        "photoDate": "20260618",
+                    }, ensure_ascii=False),
+                    uid,
+                ),
+            )
+            old_stem = "GXFCG-BLW-SC002-1-R-20260618-广西防城港-白龙尾-独齿沙蚕-20260618"
+            old_tif = Path(project_dir) / "results" / f"{old_stem}.tif"
+            old_zip = Path(project_dir) / "results" / f"{old_stem}.zip"
+            old_tif.write_bytes(b"tif")
+            old_zip.write_bytes(b"zip")
+            db.execute(
+                """
+                INSERT INTO grouping
+                  (uid, group_index, composed_tiff_path, archive_zip,
+                   status, result_sequence)
+                VALUES (?, 0, ?, ?, 'organized', 1)
+                """,
+                (uid, str(old_tif), str(old_zip)),
+            )
+            db.commit()
+
+            w._on_specimen_selected(uid)
+
+            assert w._results._current_tiffs[0]["name"].startswith(
+                "GXFCG-BLW-SC002-1-RD79-广西防城港"
+            )
+            assert w._results._current_zips[0]["name"].startswith(
+                "GXFCG-BLW-SC002-1-RD79-广西防城港"
+            )
+            assert "-R-" not in w._results._current_tiffs[0]["name"]
+        finally:
+            db.close()
+
+    def test_show_all_results_groups_outputs_by_uid(self, tmp_path):
+        uid1 = "GXFCG-BLW-SC001-D79-20260618"
+        uid2 = "GXFCG-BLW-SC002-RD79-20260618"
+        w, db, project_dir = self._make_workbench(tmp_path)
+        try:
+            self._insert_specimen(db, uid1, project_dir, species_id="SC001")
+            self._insert_specimen(db, uid2, project_dir, species_id="SC002")
+            result_dir = Path(project_dir) / "results"
+            tif1 = result_dir / "GXFCG-BLW-SC001-1-D79-20260618.tif"
+            zip1 = result_dir / "GXFCG-BLW-SC001-1-D79-20260618.zip"
+            tif2 = result_dir / "GXFCG-BLW-SC002-1-RD79-20260618.tif"
+            zip2 = result_dir / "GXFCG-BLW-SC002-1-RD79-20260618.zip"
+            for path in (tif1, zip1, tif2, zip2):
+                path.write_bytes(b"result")
+            db.executemany(
+                """
+                INSERT INTO grouping
+                  (uid, group_index, composed_tiff_path, archive_zip,
+                   status, result_sequence)
+                VALUES (?, ?, ?, ?, 'organized', 1)
+                """,
+                [
+                    (uid1, 0, str(tif1), str(zip1)),
+                    (uid2, 0, str(tif2), str(zip2)),
+                ],
+            )
+            db.commit()
+
+            w._on_show_all_results()
+
+            assert [g["uid"] for g in w._results._current_groups] == [uid1, uid2]
+            assert w._results._count.text() == "2 编号 / 2 项"
+            assert w._results._current_tiffs[0]["name"] == tif1.name
+            assert w._results._current_tiffs[1]["name"] == tif2.name
+        finally:
+            db.close()
+
+    def test_all_results_group_header_selects_uid(self, tmp_path):
+        from app.widgets.results_column import _SpecimenResultHeader
+
+        uid = "GXFCG-BLW-SC001-D79-20260618"
+        w, db, project_dir = self._make_workbench(tmp_path)
+        try:
+            self._insert_specimen(db, uid, project_dir, species_id="SC001")
+            result_dir = Path(project_dir) / "results"
+            tif = result_dir / "GXFCG-BLW-SC001-1-D79-20260618.tif"
+            zip_path = result_dir / "GXFCG-BLW-SC001-1-D79-20260618.zip"
+            tif.write_bytes(b"result")
+            zip_path.write_bytes(b"result")
+            db.execute(
+                """
+                INSERT INTO grouping
+                  (uid, group_index, composed_tiff_path, archive_zip,
+                   status, result_sequence)
+                VALUES (?, 0, ?, ?, 'organized', 1)
+                """,
+                (uid, str(tif), str(zip_path)),
+            )
+            db.commit()
+
+            w._on_show_all_results()
+            header = w._results.findChild(_SpecimenResultHeader)
+            header.clicked.emit(uid)
+
+            assert w._current_uid == uid
+            assert w._results._title.text() == "成果"
+            assert w._results._current_tiffs[0]["name"] == tif.name
+        finally:
+            db.close()
+
+    def test_add_button_creates_current_uid_without_renaming_loaded_specimen(self, tmp_path):
+        old_uid = "FJ-XM-B2-DLC001-T95E-20260601"
+        new_uid = "FJ-XM-B2-DLC002-T95E-20260601"
+        w, db, project_dir = self._make_workbench(tmp_path)
+        try:
+            self._insert_specimen(db, old_uid, project_dir)
+
+            w._on_specimen_selected(old_uid)
+            assert w._naming.persisted_uid() == old_uid
+            w._naming._species_id.setText("DLC002")
+            w._on_naming_add()
+
+            assert db.execute("SELECT 1 FROM specimens WHERE uid=?", (old_uid,)).fetchone()
+            assert db.execute("SELECT 1 FROM specimens WHERE uid=?", (new_uid,)).fetchone()
+            assert w._naming.persisted_uid() == new_uid
+            assert w._sidebar.current_uid() == new_uid
+        finally:
+            db.close()
+
     def test_selected_specimen_save_refuses_to_cover_existing_uid(self, tmp_path):
         old_uid = "FJ-XM-B2-DLC001-T95E-20260601"
         existing_uid = "FJ-XM-B2-DLC002-T95E-20260601"
@@ -1810,23 +2139,25 @@ class TestGroupingPanelDeleteClearGroup:
         w.delete_group(0)
         assert received, "grouping_changed must be emitted after delete"
 
-    def test_delete_composed_group_blocked(self):
-        """delete_group must be a no-op for composed groups."""
+    def test_delete_composed_group_removes_record_but_keeps_tiff(self, tmp_path):
+        """删除分组只删记录；已关联 TIFF 时也不能碰文件本体。"""
         from app.widgets.grouping_panel import GroupingPanel
         from app.services.grouping_service import Group, SpecimenGrouping
+        tiff_path = tmp_path / "result.tif"
+        tiff_path.write_bytes(b"TIF")
         ctx = _make_ctx()
         w = GroupingPanel(ctx)
         sg = SpecimenGrouping(
             uid="UID1",
             groups=[
                 Group(group_index=0, jpg_paths=["/a.jpg"],
-                      composed_tiff_path="/result.tif"),
+                      composed_tiff_path=str(tiff_path)),
             ],
         )
         w.load_grouping("UID1", sg)
         w.delete_group(0)
-        # Must NOT be deleted (still 1 group)
-        assert len(w._grouping.groups) == 1
+        assert w._grouping.groups == []
+        assert tiff_path.exists()
 
     def test_draft_group_row_has_clear_and_delete_buttons(self):
         """_DraftGroupRow must have clear_group_requested and delete_group_requested signals."""
@@ -1898,6 +2229,21 @@ class TestNamingPanelDupCheck:
         assert w._dup_warn.isHidden(), "dup_warn must be hidden when UID not in DB"
         db.close()
 
+    def test_live_dup_check_does_not_scan_other_workspaces(self, tmp_path, monkeypatch):
+        from app.services import specimen_catalog_service as catalog
+        from app.widgets.naming_panel import NamingPanel
+
+        def fail_global_scan(*_args, **_kwargs):
+            raise AssertionError("live duplicate check must stay local")
+
+        monkeypatch.setattr(catalog, "conflicting_uid_hits", fail_global_scan)
+        db = _make_db(str(tmp_path / "p.db"))
+        ctx = _make_ctx(db=db)
+        w = NamingPanel(ctx)
+        w._check_duplicate("FJ-XM-B2-DLC001-T95E-20260601")
+        assert w._dup_warn.isHidden()
+        db.close()
+
     def test_dup_warn_shown_when_uid_exists(self, tmp_path):
         from app.widgets.naming_panel import NamingPanel
         db = _make_db(str(tmp_path / "p.db"))
@@ -1912,6 +2258,30 @@ class TestNamingPanelDupCheck:
         w._check_duplicate(uid)
         # isHidden() is reliable even when widget has no parent window
         assert not w._dup_warn.isHidden(), "dup_warn must be shown after duplicate found"
+        db.close()
+
+    def test_acknowledge_existing_uid_clears_dup_warn(self, tmp_path):
+        from app.widgets.naming_panel import NamingPanel
+        db = _make_db(str(tmp_path / "p.db"))
+        uid = "GXFCG-BLW-SC001-D79-20260618"
+        db.execute(
+            "INSERT INTO specimens (uid, owner_project_dir) VALUES (?, ?)",
+            (uid, "/some/project"),
+        )
+        db.commit()
+        ctx = _make_ctx(db=db)
+        w = NamingPanel(ctx)
+        w._province.setText("GXFCG")
+        w._site.setText("BLW")
+        w._species_id.setText("SC001")
+        w._storage.setText("D79")
+        w._collection_date.setText("20260618")
+        w._photo_date.setText("20260618")
+        w._update_preview()
+        assert not w._dup_warn.isHidden()
+        w.acknowledge_existing_uid(uid)
+        assert w._dup_warn.isHidden()
+        assert w.persisted_uid() == uid
         db.close()
 
     def test_compliance_no_warn_empty(self):
@@ -2373,6 +2743,32 @@ class TestSupplementaryArchival:
         assert not os.path.isfile(tiff)
         db.close()
 
+    def test_no_project_supplementary_spawns_local_worker(self, qt_app, tmp_path):
+        """无项目补处理：JPG+TIF 可直接本地整理，ZIP 输出到 TIF 同目录。"""
+        from unittest.mock import patch, MagicMock
+        from app.views.workbench_view import WorkbenchView
+
+        ctx = _make_ctx(project_dir=None, db=None)
+        w = WorkbenchView(ctx)
+        jpg = tmp_path / "a.jpg"
+        tiff = tmp_path / "external-result.tif"
+        jpg.write_bytes(b"\xff\xd8jpg")
+        tiff.write_bytes(b"II*\x00tif")
+
+        with patch("app.workers.supp_compression_worker.SuppCompressionWorker") as MW, \
+                patch("app.utils.ui.warn"), patch("app.utils.ui.info"):
+            inst = MagicMock()
+            MW.return_value = inst
+            w._run_supplementary([str(jpg), str(tiff)])
+
+        inst.start.assert_called_once()
+        _, args, kwargs = MW.mock_calls[0]
+        assert args[0] == [str(jpg)]
+        assert args[1] == str(tiff)
+        assert args[2] == str(tmp_path)
+        assert kwargs["output_dir"] == str(tmp_path)
+        assert w._supp_pending.uid == ""
+
 
 # ── 阶段按钮 → collab store + DB 持久化接线 ──────────────────────────────────
 
@@ -2597,6 +2993,120 @@ class TestSaveButtonPersistsMetadata:
         assert row["province"] == "FJ"
         assert row["station"] == "B2"
         assert row["storage"] == "T95E"
+
+    def test_save_new_specimen_claims_current_adhoc_grouping(self, tmp_path):
+        """临时分组后保存右侧新编号，应把新组挂到该编号并刷新左侧进度。"""
+        from app.services.grouping_service import ADHOC_GROUPING_UID, load_grouping
+
+        w, ctx, db = self._make_view(tmp_path)
+        w._on_open_grouping()
+        assert w._grouping._uid == ADHOC_GROUPING_UID
+        w._grouping._add_group()
+        assert len(w._grouping._grouping.groups) == 1
+
+        uid = self._fill_new_specimen(w)
+        w._on_naming_save()
+
+        assert w._grouping._uid == uid
+        assert len(load_grouping(db, uid).groups) == 1
+        assert load_grouping(db, ADHOC_GROUPING_UID).groups == []
+        assert w._sidebar.current_uid() == uid
+        row = w._sidebar._all_items[0]
+        assert row["uid"] == uid
+        assert row["progress"]["total"] == 1
+
+    def test_right_save_keeps_selected_inactive_specimen_grouping(self, tmp_path):
+        """左侧选中未激活编号时，右侧保存不能把分组工具清回临时空组。"""
+        from app.services.grouping_service import load_grouping
+
+        w, ctx, db = self._make_view(tmp_path)
+        uid = self._fill_new_specimen(w)
+        w._on_naming_save()
+
+        # Simulate the common workflow: an existing specimen is selected for
+        # editing, but it is not the active capture target.
+        w._load_specimen(uid)
+        w._on_open_grouping()
+        assert w._grouping._uid == uid
+
+        w._grouping._add_group()
+        assert len(w._grouping._grouping.groups) == 1
+
+        w._metadata._collector.setText("李四")
+        w._on_save_metadata(uid)
+
+        assert w._grouping._uid == uid
+        assert len(w._grouping._grouping.groups) == 1
+        assert len(load_grouping(db, uid).groups) == 1
+
+    def test_active_specimen_second_angle_is_not_duplicate_uid(self, tmp_path):
+        """当前激活 voucher 的成果序号2不是新标本，不应报 voucher 重复。"""
+        from app.services import activation_service
+
+        w, ctx, db = self._make_view(tmp_path)
+        uid = "GXFCG-BLW-BZC002-R-20260618"
+        db.execute(
+            """
+            INSERT INTO specimens (
+                uid, id, province, site, storage, collection_date, photo_date,
+                owner_project_dir
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (uid, "BZC002", "GXFCG", "BLW", "R", "20260618", "20260618", ctx.current_project_dir),
+        )
+        db.commit()
+        activation_service.activate(ctx.current_project_dir, db, uid)
+        w._current_uid = None
+
+        n = w._naming
+        n._province.setText("GXFCG")
+        n._site.setText("BLW")
+        n._species_id.setText("BZC002")
+        n._storage.setText("R")
+        n._collection_date.setText("20260618")
+        n._photo_date.setText("20260618")
+        n._seq.setValue(2)
+        n._update_preview()
+
+        assert n.current_uid() == uid
+        assert n.current_result_id() == "GXFCG-BLW-BZC002-2-R-20260618"
+        assert n._dup_warn.isHidden()
+        assert n.persisted_uid() == uid
+        assert not n._preview_save_btn.isHidden()
+        assert n._pin_btn.text() == "添加"
+
+    def test_active_uid_still_conflicts_when_editing_different_specimen(self, tmp_path):
+        """右侧正在编辑 B 时，不能把左侧激活的 A 当作同一标本放过。"""
+        from app.services import activation_service
+
+        w, ctx, db = self._make_view(tmp_path)
+        active_uid = "GXFCG-BLW-BZC002-R-20260618"
+        editing_uid = "GXFCG-BLW-SC001-D79-20260618"
+        for uid, sid, storage in (
+            (active_uid, "BZC002", "R"),
+            (editing_uid, "SC001", "D79"),
+        ):
+            db.execute(
+                """
+                INSERT INTO specimens (
+                    uid, id, province, site, storage, collection_date, photo_date,
+                    owner_project_dir
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (uid, sid, "GXFCG", "BLW", storage, "20260618", "20260618", ctx.current_project_dir),
+            )
+        db.commit()
+        activation_service.activate(ctx.current_project_dir, db, active_uid)
+
+        w._load_specimen(editing_uid)
+        n = w._naming
+        n._species_id.setText("BZC002")
+        n._storage.setText("R")
+        n._update_preview()
+
+        assert n.current_uid() == active_uid
+        assert not n._dup_warn.isHidden()
+        assert n.persisted_uid() == editing_uid
 
     def test_save_blocks_incomplete_hard_required_uid(self, tmp_path, monkeypatch):
         """只填地区/日期生成的短 UID 不得写入标本列表。"""
@@ -2854,6 +3364,26 @@ class TestOpenGroupingLoadsActive:
 
         assert w._grouping._uid == "FJ-XM-B2-DLC001-T95E-20260601"  # 自动载入了激活号
 
+    def test_load_active_uid_without_specimen_row_fills_naming_fields(self, tmp_path):
+        """激活编号即使还没保存 specimens 行，右侧也应从 UID 拆出编号字段。"""
+        from app.views.workbench_view import WorkbenchView
+
+        project_dir = str(tmp_path / "proj")
+        Path(project_dir, "_data").mkdir(parents=True)
+        db = _make_db(str(tmp_path / "proj" / "_data" / "project.db"))
+        ctx = _make_ctx(project_dir=project_dir, db=db)
+        ctx.collab_service = None
+        w = WorkbenchView(ctx)
+
+        w._load_specimen("GXFCG-BLW-B2-SC004-RD79-20260618")
+
+        assert w._naming._province.text() == "GXFCG"
+        assert w._naming._site.text() == "BLW"
+        assert w._naming._station.text() == "B2"
+        assert w._naming._species_id.text() == "SC004"
+        assert w._naming._storage.text() == "RD79"
+        assert w._naming._collection_date.text() == "20260618"
+
     def test_open_without_activation_ignores_naming_draft(self, tmp_path):
         """不激活、不选中——命名表单填了编号也**不显示/不绑定**它;落到临时分组。
 
@@ -2886,6 +3416,308 @@ class TestOpenGroupingLoadsActive:
         # 临时分组仍能加组
         w._grouping._add_group()
         assert len(w._grouping._grouping.groups) == 1
+
+    def test_open_without_current_rebinds_stale_grouping_panel(self, tmp_path):
+        """分组面板残留旧编号时, 无激活/无当前编号再打开应切回临时任务。"""
+        from app.views.workbench_view import WorkbenchView
+        from app.services import activation_service
+        from app.services.grouping_service import (
+            ADHOC_GROUPING_UID,
+            Group,
+            SpecimenGrouping,
+        )
+
+        stale_uid = "GXFCG-BLW-SC001-D79-20260618"
+        project_dir = str(tmp_path / "proj")
+        Path(project_dir, "_data").mkdir(parents=True)
+        db = _make_db(str(tmp_path / "proj" / "_data" / "project.db"))
+        ctx = _make_ctx(project_dir=project_dir, db=db)
+        ctx.collab_service = None
+        w = WorkbenchView(ctx)
+        w._grouping.load_grouping(
+            stale_uid,
+            SpecimenGrouping(uid=stale_uid, groups=[Group(group_index=3)]),
+        )
+        w._current_uid = None
+        assert activation_service.get_active_uid(db) is None
+
+        w._on_open_grouping()
+
+        assert w._grouping._uid == ADHOC_GROUPING_UID
+        assert w._grouping._grouping.groups == []
+
+    def test_open_with_selected_inactive_uid_uses_selected_specimen(self, tmp_path):
+        """左侧选中未激活编号时，分组工具跟随当前编辑编号。"""
+        from app.views.workbench_view import WorkbenchView
+        from app.services import activation_service
+        from app.services.grouping_service import (
+            Group,
+            load_grouping,
+            save_grouping,
+        )
+
+        uid = "GXFCG-BLW-SC001-D79-20260618"
+        project_dir = str(tmp_path / "proj")
+        Path(project_dir, "_data").mkdir(parents=True)
+        db = _make_db(str(tmp_path / "proj" / "_data" / "project.db"))
+        save_grouping(db, uid, [
+            Group(group_index=0, angle_label="角度1", status="organized"),
+        ], clean_phantoms=False)
+        ctx = _make_ctx(project_dir=project_dir, db=db)
+        ctx.collab_service = None
+        w = WorkbenchView(ctx)
+
+        assert activation_service.get_active_uid(db) is None
+        w._load_specimen(uid)
+        assert w._current_uid == uid
+
+        w._on_open_grouping()
+
+        assert w._grouping._uid == uid
+        assert len(w._grouping._grouping.groups) == 1
+        w._grouping._add_group()
+        assert len(w._grouping._grouping.groups) == 2
+        w._flush_grouping_save()
+        groups = load_grouping(db, uid).groups
+        assert len(groups) == 2
+        assert groups[1].angle_label == "角度2"
+
+    def test_deactivate_starts_fresh_unassigned_grouping_task(self, tmp_path):
+        """去激活后再点新组, 应是新的无编号任务, 从组1/角度1开始。"""
+        from app.views.workbench_view import WorkbenchView
+        from app.services import activation_service
+        from app.services.grouping_service import (
+            ADHOC_GROUPING_UID,
+            Group,
+            SpecimenGrouping,
+            save_grouping,
+        )
+
+        uid = "GXFCG-BLW-SC001-D79-20260618"
+        project_dir = str(tmp_path / "proj")
+        Path(project_dir, "_data").mkdir(parents=True)
+        db = _make_db(str(tmp_path / "proj" / "_data" / "project.db"))
+        save_grouping(db, uid, [
+            Group(group_index=0, angle_label="角度1"),
+            Group(group_index=1, angle_label="角度2"),
+        ], clean_phantoms=False)
+        save_grouping(db, ADHOC_GROUPING_UID, [
+            Group(group_index=8, angle_label="旧临时组"),
+        ], clean_phantoms=False)
+        ctx = _make_ctx(project_dir=project_dir, db=db)
+        ctx.collab_service = None
+        w = WorkbenchView(ctx)
+
+        activation_service.activate(project_dir, db, uid)
+        w._load_specimen(uid)
+        assert w._current_uid == uid
+        assert w._grouping._uid == uid
+        assert len(w._grouping._grouping.groups) == 2
+
+        w._on_sidebar_deactivate(uid)
+
+        assert activation_service.get_active_uid(db) is None
+        assert w._current_uid is None
+        assert w._grouping._uid == ADHOC_GROUPING_UID
+        assert w._grouping._grouping.groups == []
+        assert not w._grouping._add_btn.isHidden()
+
+        w._grouping._add_group()
+        groups = w._grouping._grouping.groups
+        assert len(groups) == 1
+        assert groups[0].group_index == 0
+        assert groups[0].angle_label == "角度1"
+
+
+class TestPostHocTiffRecognition:
+    """事后整理：从已有 TIF 文件名识别编号，并允许用户补正保存方式。"""
+
+    def test_storage_only_does_not_overwrite_group_output(self, tmp_path):
+        from app.services.grouping_service import ADHOC_GROUPING_UID, Group, SpecimenGrouping
+        from app.views.workbench_view import WorkbenchView
+
+        project_dir = str(tmp_path / "proj")
+        Path(project_dir, "_data").mkdir(parents=True)
+        db = _make_db(str(tmp_path / "proj" / "_data" / "project.db"))
+        w = WorkbenchView(_make_ctx(project_dir=project_dir, db=db))
+        original = "GXFCG-BLW-SC004-2-R-20260618-广西防城港-白龙尾-独齿沙蚕-20260618"
+        group = Group(group_index=2, output_name=original)
+        w._grouping.load_grouping(
+            ADHOC_GROUPING_UID,
+            SpecimenGrouping(uid=ADHOC_GROUPING_UID, groups=[group]),
+        )
+
+        w._naming._storage.setText("RD79")
+
+        assert w._sync_grouping_outputs_from_naming() is False
+        assert group.output_name == original
+
+    def test_storage_change_does_not_rewrite_organized_group_output(self, tmp_path):
+        from app.services.grouping_service import Group, SpecimenGrouping
+        from app.views.workbench_view import WorkbenchView
+
+        project_dir = str(tmp_path / "proj")
+        Path(project_dir, "_data").mkdir(parents=True)
+        db = _make_db(str(tmp_path / "proj" / "_data" / "project.db"))
+        w = WorkbenchView(_make_ctx(project_dir=project_dir, db=db))
+        uid = "GXFCG-BLW-SC001-D79-20260618"
+        group = Group(
+            group_index=0,
+            output_name="",
+            status="organized",
+            archive_zip=str(tmp_path / "GXFCG-BLW-SC001-1-D79-20260618.zip"),
+        )
+        w._grouping.load_grouping(uid, SpecimenGrouping(uid=uid, groups=[group]))
+        n = w._naming
+        n._province.setText("GXFCG")
+        n._site.setText("BLW")
+        n._species_id.setText("SC001")
+        n._storage.setText("RD79")
+        n._collection_date.setText("20260618")
+
+        assert w._sync_grouping_outputs_from_naming() is False
+        assert group.output_name == ""
+
+    def test_recognized_tiff_fills_right_panel_and_syncs_output_name(self, tmp_path):
+        from app.services.grouping_service import ADHOC_GROUPING_UID, Group, SpecimenGrouping
+        from app.views.workbench_view import WorkbenchView
+
+        project_dir = str(tmp_path / "proj")
+        Path(project_dir, "_data").mkdir(parents=True)
+        db = _make_db(str(tmp_path / "proj" / "_data" / "project.db"))
+        w = WorkbenchView(_make_ctx(project_dir=project_dir, db=db))
+        tiff = tmp_path / (
+            "GXFCG-BLW-SC004-2-R-20260618-"
+            "广西防城港-白龙尾-独齿沙蚕-20260618.tif"
+        )
+        tiff.write_bytes(b"tif")
+        group = Group(group_index=2, composed_tiff_path=str(tiff), output_name=tiff.stem)
+        w._grouping.load_grouping(
+            ADHOC_GROUPING_UID,
+            SpecimenGrouping(uid=ADHOC_GROUPING_UID, groups=[group]),
+        )
+        w._naming._storage.setText("RD79")
+
+        w._apply_tiff_filename_recognition(str(tiff))
+
+        assert w._naming._province.text() == "GXFCG"
+        assert w._naming._site.text() == "BLW"
+        assert w._naming._species_id.text() == "SC004"
+        assert w._naming._storage.text() == "RD79"
+        assert w._naming._collection_date.text() == "20260618"
+        assert w._grouping._uid == "GXFCG-BLW-SC004-RD79-20260618"
+        assert group.output_name != "3-RD79"
+        assert "GXFCG-BLW-SC004-2-RD79" in group.output_name
+
+    def test_imported_different_tiff_overwrites_stale_right_panel(self, tmp_path):
+        from app.views.workbench_view import WorkbenchView
+
+        project_dir = str(tmp_path / "proj")
+        Path(project_dir, "_data").mkdir(parents=True)
+        db = _make_db(str(tmp_path / "proj" / "_data" / "project.db"))
+        w = WorkbenchView(_make_ctx(project_dir=project_dir, db=db))
+        n = w._naming
+        n._province.setText("GXFCG")
+        n._site.setText("BLW")
+        n._species_id.setText("SC001")
+        n._storage.setText("D79")
+        n._collection_date.setText("20260618")
+        w._current_uid = "GXFCG-BLW-SC001-D79-20260618"
+
+        tiff = tmp_path / "GXQZ-SNW-XTC003-1-R-260619.tif"
+        tiff.write_bytes(b"tif")
+
+        w._apply_tiff_filename_recognition(str(tiff), overwrite=True)
+
+        assert n._province.text() == "GXQZ"
+        assert n._site.text() == "SNW"
+        assert n._species_id.text() == "XTC003"
+        assert n._storage.text() == "R"
+        assert n._collection_date.text() == "20260619"
+        assert w._current_uid is None
+
+    def test_results_column_hides_unorganized_imported_tiff(self, tmp_path):
+        from app.services.grouping_service import Group, SpecimenGrouping
+        from app.views.workbench_view import WorkbenchView
+
+        project_dir = str(tmp_path / "proj")
+        Path(project_dir, "_data").mkdir(parents=True)
+        db = _make_db(str(tmp_path / "proj" / "_data" / "project.db"))
+        w = WorkbenchView(_make_ctx(project_dir=project_dir, db=db))
+        imported_tif = tmp_path / "GXQZ-SNW-XTC003-1-R-260619.tif"
+        imported_tif.write_bytes(b"tif")
+        organized_tif = tmp_path / "GXFCG-BLW-SC001-2-D79-20260618.tif"
+        organized_tif.write_bytes(b"tif")
+        organized_zip = organized_tif.with_suffix(".zip")
+        organized_zip.write_bytes(b"zip")
+        grouping = SpecimenGrouping(uid="UID", groups=[
+            Group(group_index=0, composed_tiff_path=str(imported_tif), status="composed"),
+            Group(
+                group_index=1,
+                composed_tiff_path=str(organized_tif),
+                archive_zip=str(organized_zip),
+                status="organized",
+            ),
+        ])
+
+        w._refresh_results_column("UID", grouping)
+
+        assert [Path(x["path"]).name for x in w._results._current_tiffs] == [
+            organized_tif.name
+        ]
+        assert [Path(x["path"]).name for x in w._results._current_zips] == [
+            organized_zip.name
+        ]
+
+    def test_organize_rename_suggestion_uses_corrected_storage(self, tmp_path, monkeypatch):
+        from PyQt6.QtWidgets import QDialog
+
+        from app.services.grouping_service import ADHOC_GROUPING_UID, Group, SpecimenGrouping
+        from app.views.workbench_view import WorkbenchView
+
+        project_dir = str(tmp_path / "proj")
+        Path(project_dir, "_data").mkdir(parents=True)
+        db = _make_db(str(tmp_path / "proj" / "_data" / "project.db"))
+        w = WorkbenchView(_make_ctx(project_dir=project_dir, db=db))
+        tiff = tmp_path / (
+            "GXFCG-BLW-SC002-2-R-260618-"
+            "广西防城港-白龙尾-独齿沙蚕-20260618.tif"
+        )
+        tiff.write_bytes(b"tif")
+        group = Group(group_index=1, composed_tiff_path=str(tiff), output_name=tiff.stem)
+        grouping = SpecimenGrouping(uid=ADHOC_GROUPING_UID, groups=[group])
+        w._grouping.load_grouping(ADHOC_GROUPING_UID, grouping)
+
+        n = w._naming
+        n._province.setText("GXFCG")
+        n._site.setText("BLW")
+        n._species_id.setText("SC002")
+        n._storage.setText("RD79")
+        n._collection_date.setText("20260618")
+        n._photo_date.setText("20260618")
+
+        seen = {}
+
+        class FakeRenameDialog:
+            def __init__(self, current_name, suggested_name, parent=None):
+                seen["current_name"] = current_name
+                seen["suggested_name"] = suggested_name
+
+            def exec(self):
+                return QDialog.DialogCode.Rejected
+
+        import app.widgets.tiff_rename_dialog as rename_dialog
+
+        monkeypatch.setattr(rename_dialog, "TiffRenameDialog", FakeRenameDialog)
+
+        result = w._maybe_rename_tiff_before_organize(
+            db, ADHOC_GROUPING_UID, grouping, group, project_dir
+        )
+
+        assert result is False
+        assert seen["suggested_name"] == (
+            "GXFCG-BLW-SC002-2-RD79-260618-广西防城港-白龙尾-独齿沙蚕-20260618.tif"
+        )
 
 
 class TestImplicitCompose:
@@ -3680,10 +4512,12 @@ class TestBatchComposeOrganise:
         def _fake_archive(
             jpg_paths, tiff_path, project_dir, delete_jpg,
             method="maximum", concurrency=1, progress_callback=None,
+            output_dir=None,
         ):
             archived_jpgs.extend(jpg_paths)
+            assert output_dir == str(tmp_path / "results")
             result = _ArchiveResult()
-            result.zip_path = str(Path(tiff_path).with_suffix(".zip"))
+            result.zip_path = str(Path(output_dir) / Path(tiff_path).with_suffix(".zip").name)
             Path(result.zip_path).write_bytes(b"zip")
             return result
 
@@ -3701,7 +4535,68 @@ class TestBatchComposeOrganise:
         assert archived_jpgs == self._jpgs
         saved = load_grouping(db, uid).groups[0]
         assert saved.status == "organized"
-        assert saved.archive_zip == str(tif.with_suffix(".zip"))
+        assert saved.composed_tiff_path == str(tmp_path / "results" / tif.name)
+        assert saved.archive_zip == str(tmp_path / "results" / tif.with_suffix(".zip").name)
+        db.close()
+
+    def test_organise_moves_external_imported_tiff_into_project_results(
+        self, qtbot, tmp_path, monkeypatch
+    ):
+        """导入旧目录 TIF 后整理，应把 TIF+ZIP 收进当前项目 results/。
+
+        用户场景：当前项目是 zhegnli，但从白龙尾旧照片目录导入 TIF。
+        整理完成后成果不能继续指向旧目录，否则后续数据管理仍散在原始目录。
+        """
+        from app.services.grouping_service import Group, save_grouping, load_grouping
+        from app.services import archive_service
+
+        w, ctx, uid, db = self._build(tmp_path)
+        old_dir = tmp_path / "广西防城港-20260618-白龙尾"
+        old_dir.mkdir()
+        old_tif = old_dir / "FJ-XM-B2-DLC001-1-T95E-20260601.tif"
+        old_tif.write_bytes(b"II*\x00external")
+        save_grouping(db, uid, [
+            Group(
+                group_index=0,
+                jpg_paths=self._jpgs,
+                composed_tiff_path=str(old_tif),
+                status="composed",
+            )
+        ])
+        w._grouping.load_grouping(uid, load_grouping(db, uid))
+
+        class _ArchiveResult:
+            ok = True
+            saved_percent = 20
+            file_count = 4
+            delete_jpg = False
+            requested_delete_jpg = False
+            deletion_skipped_reason = ""
+
+        def _fake_archive(jpg_paths, tiff_path, project_dir, delete_jpg, **kwargs):
+            assert kwargs.get("output_dir") == str(tmp_path / "results")
+            result = _ArchiveResult()
+            result.zip_path = str(Path(kwargs["output_dir"]) / Path(tiff_path).with_suffix(".zip").name)
+            Path(result.zip_path).write_bytes(b"zip")
+            return result
+
+        monkeypatch.setattr(archive_service, "archive_group", _fake_archive)
+
+        assert w._on_organise_requested(uid, 0, silent_batch=True) is True
+
+        qtbot.waitUntil(
+            lambda: not getattr(w, "_archive_workers", set()),
+            timeout=5000,
+        )
+
+        saved = load_grouping(db, uid).groups[0]
+        project_results = tmp_path / "results"
+        assert Path(saved.composed_tiff_path).parent == project_results
+        assert Path(saved.archive_zip).parent == project_results
+        assert Path(saved.composed_tiff_path).is_file()
+        assert Path(saved.archive_zip).is_file()
+        assert not old_tif.exists()
+        assert not old_tif.with_suffix(".zip").exists()
         db.close()
 
     def test_headless_compose_uses_suggested_name_and_saves(self, tmp_path, monkeypatch):
@@ -3879,6 +4774,71 @@ class TestAdhocGrouping:
         assert done == [True]
         assert Path(captured["out"]).name == "2.tif"  # 组1 → 2.tif
         db.close()
+
+    def test_organise_without_project_writes_zip_beside_tiff(
+        self, qtbot, tmp_path, monkeypatch
+    ):
+        """无项目时允许本地整理：ZIP 与 TIF 同目录，名字取 TIF 基础名。"""
+        from app.services.grouping_service import ADHOC_GROUPING_UID, Group, SpecimenGrouping
+        from app.services import archive_service
+        from app.views.workbench_view import WorkbenchView
+
+        ctx = _make_ctx(project_dir=None, db=None)
+        w = WorkbenchView(ctx)
+        jpg1 = tmp_path / "a.jpg"
+        jpg2 = tmp_path / "b.jpg"
+        tiff = tmp_path / "sample-result.tif"
+        jpg1.write_bytes(b"\xff\xd8a")
+        jpg2.write_bytes(b"\xff\xd8b")
+        tiff.write_bytes(b"II*\x00tif")
+        grouping = SpecimenGrouping(
+            uid=ADHOC_GROUPING_UID,
+            groups=[
+                Group(
+                    group_index=0,
+                    jpg_paths=[str(jpg1), str(jpg2)],
+                    composed_tiff_path=str(tiff),
+                    status="composed",
+                )
+            ],
+        )
+        w._grouping.load_grouping(ADHOC_GROUPING_UID, grouping)
+
+        class _ArchiveResult:
+            ok = True
+            file_count = 2
+            saved_percent = 0
+            delete_jpg = False
+            requested_delete_jpg = False
+            deletion_skipped_reason = ""
+
+        captured = {}
+
+        def _fake_archive(jpg_paths, tiff_path, project_dir, delete_jpg, **kwargs):
+            captured["output_dir"] = kwargs.get("output_dir")
+            captured["project_dir"] = project_dir
+            result = _ArchiveResult()
+            result.zip_path = str(Path(kwargs["output_dir"]) / "sample-result.zip")
+            Path(result.zip_path).write_bytes(b"zip")
+            return result
+
+        monkeypatch.setattr(archive_service, "archive_group", _fake_archive)
+
+        assert w._on_organise_requested(
+            ADHOC_GROUPING_UID, 0, silent_batch=True
+        ) is True
+
+        qtbot.waitUntil(
+            lambda: not getattr(w, "_archive_workers", set()),
+            timeout=5000,
+        )
+
+        saved = w._grouping._grouping.groups[0]
+        assert captured["output_dir"] == str(tmp_path)
+        assert captured["project_dir"] == str(tmp_path)
+        assert saved.status == "organized"
+        assert saved.composed_tiff_path == str(tiff)
+        assert saved.archive_zip == str(tmp_path / "sample-result.zip")
 
     def test_batch_adhoc_one_shot_silent_no_prompts(self, qtbot, tmp_path, monkeypatch):
         """无编号 [合成+整理] 一条龙:两组都 合成→打包→移results,全程零确认框。"""

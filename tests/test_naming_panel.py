@@ -10,8 +10,8 @@ Covers:
 """
 import pytest
 from unittest.mock import MagicMock
-from PyQt6.QtWidgets import QApplication, QFrame, QLabel, QLineEdit
-from PyQt6.QtCore import QSettings
+from PyQt6.QtWidgets import QApplication, QFrame, QLabel, QLineEdit, QPushButton
+from PyQt6.QtCore import QSettings, Qt
 
 
 @pytest.fixture(scope="module")
@@ -239,6 +239,62 @@ def test_required_fields_marked(panel):
     station = [l for l in labels if "站位" in l.text()]
     assert station, "站位 field label not found"
     assert "*" not in station[0].text(), "站位 should stay optional (no *)"
+
+
+def test_preview_add_state_has_separate_save_button(panel):
+    buttons = panel.findChildren(QPushButton)
+    assert panel._pin_btn.text() == "添加"
+    assert panel._preview_save_btn in buttons
+    assert panel._preview_save_btn.text() == "保存"
+    assert panel._preview_save_btn.isVisible()
+    assert panel._update_btn.isHidden()
+
+
+def test_preview_save_and_add_buttons_visible_when_editing_existing(panel):
+    panel.load_specimen({
+        "uid": "GXFCG-BLW-SC001-D79-20260618",
+        "province": "GXFCG",
+        "site": "BLW",
+        "id": "SC001",
+        "storage": "D79",
+        "collectionDate": "20260618",
+        "photoDate": "20260618",
+    })
+
+    assert panel._preview_save_btn.text() == "保存"
+    assert panel._preview_save_btn.isVisible()
+    assert panel._pin_btn.text() == "添加"
+    assert panel._pin_btn.isVisible()
+    assert panel._update_btn.isVisible()
+
+
+def test_load_specimen_prefers_uid_segments_over_stale_raw_fields(panel):
+    panel.load_specimen({
+        "uid": "GXFCG-BLW-SC002-RD79-20260618",
+        "province": "GXFCG",
+        "site": "BLW",
+        "id": "RD79",
+        "storage": "RD79",
+        "collectionDate": "20260618",
+        "photoDate": "20260618",
+    })
+
+    assert panel._species_id.text() == "SC002"
+    assert panel._storage.text() == "RD79"
+    assert panel.current_uid() == "GXFCG-BLW-SC002-RD79-20260618"
+
+
+def test_storage_combo_shows_unlisted_storage_code(panel):
+    panel._province.setText("GXFCG")
+    panel._site.setText("BLW")
+    panel._species_id.setText("SC002")
+    panel._collection_date.setText("20260618")
+    panel._photo_date.setText("20260618")
+    panel._storage.setText("R")
+
+    assert panel._storage_combo.currentText() == "R"
+    assert panel._storage_combo.currentData(Qt.ItemDataRole.UserRole) == "R"
+    assert panel.current_uid() == "GXFCG-BLW-SC002-R-20260618"
 
 
 def test_uid_code_fields_auto_uppercase(panel):

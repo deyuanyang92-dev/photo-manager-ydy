@@ -42,6 +42,7 @@ from app.config import icons
 from app.utils.naming import (
     build_result_id,
     build_uid,
+    parse_uid,
     species_sequence_summary,
     specimen_date_seg,
 )
@@ -104,8 +105,11 @@ class NamingPanel(QWidget):
     uid_generated = pyqtSignal(str)
     result_id_generated = pyqtSignal(str)
     save_requested = pyqtSignal()
+    add_requested = pyqtSignal()
+    update_requested = pyqtSignal()
     delete_requested = pyqtSignal(str)
     uid_corrected = pyqtSignal(str, str)  # (old_uid, new_uid) after storage correction
+    storage_applied = pyqtSignal(str, str)  # (old_code, new_code) — 保存方式选定/变更
     open_project_settings = pyqtSignal()  # "其他… 打开项目设置" picked in 保存方式
     keys_committed = pyqtSignal()         # 地区/样地/站位/采集日期 finished editing or picked
                                           # → workbench looks up a collection record and auto-fills
@@ -123,6 +127,8 @@ class NamingPanel(QWidget):
         self._field_label_text: dict[str, str] = {}
         self._naming_rules_required: dict[str, bool] = {}
         self._external_naming_values: dict[str, str] = {}
+        self._legacy_inline_labels: tuple[str, ...] = ()
+        self._legacy_source_stem: str = ""
         self._display_metadata: dict[str, str] = {}
         self._display_fields = self._load_display_fields()
         self._display_notes_expanded = False
@@ -414,14 +420,30 @@ class NamingPanel(QWidget):
         preview_lbl.setObjectName("NamingGroupTitle")
         preview_hdr.addWidget(preview_lbl)
         preview_hdr.addStretch()
+        self._preview_save_btn = QPushButton("保存")
+        self._preview_save_btn.setObjectName("Outline")
+        self._preview_save_btn.setFixedHeight(26)
+        self._preview_save_btn.setToolTip("保存当前输入，不改变左侧已选编号")
+        icons.set_button_icon(self._preview_save_btn, "mdi6.content-save-outline",
+                              color=icons.TONE_MUTED, size=13)
+        self._preview_save_btn.clicked.connect(self.save_requested.emit)
+        preview_hdr.addWidget(self._preview_save_btn)
         self._pin_btn = QPushButton("添加")
         self._pin_btn.setObjectName("Primary")
         self._pin_btn.setFixedHeight(26)
         self._pin_btn.setToolTip("把当前 voucher number 保存并添加到左侧标本列表")
         icons.set_button_icon(self._pin_btn, "mdi6.pin-outline",
                               color=icons.TONE_ON_ACCENT, size=13)
-        self._pin_btn.clicked.connect(self.save_requested.emit)
+        self._pin_btn.clicked.connect(self.add_requested.emit)
         preview_hdr.addWidget(self._pin_btn)
+        self._update_btn = QPushButton("更新")
+        self._update_btn.setObjectName("Outline")
+        self._update_btn.setFixedHeight(26)
+        self._update_btn.setToolTip("按当前 voucher number 更新已登记的成果 TIFF/ZIP 文件名")
+        icons.set_button_icon(self._update_btn, "mdi6.update",
+                              color=icons.TONE_MUTED, size=13)
+        self._update_btn.clicked.connect(self.update_requested.emit)
+        preview_hdr.addWidget(self._update_btn)
         self._delete_btn = QPushButton("删除")
         self._delete_btn.setObjectName("Outline")
         self._delete_btn.setFixedHeight(26)
@@ -530,6 +552,7 @@ class NamingPanel(QWidget):
         for widget in (self._province, self._site, self._station, self._collection_date):
             widget.editingFinished.connect(self.keys_committed.emit)
         self.refresh_naming_rules()
+        self._update_edit_actions()
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -540,26 +563,50 @@ class NamingPanel(QWidget):
         fills those manually per the project constraint.
         """
         self._persisted_uid = sp.get("uid") or sp.get("uniqueId") or None
-        self._province.setText(sp.get("province") or "")
-        self._site.setText(sp.get("site") or "")
-        self._station.setText(sp.get("station") or "")
-        self._species_id.setText(sp.get("id") or "")
-        storage_val = sp.get("storage") or ""
-        self._storage.setText(storage_val)
+        parsed_uid = parse_uid(self._persisted_uid)
+        values = dict(sp)
+        if parsed_uid:
+            values.update({
+                "province": parsed_uid.get("province") or "",
+                "site": parsed_uid.get("site") or "",
+                "station": parsed_uid.get("station") or "",
+                "id": parsed_uid.get("speciesId") or "",
+                "storage": parsed_uid.get("storage") or "",
+            })
+
+        def _set_line(edit: QLineEdit, value: str) -> None:
+            edit.blockSignals(True)
+            edit.setText(value or "")
+            edit.blockSignals(False)
+
+        _set_line(self._province, values.get("province") or "")
+        _set_line(self._site, values.get("site") or "")
+        _set_line(self._station, values.get("station") or "")
+        _set_line(self._species_id, values.get("id") or "")
+        storage_val = values.get("storage") or ""
+        _set_line(self._storage, storage_val)
         # Sync the storage dropdown selection with the loaded value.
         self._sync_combo_to_storage(storage_val)
-        self._collection_date.setText(sp.get("collectionDate") or sp.get("collection_date") or "")
-        self._photo_date.setText(sp.get("photoDate") or sp.get("photo_date") or "")
+        _set_line(
+            self._collection_date,
+            values.get("collectionDate") or values.get("collection_date") or "",
+        )
+        _set_line(
+            self._photo_date,
+            values.get("photoDate") or values.get("photo_date") or "",
+        )
         self._photo_notes.blockSignals(True)
-        self._photo_notes.setPlainText(sp.get("photoNotes") or sp.get("photo_notes") or "")
+        self._photo_notes.setPlainText(values.get("photoNotes") or values.get("photo_notes") or "")
         self._photo_notes.blockSignals(False)
-        self.set_display_metadata(sp)
+        self.set_display_metadata(values)
         # seq hint
         hint = sp.get("nextResultSequenceHint") or sp.get("next_result_sequence_hint") or 1
+        self._seq.blockSignals(True)
         try:
             self._seq.setValue(int(hint))
         except (ValueError, TypeError):
             self._seq.setValue(1)
+        self._seq.blockSignals(False)
         self._update_preview()
         self._update_edit_actions()
 
@@ -572,10 +619,15 @@ class NamingPanel(QWidget):
         sequence: int | None = None,
         inline_labels: tuple[str, ...] | list[str] = (),
         source_filename: str = "",
+        overwrite: bool = False,
     ) -> None:
         """Fill empty naming fields from a recognized legacy TIFF basename."""
+        from pathlib import Path
+
         from app.utils.naming import coalesce_specimen_dates, legacy_filename_photo_notes
 
+        if overwrite:
+            self._persisted_uid = None
         widgets = {
             "province": self._province,
             "site": self._site,
@@ -585,14 +637,21 @@ class NamingPanel(QWidget):
         }
         for key, widget in widgets.items():
             val = str(field_values.get(key) or "").strip()
-            if val and not widget.text().strip():
-                widget.setText(val)
+            if not val:
+                if overwrite:
+                    widget.setText("")
+                continue
+            if widget.text().strip() and not overwrite:
+                continue
+            if key == "storage" and re.fullmatch(r"\d{6,8}", val):
+                continue
+            widget.setText(val)
 
         # 只有一个日期 → 采集日期与拍照日期视为同一天（历史数据常见）
         col, photo = coalesce_specimen_dates(collection_date, photo_date)
-        if col and not self._collection_date.text().strip():
+        if col and (overwrite or not self._collection_date.text().strip()):
             self._collection_date.setText(col)
-        if photo and not self._photo_date.text().strip():
+        if photo and (overwrite or not self._photo_date.text().strip()):
             self._photo_date.setText(photo)
 
         if sequence is not None and sequence >= 1:
@@ -600,21 +659,84 @@ class NamingPanel(QWidget):
         if self._storage.text().strip():
             self._sync_combo_to_storage(self._storage.text().strip())
 
-        archive = legacy_filename_photo_notes(
-            inline_labels,
-            source_name=source_filename,
+        self._legacy_inline_labels = tuple(
+            str(x).strip() for x in inline_labels if str(x).strip()
         )
-        if archive:
-            existing = self._photo_notes.toPlainText().strip()
-            if not existing:
-                self._photo_notes.setPlainText(archive)
-            elif archive not in existing:
-                self._photo_notes.setPlainText(f"{existing}\n{archive}")
-            self._display_metadata["photo_notes"] = self._photo_notes.toPlainText().strip()
-            self._refresh_display_summary()
+        self._legacy_source_stem = Path(source_filename).stem if source_filename else ""
+        self._write_legacy_photo_notes()
 
         self._update_preview()
         self._update_edit_actions()
+
+    def _write_legacy_photo_notes(self) -> None:
+        """Rebuild 拍照备注 from remembered inline filename labels + dates."""
+        from app.utils.naming import coalesce_specimen_dates, legacy_filename_photo_notes
+
+        if not self._legacy_inline_labels:
+            return
+        col, photo = coalesce_specimen_dates(
+            self._collection_date.text().strip(),
+            self._photo_date.text().strip(),
+        )
+        archive = legacy_filename_photo_notes(
+            self._legacy_inline_labels,
+            date_suffix=col or photo,
+        )
+        if not archive:
+            return
+        existing = self._photo_notes.toPlainText().strip()
+        if not existing or existing != archive:
+            if not existing or "【" in existing or existing != archive:
+                self._photo_notes.setPlainText(archive)
+        self._display_metadata["photo_notes"] = self._photo_notes.toPlainText().strip()
+        self._refresh_display_summary()
+
+    def refresh_legacy_photo_notes(self) -> None:
+        """Public hook when dates/storage change after legacy TIF recognition."""
+        self._write_legacy_photo_notes()
+
+    def suggested_result_stem(self, seq: int | None = None) -> str:
+        """Build standard result basename (no .tif) from current naming fields."""
+        from app.utils.naming import (
+            coalesce_specimen_dates,
+            specimen_date_seg,
+            suggest_tiff_filename_preserve_legacy,
+        )
+
+        col, photo = coalesce_specimen_dates(
+            self._collection_date.text().strip(),
+            self._photo_date.text().strip(),
+        )
+        date_seg = specimen_date_seg(col or None, photo or None)
+        use_seq = self._seq.value() if seq is None else int(seq)
+        if self._legacy_source_stem:
+            return suggest_tiff_filename_preserve_legacy(
+                self._legacy_source_stem,
+                self._load_component_rules(),
+                self._component_values(date_seg),
+                seq=use_seq,
+            )
+        return self._build_configured_uid(date_seg, seq=use_seq)
+
+    def group_output_looks_auto_legacy(self, output_name: str) -> bool:
+        """True when group 输出名 looks auto-filled from legacy TIF, not hand-tuned."""
+        from pathlib import Path
+
+        from app.utils.naming import legacy_filename_photo_notes
+
+        name = (output_name or "").strip()
+        if not name:
+            return True
+        if any("\u4e00" <= c <= "\u9fff" for c in name):
+            return True
+        if self._legacy_inline_labels:
+            legacy_note = legacy_filename_photo_notes(
+                self._legacy_inline_labels,
+                date_suffix=self._collection_date.text().strip(),
+            )
+            if legacy_note and name in (legacy_note, Path(legacy_note).stem):
+                return True
+        return False
 
     def set_display_metadata(self, values: dict) -> None:
         """更新 UID 下方的展示摘要；不参与 UID 构造或复制。"""
@@ -712,6 +834,19 @@ class NamingPanel(QWidget):
     def current_result_id(self) -> str:
         return self._result_preview.text() if self._result_preview.text() != "—" else ""
 
+    def has_result_identity(self) -> bool:
+        """True when fields are complete enough to rename/sync result files."""
+        return bool(
+            self._province.text().strip()
+            and self._site.text().strip()
+            and self._species_id.text().strip()
+            and self._storage.text().strip()
+            and (
+                self._collection_date.text().strip()
+                or self._photo_date.text().strip()
+            )
+        )
+
     def missing_required_fields(self) -> list[str]:
         """Return labels for project-required naming fields that are empty."""
         required = self._load_required_rules()
@@ -746,6 +881,24 @@ class NamingPanel(QWidget):
             self._dup_warn.show()
         else:
             self._dup_warn.hide()
+
+    def acknowledge_existing_uid(self, uid: str) -> None:
+        """Mark *uid* as the specimen being edited (clears false duplicate warnings).
+
+        Used when legacy TIF recognition resolves to a voucher that already exists
+        in the DB but ad-hoc grouping has not gone through ``load_specimen`` yet.
+        """
+        text = str(uid or "").strip()
+        if not text:
+            return
+        self._persisted_uid = text
+        self._check_duplicate(self.current_uid())
+        self._update_edit_actions()
+
+    def mark_current_values_as_new(self) -> None:
+        """Treat the visible form values as a new specimen on the next add."""
+        self._persisted_uid = None
+        self._update_edit_actions()
 
     def persisted_uid(self) -> str:
         """Return the loaded saved UID, or an empty string for a new draft."""
@@ -1032,12 +1185,14 @@ class NamingPanel(QWidget):
 
     def _update_edit_actions(self) -> None:
         editing = bool(self._persisted_uid)
-        self._pin_btn.setText("保存" if editing else "添加")
+        self._pin_btn.setText("添加")
         self._pin_btn.setToolTip(
-            "保存对当前编号的修改，编号变化时迁移旧编号"
+            "按当前表单添加为左侧编号；不迁移当前载入的旧编号"
             if editing else
             "把当前 voucher number 保存并添加到左侧标本列表"
         )
+        self._preview_save_btn.setVisible(True)
+        self._update_btn.setVisible(editing)
         self._delete_btn.setVisible(editing)
 
     def _emit_delete_requested(self) -> None:
@@ -1141,21 +1296,10 @@ class NamingPanel(QWidget):
             )
             self._dup_warn.show()
         else:
-            try:
-                from app.services import specimen_catalog_service as catalog
-                hits = catalog.conflicting_uid_hits(
-                    uid,
-                    current_project_dir=getattr(self.ctx, "current_project_dir", None),
-                    current_project_root=getattr(self.ctx, "current_project_root", None),
-                    allowed_current_uid=self._persisted_uid,
-                )
-            except Exception:
-                hits = []
-            if hits:
-                self._dup_warn.setText("⚠ " + catalog.format_uid_conflict(uid, hits))
-                self._dup_warn.show()
-            else:
-                self._dup_warn.hide()
+            # Keep live preview cheap. Cross-workspace duplicate checks scan
+            # every known project DB and are enforced on save in WorkbenchView;
+            # doing that on every keystroke is visibly slow on WSL-mounted dirs.
+            self._dup_warn.hide()
 
     def _check_compliance(self, uid: str) -> None:
         """Light 7-segment format compliance check for the live preview UID.
@@ -1387,6 +1531,9 @@ class NamingPanel(QWidget):
                 if value and data == value:
                     target = row
                     break
+            if value and target == 0:
+                self._storage_combo.addItem(value, value)
+                target = self._storage_combo.count() - 1
             self._storage_combo.setCurrentIndex(target)
         finally:
             self._storage_syncing = False
@@ -1405,6 +1552,9 @@ class NamingPanel(QWidget):
         old_code = self._storage.text().strip()
         self._storage.setText(code)
         self._sync_combo_to_storage(code)
+
+        if old_code != code:
+            self.storage_applied.emit(old_code, code)
 
         if not self._persisted_uid or old_code == code:
             return
@@ -1426,8 +1576,11 @@ class NamingPanel(QWidget):
         if specimen_has_risky_references(db, uid):
             reply = QMessageBox.warning(
                 self,
-                "保存方式修正",
-                "保存方式改变会更新唯一编号，已有记录将迁移。确认？",
+                "保存方式改名确认",
+                f"保存方式将从 {old_code or '空'} 改为 {code}，唯一编号也会随之改名。\n\n"
+                "系统会把该编号下的分组、激活/阶段记录，以及已登记的成果 TIFF/ZIP "
+                "路径同步到新编号；原始 JPG/TIF 不会被删除。\n\n"
+                "确认继续？",
                 QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
             )
             if reply != QMessageBox.StandardButton.Ok:

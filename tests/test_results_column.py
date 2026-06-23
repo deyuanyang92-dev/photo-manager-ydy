@@ -229,6 +229,59 @@ def test_tiff_and_zip_render_as_two_list_rows(qtbot):
     assert len(rows[0].findChildren(_ArchiveCard)) == 1
 
 
+def test_load_many_groups_results_by_specimen_uid(qtbot):
+    from PyQt6.QtWidgets import QLabel
+
+    from app.widgets.results_column import (
+        ResultsColumn, _ResultRow, _SpecimenResultHeader,
+    )
+    col = ResultsColumn()
+    qtbot.addWidget(col)
+
+    col.load_many([
+        {
+            "uid": "UID-1",
+            "tiffs": [{"path": "/fake/a.tif", "name": "a.tif", "seq": 1}],
+            "zips": [{"path": "/fake/a.zip", "name": "a.zip", "seq": 1}],
+        },
+        {
+            "uid": "UID-2",
+            "tiffs": [{"path": "/fake/b.tif", "name": "b.tif", "seq": 2}],
+            "zips": [],
+        },
+    ])
+
+    headers = col.findChildren(_SpecimenResultHeader)
+    assert len(headers) == 2
+    assert "UID-1" in headers[0].findChildren(QLabel)[0].text()
+    assert "UID-2" in headers[1].findChildren(QLabel)[0].text()
+    assert len(col.findChildren(_ResultRow)) == 2
+    assert col._count.text() == "2 编号 / 2 项"
+    assert col._title.text() == "全部成果"
+
+
+def test_all_results_header_click_requests_specimen(qtbot):
+    from PyQt6.QtCore import Qt
+
+    from app.widgets.results_column import ResultsColumn, _SpecimenResultHeader
+    col = ResultsColumn()
+    qtbot.addWidget(col)
+    col.load_many([
+        {
+            "uid": "UID-1",
+            "tiffs": [{"path": "/fake/a.tif", "name": "a.tif", "seq": 1}],
+            "zips": [],
+        },
+    ])
+    seen = []
+    col.specimen_requested.connect(seen.append)
+
+    header = col.findChild(_SpecimenResultHeader)
+    qtbot.mouseClick(header, Qt.MouseButton.LeftButton)
+
+    assert seen == ["UID-1"]
+
+
 def test_no_zip_only_tiff_row(qtbot):
     """A TIFF with no paired ZIP yields one row with only a ``_TiffCard``."""
     from app.widgets.results_column import ResultsColumn, _ResultRow, _TiffCard, _ArchiveCard

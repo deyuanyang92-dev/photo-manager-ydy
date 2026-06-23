@@ -500,7 +500,7 @@ class MainWindow(QMainWindow):
         self._nav_pin_menu.setTitle(tr("固定到顶栏"))
 
         self._btn_compress.setText(tr("归档"))
-        self._btn_compress.setToolTip(tr("智能压缩归档（JPG→JXL→ZIP）"))
+        self._btn_compress.setToolTip(tr("整理归档（JPG→ZIP）"))
         self._settings_btn.setToolTip(tr("配置"))
         self._btn_helicon.setToolTip(tr("Helicon Focus 景深合成"))
         self._active_label.setText(tr("激活标本"))

@@ -627,30 +627,30 @@ class SettingsView(BaseView):
         self._tabs.addTab(tab, tr("Helicon"))
 
     def _build_tab_archive(self) -> None:
-        """归档 tab — JXL effort + delete-JPG (default OFF, hard rule)."""
+        """归档 tab — plain JPG ZIP + delete-JPG verification."""
         tab = _ScrollTab()
         form = QFormLayout()
         form.setHorizontalSpacing(16)
         form.setVerticalSpacing(10)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
-        # JXL effort
+        # Compatibility settings; kept so existing QSettings/tests keep working.
         self._jxl_effort_combo = QComboBox()
         self._jxl_effort_combo.addItems([
-            "快速无损 — e7（约 10 倍快，体积约多 0.7%）",
-            "极限无损 — e9（最大压缩比，并行加速）",
+            "普通 ZIP — 直接解压得到 JPG",
+            "普通 ZIP — 兼容旧设置",
         ])
         self._jxl_effort_combo.setToolTip(
-            "两种模式都可恢复原始 JPEG；差别仅为压缩耗时和归档体积"
+            "归档 ZIP 内直接保存 JPG；普通解压工具打开后不会看到 JXL 或 manifest.json"
         )
         self._jxl_effort_combo.currentIndexChanged.connect(self._save_archive)
-        form.addRow("无损压缩方案", self._jxl_effort_combo)
+        form.addRow("归档格式", self._jxl_effort_combo)
 
         self._jxl_concurrency_spin = QSpinBox()
         self._jxl_concurrency_spin.setRange(1, 8)
         self._jxl_concurrency_spin.setValue(4)
         self._jxl_concurrency_spin.setToolTip(
-            "同时压缩的照片数；建议 4，机械硬盘可改为 2"
+            "兼容旧设置；当前普通 ZIP 归档不需要 JPEG XL 并行压缩"
         )
         self._jxl_concurrency_spin.valueChanged.connect(self._save_archive)
         form.addRow("并行任务数", self._jxl_concurrency_spin)
@@ -663,12 +663,11 @@ class SettingsView(BaseView):
         del_v = QVBoxLayout(del_box)
 
         prereq_label = QLabel(
-            "默认流程：JPG 无损压缩进 ZIP，校验成功后删除散落原片。\n"
+            "默认流程：JPG 原片直接打包进 ZIP，普通解压后仍是 JPG。\n"
             "只有同时满足以下条件才会删除：\n"
-            "  1. cjxl 可用（JPEG XL 无损压缩工具已安装）\n"
-            "  2. ZIP 已生成且大小 > 32 字节\n"
-            "  3. 清单完整（文件数 + 名称 + 大小全部核验通过）\n"
-            "  4. JXL 可恢复，且恢复 JPEG 的 SHA-256 与原图完全一致\n"
+            "  1. ZIP 已生成且大小 > 32 字节\n"
+            "  2. ZIP 完整性校验通过\n"
+            "  3. ZIP 内每张 JPG 的名称、大小、SHA-256 与原图一致\n"
             "任何一项失败都会保留原 JPG。TIFF 永远不会被删除。"
         )
         prereq_label.setObjectName("Muted")
@@ -795,9 +794,9 @@ class SettingsView(BaseView):
         # （已移除「JPG 入库后自动分组处理」死开关：重设计后合成永远手动，自动只保留
         #   下面的「合成后自动整理归档」。）
 
-        # 合成后自动整理归档：手动合成出 TIFF 后，自动把源 JPG 打包压缩+命名+移
+        # 合成后自动整理归档：手动合成出 TIFF 后，自动把源 JPG 打包归档+命名+移
         # results。合成本身仍手动（软件无法判断哪些 JPG 该合成）。默认关。
-        self._auto_organize_chk = QCheckBox("合成后自动整理归档（源 JPG 打包压缩→命名→移 results）")
+        self._auto_organize_chk = QCheckBox("合成后自动整理归档（源 JPG 打包 ZIP→命名→移 results）")
         self._auto_organize_chk.setChecked(False)
         self._auto_organize_chk.setToolTip(
             "打开后：你手动合成出 TIFF，软件自动整理归档（不自动删 TIFF）。"
@@ -1174,18 +1173,18 @@ class SettingsView(BaseView):
         tab.body.addWidget(shortcut_box)
         tab.body.addSpacing(12)
 
-        # ── 调试：真实压缩 ────────────────────────────────────────────────────
+        # ── 调试：真实归档 ────────────────────────────────────────────────────
         debug_box = QGroupBox(tr("调试选项"))
         debug_v = QVBoxLayout(debug_box)
 
         self._use_real_compression_chk = QCheckBox(
-            tr("使用后端真实压缩（文件需实际存在于项目目录）")
+            tr("使用后端真实归档（文件需实际存在于项目目录）")
         )
         self._use_real_compression_chk.setChecked(False)
         self._use_real_compression_chk.setToolTip(
             tr(
                 "对应 web useRealCompression 调试开关。"
-                "关闭时系统只模拟压缩结果状态，不调用 cjxl / archiver。"
+                "关闭时系统只模拟归档结果状态，不实际写入 ZIP。"
             )
         )
         self._use_real_compression_chk.stateChanged.connect(self._save_ui)
@@ -1234,7 +1233,7 @@ class SettingsView(BaseView):
 
         about_text = QLabel(
             "标本照片工作台  |  Specimen Photo Workbench\n"
-            "分类学标本拍摄 · 景深叠加 · JPEG XL 归档 · 标签打印\n"
+            "分类学标本拍摄 · 景深叠加 · JPG ZIP 归档 · 标签打印\n"
         )
         about_text.setObjectName("Muted")
         about_text.setAlignment(Qt.AlignmentFlag.AlignCenter)

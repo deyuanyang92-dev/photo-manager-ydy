@@ -87,13 +87,34 @@ def list_bundled_basemaps() -> list[dict]:
 
 
 def list_basemaps(user_dir: Optional[Path] = None) -> list[dict]:
-    """全部底图条目：OSM 交互 + 用户图 + 随包栅格。
+    """全部底图条目：交互瓦片 + 用户图 + 随包栅格。
 
     生成投影底图（kind='generated'）在 Phase C 由 PublicationMapWidget 自带预设提供。
     """
     entries: list[dict] = [
-        {"id": "osm", "name": "交互地图 (OSM)", "kind": "osm", "source": "", "ext": "",
-         "vector": None},
+        {
+            "id": "osm",
+            "name": "交互地图 (OSM)",
+            "kind": "osm",
+            "source": "",
+            "ext": "",
+            "vector": None,
+            "tile_url": "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+            "attribution": "© OpenStreetMap contributors",
+        },
+        {
+            "id": "satellite:esri-world-imagery",
+            "name": "卫星影像 (Esri)",
+            "kind": "tile",
+            "source": "",
+            "ext": "",
+            "vector": None,
+            "tile_url": (
+                "https://server.arcgisonline.com/ArcGIS/rest/services/"
+                "World_Imagery/MapServer/tile/{z}/{y}/{x}"
+            ),
+            "attribution": "Imagery © Esri",
+        },
     ]
     # 内置优先；用户目录同名图不再重复列出
     seen: set[str] = set()

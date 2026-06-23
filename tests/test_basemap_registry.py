@@ -35,6 +35,14 @@ class TestDiscovery:
         entries = br.list_basemaps(user_dir=None)
         assert any(e["kind"] == "osm" for e in entries)
 
+    def test_satellite_tile_entry_present(self):
+        entries = br.list_basemaps(user_dir=None)
+        sat = next((e for e in entries if e["id"] == "satellite:esri-world-imagery"), None)
+        assert sat is not None
+        assert sat["kind"] == "tile"
+        assert "World_Imagery" in sat["tile_url"]
+        assert sat["attribution"]
+
     def test_default_map_dir_is_repo_dir(self):
         d = br.default_map_dir()
         assert d.name == "地图"

@@ -10,7 +10,8 @@ import sys
 import unittest.mock as mock
 
 import pytest
-from PyQt6.QtWidgets import QApplication, QDialog, QWidget
+from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import QApplication, QDialog, QFileDialog, QTreeView, QWidget
 
 
 @pytest.fixture(scope="module")
@@ -127,6 +128,25 @@ class TestGetOpenFileName:
         ):
             result = get_open_file_name(None, "打开文件")
         assert result == expected
+
+
+class TestFileDialogSorting:
+    def test_sort_dialog_by_mtime_desc_uses_detail_date_column(self, qapp, tmp_path):
+        from app.utils.ui import _NO_NATIVE, _sort_dialog_by_mtime_desc
+
+        dlg = QFileDialog(None, "选择照片", str(tmp_path))
+        dlg.setOption(_NO_NATIVE, True)
+
+        _sort_dialog_by_mtime_desc(dlg)
+
+        tree = next(
+            view for view in dlg.findChildren(QTreeView)
+            if view.objectName() == "treeView"
+        )
+        assert dlg.viewMode() == QFileDialog.ViewMode.Detail
+        assert tree.header().sortIndicatorSection() == 3
+        assert tree.header().sortIndicatorOrder() == Qt.SortOrder.DescendingOrder
+        assert dlg.width() >= 820
 
 
 # ── get_save_file_name ────────────────────────────────────────────────────────

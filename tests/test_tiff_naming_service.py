@@ -173,6 +173,37 @@ def test_parse_legacy_inline_chinese_descriptor_before_date():
     assert rec.inline_labels == ("广西防城港", "白龙尾", "独齿沙蚕")
 
 
+def test_parse_inline_descriptor_with_existing_core_date_does_not_duplicate_date():
+    from app.utils.naming import recognize_tiff_filename
+
+    stem = "GXFCG-BLW-SC004-2-R-20260618-广西防城港-白龙尾-独齿沙蚕-20260618"
+    components = [
+        "province", "site", "station", "species_id", "storage", "date_seg",
+    ]
+    rec = recognize_tiff_filename(stem, components)
+
+    assert rec is not None
+    assert rec.uid == "GXFCG-BLW-SC004-R-20260618"
+    assert rec.field_values["date_seg"] == "20260618"
+
+
+def test_parse_inline_descriptor_with_storage_and_legacy_short_date():
+    from app.utils.naming import recognize_tiff_filename
+
+    stem = "GXFCG-BLW-SC002-2-R-260618-广西防城港-白龙尾-独齿沙蚕-20260618"
+    components = [
+        "province", "site", "station", "species_id", "storage", "date_seg",
+    ]
+    rec = recognize_tiff_filename(stem, components)
+
+    assert rec is not None
+    assert rec.uid == "GXFCG-BLW-SC002-R-20260618"
+    assert rec.sequence == 2
+    assert rec.field_values["storage"] == "R"
+    assert rec.field_values["date_seg"] == "20260618"
+    assert rec.inline_labels == ("260618", "广西防城港", "白龙尾", "独齿沙蚕")
+
+
 def test_tiff_stem_fully_conforms_requires_exact_core():
     from app.utils.naming import tiff_stem_fully_conforms, tiff_stem_is_recognizable
 
@@ -189,20 +220,88 @@ def test_tiff_stem_fully_conforms_requires_exact_core():
     assert tiff_stem_fully_conforms(standard, components)
 
 
+def test_tiff_stem_needs_rename_only_when_storage_must_be_patched():
+    from app.utils.naming import tiff_stem_needs_rename_for_organize
+
+    components = [
+        "province", "site", "station", "species_id", "storage", "date_seg",
+    ]
+    legacy = "GXFCG-BLW-SC001-1-260618-广西防城港-白龙尾-独齿沙蚕-20260618"
+    uid = "GXFCG-BLW-SC001-20260618"
+
+    assert not tiff_stem_needs_rename_for_organize(
+        legacy, components, panel_uid=uid, panel_storage="",
+    )
+    assert tiff_stem_needs_rename_for_organize(
+        legacy, components, panel_uid=uid, panel_storage="D79",
+    )
+    assert tiff_stem_needs_rename_for_organize(
+        "HeliconFocus", components, panel_uid=uid, panel_storage="D79",
+    )
+
+
+def test_suggest_tiff_filename_preserve_legacy_inserts_storage():
+    from app.utils.naming import suggest_tiff_filename_preserve_legacy
+
+    components = [
+        "province", "site", "station", "species_id", "storage", "date_seg",
+    ]
+    stem = "GXFCG-BLW-SC001-1-260618-广西防城港-白龙尾-独齿沙蚕-20260618"
+    suggested = suggest_tiff_filename_preserve_legacy(
+        stem,
+        components,
+        {
+            "province": "GXFCG",
+            "site": "BLW",
+            "species_id": "SC001",
+            "storage": "D79",
+            "date_seg": "20260618",
+        },
+        seq=1,
+    )
+    assert suggested == (
+        "GXFCG-BLW-SC001-1-D79-260618-广西防城港-白龙尾-独齿沙蚕-20260618"
+    )
+
+
+def test_suggest_tiff_filename_preserve_legacy_replaces_old_storage():
+    from app.utils.naming import suggest_tiff_filename_preserve_legacy
+
+    components = [
+        "province", "site", "station", "species_id", "storage", "date_seg",
+    ]
+    stem = "GXFCG-BLW-SC002-2-R-260618-广西防城港-白龙尾-独齿沙蚕-20260618"
+    suggested = suggest_tiff_filename_preserve_legacy(
+        stem,
+        components,
+        {
+            "province": "GXFCG",
+            "site": "BLW",
+            "species_id": "SC002",
+            "storage": "RD79",
+            "date_seg": "20260618",
+        },
+        seq=2,
+    )
+    assert suggested == (
+        "GXFCG-BLW-SC002-2-RD79-260618-广西防城港-白龙尾-独齿沙蚕-20260618"
+    )
+
+
 def test_legacy_filename_photo_notes_archives_unmapped_segments():
     from app.utils.naming import legacy_filename_photo_notes
 
     text = legacy_filename_photo_notes(
         ["广西防城港", "白龙尾", "独齿沙蚕"],
-        source_name="GXFCG-BLW-SC001-1-260618-广西防城港-白龙尾-独齿沙蚕-20260618.tif",
+        date_suffix="20260618",
     )
-    assert "【文件名附加】广西防城港 · 白龙尾 · 独齿沙蚕" in text
-    assert "【原文件名】" in text
+    assert text == "广西防城港-白龙尾-独齿沙蚕-20260618"
 
 
 def test_apply_recognized_fields_single_date_fills_both(qtbot):
-    from app.widgets.naming_panel import NamingPanel
     from unittest.mock import MagicMock
+
+    from app.widgets.naming_panel import NamingPanel
 
     panel = NamingPanel(MagicMock())
     qtbot.addWidget(panel)
@@ -211,12 +310,12 @@ def test_apply_recognized_fields_single_date_fills_both(qtbot):
         collection_date="20260618",
         photo_date="",
         sequence=1,
-        inline_labels=("白龙尾", "独齿沙蚕"),
+        inline_labels=("广西防城港", "白龙尾", "独齿沙蚕"),
         source_filename="demo.tif",
     )
     assert panel._collection_date.text() == "20260618"
     assert panel._photo_date.text() == "20260618"
-    assert "【文件名附加】" in panel._photo_notes.toPlainText()
+    assert panel._photo_notes.toPlainText() == "广西防城港-白龙尾-独齿沙蚕-20260618"
 
 
 def test_parse_tiff_result_detail_accepts_dual_date_segment(tmp_path):

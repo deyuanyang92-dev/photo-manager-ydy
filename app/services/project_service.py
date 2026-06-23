@@ -224,6 +224,26 @@ def open_project(directory: str) -> dict:
     }
 
 
+def enter_photo_folder(ctx, directory: str) -> str:
+    """Use an existing photo directory without turning it into a project.
+
+    Standalone grouping only needs a local database.  Keep that database beside
+    the photos in ``_data/project.db`` but do not scaffold the project-only
+    ``incoming-jpg`` and ``results`` directories and do not add the folder to
+    the project catalogue/recent-project list.
+    """
+    from app.db.db_manager import open_project_db
+    from app.services.project_paths import require_project_root
+
+    root = require_project_root(directory)
+    resolved = str(root.resolve())
+    open_project_db(resolved, create=True)
+    default_registry.register_root(resolved)
+    ctx.current_project_dir = resolved
+    ctx.current_project_root = resolved
+    return resolved
+
+
 def list_projects(user_projects_json_path: str) -> list:
     """Read the user_projects.json file and return the list of project dicts.
 

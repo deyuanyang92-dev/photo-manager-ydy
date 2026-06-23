@@ -91,7 +91,7 @@ class AppSettings:
     @property
     def auto_organize_after_compose(self) -> bool:
         # 「合成后自动整理归档」开关（默认关）。开 → 手动合成出 TIFF 后，自动把
-        # 源 JPG 打包压缩+命名+移 results。合成本身仍手动。
+        # 源 JPG 打包归档+命名+移 results。合成本身仍手动。
         return str(
             self._qs.value("workbench/auto_organize_after_compose", "false")
         ).lower() == "true"
@@ -133,7 +133,7 @@ class AppSettings:
 
     @property
     def jxl_effort_method(self) -> str:
-        """JXL effort selected in Settings: 0=standard(e7), 1=maximum(e9)."""
+        """Legacy archive option key kept for settings compatibility."""
         try:
             index = int(self._qs.value("archive/jxl_effort", 0))
         except (TypeError, ValueError):

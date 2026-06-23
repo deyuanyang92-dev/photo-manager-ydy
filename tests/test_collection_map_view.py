@@ -144,6 +144,23 @@ class TestBasemapSwitch:
         assert v._stack.currentWidget() is v._tile_map
         assert not v._calibrate_btn.isEnabled()
 
+    def test_activate_satellite_tile_stays_interactive(self):
+        v = _view()
+        entry = {
+            "id": "satellite:test",
+            "name": "卫星影像",
+            "kind": "tile",
+            "source": "",
+            "ext": "",
+            "tile_url": "https://tiles.example.test/{z}/{y}/{x}.jpg",
+            "attribution": "Imagery © Test",
+        }
+        v._activate_basemap(entry)
+        assert v._stack.currentWidget() is v._tile_map
+        assert not v._calibrate_btn.isEnabled()
+        assert v._is_publication_mode() is False
+        assert v._tile_map._tile_source_id == "satellite:test"
+
 
 class TestAddProject:
     """左侧「项目」卡片内的「+ 新建项目」入口。"""
@@ -393,6 +410,30 @@ class TestEditMode:
         v = self._view_with_project(_seed_db())
         assert v._add_point_btn.isEnabled() is True
         assert v._input_coord_btn.isEnabled() is True
+        assert "写入：proj-x" in v._edit_status_lbl.text()
+        assert "可拖点" in v._edit_status_lbl.text()
+
+    def test_edit_buttons_enabled_all_projects_with_current_project(self):
+        db = _seed_db()
+        ctx = self._ctx_db(db)
+        ctx.current_project_dir = "/tmp/current-proj"
+        v = CollectionMapView(ctx)
+        v.resize(900, 600)
+        v._project_filter = None
+        v._update_edit_buttons()
+        assert v._edit_target_project() == "/tmp/current-proj"
+        assert v._add_point_btn.isEnabled() is True
+        assert v._input_coord_btn.isEnabled() is True
+        assert "写入：current-proj" in v._edit_status_lbl.text()
+        assert "全部视图" in v._edit_status_lbl.text()
+        assert v._tile_map.point_drag_enabled is False
+
+    def test_drag_disabled_when_not_station_level(self):
+        v = self._view_with_project(_seed_db())
+        assert v._tile_map.point_drag_enabled is True
+        v._set_level("site")
+        assert v._tile_map.point_drag_enabled is False
+        assert "拖点需站位层级" in v._edit_status_lbl.text()
 
     def test_toggle_sets_interactive_points_and_hint(self):
         v = self._view_with_project(_seed_db())
@@ -400,6 +441,7 @@ class TestEditMode:
         assert v._edit_mode is True
         assert v._tile_map.interactive_points is True
         assert v._edit_hint.isHidden() is False
+        assert "写入「proj-x」" in v._edit_hint.text()
         v._set_edit_mode(False)
         assert v._tile_map.interactive_points is False
         assert v._edit_hint.isHidden() is True
@@ -423,6 +465,30 @@ class TestEditMode:
         assert rec is not None
         assert rec["lon"] == pytest.approx(122.5)
         assert rec["lat"] == pytest.approx(30.5)
+
+    def test_point_create_all_projects_writes_current_project(self, monkeypatch):
+        db = _seed_db()
+        ctx = self._ctx_db(db)
+        ctx.current_project_dir = "/tmp/current-proj"
+        v = CollectionMapView(ctx)
+        v.resize(900, 600)
+        v._project_filter = None
+        ctx.get_db.reset_mock()
+        from unittest.mock import patch
+        fake = MagicMock()
+        fake.exec.return_value = 1
+        fake.result_point.return_value = {
+            "action": "new", "province": "ZJ", "site": "SMW", "station": "C1",
+            "collection_date": "20260622", "zone": "intertidal",
+            "lon": 122.6, "lat": 30.6,
+        }
+        with patch("app.widgets.collection_point_dialog.CollectionPointDialog",
+                   return_value=fake):
+            v._on_point_create(122.6, 30.6)
+        ctx.get_db.assert_any_call("/tmp/current-proj")
+        rec = crs.lookup_record(db, "ZJ", "SMW", "C1", "20260622")
+        assert rec is not None
+        assert rec["lon"] == pytest.approx(122.6)
 
     def test_point_create_bind_updates_station_coords(self, monkeypatch):
         db = _seed_db()   # B2 已有 (121,29)

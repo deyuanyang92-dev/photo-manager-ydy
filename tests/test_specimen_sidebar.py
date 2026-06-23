@@ -53,6 +53,34 @@ def _add_specimen(db, uid, name="", storage=""):
     db.commit()
 
 
+def _add_complete_specimen(db, uid, name="Marphysa sp.", storage="D95E"):
+    db.execute(
+        """
+        INSERT INTO specimens (
+            uid, scientific_name, storage,
+            collection_date, photo_date, owner_project_dir
+        )
+        VALUES (?, ?, ?, '20260618', '20260618', ?)
+        """,
+        (uid, name, storage, _PROJ),
+    )
+    db.commit()
+
+
+def _add_specimen_with_fields(db, *, uid, species_id, storage):
+    db.execute(
+        """
+        INSERT INTO specimens (
+            uid, province, site, station, id, storage,
+            collection_date, photo_date, owner_project_dir
+        )
+        VALUES (?, 'GXFCG', 'BLW', '', ?, ?, '20260618', '20260618', ?)
+        """,
+        (uid, species_id, storage, _PROJ),
+    )
+    db.commit()
+
+
 def _dots(sidebar, uid):
     return sidebar._phase_dots.get(uid, {})
 
@@ -77,7 +105,17 @@ def test_current_phase_dot_is_checked_from_db(ctx, db):
     assert dots["done"].isChecked() is False
 
 
-def test_no_phase_means_no_dot_checked(ctx, db):
+def test_activate_emits_for_single_visible_row_without_prior_selection(ctx, db, qtbot):
+    uid = "GXFCG-BLW-SC001-D79-20260618"
+    _add_specimen(db, uid)
+    sb = SpecimenSidebar(ctx)
+    sb.refresh()
+    assert sb.current_uid() is None or sb._list.currentItem() is not None
+    sb._list.setCurrentItem(None)
+    seen: list[str] = []
+    sb.activate_requested.connect(seen.append)
+    sb._on_activate_clicked()
+    assert seen == [uid]
     _add_specimen(db, "U-2")
     sb = SpecimenSidebar(ctx)
     sb.refresh()
@@ -192,7 +230,103 @@ def test_active_specimen_row_has_active_style_and_badge(ctx, db):
         w for w in row.findChildren(QLabel)
         if w.objectName() == "SpecimenActivePill"
     ]
-    assert badges and badges[0].text() == "拍摄中"
+    assert badges and badges[0].text() == "当前激活"
+
+
+def test_inactive_specimen_row_has_explicit_inactive_badge(ctx, db):
+    _add_specimen(db, "FJ-D-F-DD001")
+
+    sb = SpecimenSidebar(ctx)
+    sb.refresh()
+
+    row = sb._list.itemWidget(sb._list.item(0))
+    badges = [
+        w for w in row.findChildren(QLabel)
+        if w.objectName() == "SpecimenInactivePill"
+    ]
+    assert badges and badges[0].text() == "未激活"
+
+
+def test_action_buttons_reflect_selected_activation_state(ctx, db):
+    active_uid = "FJ-D-F-DD001"
+    inactive_uid = "FJ-D-F-DD002"
+    _add_specimen(db, active_uid)
+    _add_specimen(db, inactive_uid)
+    db.execute(
+        "INSERT INTO tasks(uid, is_active) VALUES(?, 1)",
+        (active_uid,),
+    )
+    db.commit()
+
+    sb = SpecimenSidebar(ctx)
+    sb.refresh()
+
+    sb.select_uid(active_uid)
+    assert sb._activate_btn.text() == "已激活"
+    assert sb._activate_btn.isEnabled() is False
+    assert sb._deactivate_btn.text() == "取消激活"
+    assert sb._deactivate_btn.isEnabled() is True
+
+    sb.select_uid(inactive_uid)
+    assert sb._activate_btn.text() == "激活此编号"
+    assert sb._activate_btn.isEnabled() is True
+    assert sb._deactivate_btn.text() == "未激活"
+    assert sb._deactivate_btn.isEnabled() is False
+
+
+def test_row_shows_organize_progress_from_grouping(ctx, db):
+    uid = "GXFCG-BLW-SC001-D79-20260618"
+    _add_specimen(db, uid)
+    db.execute(
+        """
+        INSERT INTO grouping
+          (uid, group_index, jpg_paths, composed_tiff_path, status, archive_zip)
+        VALUES
+          (?, 0, '["a.jpg","b.jpg"]', '/p/results/one.tif', 'organized',
+           '/p/results/one.zip')
+        """,
+        (uid,),
+    )
+    db.commit()
+
+    sb = SpecimenSidebar(ctx)
+    sb.refresh()
+
+    row = sb._list.itemWidget(sb._list.item(0))
+    badges = [
+        w for w in row.findChildren(QLabel)
+        if w.objectName() == "SpecimenProgressBadge"
+    ]
+    assert badges and badges[0].text() == "已整理 1角度"
+
+
+def test_organized_progress_badge_does_not_show_total_groups(ctx, db):
+    uid = "GXFCG-BLW-SC001-D79-20260618"
+    _add_specimen(db, uid)
+    db.executemany(
+        """
+        INSERT INTO grouping
+          (uid, group_index, jpg_paths, composed_tiff_path, status, archive_zip)
+        VALUES
+          (?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (uid, 0, '["a.jpg"]', "/p/results/one.tif", "organized", "/p/results/one.zip"),
+            (uid, 1, '["b.jpg"]', "/p/results/two.tif", "organized", "/p/results/two.zip"),
+            (uid, 2, '["c.jpg"]', "/p/results/three.tif", "composed", None),
+        ],
+    )
+    db.commit()
+
+    sb = SpecimenSidebar(ctx)
+    sb.refresh()
+
+    row = sb._list.itemWidget(sb._list.item(0))
+    badges = [
+        w for w in row.findChildren(QLabel)
+        if w.objectName() == "SpecimenProgressBadge"
+    ]
+    assert badges and badges[0].text() == "已整理 2角度"
 
 
 def test_selected_specimen_row_gets_explicit_selected_property(ctx, db):
@@ -230,6 +364,37 @@ def test_rna_filter_button_shows_count_and_filters_r_prefix(ctx, db):
     assert sb._filter_rna_btn.text() == "RNA 1"
 
 
+def test_all_filter_button_requests_all_results(ctx, db, qtbot):
+    _add_specimen(db, "RNA-1", storage="RD75E")
+    _add_specimen(db, "NONRNA-1", storage="D95E")
+    sb = SpecimenSidebar(ctx)
+    qtbot.addWidget(sb)
+    sb.refresh()
+
+    received = []
+    sb.show_all_requested.connect(lambda: received.append(True))
+
+    sb._filter_all_btn.click()
+
+    assert received == [True]
+    assert sb._list.count() == 2
+
+
+def test_attention_filter_shows_incomplete_specimens(ctx, db):
+    _add_complete_specimen(db, "COMPLETE-1")
+    _add_specimen(db, "MISSING-1", storage="D95E")
+    sb = SpecimenSidebar(ctx)
+    sb.refresh()
+
+    assert sb._filter_attention_btn.text() == "待补全 1"
+
+    sb._filter_attention_btn.click()
+
+    assert sb._list.count() == 1
+    assert sb._list.item(0).data(Qt.ItemDataRole.UserRole) == "MISSING-1"
+    assert sb._filter_attention_btn.text() == "待补全 1"
+
+
 def test_rna_badge_and_missing_species_are_visible_on_row(ctx, db):
     _add_specimen(db, "RNA-2", storage="RT95E")
     sb = SpecimenSidebar(ctx)
@@ -248,3 +413,14 @@ def test_rna_badge_and_missing_species_are_visible_on_row(ctx, db):
     assert rna_badges and "已取 RNA" in rna_badges[0].text()
     assert "RT95E" in rna_badges[0].text()
     assert missing and missing[0].text() == "未填写物种信息"
+
+
+def test_refresh_repairs_malformed_uid_from_naming_fields(ctx, db):
+    _add_specimen_with_fields(db, uid="RD79", species_id="SC002", storage="RD79")
+    sb = SpecimenSidebar(ctx)
+    sb.refresh()
+
+    fixed_uid = "GXFCG-BLW-SC002-RD79-20260618"
+    assert sb._list.item(0).data(Qt.ItemDataRole.UserRole) == fixed_uid
+    assert db.execute("SELECT 1 FROM specimens WHERE uid=?", (fixed_uid,)).fetchone()
+    assert not db.execute("SELECT 1 FROM specimens WHERE uid='RD79'").fetchone()

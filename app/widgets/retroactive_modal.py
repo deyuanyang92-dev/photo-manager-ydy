@@ -199,7 +199,7 @@ class RetroactiveModal(QDialog):
         no_project = self.ctx.get_db() is None
         confirm = QMessageBox.question(
             self, "确认整理",
-            f"对 {len(to_archive)} 组打包归档（JXL+ZIP）？"
+            f"对 {len(to_archive)} 组打包归档（JPG ZIP）？"
             + ("\n\n未打开项目：仅生成本地 ZIP，不写入项目数据库。"
                if no_project else "")
             + ("\n⚠ 已开启删原片：打包校验通过后将删除这些 JPG（TIFF 永久保留）。"

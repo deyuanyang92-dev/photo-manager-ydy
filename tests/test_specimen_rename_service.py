@@ -16,6 +16,7 @@ import pytest
 from app.services.specimen_rename_service import (
     apply_storage_correction,
     migrate_uid_references,
+    repair_grouping_result_files_for_uid,
     rename_specimen_code,
     specimen_has_risky_references,
 )
@@ -456,6 +457,161 @@ def test_apply_storage_correction_migrates_tasks():
     new_uid = apply_storage_correction(db, old_uid, "D95E")
     assert db.execute("SELECT 1 FROM tasks WHERE uid=?", (new_uid,)).fetchone()
     assert not db.execute("SELECT 1 FROM tasks WHERE uid=?", (old_uid,)).fetchone()
+
+
+def test_apply_storage_correction_renames_legacy_inline_results(tmp_path):
+    db = _make_db()
+    old_uid = "GXFCG-BLW-SC002-R-20260618"
+    raw = {
+        "id": "SC002",
+        "province": "GXFCG",
+        "site": "BLW",
+        "station": "",
+        "storage": "R",
+        "collectionDate": "20260618",
+        "photoDate": "20260618",
+    }
+    _insert_specimen(db, old_uid, raw)
+
+    old_stem = "GXFCG-BLW-SC002-1-R-260618-广西防城港-白龙尾-独齿沙蚕-20260618"
+    old_tiff = tmp_path / f"{old_stem}.tif"
+    old_zip = tmp_path / f"{old_stem}.zip"
+    old_tiff.write_bytes(b"TIFF")
+    with zipfile.ZipFile(old_zip, "w") as zf:
+        zf.writestr("manifest.json", json.dumps({
+            "tiffBasename": old_stem,
+            "files": [],
+        }, ensure_ascii=False))
+
+    db.execute(
+        """
+        INSERT INTO grouping
+          (uid, group_index, composed_tiff_path, archive_zip, status, raw_json)
+        VALUES (?, 1, ?, ?, 'organized', ?)
+        """,
+        (
+            old_uid,
+            str(old_tiff),
+            str(old_zip),
+            json.dumps({
+                "composedTiffPath": str(old_tiff),
+                "archiveZip": str(old_zip),
+            }, ensure_ascii=False),
+        ),
+    )
+    db.commit()
+
+    new_uid = apply_storage_correction(db, old_uid, "RD79")
+    new_stem = "GXFCG-BLW-SC002-1-RD79-260618-广西防城港-白龙尾-独齿沙蚕-20260618"
+    new_tiff = tmp_path / f"{new_stem}.tif"
+    new_zip = tmp_path / f"{new_stem}.zip"
+
+    assert new_uid == "GXFCG-BLW-SC002-RD79-20260618"
+    assert new_tiff.is_file()
+    assert new_zip.is_file()
+    assert not old_tiff.exists()
+    assert not old_zip.exists()
+
+    row = db.execute(
+        "SELECT composed_tiff_path, archive_zip, raw_json FROM grouping WHERE uid=?",
+        (new_uid,),
+    ).fetchone()
+    assert row["composed_tiff_path"] == str(new_tiff)
+    assert row["archive_zip"] == str(new_zip)
+    saved = json.loads(row["raw_json"])
+    assert saved["composedTiffPath"] == str(new_tiff)
+    assert saved["archiveZip"] == str(new_zip)
+
+    with zipfile.ZipFile(new_zip, "r") as zf:
+        manifest = json.loads(zf.read("manifest.json").decode("utf-8"))
+    assert manifest["tiffBasename"] == new_stem
+
+
+def test_apply_storage_correction_uses_column_fallback_when_raw_json_missing():
+    db = _make_db()
+    old_uid = "GXFCG-BLW-SC002-R-20260618"
+    db.execute(
+        """
+        INSERT INTO specimens
+          (uid, id, province, site, station, storage,
+           collection_date, photo_date, raw_json)
+        VALUES (?, 'SC002', 'GXFCG', 'BLW', '', 'R', '20260618', '20260618', '{}')
+        """,
+        (old_uid,),
+    )
+    db.commit()
+
+    new_uid = apply_storage_correction(db, old_uid, "RD79")
+
+    assert new_uid == "GXFCG-BLW-SC002-RD79-20260618"
+    row = db.execute("SELECT storage, raw_json FROM specimens WHERE uid=?", (new_uid,)).fetchone()
+    assert row["storage"] == "RD79"
+    saved = json.loads(row["raw_json"])
+    assert saved["province"] == "GXFCG"
+    assert saved["site"] == "BLW"
+    assert saved["id"] == "SC002"
+
+
+def test_repair_grouping_result_files_for_current_uid(tmp_path):
+    db = _make_db()
+    uid = "GXFCG-BLW-SC002-RD79-20260618"
+    raw = {
+        "id": "SC002",
+        "province": "GXFCG",
+        "site": "BLW",
+        "station": "",
+        "storage": "RD79",
+        "collectionDate": "20260618",
+        "photoDate": "20260618",
+    }
+    _insert_specimen(db, uid, raw)
+
+    old_stem = "GXFCG-BLW-SC002-1-R-20260618-广西防城港-白龙尾-独齿沙蚕-20260618"
+    old_tiff = tmp_path / f"{old_stem}.tif"
+    old_zip = tmp_path / f"{old_stem}.zip"
+    old_tiff.write_bytes(b"TIFF")
+    with zipfile.ZipFile(old_zip, "w") as zf:
+        zf.writestr("manifest.json", json.dumps({
+            "tiffBasename": old_stem,
+            "files": [],
+        }, ensure_ascii=False))
+    db.execute(
+        """
+        INSERT INTO grouping
+          (uid, group_index, composed_tiff_path, archive_zip, status, raw_json)
+        VALUES (?, 1, ?, ?, 'organized', ?)
+        """,
+        (
+            uid,
+            str(old_tiff),
+            str(old_zip),
+            json.dumps({
+                "composedTiffPath": str(old_tiff),
+                "archiveZip": str(old_zip),
+            }, ensure_ascii=False),
+        ),
+    )
+    db.commit()
+
+    assert repair_grouping_result_files_for_uid(db, uid) is True
+
+    new_stem = "GXFCG-BLW-SC002-1-RD79-广西防城港-白龙尾-独齿沙蚕-20260618"
+    new_tiff = tmp_path / f"{new_stem}.tif"
+    new_zip = tmp_path / f"{new_stem}.zip"
+    assert new_tiff.is_file()
+    assert new_zip.is_file()
+    assert not old_tiff.exists()
+    assert not old_zip.exists()
+
+    row = db.execute(
+        "SELECT composed_tiff_path, archive_zip, raw_json FROM grouping WHERE uid=?",
+        (uid,),
+    ).fetchone()
+    assert row["composed_tiff_path"] == str(new_tiff)
+    assert row["archive_zip"] == str(new_zip)
+    saved = json.loads(row["raw_json"])
+    assert saved["composedTiffPath"] == str(new_tiff)
+    assert saved["archiveZip"] == str(new_zip)
 
 
 def test_apply_storage_correction_not_found_raises():

@@ -1,8 +1,8 @@
-"""tile_map_widget.py — native Qt slippy-map widget using OSM tiles.
+"""tile_map_widget.py — native Qt slippy-map widget using web map tiles.
 
-Replaces QtWebEngine for point picking. Downloads tiles asynchronously via
-QNetworkAccessManager; renders via QPainter. Coordinate system: WGS-84 throughout
-(OSM tiles are WGS-84 / EPSG:3857 Web Mercator — no GCJ-02 conversion needed).
+Replaces QtWebEngine for point picking. Downloads web-mercator tiles
+asynchronously via QNetworkAccessManager; renders via QPainter. Coordinate
+system: WGS-84 throughout (no GCJ-02 conversion needed).
 """
 from __future__ import annotations
 
@@ -156,6 +156,8 @@ class TileMapWidget(QWidget):
     zoom_changed = pyqtSignal(int)    # new zoom level
 
     _TILE_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+    _TILE_ATTRIBUTION = "© OpenStreetMap contributors"
+    _TILE_SOURCE_NAME = "OpenStreetMap"
     _UA = "photo-platform-gui/1.0 (specimen-workbench)"
     _MARKER_COLOR = QColor(41, 185, 171)
     _MARKER_HIT_R = 14  # pixels, hit-test radius
@@ -183,6 +185,7 @@ class TileMapWidget(QWidget):
         self.interactive_marker: bool = True          # False → click never places a marker
         # 编辑模式（采集地图）：True 时点空白发 point_create_requested、拖已有点发 point_moved。
         self.interactive_points: bool = False
+        self.point_drag_enabled: bool = True          # False → 编辑模式只新增，不拖动聚合点
 
         self._drag_start: Optional[QPoint] = None
         self._drag_center_start: Optional[tuple[float, float]] = None
@@ -191,6 +194,10 @@ class TileMapWidget(QWidget):
         self._press_pos: Optional[QPoint] = None
 
         self._cache = _TileCache(200)
+        self._tile_source_id: str = "osm"
+        self._tile_source_name: str = self._TILE_SOURCE_NAME
+        self._tile_url: str = self._TILE_URL
+        self._tile_attribution: str = self._TILE_ATTRIBUTION
         self._nam = QNetworkAccessManager(self)
         self._pending: dict[tuple, QNetworkReply] = {}
         # 拉取失败（超时/网络不可达）的瓦片 key：跳过重试直到任一瓦片成功，
@@ -221,7 +228,7 @@ class TileMapWidget(QWidget):
 
     def _build_attribution(self) -> None:
         self._attr_lbl = QLabel(
-            "© OpenStreetMap contributors",
+            self._tile_attribution,
             self,
         )
         self._attr_lbl.setStyleSheet(
@@ -241,6 +248,40 @@ class TileMapWidget(QWidget):
         self.update()
 
     # ── public API ────────────────────────────────────────────────────────────
+
+    def set_tile_source(self, source: Optional[dict]) -> None:
+        """Switch the active slippy-map tile source.
+
+        ``source`` follows the basemap_registry tile shape. Missing/invalid
+        values fall back to OSM, so existing callers do not need to know about
+        tile providers.
+        """
+        source = dict(source or {})
+        tile_url = str(source.get("tile_url") or source.get("url") or self._TILE_URL)
+        source_id = str(source.get("id") or "osm")
+        source_name = str(source.get("name") or self._TILE_SOURCE_NAME)
+        attribution = str(source.get("attribution") or self._TILE_ATTRIBUTION)
+        changed = (
+            tile_url != self._tile_url
+            or source_id != self._tile_source_id
+            or attribution != self._tile_attribution
+        )
+        self._tile_url = tile_url
+        self._tile_source_id = source_id
+        self._tile_source_name = source_name
+        self._tile_attribution = attribution
+        if hasattr(self, "_attr_lbl"):
+            self._attr_lbl.setText(attribution)
+            self._attr_lbl.adjustSize()
+            self._attr_lbl.move(
+                self.width() - self._attr_lbl.width() - 4,
+                self.height() - self._attr_lbl.height() - 4,
+            )
+        if changed:
+            self._abort_all_pending()
+            self._cache = _TileCache(200)
+            self._failed_keys.clear()
+            self.update()
 
     def set_center(self, lon: float, lat: float, zoom: int = 12) -> None:
         self._center_lon = lon
@@ -498,7 +539,8 @@ class TileMapWidget(QWidget):
             painter.setPen(QPen(QColor("#6f8585")))
             painter.drawText(
                 self.rect(), Qt.AlignmentFlag.AlignCenter,
-                "地图瓦片加载失败：无法连接 OpenStreetMap\n（直连可能被拦截，请确认代理已开启后平移/缩放重试）",
+                f"地图瓦片加载失败：无法连接 {self._tile_source_name}\n"
+                "（请确认网络或代理已开启后平移/缩放重试）",
             )
 
     def _point_radius(self, count: int) -> int:
@@ -660,7 +702,7 @@ class TileMapWidget(QWidget):
                 or self._cache.get(key) is not None:
             return
         self._apply_osm_proxy()
-        url = QUrl(self._TILE_URL.format(z=z, x=x, y=y))
+        url = QUrl(self._tile_url.format(z=z, x=x, y=y))
         req = QNetworkRequest(url)
         req.setHeader(QNetworkRequest.KnownHeaders.UserAgentHeader, self._UA)
         # 直连 OSM 不通（如无代理）时请求会无限挂起、key 永远占住 _pending
@@ -720,6 +762,14 @@ class TileMapWidget(QWidget):
             r.abort()
             self._pending.pop(k, None)
 
+    def _abort_all_pending(self) -> None:
+        for k, r in list(self._pending.items()):
+            try:
+                r.abort()
+            except Exception:
+                pass
+            self._pending.pop(k, None)
+
     # ── mouse interaction ─────────────────────────────────────────────────────
 
     def _marker_pixel(self) -> Optional[tuple[int, int]]:
@@ -743,7 +793,7 @@ class TileMapWidget(QWidget):
             return
         self._press_pos = event.pos()
         # 编辑模式：按在已有点上 → 进入点拖动（移动站位坐标）。
-        if self.interactive_points and self._points:
+        if self.interactive_points and self.point_drag_enabled and self._points:
             idx = self._point_at(event.pos())
             if idx is not None:
                 self._point_drag_idx = idx

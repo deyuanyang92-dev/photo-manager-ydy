@@ -4,7 +4,7 @@ Faithfully mirrors the web prototype's "目录监控 / 拍照工作台" centre c
 (app.js renderDirectoryMonitor):
 
   ┌ batch/status strip ─ UID + phase + compact JPG/TIFF stats ────────┐
-  ├ primary toolbar ─ 刷新 / 添加照片 / 合成 / 自动压缩 / 更多(含分组工具) ─┤
+  ├ primary toolbar ─ 刷新 / 添加照片 / 合成 / 自动归档 / 更多(含分组工具) ─┤
   ├ stream header ─ 待处理照片 · 右键处理文件 ───────────────────────┤
   ├ contextual selection bar ─ appears only after selecting files ─────┤
   ├ capture stream ─ compact file cards with row/right-click menus ────┤
@@ -357,7 +357,7 @@ class MonitorPanel(QWidget):
     compose_implicit_requested = pyqtSignal()  # 主界面[合成]：隐式合成未占用JPG
     organise_selected_requested = pyqtSignal()  # 主界面[整理]：选中 JPG+TIFF 直接归档
     compose_implicit_organise_requested = pyqtSignal()  # 主界面[合成+整理]
-    auto_compress_toggled = pyqtSignal(bool)  # 新 TIFF 自动压缩开关
+    auto_compress_toggled = pyqtSignal(bool)  # 新 TIFF 自动归档开关
     settings_requested = pyqtSignal()  # emitted from the compact "更多" menu
     phase_clicked = pyqtSignal(str)    # status code: shooting/shot_done/organizing/done
 
@@ -494,11 +494,11 @@ class MonitorPanel(QWidget):
         )
         controls.addWidget(self._compose_org_btn)
 
-        self._auto_toggle = QPushButton("自动压缩")
+        self._auto_toggle = QPushButton("自动归档")
         self._auto_toggle.setObjectName("Ghost")
         self._auto_toggle.setFixedHeight(28)
         self._auto_toggle.setCheckable(True)
-        self._auto_toggle.setToolTip("新 TIFF 写入后自动压缩")
+        self._auto_toggle.setToolTip("新 TIFF 写入后自动归档")
         icons.set_button_icon(self._auto_toggle, "mdi6.checkbox-blank-outline",
                               color=icons.TONE_MUTED, size=15)
         self._auto_toggle.toggled.connect(self._on_auto_toggled)
@@ -1108,7 +1108,7 @@ class MonitorPanel(QWidget):
         hide_action.setChecked(self._hide_archived_cb.isChecked())
         hide_action.toggled.connect(self._hide_archived_cb.setChecked)
 
-        auto_action = menu.addAction("新 TIFF 自动压缩")
+        auto_action = menu.addAction("新 TIFF 自动归档")
         auto_action.setCheckable(True)
         auto_action.setChecked(self._auto_toggle.isChecked())
         auto_action.toggled.connect(self._auto_toggle.setChecked)

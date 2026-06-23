@@ -12,8 +12,8 @@ JPG + TIFF bundle WITHOUT requiring an active specimen:
         Split the selection into jpg / tiff / unsupported, enforce
         (≥1 JPG, exactly 1 TIFF, no unsupported), resolve the specimen.
 
-No Qt here — kept importable for unit tests. The actual archival (cjxl /
-ZIP / safety gates) stays in app.services.archive_service; this module only
+No Qt here — kept importable for unit tests. The actual archival (ZIP /
+safety gates) stays in app.services.archive_service; this module only
 decides *what* to archive and *which specimen* it belongs to.
 """
 

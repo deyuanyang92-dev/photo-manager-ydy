@@ -218,6 +218,7 @@ def species_sequence_summary(
 # Examples: 20260601  /  20260506-0508  /  20250601-20260601
 _DATE_SEG_RE = r"(\d{8}(?:-\d{4}|-\d{8})?)"
 _DATE_SEG_FULL_RE = re.compile(r"^" + _DATE_SEG_RE + r"$")
+_LEGACY_SHORT_DATE_RE = re.compile(r"^\d{6}$")
 
 # Storage code: alphanumeric (e.g. T95E, RD75E, D70E)
 _STORAGE_RE = r"([A-Za-z0-9]+)"
@@ -542,6 +543,9 @@ def _extract_date_seg_from_parts(parts: list[str]) -> Optional[str]:
     one_part = parts[-1]
     if _DATE_SEG_FULL_RE.fullmatch(one_part):
         return parts.pop()
+    if _LEGACY_SHORT_DATE_RE.fullmatch(one_part):
+        parts.pop()
+        return "20" + one_part
     return None
 
 
@@ -682,13 +686,43 @@ def _peel_inline_descriptors_before_date(
     return buf, date_seg, inline
 
 
+def _has_storage_before_legacy_short_date(core: list[str]) -> bool:
+    """True for legacy cores like ``...-2-R-260618``.
+
+    The six-digit token is a short date/remark, not the storage code.  Keep it
+    only as a legacy inline label after parsing the real ``R`` storage segment.
+    """
+    if len(core) < 2 or not _LEGACY_SHORT_DATE_RE.fullmatch(core[-1]):
+        return False
+    return bool(re.search(r"[A-Za-z]", core[-2] or ""))
+
+
+def _append_trailing_date_for_candidate(core: list[str], date_seg: str) -> list[str]:
+    out = list(core)
+    if not out or not _DATE_SEG_FULL_RE.fullmatch(out[-1]):
+        out.append(date_seg)
+    return out
+
+
 def _parseable_stem_candidates(stem: str) -> list[str]:
     """Stems to try when matching project naming rules (handles inline labels)."""
     parts = stem.split("-")
     candidates = [stem]
+    if parts and _LEGACY_SHORT_DATE_RE.fullmatch(parts[-1]):
+        candidates.insert(0, "-".join(parts[:-1] + ["20" + parts[-1]]))
     buf, date_seg, inline = _peel_inline_descriptors_before_date(list(parts))
     if date_seg and inline:
-        candidates.insert(0, "-".join(buf + [date_seg]))
+        # Legacy names often repeat the date after inline Chinese descriptors:
+        #   CORE-DATE-地点-物种-DATE
+        # If the remaining core already ends with a date, do not append the
+        # peeled trailing date again, or the parsed UID becomes DATE-DATE.
+        core = list(buf)
+        candidates.insert(0, "-".join(_append_trailing_date_for_candidate(core, date_seg)))
+        if _has_storage_before_legacy_short_date(core):
+            candidates.insert(
+                0,
+                "-".join(_append_trailing_date_for_candidate(core[:-1], date_seg)),
+            )
     return candidates
 
 
@@ -776,16 +810,21 @@ def _inline_labels_to_metadata(labels: list[str]) -> dict[str, str]:
 def legacy_filename_photo_notes(
     inline_labels: list[str] | tuple[str, ...],
     *,
+    date_suffix: str = "",
     source_name: str = "",
 ) -> str:
-    """Archive unmapped filename segments into 拍照备注 for legacy data migration."""
-    parts: list[str] = []
+    """Archive unmapped filename segments into 拍照备注 (legacy migration).
+
+    Format: ``广西防城港-白龙尾-独齿沙蚕-20260618`` — dash-separated, no bracket tags.
+    """
+    _ = source_name  # kept for call-site compat; no longer written into notes
     labels = [str(x).strip() for x in inline_labels if str(x).strip()]
-    if labels:
-        parts.append("【文件名附加】" + " · ".join(labels))
-    if source_name and source_name.strip():
-        parts.append(f"【原文件名】{source_name.strip()}")
-    return "\n".join(parts)
+    if not labels:
+        return ""
+    date_suffix = re.sub(r"\D", "", str(date_suffix or ""))[:8]
+    if date_suffix and (not labels or labels[-1] != date_suffix):
+        labels.append(date_suffix)
+    return "-".join(labels)
 
 
 @dataclass(frozen=True)
@@ -813,7 +852,12 @@ def recognize_tiff_filename(
         seq = detail.sequence
     else:
         values, seq = parsed_values
-    _, _, inline = _peel_inline_descriptors_before_date(stem.split("-"))
+    buf, _, inline = _peel_inline_descriptors_before_date(stem.split("-"))
+    inline = list(inline)
+    if buf and _LEGACY_SHORT_DATE_RE.fullmatch(buf[-1]):
+        core_parts = detail.core_stem.split("-")
+        if buf[-1] not in core_parts:
+            inline.insert(0, buf[-1])
     date_seg = values.get("date_seg") or ""
     col, photo = _date_seg_to_collection_photo(date_seg)
     return ParsedTiffRecognition(
@@ -842,6 +886,120 @@ def tiff_stem_fully_conforms(stem: str, components: list[str]) -> bool:
     if detail is None:
         return False
     return normalize_uid(detail.core_stem) == normalize_uid(stem)
+
+
+def tiff_stem_needs_rename_for_organize(
+    stem: str,
+    components: list[str],
+    *,
+    panel_uid: str,
+    panel_storage: str,
+) -> bool:
+    """True when organize should prompt for TIFF rename.
+
+    Legacy remark suffixes (Chinese labels, etc.) are allowed when the parsed
+    specimen UID matches the panel. Only prompt when the basename is
+    unrecognizable, the UID disagrees, or a panel storage code must be patched
+    into the filename.
+    """
+    if validate_uid(stem):
+        return False
+    rec = recognize_tiff_filename(stem, components)
+    if rec is None:
+        return True
+    comp_list = normalize_naming_components(components)
+    if panel_uid:
+        rec_base = build_configured_uid(
+            comp_list, {**rec.field_values, "storage": ""}
+        )
+        parsed_panel = parse_uid(panel_uid) or {}
+        panel_values = _values_from_parsed_uid(parsed_panel)
+        panel_base = build_configured_uid(
+            comp_list, {**panel_values, "storage": ""}
+        )
+        panel_cmp = normalize_uid(panel_base or panel_uid)
+        if normalize_uid(rec_base) != panel_cmp:
+            return True
+    storage = str(panel_storage or "").strip()
+    if not storage:
+        return False
+    file_storage = str(rec.field_values.get("storage") or "").strip()
+    return normalize_uid(file_storage) != normalize_uid(storage)
+
+
+def suggest_tiff_filename_preserve_legacy(
+    stem: str,
+    components: list[str],
+    values: dict[str, str],
+    *,
+    seq: int | None = None,
+) -> str:
+    """Build a TIFF basename: configured core + legacy orphan segments + inline labels.
+
+    When a legacy file used a date-like token in the storage slot (``260618``),
+    inserting the real storage code (``D79``) keeps that token as a middle remark
+    segment instead of dropping descriptive suffixes.
+    """
+    comp_list = normalize_naming_components(components)
+    rec = recognize_tiff_filename(stem, components)
+    use_seq = int(seq if seq is not None else (rec.sequence if rec else 1))
+
+    if rec is None:
+        merged = dict(values)
+        if not merged.get("date_seg"):
+            merged["date_seg"] = specimen_date_seg(
+                merged.get("collection_date"),
+                merged.get("photo_date"),
+            )
+        return build_configured_result_id(comp_list, merged, seq=use_seq)
+
+    merged = dict(rec.field_values)
+    for key in (
+        "province",
+        "site",
+        "station",
+        "species_id",
+        "storage",
+        "date_seg",
+        "collection_date",
+        "photo_date",
+    ):
+        val = str(values.get(key) or "").strip()
+        if val:
+            merged[key] = val
+    if not str(merged.get("date_seg") or "").strip():
+        merged["date_seg"] = specimen_date_seg(
+            merged.get("collection_date"),
+            merged.get("photo_date"),
+        )
+
+    date_seg = str(merged.get("date_seg") or "").strip()
+    if not date_seg:
+        _, peeled_date, _ = _peel_inline_descriptors_before_date(stem.split("-"))
+        date_seg = str(peeled_date or "").strip()
+
+    prefix_values = dict(merged)
+    prefix_values["date_seg"] = ""
+    prefix = build_configured_result_id(comp_list, prefix_values, seq=use_seq)
+
+    old_storage = str(rec.field_values.get("storage") or "").strip()
+    new_storage = str(merged.get("storage") or "").strip()
+    orphan_segments: list[str] = []
+    if old_storage and old_storage not in (prefix.split("-") if prefix else []):
+        if (
+            (not new_storage or normalize_uid(old_storage) != normalize_uid(new_storage))
+            and _LEGACY_SHORT_DATE_RE.fullmatch(old_storage)
+        ):
+            orphan_segments.append(old_storage)
+
+    out_parts: list[str] = []
+    if prefix:
+        out_parts.extend(prefix.split("-"))
+    out_parts.extend(orphan_segments)
+    out_parts.extend(rec.inline_labels)
+    if date_seg:
+        out_parts.append(date_seg)
+    return "-".join(out_parts)
 
 
 @dataclass(frozen=True)

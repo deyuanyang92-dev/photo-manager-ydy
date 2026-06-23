@@ -16,7 +16,22 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-from app.utils.naming import derive_uid
+from app.utils.naming import (
+    derive_uid,
+    parse_uid,
+    recognize_tiff_filename,
+    suggest_tiff_filename_preserve_legacy,
+)
+
+
+_DEFAULT_NAMING_COMPONENTS = [
+    "province",
+    "site",
+    "station",
+    "species_id",
+    "storage",
+    "date_seg",
+]
 
 
 def specimen_has_risky_references(db: sqlite3.Connection, uid: str) -> bool:
@@ -41,18 +56,44 @@ def _result_name_for_uid(name: str, old_uid: str, new_uid: str) -> str | None:
     """Return a filename rewritten from old UID to new UID, preserving sequence."""
     path = Path(name)
     parts = path.stem.split("-")
-    if len(parts) < 7:
+    if len(parts) >= 7:
+        try:
+            seq = int(parts[4])
+        except ValueError:
+            seq = None
+        if seq is not None:
+            candidate_uid = "-".join(parts[:4] + parts[5:])
+            if candidate_uid == old_uid:
+                new_parts = new_uid.split("-")
+                new_parts.insert(4, str(seq))
+                return "-".join(new_parts) + path.suffix
+
+    rec = recognize_tiff_filename(path.stem, _DEFAULT_NAMING_COMPONENTS)
+    if rec is None or rec.uid != old_uid:
         return None
-    try:
-        seq = int(parts[4])
-    except ValueError:
+
+    parsed = parse_uid(new_uid)
+    if not parsed:
         return None
-    candidate_uid = "-".join(parts[:4] + parts[5:])
-    if candidate_uid != old_uid:
-        return None
-    new_parts = new_uid.split("-")
-    new_parts.insert(4, str(seq))
-    return "-".join(new_parts) + path.suffix
+    values = {
+        "province": str(parsed.get("province") or ""),
+        "site": str(parsed.get("site") or ""),
+        "station": str(parsed.get("station") or ""),
+        "species_id": str(parsed.get("speciesId") or ""),
+        "storage": str(parsed.get("storage") or ""),
+        "date_seg": str(parsed.get("dateSegment") or ""),
+        "collection_date": str(parsed.get("dateSegment") or ""),
+        "photo_date": str(parsed.get("dateSegment") or ""),
+    }
+    return (
+        suggest_tiff_filename_preserve_legacy(
+            path.stem,
+            _DEFAULT_NAMING_COMPONENTS,
+            values,
+            seq=rec.sequence,
+        )
+        + path.suffix
+    )
 
 
 def _planned_result_path(path: str | None, old_uid: str, new_uid: str) -> str | None:
@@ -74,6 +115,24 @@ def _json_load_object(raw: str | None) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def _specimen_raw_from_row(row) -> dict:
+    raw = _json_load_object(row["raw_json"])
+    fallbacks = {
+        "uid": row["uid"],
+        "id": row["id"],
+        "province": row["province"],
+        "site": row["site"],
+        "station": row["station"],
+        "storage": row["storage"],
+        "collectionDate": row["collection_date"],
+        "photoDate": row["photo_date"],
+    }
+    for key, value in fallbacks.items():
+        if value is not None and not str(raw.get(key) or "").strip():
+            raw[key] = value
+    return raw
+
+
 def _replace_json_values(value, replacements: dict[str, str]):
     """Recursively replace exact string path values in a raw_json blob."""
     if isinstance(value, str):
@@ -83,6 +142,14 @@ def _replace_json_values(value, replacements: dict[str, str]):
     if isinstance(value, dict):
         return {k: _replace_json_values(v, replacements) for k, v in value.items()}
     return value
+
+
+def _add_path_replacements(replacements: dict[str, str], old: str, new: str) -> None:
+    replacements[old] = new
+    old_path = Path(old)
+    new_path = Path(new)
+    replacements[old_path.name] = new_path.name
+    replacements[old_path.stem] = new_path.stem
 
 
 def _rewrite_zip_manifest(zip_path: str, old_uid: str, new_uid: str) -> None:
@@ -129,8 +196,13 @@ def _rewrite_zip_manifest(zip_path: str, old_uid: str, new_uid: str) -> None:
 
 
 def _migrate_grouping_result_files(
-    db: sqlite3.Connection, old_uid: str, new_uid: str
+    db: sqlite3.Connection,
+    old_uid: str,
+    new_uid: str,
+    *,
+    row_uid: str | None = None,
 ) -> None:
+    lookup_uid = row_uid or old_uid
     rows = db.execute(
         """
         SELECT group_index, composed_tiff_path, archive_zip,
@@ -138,7 +210,7 @@ def _migrate_grouping_result_files(
         FROM grouping
         WHERE uid = ?
         """,
-        (old_uid,),
+        (lookup_uid,),
     ).fetchall()
     if not rows:
         return
@@ -153,14 +225,14 @@ def _migrate_grouping_result_files(
         tiff_old = d.get("composed_tiff_path")
         tiff_new = _planned_result_path(tiff_old, old_uid, new_uid)
         if tiff_old and tiff_new:
-            replacements[tiff_old] = tiff_new
+            _add_path_replacements(replacements, tiff_old, tiff_new)
             if os.path.isfile(tiff_old):
                 planned[tiff_old] = tiff_new
 
         zip_old = d.get("archive_zip")
         zip_new = _planned_result_path(zip_old, old_uid, new_uid)
         if zip_old and zip_new:
-            replacements[zip_old] = zip_new
+            _add_path_replacements(replacements, zip_old, zip_new)
             if os.path.isfile(zip_old):
                 planned[zip_old] = zip_new
 
@@ -174,7 +246,7 @@ def _migrate_grouping_result_files(
                 and sibling_zip_old not in planned
                 and os.path.isfile(sibling_zip_old)
             ):
-                replacements[sibling_zip_old] = sibling_zip_new
+                _add_path_replacements(replacements, sibling_zip_old, sibling_zip_new)
                 planned[sibling_zip_old] = sibling_zip_new
 
         retired = []
@@ -191,7 +263,7 @@ def _migrate_grouping_result_files(
                 continue
             new_item = _planned_result_path(item, old_uid, new_uid)
             if new_item:
-                replacements[item] = new_item
+                _add_path_replacements(replacements, item, new_item)
                 if os.path.isfile(item):
                     planned[item] = new_item
                 new_retired.append(new_item)
@@ -247,8 +319,73 @@ def _migrate_grouping_result_files(
                 raw_json = ?
             WHERE uid = ? AND group_index = ?
             """,
-            (tiff_path, archive_zip, retired_json, raw_json, old_uid, group_index),
+            (tiff_path, archive_zip, retired_json, raw_json, lookup_uid, group_index),
         )
+
+
+def _same_specimen_identity_ignoring_storage(a_uid: str, b_uid: str) -> bool:
+    a = parse_uid(a_uid)
+    b = parse_uid(b_uid)
+    if not a or not b:
+        return False
+    keys = ("province", "site", "station", "speciesId", "dateSegment")
+    return all(str(a.get(k) or "") == str(b.get(k) or "") for k in keys)
+
+
+def _result_uid_from_name(name: str | None) -> str | None:
+    if not name:
+        return None
+    rec = recognize_tiff_filename(Path(name).stem, _DEFAULT_NAMING_COMPONENTS)
+    return rec.uid if rec else None
+
+
+def repair_grouping_result_files_for_uid(db: sqlite3.Connection, uid: str) -> bool:
+    """Fix result file paths that still contain an older storage code for *uid*.
+
+    This repairs projects that already migrated ``grouping.uid`` but kept stale
+    composed TIFF / ZIP paths, e.g. grouping.uid is ``...-RD79-...`` while result
+    files are still named ``...-R-...``.
+    """
+    rows = db.execute(
+        """
+        SELECT composed_tiff_path, archive_zip, retired_tiff_paths
+        FROM grouping
+        WHERE uid = ?
+        """,
+        (uid,),
+    ).fetchall()
+    if not rows:
+        return False
+
+    stale_uids: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        d = dict(row) if not isinstance(row, dict) else row
+        candidates = [d.get("composed_tiff_path"), d.get("archive_zip")]
+        try:
+            retired = json.loads(d.get("retired_tiff_paths") or "[]")
+        except Exception:
+            retired = []
+        if isinstance(retired, list):
+            candidates.extend(item for item in retired if isinstance(item, str))
+        for path in candidates:
+            old_uid = _result_uid_from_name(Path(path).name if path else "")
+            if (
+                old_uid
+                and old_uid != uid
+                and old_uid not in seen
+                and _same_specimen_identity_ignoring_storage(old_uid, uid)
+            ):
+                seen.add(old_uid)
+                stale_uids.append(old_uid)
+
+    if not stale_uids:
+        return False
+
+    with db:
+        for old_uid in stale_uids:
+            _migrate_grouping_result_files(db, old_uid, uid, row_uid=uid)
+    return True
 
 
 def migrate_uid_references(db: sqlite3.Connection, old_uid: str, new_uid: str) -> None:
@@ -275,12 +412,18 @@ def rename_specimen_code(db: sqlite3.Connection, uid: str, new_code: str) -> str
       - the resulting new UID already exists (collision)
     """
     row = db.execute(
-        "SELECT uid, raw_json FROM specimens WHERE uid=?", (uid,)
+        """
+        SELECT uid, id, province, site, station, storage,
+               collection_date, photo_date, raw_json
+        FROM specimens
+        WHERE uid=?
+        """,
+        (uid,),
     ).fetchone()
     if not row:
         raise ValueError(f"Specimen not found: {uid}")
 
-    raw = json.loads(row["raw_json"] or "{}")
+    raw = _specimen_raw_from_row(row)
     raw["id"] = new_code
     new_uid = derive_uid(raw)
 
@@ -319,12 +462,18 @@ def apply_storage_correction(
       - the new UID would collide with an existing specimen
     """
     row = db.execute(
-        "SELECT uid, raw_json FROM specimens WHERE uid=?", (uid,)
+        """
+        SELECT uid, id, province, site, station, storage,
+               collection_date, photo_date, raw_json
+        FROM specimens
+        WHERE uid=?
+        """,
+        (uid,),
     ).fetchone()
     if not row:
         raise ValueError(f"Specimen not found: {uid}")
 
-    raw = json.loads(row["raw_json"] or "{}")
+    raw = _specimen_raw_from_row(row)
     old_storage = raw.get("storage", "")
 
     if old_storage == new_storage:

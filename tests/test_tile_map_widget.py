@@ -212,6 +212,19 @@ class TestTileMapWidget:
         texts = [lbl.text() for lbl in labels]
         assert any("OpenStreetMap" in t for t in texts), f"No OSM attribution. Labels: {texts}"
 
+    def test_set_tile_source_updates_attribution(self):
+        TileMapWidget = _import_widget()
+        w = TileMapWidget()
+        w.set_tile_source({
+            "id": "satellite:test",
+            "name": "卫星影像",
+            "tile_url": "https://tiles.example.test/{z}/{y}/{x}.jpg",
+            "attribution": "Imagery © Test",
+        })
+        labels = w.findChildren(QLabel)
+        assert any("Imagery © Test" in lbl.text() for lbl in labels)
+        assert w._tile_source_id == "satellite:test"
+
     def test_clear_marker_does_not_emit_signal(self):
         TileMapWidget = _import_widget()
         w = TileMapWidget()
@@ -664,6 +677,25 @@ class TestTileFetchHardening:
         w._request_tile(5, 1, 2)
         assert "req" in captured
         assert captured["req"].transferTimeout() > 0
+
+    def test_request_tile_uses_active_tile_source(self):
+        TileMapWidget = _import_widget()
+        w = TileMapWidget()
+        w.set_tile_source({
+            "id": "satellite:test",
+            "name": "卫星影像",
+            "tile_url": "https://tiles.example.test/{z}/{y}/{x}.jpg",
+            "attribution": "Imagery © Test",
+        })
+        captured = {}
+
+        def fake_get(req):
+            captured["url"] = req.url().toString()
+            return _FakeReply()
+
+        w._nam.get = fake_get
+        w._request_tile(5, 1, 2)
+        assert captured["url"] == "https://tiles.example.test/5/2/1.jpg"
 
     def test_failed_tile_marked_and_not_retried(self):
         """失败 key 记入 _failed_keys；后续 _request_tile 跳过，不再风暴重试。"""

@@ -1,8 +1,9 @@
 """restore_worker.py — QThread for non-blocking 还原归档 JPG.
 
-Wraps app.services.archive_service.restore_archive so that re-decoding N JXLs
-back to original JPGs (via djxl) never blocks the UI. Contains NO logic of its
-own — all extraction / integrity checks live inside restore_archive.
+Wraps app.services.archive_service.restore_archive so that extracting archived
+JPGs never blocks the UI. Legacy JXL archives are still decoded by the service
+when needed. Contains NO logic of its own — all extraction / integrity checks
+live inside restore_archive.
 
 Mirrors the SuppCompressionWorker pattern (QThread + Qt signals for thread-safe
 result delivery).

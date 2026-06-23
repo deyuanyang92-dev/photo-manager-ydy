@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch, call
 import pytest
 
 from PyQt6.QtCore import Qt, QMimeData, QPoint
-from PyQt6.QtWidgets import QApplication, QListWidget
+from PyQt6.QtWidgets import QApplication, QLabel, QListWidget, QPushButton
 
 
 # ---------------------------------------------------------------------------
@@ -407,6 +407,40 @@ def test_add_group_auto_labels(qtbot):
     assert panel._add_btn.isVisible() or True   # 载入后按钮可用
 
 
+def test_add_group_counts_existing_organized_angles(qtbot, tmp_path):
+    """已整理角度仍占用标本内角度序号；点「新组」应继续角度2。"""
+    from app.services.grouping_service import Group, SpecimenGrouping
+    from app.widgets.grouping_panel import GroupingPanel, _DraftGroupRow
+
+    tif = tmp_path / "done.tif"
+    tif.write_bytes(b"tif")
+    ctx = _make_app_context()
+    panel = GroupingPanel(ctx)
+    qtbot.addWidget(panel)
+    panel.load_grouping(
+        "test-uid",
+        SpecimenGrouping(
+            uid="test-uid",
+            groups=[
+                Group(
+                    group_index=0,
+                    angle_label="角度1",
+                    composed_tiff_path=str(tif),
+                    status="organized",
+                    archive_zip=str(tif.with_suffix(".zip")),
+                )
+            ],
+        ),
+    )
+
+    panel._add_group()
+
+    draft = [g for g in panel._grouping.groups if not g.composed_tiff_path]
+    assert [g.angle_label for g in draft] == ["角度2"]
+    rows = panel.findChildren(_DraftGroupRow)
+    assert [row._group_number_chip.text() for row in rows] == ["组2"]
+
+
 def test_visible_group_numbers_and_default_angles_are_contiguous(qtbot):
     """数据库内部索引可以有空洞，但 UI 必须始终显示组1/角度1、组2/角度2。"""
     from app.widgets.grouping_panel import GroupingPanel, _DraftGroupRow
@@ -469,6 +503,102 @@ def test_register_existing_zip_updates_composed_group(qtbot, tmp_path, monkeypat
     group = panel._grouping.groups[0]
     assert group.archive_zip == str(zip_path)
     assert group.status == "organized"
+
+
+def test_composed_row_without_jpg_explains_missing_link(qtbot, tmp_path):
+    from app.services.grouping_service import Group
+    from app.widgets.grouping_panel import _ComposedRow
+
+    row = _ComposedRow(Group(
+        group_index=0,
+        angle_label="角度1",
+        composed_tiff_path=str(tmp_path / "result.tif"),
+    ))
+    qtbot.addWidget(row)
+
+    labels = [w.text() for w in row.findChildren(QLabel)]
+    buttons = row.findChildren(QPushButton)
+
+    assert "未关联 JPG" in labels
+    organise = next(b for b in buttons if b.text() == "整理")
+    assert not organise.isEnabled()
+    assert "未关联 JPG" in organise.toolTip()
+
+
+def test_composed_row_with_jpg_shows_pending_count(qtbot, tmp_path):
+    from app.services.grouping_service import Group
+    from app.widgets.grouping_panel import _ComposedRow
+
+    row = _ComposedRow(Group(
+        group_index=0,
+        angle_label="角度1",
+        composed_tiff_path=str(tmp_path / "result.tif"),
+        jpg_paths=["a.jpg", "b.jpg"],
+    ))
+    qtbot.addWidget(row)
+
+    labels = [w.text() for w in row.findChildren(QLabel)]
+    organise = next(b for b in row.findChildren(QPushButton) if b.text() == "整理")
+
+    assert "2 JPG 待整理" in labels
+    assert organise.isEnabled()
+
+
+def test_composed_row_with_archive_counts_plain_jpg_zip(qtbot, tmp_path):
+    import zipfile
+
+    from app.services.grouping_service import Group
+    from app.widgets.grouping_panel import _ComposedRow
+
+    zip_path = tmp_path / "result.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("a.jpg", b"a")
+        zf.writestr("b.jpg", b"b")
+        zf.writestr("c.jpg", b"c")
+
+    row = _ComposedRow(Group(
+        group_index=0,
+        angle_label="角度1",
+        composed_tiff_path=str(tmp_path / "result.tif"),
+        archive_zip=str(zip_path),
+        status="organized",
+    ))
+    qtbot.addWidget(row)
+
+    labels = [w.text() for w in row.findChildren(QLabel)]
+    buttons = row.findChildren(QPushButton)
+
+    assert "已归档 3 JPG" in labels
+    assert any(b.text() == "已整理" and not b.isEnabled() for b in buttons)
+
+
+def test_composed_row_infers_archive_from_same_stem_zip(qtbot, tmp_path):
+    import zipfile
+
+    from app.services.grouping_service import Group
+    from app.widgets.grouping_panel import _ComposedRow
+
+    tiff_path = tmp_path / "GXFCG-BLW-SC001-2-D79-20260618.tif"
+    tiff_path.write_bytes(b"tif")
+    zip_path = tiff_path.with_suffix(".zip")
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("a.jpg", b"a")
+        zf.writestr("b.jpg", b"b")
+
+    row = _ComposedRow(Group(
+        group_index=0,
+        angle_label="角度1",
+        composed_tiff_path=str(tiff_path),
+        jpg_paths=[],
+        archive_zip=None,
+    ))
+    qtbot.addWidget(row)
+
+    labels = [w.text() for w in row.findChildren(QLabel)]
+    buttons = row.findChildren(QPushButton)
+
+    assert "已归档 2 JPG" in labels
+    assert any(b.text() == "已整理" and not b.isEnabled() for b in buttons)
 
 
 def test_drop_external_jpg_adds_to_group(qtbot, tmp_path):
@@ -549,10 +679,31 @@ def test_add_photos_from_picker(qtbot, tmp_path, monkeypatch):
     assert g.output_name == "Helicon PMax"
 
 
-def test_draft_row_shows_linked_tiff(qtbot, tmp_path):
-    """关联 TIF 后留在组卡片内显示绿色 TIF 标记，不立刻沉到「已整理」区。"""
+def test_add_photos_picker_requests_mtime_sort(qtbot, monkeypatch):
+    """照片后处理选择器默认按修改时间降序，方便按拍摄批次选片。"""
+    import app.utils.ui as ui
+    from app.widgets.grouping_panel import GroupingPanel
+
+    panel = GroupingPanel(_make_app_context())
+    qtbot.addWidget(panel)
+    panel.load_grouping("test-uid", _make_grouping([{"index": 0, "jpgs": []}]))
+    captured = {}
+
+    def fake_picker(*args, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(ui, "get_open_file_names", fake_picker)
+
+    panel._on_add_photos_from_picker(0)
+
+    assert captured["sort_by_mtime"] is True
+
+
+def test_linked_tiff_moves_to_composed_row(qtbot, tmp_path):
+    """关联 TIF 后进入已合成行，可继续整理 JPG 或注册已有 ZIP。"""
     from app.services.grouping_service import Group, SpecimenGrouping
-    from app.widgets.grouping_panel import GroupingPanel, _DraftGroupRow
+    from app.widgets.grouping_panel import GroupingPanel, _ComposedRow, _DraftGroupRow
 
     tif = tmp_path / "Helicon PMax.tif"
     tif.write_bytes(b"t")
@@ -571,11 +722,13 @@ def test_draft_row_shows_linked_tiff(qtbot, tmp_path):
     )
     panel.load_grouping("test-uid", grouping)
 
-    rows = panel.findChildren(_DraftGroupRow)
+    assert panel.findChildren(_DraftGroupRow) == []
+    rows = panel.findChildren(_ComposedRow)
     assert len(rows) == 1
-    lw = rows[0]._jpg_list
-    shown = [
-        (lw.item(i).toolTip() or "") + (lw.item(i).text() or "")
-        for i in range(lw.count()) if lw.item(i)
-    ]
-    assert any("Helicon PMax.tif" in s for s in shown)
+
+    labels = [w.text() for w in rows[0].findChildren(QLabel)]
+    buttons = rows[0].findChildren(QPushButton)
+
+    assert "Helicon PMax.tif" in labels
+    assert "未关联 JPG" in labels
+    assert any(b.toolTip() == "注册已有 ZIP 归档（不重新压缩）" for b in buttons)

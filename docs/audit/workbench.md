@@ -63,7 +63,7 @@
 | `groupingSave` | ✓ | `WorkbenchView._flush_grouping_save` + `grouping_service.save_grouping` |
 | `groupingAddSelectedToGroup` | ✓ | `WorkbenchView._on_add_selection_to_group` + `GroupingPanel.add_jpgs_to_group`（含互斥移除） |
 | `groupingRemoveFile` | ✓ | `GroupingPanel.remove_jpg_from_group` |
-| `groupingDeleteGroup` | ✓ | `GroupingPanel.delete_group` + `_DraftGroupRow` 删组按钮（已合成组阻止删除） |
+| `groupingDeleteGroup` | ✓ | `GroupingPanel.delete_group` + `_DraftGroupRow` 删组按钮（仅删记录，不删 JPG/TIFF 文件） |
 | `groupingClearGroup` | ✓ | `GroupingPanel.clear_group` + `_DraftGroupRow` 清空按钮 |
 | `groupingMoveFileBetweenGroups` | ◐ | Qt 只能右键移除再手动加入，无直接拖拽组间移动 |
 | `groupingAddColumn` (新组) | ✓ | `GroupingPanel._add_group` |
@@ -241,7 +241,7 @@
 
 ### P1 — 高影响（已全部落地）
 
-1. **✓ 删组 / 清空组** (`groupingDeleteGroup` / `groupingClearGroup`)：`_DraftGroupRow` 内嵌删组 / 清空按钮，已合成组阻止删除。
+1. **✓ 删组 / 清空组** (`groupingDeleteGroup` / `groupingClearGroup`)：`_DraftGroupRow` 内嵌删组 / 清空按钮；删组仅删记录，不删 JPG/TIFF 文件。
 2. **✓ 碰撞处理** (`postOrganizeWithCollision`)：`_on_organise_requested` 检查 ZIP 已存在时弹确认，拒绝可中止。
 3. **✓ composeImplicitActiveBatch**：`_on_compose_requested` 含 `_get_attributed_jpg_paths` 隐式批次回退。
 

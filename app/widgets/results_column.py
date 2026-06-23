@@ -642,6 +642,36 @@ class _ResultRow(QFrame):
                 r.set_thumb_size(size)
 
 
+class _SpecimenResultHeader(QFrame):
+    """Divider header for all-specimens result view."""
+
+    clicked = pyqtSignal(str)
+
+    def __init__(self, uid: str, row_count: int, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._uid = uid
+        self.setObjectName("ResultGroupHeader")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip(f"打开编号：{uid}")
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(2, 6, 2, 2)
+        lay.setSpacing(8)
+        uid_lbl = QLabel(uid)
+        uid_lbl.setObjectName("Mono")
+        uid_lbl.setToolTip(uid)
+        lay.addWidget(uid_lbl, stretch=1)
+        count_lbl = QLabel(f"{row_count} 项")
+        count_lbl.setObjectName("MutedSmall")
+        lay.addWidget(count_lbl)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and self._uid:
+            self.clicked.emit(self._uid)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+
 def _pair_results(composed_tiffs: list, archive_zips: list) -> list:
     """Pair TIFF/ZIP infos by ``seq`` (fallback: filename stem), preserving the
     TIFF input order.  Returns a list of ``(seq_label, tiff_or_None, zip_or_None)``.
@@ -685,6 +715,7 @@ class ResultsColumn(QWidget):
     """② 成果内容 column: collapsible, zoomable, paired TIFF↔ZIP rows."""
 
     restore_requested = pyqtSignal(str)  # ZIP 绝对路径 → 还原原片 JPG
+    specimen_requested = pyqtSignal(str)  # all-results group header → select UID
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -697,6 +728,8 @@ class ResultsColumn(QWidget):
         self._results_dir: str = ""
         self._current_tiffs: list[dict] = []
         self._current_zips: list[dict] = []
+        self._current_groups: list[dict] = []
+        self._display_mode = "single"
         self._setup_ui()
 
     # ── UI ────────────────────────────────────────────────────────────────────
@@ -731,9 +764,9 @@ class ResultsColumn(QWidget):
         )
         hdr.addWidget(self._collapse_btn)
 
-        title = QLabel("成果")
-        title.setObjectName("WorkspaceTitle")
-        hdr.addWidget(title)
+        self._title = QLabel("成果")
+        self._title.setObjectName("WorkspaceTitle")
+        hdr.addWidget(self._title)
 
         self._count = QLabel("0 项")
         self._count.setObjectName("MutedSmall")
@@ -808,7 +841,10 @@ class ResultsColumn(QWidget):
                  composed_tiffs: list,
                  archive_zips: list) -> None:
         """Populate the paired rows for the given specimen UID."""
+        self._display_mode = "single"
+        self._current_groups = []
         self._clear_rows()
+        self._title.setText("成果")
 
         self._current_tiffs = list(composed_tiffs or [])
         self._current_zips = list(archive_zips or [])
@@ -848,11 +884,77 @@ class ResultsColumn(QWidget):
         if not n:
             self._show_empty()
 
+    def load_many(self, groups: list[dict]) -> None:
+        """Populate results for multiple specimen UIDs, grouped by UID."""
+        self._display_mode = "many"
+        self._title.setText("全部成果")
+        self._current_groups = [
+            {
+                "uid": str(g.get("uid") or ""),
+                "tiffs": list(g.get("tiffs") or []),
+                "zips": list(g.get("zips") or []),
+            }
+            for g in list(groups or [])
+        ]
+        self._current_tiffs = [
+            item for g in self._current_groups for item in g.get("tiffs", [])
+        ]
+        self._current_zips = [
+            item for g in self._current_groups for item in g.get("zips", [])
+        ]
+        self._clear_rows()
+        self._remember_results_dir(self._current_tiffs, self._current_zips)
+
+        total_rows = 0
+        visible_groups = 0
+        for group in self._current_groups:
+            rows = self._sort_rows(_pair_results(group["tiffs"], group["zips"]))
+            if not rows:
+                continue
+            visible_groups += 1
+            total_rows += len(rows)
+            header = _SpecimenResultHeader(group["uid"], len(rows))
+            header.clicked.connect(self.specimen_requested.emit)
+            self._rows_lay.addWidget(header)
+            all_tiff_paths = [
+                Path(tinfo["path"]) for _label, tinfo, _zinfo in rows
+                if tinfo is not None and tinfo.get("path")
+            ]
+            for seq_label, tinfo, zinfo in rows:
+                tc = None
+                zc = None
+                if tinfo is not None:
+                    tc = _TiffCard(
+                        tinfo,
+                        open_fn=self._open_in_explorer,
+                        lightbox_fn=lambda p, _paths=all_tiff_paths: self._open_tiff_lightbox(p, _paths),
+                        thumb_provider=self._thumb_provider,
+                        thumb_size=self._thumb_size,
+                    )
+                    self._cards.append(tc)
+                if zinfo is not None:
+                    zc = _ArchiveCard(
+                        zinfo, open_fn=self._open_in_explorer,
+                        restore_fn=lambda p: self.restore_requested.emit(p),
+                        thumb_size=self._thumb_size,
+                    )
+                    self._cards.append(zc)
+                self._rows_lay.addWidget(
+                    _ResultRow(seq_label, tc, zc, tile_view=self._tile_view)
+                )
+
+        self._count.setText(f"{visible_groups} 编号 / {total_rows} 项")
+        if not total_rows:
+            self._show_empty("暂无成果：当前项目还没有已整理结果")
+
     def clear(self) -> None:
         """Reset to empty (暂无成果) state."""
         self._clear_rows()
         self._current_tiffs = []
         self._current_zips = []
+        self._current_groups = []
+        self._display_mode = "single"
+        self._title.setText("成果")
         self._results_dir = ""
         self._show_empty()
 
@@ -873,9 +975,9 @@ class ResultsColumn(QWidget):
                 it.widget().deleteLater()
         self._cards = []
 
-    def _show_empty(self) -> None:
+    def _show_empty(self, text: str = "暂无成果") -> None:
         self._count.setText("0 项")
-        empty = QLabel("暂无成果")
+        empty = QLabel(text)
         empty.setObjectName("Muted")
         empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
         empty.setWordWrap(True)
@@ -933,12 +1035,18 @@ class ResultsColumn(QWidget):
             "size": "大小",
             "mtime": "修改时间",
         }[key])
-        self.load_uid("", self._current_tiffs, self._current_zips)
+        if self._display_mode == "many":
+            self.load_many(self._current_groups)
+        else:
+            self.load_uid("", self._current_tiffs, self._current_zips)
 
     def _set_tile_view(self, checked: bool) -> None:
         self._tile_view = bool(checked)
         self._tile_btn.setText("平铺" if self._tile_view else "列表")
-        self.load_uid("", self._current_tiffs, self._current_zips)
+        if self._display_mode == "many":
+            self.load_many(self._current_groups)
+        else:
+            self.load_uid("", self._current_tiffs, self._current_zips)
 
     def _sort_rows(self, rows: list) -> list:
         def stat_value(info: dict, attr: str, default=0):
