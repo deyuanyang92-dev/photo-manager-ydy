@@ -34,6 +34,14 @@ DEFAULT_TIFF_FIELDS: dict[str, bool] = {
     "photoNotes": True,
 }
 
+DEFAULT_TIFF_METADATA_WRITE: dict[str, Any] = {
+    "enabled": True,
+    # fill_empty: write missing workbench metadata only; never replace existing
+    # workbench values. skip_written: skip files already marked by this app.
+    # force: replace this app's business metadata with current DB values.
+    "mode": "fill_empty",
+}
+
 DEFAULT_PERSONNEL: dict[str, str] = {
     "verifier": "",
     "logistics": "",

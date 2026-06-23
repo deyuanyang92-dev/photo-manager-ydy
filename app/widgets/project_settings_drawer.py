@@ -551,6 +551,21 @@ class ProjectSettingsDrawer(QWidget):
         hint.setWordWrap(True)
         lay.addWidget(hint)
 
+        self._tiff_write_enabled_cb = QCheckBox("整理完成后自动写入 TIFF 元数据")
+        self._tiff_write_enabled_cb.setToolTip("写入项目/标本业务信息；相机、镜头、曝光等原始 EXIF 不会被覆盖。")
+        self._tiff_write_enabled_cb.stateChanged.connect(self._save_tiff_metadata_write)
+        lay.addWidget(self._tiff_write_enabled_cb)
+
+        self._tiff_write_mode_combo = QComboBox()
+        self._tiff_write_mode_combo.setFixedHeight(30)
+        self._tiff_write_mode_combo.addItem("只补空字段（推荐）", "fill_empty")
+        self._tiff_write_mode_combo.addItem("跳过已写入照片", "skip_written")
+        self._tiff_write_mode_combo.addItem("强制覆盖软件字段", "force")
+        self._tiff_write_mode_combo.currentIndexChanged.connect(self._save_tiff_metadata_write)
+        lay.addWidget(_row("写入策略", self._tiff_write_mode_combo, width=72))
+
+        lay.addWidget(_divider())
+
         groups: list[tuple[str, list[tuple[str, str, bool]]]] = [
             ("标识", [
                 ("照片编号",   "uniqueId",        True),
@@ -983,6 +998,7 @@ class ProjectSettingsDrawer(QWidget):
             DEFAULT_NAMING_RULES,
             DEFAULT_CAPTURE_DEFAULTS,
             DEFAULT_TIFF_FIELDS,
+            DEFAULT_TIFF_METADATA_WRITE,
             DEFAULT_PRINT_SETTINGS,
             effective_print_settings,
             load_setting_if_present,
@@ -1032,6 +1048,15 @@ class ProjectSettingsDrawer(QWidget):
             cb.blockSignals(True)
             cb.setChecked(tf.get(key, DEFAULT_TIFF_FIELDS.get(key, False)))
             cb.blockSignals(False)
+        tw = load_setting(db, "tiff_metadata_write", DEFAULT_TIFF_METADATA_WRITE)
+        self._tiff_write_enabled_cb.blockSignals(True)
+        self._tiff_write_enabled_cb.setChecked(bool(tw.get("enabled", True)))
+        self._tiff_write_enabled_cb.blockSignals(False)
+        mode = str(tw.get("mode") or DEFAULT_TIFF_METADATA_WRITE["mode"])
+        idx = self._tiff_write_mode_combo.findData(mode)
+        self._tiff_write_mode_combo.blockSignals(True)
+        self._tiff_write_mode_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self._tiff_write_mode_combo.blockSignals(False)
 
         # 自定义保存方式
         from app.services.project_settings_service import load_custom_storages
@@ -1194,6 +1219,16 @@ class ProjectSettingsDrawer(QWidget):
         from app.services.project_settings_service import save_setting
         data = {key: cb.isChecked() for key, cb in self._tiff_checks.items()}
         save_setting(db, "tiff_fields", data)
+
+    def _save_tiff_metadata_write(self) -> None:
+        db = self.ctx.get_db()
+        if db is None:
+            return
+        from app.services.project_settings_service import save_setting
+        save_setting(db, "tiff_metadata_write", {
+            "enabled": self._tiff_write_enabled_cb.isChecked(),
+            "mode": str(self._tiff_write_mode_combo.currentData() or "fill_empty"),
+        })
 
     def _save_print_settings(self) -> None:
         db = self.ctx.get_db()
@@ -1445,6 +1480,8 @@ class ProjectSettingsDrawer(QWidget):
         self._species_kv.setEnabled(enabled)
         for cb in self._tiff_checks.values():
             cb.setEnabled(enabled)
+        self._tiff_write_enabled_cb.setEnabled(enabled)
+        self._tiff_write_mode_combo.setEnabled(enabled)
         self._new_code_edit.setEnabled(enabled)
         self._new_detail_edit.setEnabled(enabled)
         self._quick_print_mode.setEnabled(enabled)

@@ -129,6 +129,23 @@ def test_tiff_fields_roundtrip(qtbot, db):
     assert data["taxonGroup"] is True
 
 
+def test_tiff_metadata_write_settings_roundtrip(qtbot, db):
+    from app.widgets.project_settings_drawer import ProjectSettingsDrawer
+    from app.services.project_settings_service import load_setting, DEFAULT_TIFF_METADATA_WRITE
+
+    ctx = _make_ctx(db=db)
+    d = ProjectSettingsDrawer(ctx)
+    qtbot.addWidget(d)
+    d.refresh()
+    d._tiff_write_enabled_cb.setChecked(False)
+    d._tiff_write_mode_combo.setCurrentIndex(d._tiff_write_mode_combo.findData("force"))
+    d._save_tiff_metadata_write()
+
+    data = load_setting(db, "tiff_metadata_write", DEFAULT_TIFF_METADATA_WRITE)
+    assert data["enabled"] is False
+    assert data["mode"] == "force"
+
+
 def test_print_settings_roundtrip(qtbot, db):
     from app.widgets.project_settings_drawer import ProjectSettingsDrawer
     from app.services.project_settings_service import load_setting, DEFAULT_PRINT_SETTINGS

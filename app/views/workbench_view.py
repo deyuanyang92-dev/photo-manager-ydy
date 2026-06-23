@@ -4442,6 +4442,26 @@ class WorkbenchView(BaseView):
                 else:
                     _moved_zip = _zip_src
 
+                if has_project and _moved_tiff:
+                    try:
+                        from app.services.tiff_metadata_service import write_result_tiff_metadata
+
+                        project_root = getattr(self.ctx, "current_project_root", None)
+                        if not isinstance(project_root, str):
+                            project_root = None
+                        meta_result = write_result_tiff_metadata(
+                            db,
+                            uid,
+                            _moved_tiff,
+                            project_dir=project_dir,
+                            project_root=project_root,
+                        )
+                        skipped = str(meta_result.get("skipped") or "")
+                        if skipped and skipped not in {"disabled", "unchanged"}:
+                            self._status_message(f"TIFF 元数据未写入：{skipped}")
+                    except Exception as exc:
+                        self._status_message(f"TIFF 元数据写入失败：{exc}")
+
                 # Update grouping record with archive info
                 from datetime import datetime, timezone
                 now = datetime.now(tz=timezone.utc).isoformat()
