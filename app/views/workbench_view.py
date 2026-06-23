@@ -905,7 +905,6 @@ class WorkbenchView(BaseView):
         self._refresh_header()
         self._sidebar.refresh()
         self._sync_rna_queue_count()
-        self._refresh_monitor()
 
         # Re-select the previously active specimen if possible
         active_uid = self._get_active_uid()
@@ -925,6 +924,10 @@ class WorkbenchView(BaseView):
 
         # Start filesystem watcher + fallback poll
         self._setup_fs_watcher()
+        # Let the page paint before scanning directories.  The scan can touch a
+        # large incoming/results folder, so doing it through the debounce timer
+        # keeps returning to the workbench responsive and avoids a duplicate
+        # immediate scan.
         self._debounce_timer.start(50)  # first refresh almost immediately
         if not self._fallback_timer.isActive():
             self._fallback_timer.start()
@@ -1818,6 +1821,7 @@ class WorkbenchView(BaseView):
         from app.services.grouping_service import (
             ADHOC_GROUPING_UID,
             SpecimenGrouping,
+            load_grouping,
             save_grouping,
         )
 
@@ -1828,6 +1832,15 @@ class WorkbenchView(BaseView):
 
         if panel_uid != ADHOC_GROUPING_UID or not groups:
             return False
+
+        existing = load_grouping(db, text)
+        if existing.groups:
+            next_index = max(g.group_index for g in existing.groups) + 1
+            claimed_groups = []
+            for offset, group in enumerate(groups):
+                group.group_index = next_index + offset
+                claimed_groups.append(group)
+            groups = existing.groups + claimed_groups
 
         self._grouping.load_grouping(text, SpecimenGrouping(uid=text, groups=groups))
         self._sync_grouping_outputs_from_naming()
@@ -5030,14 +5043,6 @@ class WorkbenchView(BaseView):
         except Exception:
             pass
 
-        if reload:
-            try:
-                self._claim_current_grouping_for_saved_uid(uid)
-            except Exception:
-                pass
-
-        # Refresh naming panel with latest values if storage changed.  Skipped
-        # for autosave (reload=False) so the focused input keeps its cursor.
         if reload:
             self._load_specimen(uid)
 

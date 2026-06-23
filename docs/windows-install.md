@@ -2,7 +2,7 @@
 
 ## 直接使用打包版
 
-1. 下载 `SpecimenPhotoWorkbench-v0.02-win64.zip`。
+1. 下载 `SpecimenPhotoWorkbench-v0.03-win64.zip`。
 2. 解压到一个普通目录，例如 `D:\Apps\SpecimenPhotoWorkbench\`。
 3. 双击 `SpecimenPhotoWorkbench.exe` 启动。
 4. 首次使用时，在“项目总览”中新建或打开项目目录。
@@ -40,7 +40,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build_windows.ps1
 输出：
 
 - `dist\SpecimenPhotoWorkbench\SpecimenPhotoWorkbench.exe`
-- `dist\SpecimenPhotoWorkbench-v0.02-win64.zip`
+- `dist\SpecimenPhotoWorkbench-v0.03-win64.zip`
 
 ## 可选外部工具
 

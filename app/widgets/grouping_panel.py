@@ -22,6 +22,7 @@ grouping_changed()
 """
 from __future__ import annotations
 
+from collections import OrderedDict
 import json
 from pathlib import Path
 import re
@@ -58,6 +59,8 @@ if TYPE_CHECKING:
 
 _JPG_EXTS = {".jpg", ".jpeg"}
 _TIFF_EXTS = {".tif", ".tiff"}
+_THUMB_ICON_CACHE_LIMIT = 512
+_THUMB_ICON_CACHE: "OrderedDict[tuple[str, int, int], object]" = OrderedDict()
 
 
 def _archive_jpg_count(zip_path: str | None) -> int | None:
@@ -640,6 +643,15 @@ class _DraftGroupRow(QFrame):
         失败/非图片 → 通用图片图标占位。"""
         from PyQt6.QtGui import QImageReader, QIcon, QPixmap
         try:
+            stat = Path(path).stat()
+            key = (str(Path(path).resolve()), int(stat.st_mtime_ns), int(stat.st_size))
+            cached = _THUMB_ICON_CACHE.get(key)
+            if cached is not None:
+                _THUMB_ICON_CACHE.move_to_end(key)
+                return cached
+        except Exception:
+            key = None
+        try:
             r = QImageReader(path)
             r.setAutoTransform(True)
             sz = r.size()
@@ -648,7 +660,13 @@ class _DraftGroupRow(QFrame):
                 r.setScaledSize(sz)
             img = r.read()
             if not img.isNull():
-                return QIcon(QPixmap.fromImage(img))
+                icon = QIcon(QPixmap.fromImage(img))
+                if key is not None:
+                    _THUMB_ICON_CACHE[key] = icon
+                    _THUMB_ICON_CACHE.move_to_end(key)
+                    while len(_THUMB_ICON_CACHE) > _THUMB_ICON_CACHE_LIMIT:
+                        _THUMB_ICON_CACHE.popitem(last=False)
+                return icon
         except Exception:
             pass
         return icons.icon("mdi6.image-outline")
@@ -885,6 +903,7 @@ class GroupingPanel(QWidget):
         self.ctx = ctx
         self._uid: Optional[str] = None
         self._grouping: Optional["SpecimenGrouping"] = None
+        self._render_signature: tuple | None = None
         self._selected_group_indexes: set[int] = set()
         self._auto_group_staged_paths: list[str] = []
         self._auto_group_preview_result: Optional[dict] = None
@@ -1110,11 +1129,17 @@ class GroupingPanel(QWidget):
         self._target_label.setText(short)
         self._toolbar_widget.show()
         self._add_btn.show()
+        signature = self._grouping_render_signature(uid, grouping)
+        if signature == self._render_signature:
+            self._refresh_auto_group_drop_visibility()
+            return
+        self._render_signature = signature
         self._rebuild()
 
     def clear(self) -> None:
         self._uid = None
         self._grouping = None
+        self._render_signature = None
         self._selected_group_indexes.clear()
         self._uid_label.setText("— 未选择标本 —")
         self._target_label.setText("—")
@@ -1418,13 +1443,40 @@ class GroupingPanel(QWidget):
         helicon_act.triggered.connect(self.helicon_params_requested.emit)
         return menu
 
+    def _default_group_label_prefix(self) -> str:
+        """Default group label reflects whether this is a specimen or ad-hoc job."""
+        from app.services.grouping_service import ADHOC_GROUPING_UID
+
+        return "结果" if self._uid == ADHOC_GROUPING_UID else "角度"
+
     def _renumber_default_angle_labels(self) -> None:
-        """只重排系统默认的“角度N”；用户自定义角度名保持不变。"""
+        """只重排系统默认标签；用户自定义角度名保持不变。"""
         if not self._grouping:
             return
+        prefix = self._default_group_label_prefix()
         for display_number, group in enumerate(self._grouping.groups, start=1):
-            if re.fullmatch(r"角度\d+", (group.angle_label or "").strip()):
-                group.angle_label = f"角度{display_number}"
+            label = (group.angle_label or "").strip()
+            if re.fullmatch(r"(角度|结果)\d+", label):
+                group.angle_label = f"{prefix}{display_number}"
+
+    def _grouping_render_signature(self, uid: str, grouping: "SpecimenGrouping") -> tuple:
+        """Small immutable snapshot of fields that affect rendered group cards."""
+        return (
+            uid,
+            tuple(
+                (
+                    g.group_index,
+                    g.angle_label or "",
+                    tuple(g.jpg_paths),
+                    g.composed_tiff_path or "",
+                    getattr(g, "archive_zip", None) or "",
+                    getattr(g, "status", None) or "",
+                    getattr(g, "output_name", None) or "",
+                )
+                for g in grouping.groups
+            ),
+            tuple(sorted(self._selected_group_indexes)),
+        )
 
     def _rebuild(self) -> None:
         self._clear_content()
@@ -1514,18 +1566,20 @@ class GroupingPanel(QWidget):
                 item.widget().deleteLater()
 
     def _add_group(self) -> None:
-        """新增一个空草稿组，自动标「角度N」（web 同款 angleLabel:"角度"+n）。"""
+        """新增一个空草稿组；编号标本用角度N，无编号任务用结果N。"""
         if not self._grouping or not self._uid:
             return
         from app.services.grouping_service import Group
         new_index = max((g.group_index for g in self._grouping.groups), default=-1) + 1
         display_number = len(self._grouping.groups) + 1
+        prefix = self._default_group_label_prefix()
         new_group = Group(
             group_index=new_index,
-            angle_label=f"角度{display_number}",
+            angle_label=f"{prefix}{display_number}",
             jpg_paths=[],
         )
         self._grouping.groups.append(new_group)
+        self._render_signature = None
         self._rebuild()
         self.grouping_changed.emit()
 

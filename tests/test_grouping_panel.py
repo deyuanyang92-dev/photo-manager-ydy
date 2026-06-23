@@ -83,6 +83,31 @@ def test_toolbar_visible_after_load(qtbot):
     assert not panel._add_btn.isHidden()
 
 
+def test_load_grouping_skips_rebuild_when_render_data_unchanged(qtbot):
+    """Returning to an already-rendered specimen should not rebuild all cards."""
+    from app.widgets.grouping_panel import GroupingPanel
+
+    ctx = _make_app_context()
+    panel = GroupingPanel(ctx)
+    qtbot.addWidget(panel)
+    panel.load_grouping("test-uid", _make_grouping([
+        {"index": 0, "label": "角度1", "jpgs": ["/p/a.jpg"]},
+    ]))
+    calls = []
+    original_rebuild = panel._rebuild
+    panel._rebuild = lambda: calls.append("rebuild")
+
+    panel.load_grouping("test-uid", _make_grouping([
+        {"index": 0, "label": "角度1", "jpgs": ["/p/a.jpg"]},
+    ]))
+    panel.load_grouping("test-uid", _make_grouping([
+        {"index": 0, "label": "角度1", "jpgs": ["/p/a.jpg", "/p/b.jpg"]},
+    ]))
+
+    assert calls == ["rebuild"]
+    panel._rebuild = original_rebuild
+
+
 def test_auto_group_organize_button_emits_request(qtbot):
     """The grouping toolbar exposes the legacy-folder automation entry."""
     from app.widgets.grouping_panel import GroupingPanel
@@ -405,6 +430,44 @@ def test_add_group_auto_labels(qtbot):
     labels = [g.angle_label for g in panel._grouping.groups]
     assert labels == ["角度1", "角度2"]
     assert panel._add_btn.isVisible() or True   # 载入后按钮可用
+
+
+def test_add_group_auto_labels_for_adhoc_jobs(qtbot):
+    """无编号临时任务不是同一标本的多角度，应标为结果1/结果2。"""
+    from app.services.grouping_service import ADHOC_GROUPING_UID
+    from app.widgets.grouping_panel import GroupingPanel
+
+    ctx = _make_app_context()
+    panel = GroupingPanel(ctx)
+    qtbot.addWidget(panel)
+    panel.load_grouping(ADHOC_GROUPING_UID, _make_grouping([]))
+
+    panel._add_group()
+    panel._add_group()
+
+    labels = [g.angle_label for g in panel._grouping.groups]
+    assert labels == ["结果1", "结果2"]
+
+
+def test_adhoc_load_converts_old_default_angles_to_results(qtbot):
+    """旧版本临时分组若存了角度N，打开时按无编号语义显示为结果N。"""
+    from app.services.grouping_service import ADHOC_GROUPING_UID
+    from app.widgets.grouping_panel import GroupingPanel, _DraftGroupRow
+
+    ctx = _make_app_context()
+    panel = GroupingPanel(ctx)
+    qtbot.addWidget(panel)
+    panel.load_grouping(ADHOC_GROUPING_UID, _make_grouping([
+        {"index": 0, "label": "角度1"},
+        {"index": 1, "label": "角度2"},
+    ]))
+
+    assert [g.angle_label for g in panel._grouping.groups] == ["结果1", "结果2"]
+    rows = sorted(
+        panel.findChildren(_DraftGroupRow),
+        key=lambda r: r._group.group_index,
+    )
+    assert [row._label_edit.text() for row in rows] == ["结果1", "结果2"]
 
 
 def test_add_group_counts_existing_organized_angles(qtbot, tmp_path):

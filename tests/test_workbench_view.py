@@ -45,9 +45,9 @@ def qt_app():
 def _teardown_leaked_workbench():
     """每个用例后停掉泄漏的 WorkbenchView 定时器。
 
-    WorkbenchView 构造即起 _debounce_timer(50ms)→_refresh_monitor→再 start(300)
-    自循环；_wb() 不做清理，上个用例的 widget 定时器会在下个用例 setup 时
-    对已关闭的 db / 即将销毁的 tmp_path 跑 _refresh_monitor → 阻塞事件循环
+    WorkbenchView.on_activate() 会启动文件监听和首轮延迟扫描；_wb() 不做清理，
+    上个用例的 widget 定时器会在下个用例 setup 时对已关闭的 db / 即将销毁的
+    tmp_path 跑 _refresh_monitor → 阻塞事件循环
     （首发现象：673 真·快速打印后，690 无打印机型用例 hang）。用现成的
     on_activate 的反操作 on_deactivate() 停两个定时器，再 deleteLater。
     """
@@ -282,6 +282,26 @@ class TestOnActivate:
         assert w._fs_watcher.directories()
         assert w._debounce_timer.isActive() or w._debounce_timer.isSingleShot()
         assert w._fallback_timer.isActive()
+        db.close()
+
+    def test_on_activate_defers_initial_monitor_scan(self, tmp_path):
+        """Returning to the workbench should not synchronously scan twice."""
+        from app.views.workbench_view import WorkbenchView
+        project_dir = str(tmp_path / "proj-defer")
+        Path(project_dir).mkdir(parents=True)
+        (Path(project_dir) / "incoming-jpg").mkdir()
+        (Path(project_dir) / "results").mkdir()
+        (Path(project_dir) / "_data").mkdir()
+        db = _make_db(str(tmp_path / "proj-defer" / "_data" / "project.db"))
+        ctx = _make_ctx(project_dir=project_dir, db=db)
+        w = WorkbenchView(ctx)
+        calls = []
+        w._refresh_monitor = lambda: calls.append("scan")
+
+        w.on_activate()
+
+        assert calls == []
+        assert w._debounce_timer.isActive()
         db.close()
 
     def test_fs_watcher_stops_on_deactivate(self, tmp_path):
@@ -3515,8 +3535,67 @@ class TestOpenGroupingLoadsActive:
         assert len(groups) == 2
         assert groups[1].angle_label == "角度2"
 
+    def test_activate_existing_uid_does_not_claim_current_adhoc_grouping(self, tmp_path):
+        """激活只切换拍摄目标，不能把无编号整理单元自动挂到该标本。"""
+        from app.views.workbench_view import WorkbenchView
+        from app.services.grouping_service import (
+            ADHOC_GROUPING_UID,
+            Group,
+            SpecimenGrouping,
+            load_grouping,
+            save_grouping,
+        )
+
+        uid = "GXFCG-BLW-SC001-D79-20260618"
+        project_dir = str(tmp_path / "proj")
+        Path(project_dir, "_data").mkdir(parents=True)
+        db = _make_db(str(tmp_path / "proj" / "_data" / "project.db"))
+        db.execute(
+            """
+            INSERT INTO specimens (
+                uid, id, province, site, storage, collection_date, photo_date,
+                owner_project_dir
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (uid, "SC001", "GXFCG", "BLW", "D79", "20260618", "20260618", project_dir),
+        )
+        save_grouping(
+            db,
+            uid,
+            [Group(group_index=0, angle_label="角度1")],
+            clean_phantoms=False,
+        )
+
+        jpg = tmp_path / "P001.JPG"
+        jpg.write_bytes(b"jpg")
+        adhoc_group = Group(group_index=0, angle_label="结果1", jpg_paths=[str(jpg)])
+        save_grouping(db, ADHOC_GROUPING_UID, [adhoc_group], clean_phantoms=False)
+        db.commit()
+        ctx = _make_ctx(project_dir=project_dir, db=db)
+        ctx.collab_service = None
+        w = WorkbenchView(ctx)
+        w._grouping.load_grouping(
+            ADHOC_GROUPING_UID,
+            SpecimenGrouping(
+                uid=ADHOC_GROUPING_UID,
+                groups=[adhoc_group],
+            ),
+        )
+
+        w._on_sidebar_activate(uid)
+
+        groups = load_grouping(db, uid).groups
+        assert len(groups) == 1
+        assert groups[0].angle_label == "角度1"
+        assert groups[0].jpg_paths == []
+        adhoc_groups = load_grouping(db, ADHOC_GROUPING_UID).groups
+        assert len(adhoc_groups) == 1
+        assert adhoc_groups[0].jpg_paths == [str(jpg)]
+        assert w._grouping._uid == uid
+        assert len(w._grouping._grouping.groups) == 1
+
     def test_deactivate_starts_fresh_unassigned_grouping_task(self, tmp_path):
-        """去激活后再点新组, 应是新的无编号任务, 从组1/角度1开始。"""
+        """去激活后再点新组, 应是新的无编号任务, 从组1/结果1开始。"""
         from app.views.workbench_view import WorkbenchView
         from app.services import activation_service
         from app.services.grouping_service import (
@@ -3559,7 +3638,7 @@ class TestOpenGroupingLoadsActive:
         groups = w._grouping._grouping.groups
         assert len(groups) == 1
         assert groups[0].group_index == 0
-        assert groups[0].angle_label == "角度1"
+        assert groups[0].angle_label == "结果1"
 
 
 class TestPostHocTiffRecognition:
