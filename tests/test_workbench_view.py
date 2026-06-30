@@ -1279,6 +1279,36 @@ class TestResultsColumn:
         zips = [{"path": "/fake/result.zip", "name": "result.zip", "size": 12345}]
         w.load_uid("FJ-XM-B2-DLC001-T95E-20260601", tiffs, zips)
 
+    def test_workbench_result_infos_include_unorganized_composed_tiff(self):
+        from app.views.workbench_view import WorkbenchView
+        from app.services.grouping_service import Group, SpecimenGrouping
+
+        w = WorkbenchView(_make_ctx())
+        grouping = SpecimenGrouping(
+            uid="UID1",
+            groups=[
+                Group(
+                    group_index=0,
+                    composed_tiff_path="/fake/unorganized.tif",
+                    status="composed",
+                )
+            ],
+        )
+
+        tiffs, zips = w._result_infos_from_grouping(grouping)
+
+        assert tiffs == [
+            {
+                "path": "/fake/unorganized.tif",
+                "name": "unorganized.tif",
+                "seq": None,
+                "owner_uid": "UID1",
+                "group_index": 0,
+                "registered": True,
+            }
+        ]
+        assert zips == []
+
     def test_results_column_mode_buttons_emit_requests(self, qtbot):
         from app.widgets.results_column import ResultsColumn
 
@@ -1903,6 +1933,52 @@ class TestMonitorPanelAddJpg:
         ctx = _make_ctx()
         w = MonitorPanel(ctx)
         assert hasattr(w, "add_jpg_requested")
+
+    def test_drop_parser_accepts_jpg_and_tiff(self, tmp_path):
+        """Dragging external Helicon JPG+TIF keeps both file types."""
+        from PyQt6.QtCore import QMimeData, QUrl
+        from app.widgets.monitor_panel import MonitorPanel
+
+        jpg = tmp_path / "P6202064.JPG"
+        tif = tmp_path / "HeliconFocus.tif"
+        txt = tmp_path / "note.txt"
+        jpg.write_bytes(b"jpg")
+        tif.write_bytes(b"tif")
+        txt.write_text("skip")
+        mime = QMimeData()
+        mime.setUrls([
+            QUrl.fromLocalFile(str(jpg)),
+            QUrl.fromLocalFile(str(tif)),
+            QUrl.fromLocalFile(str(txt)),
+        ])
+
+        paths = MonitorPanel._jpg_paths_from_mime(mime)
+
+        assert paths == [str(jpg), str(tif)]
+
+
+class TestWorkbenchImportMedia:
+    def test_add_photos_imports_jpg_and_tiff_to_capture_workspace(self, tmp_path):
+        """Main add/drop path supports external Helicon workflow: JPG + TIF."""
+        from app.views.workbench_view import WorkbenchView
+
+        project = tmp_path / "project"
+        camera = tmp_path / "camera"
+        project.mkdir()
+        camera.mkdir()
+        jpg = camera / "P6202064.JPG"
+        tif = camera / "HeliconFocus.tif"
+        jpg.write_bytes(b"jpg")
+        tif.write_bytes(b"tif")
+        w = WorkbenchView(_make_ctx(project_dir=str(project)))
+        w._refresh_monitor = MagicMock()
+
+        imported = w._import_media_paths([str(jpg), str(tif)], source="添加照片")
+
+        assert sorted(Path(p).name for p in imported) == ["HeliconFocus.tif", "P6202064.JPG"]
+        assert (project / "incoming-jpg" / "P6202064.JPG").read_bytes() == b"jpg"
+        assert (project / "results" / "HeliconFocus.tif").read_bytes() == b"tif"
+        w._refresh_monitor.assert_called_once()
 
 
 class TestResultsColumnOpenExplorer:
@@ -3047,14 +3123,19 @@ class TestSaveButtonPersistsMetadata:
         assert row["station"] == "B2"
         assert row["storage"] == "T95E"
 
-    def test_save_new_specimen_claims_current_adhoc_grouping(self, tmp_path):
-        """临时分组后保存右侧新编号，应把新组挂到该编号并刷新左侧进度。"""
+    def test_open_grouping_without_activation_creates_unassigned_grouping(self, tmp_path):
+        """未激活编号时，新组暂存为未归属，保存新编号后可迁入该编号。"""
         from app.services.grouping_service import ADHOC_GROUPING_UID, load_grouping
 
         w, ctx, db = self._make_view(tmp_path)
         w._on_open_grouping()
         assert w._grouping._uid == ADHOC_GROUPING_UID
-        w._grouping._add_group()
+        assert not w._grouping._add_btn.isHidden()
+        jpg = tmp_path / "P001.JPG"
+        jpg.write_bytes(b"jpg")
+        group_index = w._grouping._append_group(jpg_paths=[str(jpg)])
+        w._grouping._rebuild()
+        assert group_index == 0
         assert len(w._grouping._grouping.groups) == 1
 
         uid = self._fill_new_specimen(w)
@@ -3068,19 +3149,34 @@ class TestSaveButtonPersistsMetadata:
         assert row["uid"] == uid
         assert row["progress"]["total"] == 1
 
-    def test_right_save_keeps_selected_inactive_specimen_grouping(self, tmp_path):
-        """左侧选中未激活编号时，右侧保存不能把分组工具清回临时空组。"""
-        from app.services.grouping_service import load_grouping
+    def test_blank_unassigned_group_is_not_claimed_on_save(self, tmp_path):
+        """未归属空组不应在保存新编号时变成目标编号的空角度。"""
+        from app.services.grouping_service import ADHOC_GROUPING_UID, load_grouping
+
+        w, ctx, db = self._make_view(tmp_path)
+        w._on_open_grouping()
+        assert w._grouping._uid == ADHOC_GROUPING_UID
+        w._grouping._add_group()
+        assert len(w._grouping._grouping.groups) == 1
+
+        uid = self._fill_new_specimen(w)
+        w._on_naming_save()
+
+        assert load_grouping(db, uid).groups == []
+        assert load_grouping(db, ADHOC_GROUPING_UID).groups == []
+
+    def test_right_save_does_not_claim_unassigned_group_for_selected_inactive_uid(self, tmp_path):
+        """左侧选中未激活编号时，新组仍保持未归属，不自动挂到该编号。"""
+        from app.services.grouping_service import ADHOC_GROUPING_UID, load_grouping
 
         w, ctx, db = self._make_view(tmp_path)
         uid = self._fill_new_specimen(w)
         w._on_naming_save()
 
-        # Simulate the common workflow: an existing specimen is selected for
-        # editing, but it is not the active capture target.
+        # Simulate an existing specimen being edited in the right rail without
+        # using the grouping-popup entry point as an implicit activation path.
         w._load_specimen(uid)
-        w._on_open_grouping()
-        assert w._grouping._uid == uid
+        assert w._grouping._uid == ADHOC_GROUPING_UID
 
         w._grouping._add_group()
         assert len(w._grouping._grouping.groups) == 1
@@ -3088,9 +3184,9 @@ class TestSaveButtonPersistsMetadata:
         w._metadata._collector.setText("李四")
         w._on_save_metadata(uid)
 
-        assert w._grouping._uid == uid
+        assert w._grouping._uid == ADHOC_GROUPING_UID
         assert len(w._grouping._grouping.groups) == 1
-        assert len(load_grouping(db, uid).groups) == 1
+        assert load_grouping(db, uid).groups == []
 
     def test_active_specimen_second_angle_is_not_duplicate_uid(self, tmp_path):
         """当前激活 voucher 的成果序号2不是新标本，不应报 voucher 重复。"""
@@ -3268,9 +3364,9 @@ class TestFileSystemWatcher:
         assert w._debounce_timer.interval() == 300
         db.close()
 
-    def test_fallback_interval_30s(self, tmp_path):
+    def test_fallback_interval_120s(self, tmp_path):
         w, _, db = self._make_view(tmp_path)
-        assert w._fallback_timer.interval() == 30000
+        assert w._fallback_timer.interval() == 120000
         db.close()
 
     def test_on_activate_watches_directories(self, tmp_path):
@@ -3398,7 +3494,7 @@ class TestSuppAutonameByActive:
 
 
 class TestOpenGroupingLoadsActive:
-    """打开分组工具时, 若面板未绑标本 → 自动载入激活/当前编号, 让「新组」立即可用。"""
+    """打开分组工具时, 有激活则载入激活编号；无激活则进入未归属任务。"""
 
     def test_open_loads_active_uid(self, tmp_path):
         from app.views.workbench_view import WorkbenchView
@@ -3437,12 +3533,8 @@ class TestOpenGroupingLoadsActive:
         assert w._naming._storage.text() == "RD79"
         assert w._naming._collection_date.text() == "20260618"
 
-    def test_open_without_activation_ignores_naming_draft(self, tmp_path):
-        """不激活、不选中——命名表单填了编号也**不显示/不绑定**它;落到临时分组。
-
-        未激活的编号不该出现在分组工具(用户:没激活不用显示)。砍掉命名草稿回退档
-        后,无激活+无载入 → ADHOC,草稿编号既不进 _uid 也不进 _uid_label。
-        """
+    def test_open_without_activation_uses_unassigned_not_naming_draft(self, tmp_path):
+        """不激活：命名表单草稿不能成为分组归属，只能进入未归属任务。"""
         from app.views.workbench_view import WorkbenchView
         from app.services import activation_service
         from app.services.grouping_service import ADHOC_GROUPING_UID
@@ -3464,14 +3556,15 @@ class TestOpenGroupingLoadsActive:
         assert uid
 
         w._on_open_grouping()
-        assert w._grouping._uid == ADHOC_GROUPING_UID             # 落到临时,不绑草稿编号
+        assert w._grouping._uid == ADHOC_GROUPING_UID
+        assert not w._grouping._add_btn.isHidden()
         assert uid not in w._grouping._uid_label.text()           # 草稿编号不显示
-        # 临时分组仍能加组
         w._grouping._add_group()
         assert len(w._grouping._grouping.groups) == 1
+        assert w._grouping._grouping.groups[0].angle_label == "结果1"
 
     def test_open_without_current_rebinds_stale_grouping_panel(self, tmp_path):
-        """分组面板残留旧编号时, 无激活/无当前编号再打开应切回临时任务。"""
+        """分组面板残留旧编号时，无激活再打开应切到空的未归属任务。"""
         from app.views.workbench_view import WorkbenchView
         from app.services import activation_service
         from app.services.grouping_service import (
@@ -3498,12 +3591,14 @@ class TestOpenGroupingLoadsActive:
 
         assert w._grouping._uid == ADHOC_GROUPING_UID
         assert w._grouping._grouping.groups == []
+        assert not w._grouping._add_btn.isHidden()
 
-    def test_open_with_selected_inactive_uid_uses_selected_specimen(self, tmp_path):
-        """左侧选中未激活编号时，分组工具跟随当前编辑编号。"""
+    def test_open_with_selected_inactive_uid_starts_unassigned_task(self, tmp_path):
+        """左侧选中未激活编号时，新组不得归属该编号，只能暂存未归属。"""
         from app.views.workbench_view import WorkbenchView
         from app.services import activation_service
         from app.services.grouping_service import (
+            ADHOC_GROUPING_UID,
             Group,
             load_grouping,
             save_grouping,
@@ -3526,14 +3621,46 @@ class TestOpenGroupingLoadsActive:
 
         w._on_open_grouping()
 
-        assert w._grouping._uid == uid
-        assert len(w._grouping._grouping.groups) == 1
+        assert w._grouping._uid == ADHOC_GROUPING_UID
+        assert w._grouping._grouping.groups == []
+        assert not w._grouping._add_btn.isHidden()
         w._grouping._add_group()
-        assert len(w._grouping._grouping.groups) == 2
+        assert len(w._grouping._grouping.groups) == 1
         w._flush_grouping_save()
+        assert len(load_grouping(db, ADHOC_GROUPING_UID).groups) == 1
         groups = load_grouping(db, uid).groups
-        assert len(groups) == 2
-        assert groups[1].angle_label == "角度2"
+        assert len(groups) == 1
+        assert groups[0].angle_label == "角度1"
+
+    def test_open_without_activation_ignores_stale_current_uid(self, tmp_path):
+        """取消激活后即使 _current_uid 残留旧编号，重新打开也应切到未归属任务。"""
+        from app.views.workbench_view import WorkbenchView
+        from app.services import activation_service
+        from app.services.grouping_service import (
+            ADHOC_GROUPING_UID,
+            Group,
+            SpecimenGrouping,
+        )
+
+        stale_uid = "GXFCG-BLW-BZC003-R-20260618"
+        project_dir = str(tmp_path / "proj")
+        Path(project_dir, "_data").mkdir(parents=True)
+        db = _make_db(str(tmp_path / "proj" / "_data" / "project.db"))
+        ctx = _make_ctx(project_dir=project_dir, db=db)
+        ctx.collab_service = None
+        w = WorkbenchView(ctx)
+        w._grouping.load_grouping(
+            stale_uid,
+            SpecimenGrouping(uid=stale_uid, groups=[Group(group_index=2)]),
+        )
+        w._current_uid = stale_uid
+        assert activation_service.get_active_uid(db) is None
+
+        w._on_open_grouping()
+
+        assert w._grouping._uid == ADHOC_GROUPING_UID
+        assert w._grouping._grouping.groups == []
+        assert not w._grouping._add_btn.isHidden()
 
     def test_activate_existing_uid_does_not_claim_current_adhoc_grouping(self, tmp_path):
         """激活只切换拍摄目标，不能把无编号整理单元自动挂到该标本。"""
@@ -3595,13 +3722,12 @@ class TestOpenGroupingLoadsActive:
         assert len(w._grouping._grouping.groups) == 1
 
     def test_deactivate_starts_fresh_unassigned_grouping_task(self, tmp_path):
-        """去激活后再点新组, 应是新的无编号任务, 从组1/结果1开始。"""
+        """去激活后再点新组，应进入新的未归属任务，从结果1开始。"""
         from app.views.workbench_view import WorkbenchView
         from app.services import activation_service
         from app.services.grouping_service import (
             ADHOC_GROUPING_UID,
             Group,
-            SpecimenGrouping,
             save_grouping,
         )
 
@@ -3748,7 +3874,146 @@ class TestPostHocTiffRecognition:
         assert n._collection_date.text() == "20260619"
         assert w._current_uid is None
 
-    def test_results_column_hides_unorganized_imported_tiff(self, tmp_path):
+    def test_import_tiff_save_stops_pending_debounce_and_keeps_jpgs(
+        self, tmp_path, monkeypatch
+    ):
+        from app.services.grouping_service import (
+            Group,
+            SpecimenGrouping,
+            load_grouping,
+        )
+        from app.views.workbench_view import WorkbenchView
+
+        uid = "GXFCG-BLW-SC006-R-20260618"
+        project_dir = str(tmp_path / "proj")
+        Path(project_dir, "_data").mkdir(parents=True)
+        db = _make_db(str(tmp_path / "proj" / "_data" / "project.db"))
+        ctx = _make_ctx(project_dir=project_dir, db=db)
+        ctx.collab_service = None
+        w = WorkbenchView(ctx)
+        monkeypatch.setattr(w, "_refresh_monitor", lambda: None)
+        tif = tmp_path / "external.tif"
+        tif.write_bytes(b"II*\x00")
+        missing_jpg = str(tmp_path / "temporarily-hidden.JPG")
+        w._grouping.load_grouping(
+            uid,
+            SpecimenGrouping(
+                uid=uid,
+                groups=[
+                    Group(
+                        group_index=0,
+                        jpg_paths=[missing_jpg],
+                        composed_tiff_path=str(tif),
+                        status="composed",
+                    )
+                ],
+            ),
+        )
+        w._save_timer.start()
+
+        w._on_import_tiff(uid, 0)
+
+        assert not w._save_timer.isActive()
+        saved = load_grouping(db, uid).groups[0]
+        assert saved.composed_tiff_path == str(tif)
+        assert saved.jpg_paths == [missing_jpg]
+
+    def test_tiff_naming_check_uses_selected_group_tiff_without_folder_prompt(
+        self, tmp_path, monkeypatch
+    ):
+        from app.services.grouping_service import Group, SpecimenGrouping
+        from app.views import workbench_view
+        from app.views.workbench_view import WorkbenchView
+        from app.widgets import tiff_naming_audit_dialog
+
+        uid = "GXFCG-BLW-JinSC003-R-20260618"
+        project_dir = str(tmp_path / "proj")
+        Path(project_dir, "_data").mkdir(parents=True)
+        db = _make_db(str(tmp_path / "proj" / "_data" / "project.db"))
+        ctx = _make_ctx(project_dir=project_dir, db=db)
+        ctx.collab_service = None
+        w = WorkbenchView(ctx)
+        tif0 = tmp_path / "GXFCG-BLW-JinSC002-1-R-20260618.tif"
+        tif1 = tmp_path / "GXFCG-BLW-JinSC003-2-R-20260618-广西防城港.tif"
+        tif0.write_bytes(b"tif")
+        tif1.write_bytes(b"tif")
+        w._grouping.load_grouping(
+            uid,
+            SpecimenGrouping(
+                uid=uid,
+                groups=[
+                    Group(group_index=0, composed_tiff_path=str(tif0)),
+                    Group(group_index=1, composed_tiff_path=str(tif1)),
+                ],
+            ),
+        )
+        w._grouping._selected_group_indexes.add(1)
+        monkeypatch.setattr(
+            workbench_view.ui,
+            "get_existing_directory",
+            lambda *a, **k: (_ for _ in ()).throw(
+                AssertionError("folder prompt not expected")
+            ),
+        )
+        captured = {}
+
+        class _FakeAuditDialog:
+            def __init__(self, audit, parent=None):
+                captured["audit"] = audit
+
+            def exec(self):
+                captured["shown"] = True
+                return 0
+
+        monkeypatch.setattr(
+            tiff_naming_audit_dialog,
+            "TiffNamingAuditDialog",
+            _FakeAuditDialog,
+        )
+
+        w._on_tiff_naming_check()
+
+        audit = captured["audit"]
+        assert captured["shown"] is True
+        assert [item.name for item in audit.items] == [tif1.name]
+        assert audit.items[0].valid is True
+        assert audit.items[0].sequence == 2
+
+    def test_delete_result_tiff_path_uses_registered_group_undo(
+        self, tmp_path, monkeypatch
+    ):
+        from app.services.grouping_service import Group, save_grouping
+        from app.views.workbench_view import WorkbenchView
+
+        project_dir = str(tmp_path / "proj")
+        Path(project_dir, "_data").mkdir(parents=True)
+        db = _make_db(str(tmp_path / "proj" / "_data" / "project.db"))
+        uid = "GXFCG-BLW-BZC003-R-20260618"
+        tif = tmp_path / "GXFCG-BLW-BZC003-4-R-20260618.tif"
+        tif.write_bytes(b"tif")
+        save_grouping(
+            db,
+            uid,
+            [Group(group_index=4, composed_tiff_path=str(tif))],
+            clean_phantoms=False,
+        )
+        ctx = _make_ctx(project_dir=project_dir, db=db)
+        ctx.collab_service = None
+        w = WorkbenchView(ctx)
+        called = {}
+        monkeypatch.setattr(
+            w,
+            "_on_undo_compose",
+            lambda undo_uid, group_index: called.update(
+                {"uid": undo_uid, "group_index": group_index}
+            ),
+        )
+
+        w._on_delete_result_tiff_path(str(tif))
+
+        assert called == {"uid": uid, "group_index": 4}
+
+    def test_results_column_shows_unorganized_imported_tiff(self, tmp_path):
         from app.services.grouping_service import Group, SpecimenGrouping
         from app.views.workbench_view import WorkbenchView
 
@@ -3775,11 +4040,84 @@ class TestPostHocTiffRecognition:
         w._refresh_results_column("UID", grouping)
 
         assert [Path(x["path"]).name for x in w._results._current_tiffs] == [
+            imported_tif.name,
             organized_tif.name
         ]
         assert [Path(x["path"]).name for x in w._results._current_zips] == [
             organized_zip.name
         ]
+
+    def test_organized_group_with_zip_is_noop_when_organize_requested(
+        self, tmp_path, monkeypatch
+    ):
+        from app.services.grouping_service import Group, load_grouping, save_grouping
+        from app.views.workbench_view import WorkbenchView
+
+        project_dir = str(tmp_path / "proj")
+        Path(project_dir, "_data").mkdir(parents=True)
+        db = _make_db(str(tmp_path / "proj" / "_data" / "project.db"))
+        uid = "GXFCG-BLW-SC001-R-20260618"
+        tif = tmp_path / "result.tif"
+        zipf = tmp_path / "result.zip"
+        tif.write_bytes(b"tif")
+        zipf.write_bytes(b"zip")
+        save_grouping(
+            db,
+            uid,
+            [
+                Group(
+                    group_index=0,
+                    composed_tiff_path=str(tif),
+                    archive_zip=str(zipf),
+                    status="organized",
+                )
+            ],
+            clean_phantoms=False,
+        )
+        w = WorkbenchView(_make_ctx(project_dir=project_dir, db=db))
+        monkeypatch.setattr(w, "_status_message", lambda *_a, **_k: None)
+
+        assert w._on_organise_requested(uid, 0) is True
+
+        saved = load_grouping(db, uid).groups[0]
+        assert saved.status == "organized"
+        assert saved.archive_zip == str(zipf)
+
+    def test_link_existing_result_pair_to_right_uid_moves_from_old_uid(
+        self, tmp_path, monkeypatch
+    ):
+        from app.services.grouping_service import Group, load_grouping, save_grouping
+        from app.views.workbench_view import WorkbenchView
+
+        project_dir = str(tmp_path / "proj")
+        Path(project_dir, "_data").mkdir(parents=True)
+        db = _make_db(str(tmp_path / "proj" / "_data" / "project.db"))
+        old_uid = "GXHP-SL-YMC002-R-20260616"
+        target_uid = "GXHP-SL-YMC001-R-T95E-20260616"
+        tif = tmp_path / "GXHP-SL-YMC001-2-R-260616.tif"
+        zipf = tmp_path / "GXHP-SL-YMC001-2-R-260616.zip"
+        tif.write_bytes(b"tif")
+        zipf.write_bytes(b"zip")
+        save_grouping(db, old_uid, [
+            Group(
+                group_index=0,
+                composed_tiff_path=str(tif),
+                archive_zip=str(zipf),
+                status="organized",
+            )
+        ], clean_phantoms=False)
+        w = WorkbenchView(_make_ctx(project_dir=project_dir, db=db))
+        monkeypatch.setattr(w._naming, "current_uid", lambda: target_uid)
+        monkeypatch.setattr(w, "_refresh_monitor", lambda: None)
+
+        w._on_link_result_to_right_uid(str(tif), str(zipf))
+
+        assert load_grouping(db, old_uid).groups == []
+        target_groups = load_grouping(db, target_uid).groups
+        assert len(target_groups) == 1
+        assert target_groups[0].composed_tiff_path == str(tif.resolve())
+        assert target_groups[0].archive_zip == str(zipf.resolve())
+        assert target_groups[0].status == "organized"
 
     def test_organize_rename_suggestion_uses_corrected_storage(self, tmp_path, monkeypatch):
         from PyQt6.QtWidgets import QDialog
@@ -3890,6 +4228,231 @@ class TestImplicitCompose:
         w, ctx, db = self._make_view(tmp_path, [])
         w._on_compose_implicit()  # 无激活编号, 不崩
 
+    def test_compose_implicit_no_active_with_auto_archive_still_does_not_guess(
+        self, tmp_path, monkeypatch
+    ):
+        w, ctx, db = self._make_view(
+            tmp_path,
+            [str(tmp_path / "a.jpg"), str(tmp_path / "b.jpg")],
+        )
+        ctx.settings.auto_organize_after_compose = True
+        monkeypatch.setattr(w, "_get_active_uid", lambda: None)
+        monkeypatch.setattr(w._monitor, "selected_jpg_paths", lambda: [])
+        calls = []
+        monkeypatch.setattr(
+            w,
+            "_on_compose_requested",
+            lambda uid, idx: calls.append((uid, idx)),
+        )
+
+        w._on_compose_implicit()
+
+        assert calls == []
+
+    def test_compose_implicit_with_active_but_no_selection_is_noop_when_auto_off(
+        self, tmp_path, monkeypatch
+    ):
+        w, ctx, db = self._make_view(
+            tmp_path,
+            [str(tmp_path / "a.jpg"), str(tmp_path / "b.jpg")],
+        )
+        ctx.settings.auto_organize_after_compose = False
+        monkeypatch.setattr(w, "_get_active_uid", lambda: self.UID)
+        monkeypatch.setattr(w._monitor, "selected_jpg_paths", lambda: [])
+        monkeypatch.setattr(w._monitor, "auto_compress_enabled", lambda: False)
+        calls = []
+        monkeypatch.setattr(
+            w,
+            "_compose_group_headless",
+            lambda uid, idx, done: calls.append((uid, idx)),
+        )
+        monkeypatch.setattr(
+            w,
+            "_on_compose_requested",
+            lambda uid, idx: calls.append((uid, idx)),
+        )
+
+        w._on_compose_implicit()
+
+        assert calls == []
+
+    def test_compose_implicit_with_active_auto_archive_uses_unoccupied_jpgs(
+        self, tmp_path, monkeypatch
+    ):
+        from app.services.grouping_service import load_grouping
+
+        jpgs = [str(tmp_path / "a.jpg"), str(tmp_path / "b.jpg")]
+        w, ctx, db = self._make_view(tmp_path, jpgs)
+        ctx.settings.auto_organize_after_compose = True
+        monkeypatch.setattr(w, "_get_active_uid", lambda: self.UID)
+        monkeypatch.setattr(w._monitor, "selected_jpg_paths", lambda: [])
+        calls = []
+        monkeypatch.setattr(
+            w,
+            "_on_compose_requested",
+            lambda uid, idx: calls.append((uid, idx)),
+        )
+
+        w._on_compose_implicit()
+
+        assert calls == [(self.UID, 0)]
+        grouping = load_grouping(db, self.UID)
+        assert grouping.groups[0].jpg_paths == jpgs
+
+    def test_compose_implicit_with_active_toolbar_auto_archive_uses_unoccupied_jpgs(
+        self, tmp_path, monkeypatch
+    ):
+        from app.services.grouping_service import load_grouping
+
+        jpgs = [str(tmp_path / "a.jpg"), str(tmp_path / "b.jpg")]
+        w, ctx, db = self._make_view(tmp_path, jpgs)
+        ctx.settings.auto_organize_after_compose = False
+        monkeypatch.setattr(w, "_get_active_uid", lambda: self.UID)
+        monkeypatch.setattr(w._monitor, "selected_jpg_paths", lambda: [])
+        monkeypatch.setattr(w._monitor, "auto_compress_enabled", lambda: True)
+        calls = []
+        monkeypatch.setattr(
+            w,
+            "_on_compose_requested",
+            lambda uid, idx: calls.append((uid, idx)),
+        )
+
+        w._on_compose_implicit()
+
+        assert calls == [(self.UID, 0)]
+        grouping = load_grouping(db, self.UID)
+        assert grouping.groups[0].jpg_paths == jpgs
+
+    def test_selected_owned_jpgs_confirm_output_target_without_activation(self, tmp_path, monkeypatch):
+        from app.views.workbench_view import _SelectedComposeTarget
+        from app.services.grouping_service import load_grouping
+
+        selected = [str(tmp_path / "a.jpg"), str(tmp_path / "b.jpg")]
+        w, ctx, db = self._make_view(tmp_path, [])
+        monkeypatch.setattr(w, "_get_active_uid", lambda: None)
+        monkeypatch.setattr(w._monitor, "selected_jpg_paths", lambda: selected)
+        monkeypatch.setattr(w._monitor, "selected_jpg_owner_uids", lambda: [self.UID])
+        prompts = []
+
+        def _prompt(jpg_count, *, organise, default_uid=""):
+            prompts.append((jpg_count, organise, default_uid))
+            return _SelectedComposeTarget(uid=default_uid)
+
+        monkeypatch.setattr(w, "_prompt_selected_compose_target", _prompt)
+        calls = []
+        monkeypatch.setattr(w, "_on_compose_requested", lambda uid, idx: calls.append((uid, idx)))
+
+        w._on_compose_implicit()
+
+        assert prompts == [(2, False, self.UID)]
+        assert calls == [(self.UID, 0)]
+        grouping = load_grouping(db, self.UID)
+        assert grouping.groups[0].jpg_paths == selected
+
+    def test_selected_jpgs_use_active_uid_without_prompt(self, tmp_path, monkeypatch):
+        from app.services.grouping_service import load_grouping
+
+        selected = [str(tmp_path / "a.jpg"), str(tmp_path / "b.jpg")]
+        active_uid = "GXFCG-BLW-BZC003-R-20260618"
+        w, ctx, db = self._make_view(tmp_path, [])
+        monkeypatch.setattr(w, "_get_active_uid", lambda: active_uid)
+        monkeypatch.setattr(w._monitor, "selected_jpg_paths", lambda: selected)
+        monkeypatch.setattr(w._monitor, "selected_jpg_owner_uids", lambda: [self.UID])
+        monkeypatch.setattr(
+            w,
+            "_prompt_selected_compose_target",
+            lambda *_a, **_k: pytest.fail("active UID should auto-name without prompt"),
+        )
+        assigned = []
+        monkeypatch.setattr(w, "_assign_selected_jpgs_to_uid", lambda uid, paths: assigned.append((uid, paths)))
+        calls = []
+        monkeypatch.setattr(w, "_on_compose_requested", lambda uid, idx: calls.append((uid, idx)))
+
+        w._on_compose_implicit()
+
+        assert assigned == [(active_uid, selected)]
+        assert calls == [(active_uid, 0)]
+        grouping = load_grouping(db, active_uid)
+        assert grouping.groups[0].jpg_paths == selected
+
+    def test_selected_unowned_jpgs_require_output_name_without_activation(self, tmp_path, monkeypatch):
+        from app.views.workbench_view import _SelectedComposeTarget
+        from app.services.grouping_service import ADHOC_GROUPING_UID, load_grouping
+
+        selected = [str(tmp_path / "a.jpg"), str(tmp_path / "b.jpg")]
+        w, ctx, db = self._make_view(tmp_path, [])
+        monkeypatch.setattr(w, "_get_active_uid", lambda: None)
+        monkeypatch.setattr(w._monitor, "selected_jpg_paths", lambda: selected)
+        monkeypatch.setattr(w._monitor, "selected_jpg_owner_uids", lambda: [])
+        monkeypatch.setattr(
+            w,
+            "_prompt_selected_compose_target",
+            lambda *_a, **_k: _SelectedComposeTarget(
+                uid=ADHOC_GROUPING_UID,
+                output_name="手填输出名",
+            ),
+        )
+        calls = []
+        monkeypatch.setattr(w, "_on_compose_requested", lambda uid, idx: calls.append((uid, idx)))
+
+        w._on_compose_implicit()
+
+        assert calls == [(ADHOC_GROUPING_UID, 0)]
+        grouping = load_grouping(db, ADHOC_GROUPING_UID)
+        assert grouping.groups[0].jpg_paths == selected
+        assert grouping.groups[0].output_name == "手填输出名"
+
+    def test_selected_unowned_jpgs_can_assign_to_uid_for_auto_sequence(self, tmp_path, monkeypatch):
+        from app.views.workbench_view import _SelectedComposeTarget
+        from app.services.grouping_service import load_grouping
+
+        selected = [str(tmp_path / "a.jpg"), str(tmp_path / "b.jpg")]
+        target_uid = "GXFCG-BLW-SC002-R-20260618"
+        w, ctx, db = self._make_view(tmp_path, [])
+        monkeypatch.setattr(w, "_get_active_uid", lambda: None)
+        monkeypatch.setattr(w._monitor, "selected_jpg_paths", lambda: selected)
+        monkeypatch.setattr(w._monitor, "selected_jpg_owner_uids", lambda: [])
+        monkeypatch.setattr(
+            w,
+            "_prompt_selected_compose_target",
+            lambda *_a, **_k: _SelectedComposeTarget(
+                uid=target_uid,
+                assign_to_uid=True,
+            ),
+        )
+        assigned = []
+        monkeypatch.setattr(w, "_assign_selected_jpgs_to_uid", lambda uid, paths: assigned.append((uid, paths)))
+        calls = []
+        monkeypatch.setattr(w, "_on_compose_requested", lambda uid, idx: calls.append((uid, idx)))
+
+        w._on_compose_implicit()
+
+        assert calls == [(target_uid, 0)]
+        assert assigned == [(target_uid, selected)]
+        grouping = load_grouping(db, target_uid)
+        assert grouping.groups[0].jpg_paths == selected
+        assert grouping.groups[0].output_name is None
+
+    def test_prompt_assigns_to_prefilled_uid_after_user_confirms(self, tmp_path, monkeypatch):
+        from PyQt6.QtWidgets import QDialog
+
+        w, ctx, db = self._make_view(tmp_path, [])
+        monkeypatch.setattr(
+            QDialog,
+            "exec",
+            lambda self: QDialog.DialogCode.Accepted,
+        )
+
+        target = w._prompt_selected_compose_target(
+            2,
+            organise=True,
+            default_uid=self.UID,
+        )
+
+        assert target is not None
+        assert target.uid == self.UID
+        assert target.assign_to_uid is True
+
     def test_selected_jpgs_take_priority_for_implicit_group(self, tmp_path):
         from app.services.grouping_service import load_grouping
         attributed = [str(tmp_path / f"a{i}.jpg") for i in range(4)]
@@ -3901,10 +4464,12 @@ class TestImplicitCompose:
         assert g.groups[0].jpg_paths == selected
 
     def test_silent_compose_implicit_uses_headless_path(self, tmp_path, monkeypatch):
-        w, ctx, db = self._make_view(tmp_path, [str(tmp_path / "a.jpg"), str(tmp_path / "b.jpg")])
+        selected = [str(tmp_path / "a.jpg"), str(tmp_path / "b.jpg")]
+        w, ctx, db = self._make_view(tmp_path, [])
         ctx.settings.silent_compose = True
         monkeypatch.setattr(w, "_get_active_uid", lambda: self.UID)
-        monkeypatch.setattr(w._monitor, "selected_jpg_paths", lambda: [])
+        monkeypatch.setattr(w._monitor, "selected_jpg_paths", lambda: selected)
+        monkeypatch.setattr(w, "_assign_selected_jpgs_to_uid", lambda uid, paths: None)
         calls = []
         monkeypatch.setattr(
             w,
@@ -3914,10 +4479,32 @@ class TestImplicitCompose:
         w._on_compose_implicit()
         assert calls == [(self.UID, 0)]
 
+    def test_toolbar_preview_toggle_controls_silent_compose(self, tmp_path):
+        w, ctx, db = self._make_view(tmp_path, [])
+
+        w._on_compose_preview_toggled(False)
+        assert ctx.settings.silent_compose is True
+
+        w._on_compose_preview_toggled(True)
+        assert ctx.settings.silent_compose is False
+
+    def test_toolbar_preview_state_syncs_from_silent_setting(self, tmp_path):
+        w, ctx, db = self._make_view(tmp_path, [])
+
+        ctx.settings.silent_compose = True
+        w._sync_compose_preview_toggle()
+        assert w._monitor.compose_preview_enabled() is False
+
+        ctx.settings.silent_compose = False
+        w._sync_compose_preview_toggle()
+        assert w._monitor.compose_preview_enabled() is True
+
     def test_compose_implicit_organise_runs_after_headless_success(self, tmp_path, monkeypatch):
-        w, ctx, db = self._make_view(tmp_path, [str(tmp_path / "a.jpg"), str(tmp_path / "b.jpg")])
+        selected = [str(tmp_path / "a.jpg"), str(tmp_path / "b.jpg")]
+        w, ctx, db = self._make_view(tmp_path, [])
         monkeypatch.setattr(w, "_get_active_uid", lambda: self.UID)
-        monkeypatch.setattr(w._monitor, "selected_jpg_paths", lambda: [])
+        monkeypatch.setattr(w._monitor, "selected_jpg_paths", lambda: selected)
+        monkeypatch.setattr(w, "_assign_selected_jpgs_to_uid", lambda uid, paths: None)
         calls = []
         monkeypatch.setattr(
             w,
@@ -3927,10 +4514,43 @@ class TestImplicitCompose:
         monkeypatch.setattr(
             w,
             "_on_organise_requested",
-            lambda uid, idx, **kw: calls.append(("organise", idx, kw.get("silent_batch"))),
+            lambda uid, idx, **kw: calls.append(
+                ("organise", idx, kw.get("silent_batch"), callable(kw.get("on_complete")))
+            ) or True,
         )
         w._on_compose_implicit(organise=True)
-        assert calls == [("compose", 0), ("organise", 0, True)]
+        assert calls == [("compose", 0), ("organise", 0, True, True)]
+
+    def test_compose_implicit_organise_reports_done_after_archive_callback(
+        self, tmp_path, monkeypatch
+    ):
+        selected = [str(tmp_path / "a.jpg"), str(tmp_path / "b.jpg")]
+        w, ctx, db = self._make_view(tmp_path, [])
+        monkeypatch.setattr(w, "_get_active_uid", lambda: self.UID)
+        monkeypatch.setattr(w._monitor, "selected_jpg_paths", lambda: selected)
+        monkeypatch.setattr(w, "_assign_selected_jpgs_to_uid", lambda uid, paths: None)
+        monkeypatch.setattr(
+            w,
+            "_compose_group_headless",
+            lambda uid, idx, done: done(True),
+        )
+        archive_done = {}
+        monkeypatch.setattr(
+            w,
+            "_on_organise_requested",
+            lambda uid, idx, **kw: archive_done.setdefault(
+                "callback",
+                kw.get("on_complete"),
+            ) or True,
+        )
+        messages = []
+        monkeypatch.setattr(w, "_status_message", lambda msg, *a, **k: messages.append(msg))
+
+        w._on_compose_implicit(organise=True)
+
+        assert "合成+整理完成" not in messages
+        archive_done["callback"](True)
+        assert messages[-1] == "合成+整理完成"
 
     def test_selected_organise_without_active_keeps_tiff_name(self, tmp_path, monkeypatch):
         from app.services.grouping_service import ADHOC_GROUPING_UID, load_grouping
@@ -3998,6 +4618,26 @@ class TestImplicitCompose:
         w._on_auto_compress_toggled(True)
 
         assert str(tiff.resolve()) in w._auto_known_tiffs
+        assert ctx.settings.auto_organize_after_compose is True
+
+    def test_auto_archive_toolbar_state_is_seeded_from_settings(self, tmp_path):
+        w, ctx, db = self._make_view(tmp_path, [])
+        ctx.settings.auto_organize_after_compose = True
+
+        from app.views.workbench_view import WorkbenchView
+
+        seeded = WorkbenchView(ctx)
+
+        assert seeded._monitor.auto_compress_enabled() is True
+
+    def test_auto_archive_toolbar_state_resyncs_from_settings(self, tmp_path):
+        w, ctx, db = self._make_view(tmp_path, [])
+        assert w._monitor.auto_compress_enabled() is False
+
+        ctx.settings.auto_organize_after_compose = True
+        w._sync_auto_archive_toggle()
+
+        assert w._monitor.auto_compress_enabled() is True
 
     def test_auto_compress_new_tiff_uses_active_uid_jpgs(self, tmp_path, monkeypatch):
         from app.services.monitor_service import FileEntry, ScanResult
@@ -4023,7 +4663,103 @@ class TestImplicitCompose:
 
         w._maybe_auto_process_new_tiff(result)
 
-        assert calls == [(jpgs, str(new_tiff.resolve()), {"silent": True})]
+        assert len(calls) == 1
+        assert calls[0][0] == jpgs
+        assert calls[0][1] == str(new_tiff.resolve())
+        assert calls[0][2]["silent"] is True
+        assert callable(calls[0][2]["on_complete"])
+        assert str(new_tiff.resolve()) not in w._auto_known_tiffs
+
+    def test_auto_compress_new_tiff_uses_settings_auto_archive(self, tmp_path, monkeypatch):
+        from app.services.monitor_service import FileEntry, ScanResult
+
+        jpgs = [str(tmp_path / "a.jpg"), str(tmp_path / "b.jpg")]
+        w, ctx, db = self._make_view(tmp_path, jpgs)
+        ctx.settings.auto_organize_after_compose = True
+        new_tiff = tmp_path / "settings-auto.tif"
+        new_tiff.write_bytes(b"II*\x00")
+        monkeypatch.setattr(w._monitor, "auto_compress_enabled", lambda: False)
+        monkeypatch.setattr(w, "_get_active_uid", lambda: self.UID)
+        calls = []
+        monkeypatch.setattr(
+            w,
+            "_organise_jpgs_with_tiff",
+            lambda paths, tiff, **kw: calls.append((paths, tiff, kw)) or True,
+        )
+
+        w._maybe_auto_process_new_tiff(ScanResult(
+            project_dir=str(tmp_path),
+            tiff_files=[FileEntry(
+                name="settings-auto.tif", path=str(new_tiff), kind="tiff", size=4,
+                mtime="2026-06-13T00:00:00+00:00", has_zip=False,
+            )],
+        ))
+
+        assert len(calls) == 1
+        assert calls[0][0] == jpgs
+
+    def test_auto_compress_without_active_uses_selected_jpgs_for_external_tif(
+        self, tmp_path, monkeypatch
+    ):
+        from app.services.monitor_service import FileEntry, ScanResult
+
+        selected = [str(tmp_path / "selected-a.jpg"), str(tmp_path / "selected-b.jpg")]
+        w, ctx, db = self._make_view(tmp_path, [])
+        new_tiff = tmp_path / "external.tif"
+        new_tiff.write_bytes(b"II*\x00")
+        monkeypatch.setattr(w._monitor, "auto_compress_enabled", lambda: True)
+        monkeypatch.setattr(w, "_get_active_uid", lambda: None)
+        monkeypatch.setattr(w._monitor, "selected_jpg_paths", lambda: selected)
+        calls = []
+        monkeypatch.setattr(
+            w,
+            "_organise_jpgs_with_tiff",
+            lambda paths, tiff, **kw: calls.append((paths, tiff, kw)) or True,
+        )
+
+        w._maybe_auto_process_new_tiff(ScanResult(
+            project_dir=str(tmp_path),
+            tiff_files=[FileEntry(
+                name="external.tif", path=str(new_tiff), kind="tiff", size=4,
+                mtime="2026-06-13T00:00:00+00:00", has_zip=False,
+            )],
+        ))
+
+        assert len(calls) == 1
+        assert calls[0][0] == selected
+        assert calls[0][1] == str(new_tiff.resolve())
+        assert calls[0][2]["silent"] is True
+        assert callable(calls[0][2]["on_complete"])
+
+    def test_auto_compress_marks_tiff_seen_after_archive_callback(self, tmp_path, monkeypatch):
+        from app.services.monitor_service import FileEntry, ScanResult
+        jpgs = [str(tmp_path / "a.jpg"), str(tmp_path / "b.jpg")]
+        w, ctx, db = self._make_view(tmp_path, jpgs)
+        new_tiff = tmp_path / "new.tif"
+        new_tiff.write_bytes(b"II*\x00")
+        monkeypatch.setattr(w._monitor, "auto_compress_enabled", lambda: True)
+        monkeypatch.setattr(w, "_get_active_uid", lambda: self.UID)
+        done = {}
+        monkeypatch.setattr(
+            w,
+            "_organise_jpgs_with_tiff",
+            lambda paths, tiff, **kw: done.setdefault("callback", kw["on_complete"]) or True,
+        )
+        result = ScanResult(
+            project_dir=str(tmp_path),
+            tiff_files=[FileEntry(
+                name="new.tif", path=str(new_tiff), kind="tiff", size=4,
+                mtime="2026-06-13T00:00:00+00:00", has_zip=False,
+            )],
+        )
+
+        w._maybe_auto_process_new_tiff(result)
+
+        assert str(new_tiff.resolve()) not in w._auto_known_tiffs
+        assert w._auto_tiff_busy is True
+        done["callback"](True)
+        assert str(new_tiff.resolve()) in w._auto_known_tiffs
+        assert w._auto_tiff_busy is False
 
     def test_auto_compress_without_active_does_not_mark_tiff_seen(self, tmp_path, monkeypatch):
         from app.services.monitor_service import FileEntry, ScanResult
@@ -4073,7 +4809,7 @@ class TestImplicitCompose:
         w._maybe_auto_process_new_tiff(result)
 
         assert calls == [str(tiffs[0].resolve())]
-        assert str(tiffs[0].resolve()) in w._auto_known_tiffs
+        assert str(tiffs[0].resolve()) not in w._auto_known_tiffs
         assert str(tiffs[1].resolve()) not in w._auto_known_tiffs
 
     def test_auto_compress_uses_only_unoccupied_attributed_jpgs(self, tmp_path, monkeypatch):
@@ -4302,12 +5038,11 @@ class TestUndoComposeDeletesTiff:
         assert len(g.groups) == 1                             # 组还在
 
 
-# ── 场景6/7：合成后自动整理归档（开关，默认关；合成仍手动） ────────────────────
+# ── 场景6/7：自动归档（默认关；开时可取激活编号未占用 JPG） ────────────────────
 
 
 class TestAutoOrganizeAfterCompose:
-    """合成永远手动；开关「合成后自动整理归档」打开时，合成成功后自动把源 JPG
-    打包压缩+命名+移 results（= 自动跑整理）。默认关。"""
+    """自动归档打开时，合成成功后自动把源 JPG 打包 ZIP+命名+移 results。"""
 
     def _make_view(self, tmp_path):
         from app.views.workbench_view import WorkbenchView
@@ -4330,11 +5065,22 @@ class TestAutoOrganizeAfterCompose:
     def test_no_auto_organize_when_toggle_off(self, tmp_path, monkeypatch):
         w, ctx, db = self._make_view(tmp_path)
         ctx.settings.auto_organize_after_compose = False
+        monkeypatch.setattr(w._monitor, "auto_compress_enabled", lambda: False)
         called = []
         monkeypatch.setattr(w, "_on_organise_requested",
                             lambda u, g: called.append((u, g)))
         w._maybe_auto_organize("U1", 0)
         assert called == []
+
+    def test_auto_organize_runs_when_toolbar_auto_archive_on(self, tmp_path, monkeypatch):
+        w, ctx, db = self._make_view(tmp_path)
+        ctx.settings.auto_organize_after_compose = False
+        monkeypatch.setattr(w._monitor, "auto_compress_enabled", lambda: True)
+        called = []
+        monkeypatch.setattr(w, "_on_organise_requested",
+                            lambda u, g: called.append((u, g)))
+        w._maybe_auto_organize("U1", 0)
+        assert called == [("U1", 0)]
 
 
 # ── 场景3：incoming/results 子目录可配置 + 新拍JPG 遗留兼容 ────────────────────
@@ -4711,6 +5457,43 @@ class TestBatchComposeOrganise:
         assert not old_tif.with_suffix(".zip").exists()
         db.close()
 
+    def test_organise_tif_only_registers_to_uid_without_zip(
+        self, tmp_path, monkeypatch
+    ):
+        """只有 TIF、没有 JPG 时，也能把成果登记到当前编号。"""
+        from app.services.grouping_service import Group, save_grouping, load_grouping
+        from app.services import tiff_metadata_service
+
+        w, ctx, uid, db = self._build(tmp_path)
+        old_dir = tmp_path / "external-results"
+        old_dir.mkdir()
+        tif = old_dir / "GXFCG-BLW-BZC003-4-R-20260618.tif"
+        tif.write_bytes(b"II*\x00external")
+        save_grouping(db, uid, [
+            Group(
+                group_index=0,
+                jpg_paths=[],
+                composed_tiff_path=str(tif),
+                status="composed",
+            )
+        ])
+        w._grouping.load_grouping(uid, load_grouping(db, uid))
+        monkeypatch.setattr(
+            tiff_metadata_service,
+            "write_result_tiff_metadata",
+            lambda *a, **k: {},
+        )
+
+        assert w._on_organise_requested(uid, 0, silent_batch=True) is True
+
+        saved = load_grouping(db, uid).groups[0]
+        assert saved.status == "organized"
+        assert Path(saved.composed_tiff_path).parent == tmp_path / "results"
+        assert Path(saved.composed_tiff_path).is_file()
+        assert saved.archive_zip in (None, "")
+        assert not tif.exists()
+        db.close()
+
     def test_headless_compose_uses_suggested_name_and_saves(self, tmp_path, monkeypatch):
         """_compose_group_headless:无 output_name 覆盖 → 用 suggested_tiff_name,
         合成完成持久化 status='composed' + composed_tiff_path。无确认框。"""
@@ -4766,12 +5549,7 @@ class TestBatchComposeOrganise:
 
 
 class TestAdhocGrouping:
-    """分组工具无需编号 — 临时分组(ad-hoc),输出默认 组序.tif,一条龙合成+整理。
-
-    用户设计:拍大量 JPG → 开分组工具(连编号都没有也能用)→ 建组 →
-    [合成+整理] 一键 合成→压缩打包→移results。有激活编号 → 编号命名;
-    无编号 → 每组输出默认 1.tif/2.tif(可手填覆盖)。
-    """
+    """Ad-hoc grouping is the unassigned target when no specimen is active."""
 
     def _build_adhoc(self, tmp_path, n_groups=2):
         from app.views.workbench_view import WorkbenchView
@@ -4797,7 +5575,7 @@ class TestAdhocGrouping:
         self._jpgs = jpgs
         return WorkbenchView(ctx), ctx, db
 
-    def test_open_grouping_without_uid_binds_adhoc_and_shows_controls(self, tmp_path):
+    def test_open_grouping_without_uid_binds_unassigned_and_shows_controls(self, tmp_path):
         from app.views.workbench_view import WorkbenchView
         from app.services.grouping_service import ADHOC_GROUPING_UID
         db = _make_db(str(tmp_path / "project.db"))
@@ -4805,14 +5583,13 @@ class TestAdhocGrouping:
         w = WorkbenchView(ctx)
         w._current_uid = None
         w._on_open_grouping()
-        # 无编号 → 绑定临时编号,新组 + 合成工具条都显示(不再空对话框)
         assert w._grouping._uid == ADHOC_GROUPING_UID
         assert not w._grouping._add_btn.isHidden()
         assert not w._grouping._toolbar_widget.isHidden()
         db.close()
 
-    def test_open_grouping_without_project_binds_adhoc_in_memory(self, tmp_path):
-        """无项目(db=None):仍绑定临时分组,控件可用;分组/合成走内存+JPG同目录输出。"""
+    def test_open_grouping_without_project_binds_unassigned_in_memory(self, tmp_path):
+        """无项目/无激活编号时，仍可建立内存中的未归属分组。"""
         from app.views.workbench_view import WorkbenchView
         from app.services.grouping_service import ADHOC_GROUPING_UID
         ctx = _make_ctx(project_dir=None, db=None)
@@ -4867,6 +5644,29 @@ class TestAdhocGrouping:
             db, uid, Group(group_index=0), res, inc)
         assert n.startswith("FJ-XM-B2-DLC001") and n.endswith(".tif")
         assert isinstance(s, int) and s >= 1
+        db.close()
+
+    def test_resolve_output_name_real_uid_advances_after_existing_tif(self, tmp_path):
+        from app.services.grouping_service import Group
+
+        w, ctx, db = self._build_adhoc(tmp_path)
+        uid = "FJ-XM-B2-DLC001-T95E-20260601"
+        res = tmp_path / "results"
+        inc = tmp_path / "incoming-jpg"
+        res.mkdir(exist_ok=True)
+        inc.mkdir(exist_ok=True)
+        (res / "FJ-XM-B2-DLC001-1-T95E-20260601.tif").write_bytes(b"II*\x00")
+
+        n, s = w._resolve_compose_output_name(
+            db,
+            uid,
+            Group(group_index=0),
+            str(res),
+            str(inc),
+        )
+
+        assert n == "FJ-XM-B2-DLC001-2-T95E-20260601.tif"
+        assert s == 2
         db.close()
 
     def test_headless_compose_adhoc_names_group_seq(self, tmp_path, monkeypatch):

@@ -46,6 +46,17 @@ _INACTIVE_STYLE = (
 )
 
 
+class _ClickableLabel(QLabel):
+    clicked = pyqtSignal()
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+
 class SpecimenSidebar(QWidget):
     """Left-column specimen list with search and per-item activation badge.
 
@@ -85,6 +96,8 @@ class SpecimenSidebar(QWidget):
         self.ctx = ctx
         self._all_items: list[dict] = []  # [{uid, display, active}]
         self._filter_mode = "all"
+        self._sort_key = "uid"
+        self._sort_reverse = False
         # uid -> {code: QPushButton} for the 4 phase dots; uid -> current code.
         self._phase_dots: dict[str, dict[str, QPushButton]] = {}
         self._phase_state: dict[str, Optional[str]] = {}
@@ -129,6 +142,14 @@ class SpecimenSidebar(QWidget):
             )
         self._search.textChanged.connect(self._on_search)
         top_row.addWidget(self._search, stretch=1)
+
+        self._sort_btn = QPushButton("编号")
+        self._sort_btn.setObjectName("Ghost")
+        self._sort_btn.setFixedHeight(32)
+        self._sort_btn.setToolTip("排序：编号、采集日期、拍照日期、RNA、资料状态")
+        icons.set_button_icon(self._sort_btn, "mdi6.sort", color=icons.TONE_MUTED, size=14)
+        self._sort_btn.clicked.connect(self._show_sort_menu)
+        top_row.addWidget(self._sort_btn)
         root.addLayout(top_row)
 
         filter_row = QHBoxLayout()
@@ -287,7 +308,8 @@ class SpecimenSidebar(QWidget):
                        COALESCE(scientific_name_cn, '') AS name_cn,
                        COALESCE(storage, '') AS storage,
                        COALESCE(collection_date, '') AS collection_date,
-                       COALESCE(photo_date, '') AS photo_date
+                       COALESCE(photo_date, '') AS photo_date,
+                       rowid AS row_order
                 FROM   specimens
                 WHERE  owner_project_dir = ?
                 ORDER  BY uid
@@ -301,6 +323,9 @@ class SpecimenSidebar(QWidget):
                         "name": row[1],
                         "name_cn": row[2],
                         "storage": row[3],
+                        "collection_date": row[4],
+                        "photo_date": row[5],
+                        "row_order": row[6],
                         "is_rna": str(row[3] or "").upper().startswith("R"),
                         "needs_attention": (
                             not str(row[1] or row[2] or "").strip()
@@ -394,7 +419,7 @@ class SpecimenSidebar(QWidget):
         shown = 0
         svc = getattr(self.ctx, "collab_service", None)
 
-        for entry in self._all_items:
+        for entry in self._sorted_items(self._all_items):
             uid: str = entry["uid"]
             name: str = entry["name"]
             name_cn: str = entry["name_cn"]
@@ -411,6 +436,8 @@ class SpecimenSidebar(QWidget):
                 and query not in name.lower()
                 and query not in name_cn.lower()
                 and query not in storage.lower()
+                and query not in str(entry.get("collection_date") or "").lower()
+                and query not in str(entry.get("photo_date") or "").lower()
             ):
                 continue
 
@@ -437,6 +464,37 @@ class SpecimenSidebar(QWidget):
         if self._list.count() > 0 and self._list.currentItem() is None:
             self._list.setCurrentItem(self._list.item(0))
         self._sync_action_buttons()
+
+    def _sorted_items(self, items: list[dict]) -> list[dict]:
+        def date_key(value) -> str:
+            return str(value or "")
+
+        def progress_score(entry: dict) -> tuple[int, int, int, int]:
+            p = entry.get("progress") or {}
+            return (
+                int(p.get("organized") or 0),
+                int(p.get("composed") or 0),
+                int(p.get("grouped") or 0),
+                int(p.get("total") or 0),
+            )
+
+        def key(entry: dict):
+            uid = str(entry.get("uid") or "")
+            if self._sort_key == "collection_date":
+                return (date_key(entry.get("collection_date")), uid)
+            if self._sort_key == "photo_date":
+                return (date_key(entry.get("photo_date")), uid)
+            if self._sort_key == "rna":
+                return (1 if entry.get("is_rna") else 0, uid)
+            if self._sort_key == "attention":
+                return (1 if entry.get("needs_attention") else 0, uid)
+            if self._sort_key == "progress":
+                return (progress_score(entry), uid)
+            if self._sort_key == "created":
+                return (int(entry.get("row_order") or 0), uid)
+            return uid
+
+        return sorted(list(items or []), key=key, reverse=self._sort_reverse)
 
     def _resolve_action_uid(self) -> Optional[str]:
         """UID for activate/deactivate: current row, or the sole visible row."""
@@ -551,9 +609,11 @@ class SpecimenSidebar(QWidget):
         line.setSpacing(8)
 
         if is_rna:
-            rna_badge = QLabel(f"已取 RNA · {storage or 'RNAlater'}")
+            rna_badge = _ClickableLabel(f"已取 RNA · {storage or 'RNAlater'}")
             rna_badge.setObjectName("SpecimenRnaBadge")
-            rna_badge.setToolTip("该标本已取 RNA 组织，保存于 RNAlater；R 前缀保存方式")
+            rna_badge.setCursor(Qt.CursorShape.PointingHandCursor)
+            rna_badge.setToolTip("点击筛选所有已取 RNA 组织的编号")
+            rna_badge.clicked.connect(lambda: self._set_filter_mode("rna"))
             line.addWidget(rna_badge)
         # 保存方式段（如 T95E）已是 UID 的一部分，不再重复显示，避免冗余。
 
@@ -810,6 +870,33 @@ class SpecimenSidebar(QWidget):
 
     def _on_search(self, text: str) -> None:
         self._apply_filter(text)
+
+    def _show_sort_menu(self) -> None:
+        menu = QMenu(self)
+        options = [
+            ("uid", "编号 A-Z", False),
+            ("created", "建号顺序 新→旧", True),
+            ("collection_date", "采集日期 新→旧", True),
+            ("collection_date", "采集日期 旧→新", False),
+            ("photo_date", "拍照日期 新→旧", True),
+            ("photo_date", "拍照日期 旧→新", False),
+            ("rna", "RNA 优先", True),
+            ("attention", "资料待补优先", True),
+            ("progress", "整理进度优先", True),
+        ]
+        for key, label, reverse in options:
+            checked = self._sort_key == key and self._sort_reverse == reverse
+            act = menu.addAction(("✓ " if checked else "") + label)
+            act.triggered.connect(
+                lambda _=False, k=key, r=reverse, text=label: self._set_sort(k, r, text)
+            )
+        menu.exec(self._sort_btn.mapToGlobal(self._sort_btn.rect().bottomLeft()))
+
+    def _set_sort(self, key: str, reverse: bool, label: str = "") -> None:
+        self._sort_key = key
+        self._sort_reverse = bool(reverse)
+        self._sort_btn.setText(label.split()[0] if label else "排序")
+        self._apply_filter(self._search.text())
 
     def _set_filter_mode(self, mode: str) -> None:
         self._filter_mode = mode if mode in ("rna", "attention") else "all"

@@ -15,6 +15,7 @@ Covers:
 """
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -63,6 +64,34 @@ def _insert_grouping(conn, uid, group_index, status):
     conn.execute(
         "INSERT INTO grouping (uid, group_index, status) VALUES (?, ?, ?)",
         (uid, group_index, status),
+    )
+    conn.commit()
+
+
+def _insert_grouping_detail(
+    conn,
+    uid,
+    group_index,
+    *,
+    status="composed",
+    jpg_paths=None,
+    tiff_path="",
+    zip_path="",
+):
+    conn.execute(
+        """
+        INSERT INTO grouping
+        (uid, group_index, status, jpg_paths, composed_tiff_path, archive_zip)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            uid,
+            group_index,
+            status,
+            json.dumps(jpg_paths or [], ensure_ascii=False),
+            tiff_path,
+            zip_path,
+        ),
     )
     conn.commit()
 
@@ -240,6 +269,72 @@ def test_specimen_summary_skips_missing_db(tmp_path):
     ws = wb["标本汇总"]
     uids = [ws.cell(r, 2).value for r in range(2, ws.max_row + 1)]
     assert "UID-A1" in uids
+
+
+def test_collect_specimen_summary_rows_keeps_duplicate_uids_separate(tmp_path):
+    root = tmp_path / "survey"
+    root.mkdir()
+    dir_a, conn_a = _make_workspace(root, "断面A")
+    dir_b, conn_b = _make_workspace(root, "断面B")
+    _insert_specimen(conn_a, "UID-DUP", scientific_name="Aaa", family="Fam")
+    _insert_specimen(conn_b, "UID-DUP", scientific_name="Bbb", family="Fam")
+    _insert_grouping(conn_a, "UID-DUP", 0, "composed")
+    _insert_grouping(conn_b, "UID-DUP", 0, "pending")
+    conn_a.execute(
+        "INSERT OR REPLACE INTO project_settings (setting_key, value_json) VALUES (?, ?)",
+        ("project_meta", json.dumps({"name": "A项目", "project_code": "PA"}, ensure_ascii=False)),
+    )
+    conn_b.execute(
+        "INSERT OR REPLACE INTO project_settings (setting_key, value_json) VALUES (?, ?)",
+        ("project_meta", json.dumps({"name": "B项目", "project_code": "PB"}, ensure_ascii=False)),
+    )
+    conn_a.commit()
+    conn_b.commit()
+
+    payload = pss.collect_specimen_summary_rows([dir_a, dir_b], str(root), use_cache=False)
+
+    assert len(payload["specimens"]) == 2
+    key_a = pss.specimen_grouping_key(str(Path(dir_a).resolve()), "UID-DUP")
+    key_b = pss.specimen_grouping_key(str(Path(dir_b).resolve()), "UID-DUP")
+    assert payload["grouping"][key_a]["status"] == "已合成"
+    assert payload["grouping"][key_a]["projCode"] == "PA"
+    assert payload["grouping"][key_b]["status"] == "待合成"
+    assert payload["grouping"][key_b]["projCode"] == "PB"
+
+
+def test_collect_specimen_summary_rows_includes_result_file_counts(tmp_path):
+    root = tmp_path / "survey"
+    root.mkdir()
+    dir_a, conn_a = _make_workspace(root, "断面A")
+    _insert_specimen(conn_a, "UID-A1", storage="RD75E", scientific_name="Aaa", family="Fam")
+    _insert_grouping_detail(
+        conn_a,
+        "UID-A1",
+        0,
+        jpg_paths=["/p/a.jpg", "/p/b.jpg"],
+        tiff_path="/p/results/UID-A1-1.tif",
+        zip_path="/p/results/UID-A1-1.zip",
+    )
+    _insert_grouping_detail(
+        conn_a,
+        "UID-A1",
+        1,
+        status="pending",
+        jpg_paths=["/p/c.jpg"],
+    )
+
+    payload = pss.collect_specimen_summary_rows([dir_a], str(root), use_cache=False)
+    key = pss.specimen_grouping_key(str(Path(dir_a).resolve()), "UID-A1")
+    facts = payload["grouping"][key]
+
+    assert facts["count"] == 1
+    assert facts["group_count"] == 2
+    assert facts["status"] == "部分合成"
+    assert facts["jpg_count"] == 3
+    assert facts["tiff_count"] == 1
+    assert facts["zip_count"] == 1
+    assert facts["tiff_names"] == "UID-A1-1.tif"
+    assert payload["dashboard"]["totals"]["tiff_count"] == 1
 
 
 # ── collection summary ─────────────────────────────────────────────────────────

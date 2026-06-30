@@ -32,6 +32,22 @@ def test_inspect_tiff_names_marks_nonconforming_files_and_suggests_names(tmp_pat
     assert result.items[1].sequence == 2
 
 
+def test_inspect_tiff_paths_checks_single_file(tmp_path):
+    """The naming audit can inspect an explicit single TIFF path."""
+    from app.services.tiff_naming_service import inspect_tiff_paths
+
+    tiff = tmp_path / "GXFCG-BLW-JinSC003-2-R-20260618-广西防城港-白龙尾.tif"
+    tiff.write_bytes(b"tif")
+
+    result = inspect_tiff_paths([str(tiff)])
+
+    assert result.total == 1
+    assert result.valid_count == 1
+    assert result.items[0].name == tiff.name
+    assert result.items[0].uid == "GXFCG-BLW-JINSC003-R-20260618"
+    assert result.items[0].sequence == 2
+
+
 def test_tiff_naming_audit_dialog_marks_invalid_row(qtbot, tmp_path):
     """The independent audit dialog visibly marks nonconforming TIFFs."""
     from app.services.tiff_naming_service import inspect_tiff_names

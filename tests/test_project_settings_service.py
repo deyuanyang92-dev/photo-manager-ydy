@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
+import time
 import pytest
 
 from app.services.project_settings_service import (
@@ -47,6 +49,41 @@ def test_save_overwrites(db):
     save_setting(db, "personnel", {"collector": "A"})
     save_setting(db, "personnel", {"collector": "B"})
     assert load_setting(db, "personnel", {})["collector"] == "B"
+
+
+def test_save_setting_retries_transient_database_lock(tmp_path):
+    db_path = tmp_path / "project.db"
+    db = sqlite3.connect(str(db_path), timeout=0.05)
+    db.execute(
+        "CREATE TABLE project_settings ("
+        "setting_key TEXT PRIMARY KEY, "
+        "value_json TEXT NOT NULL DEFAULT '{}')"
+    )
+    db.commit()
+    locker = sqlite3.connect(str(db_path), timeout=0.05, check_same_thread=False)
+    locker.execute("BEGIN IMMEDIATE")
+
+    def release_lock() -> None:
+        time.sleep(0.2)
+        locker.commit()
+        locker.close()
+
+    thread = threading.Thread(target=release_lock)
+    thread.start()
+    try:
+        save_setting(db, "print_settings", {"quick_print_mode": "dialog"})
+    finally:
+        thread.join(timeout=2.0)
+        db.close()
+
+    verify = sqlite3.connect(str(db_path))
+    try:
+        row = verify.execute(
+            "SELECT value_json FROM project_settings WHERE setting_key='print_settings'"
+        ).fetchone()
+    finally:
+        verify.close()
+    assert row is not None
 
 
 def test_tiff_defaults_match_oracle():

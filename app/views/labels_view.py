@@ -44,6 +44,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from app.config import icons
 from app.config.theme import local_font_css
 from app.views.base_view import BaseView
 from app.services.label_service import (
@@ -440,8 +441,10 @@ class LabelsView(BaseView):
         root.setSpacing(12)
 
         top = QHBoxLayout()
-        self._btn_sample_bucket = QPushButton("样品瓶")
-        self._btn_tissue_bucket = QPushButton("RNAlater")
+        self._btn_sample_bucket = QPushButton("瓶签")
+        self._btn_tissue_bucket = QPushButton("RNA签")
+        self._btn_sample_bucket.setToolTip("预览和设置样品瓶 / 酒精保存标签")
+        self._btn_tissue_bucket.setToolTip("预览和设置 RNA / RNAlater 组织管标签")
         self._bucket_group = QButtonGroup(self)
         self._bucket_group.setExclusive(True)
         for bucket, btn in (("sample", self._btn_sample_bucket), ("tissue", self._btn_tissue_bucket)):
@@ -644,6 +647,57 @@ class LabelsView(BaseView):
         title.setObjectName("PaneTitle")
         root.addWidget(title)
 
+        print_box = QFrame()
+        print_box.setObjectName("PrintActions")
+        print_lay = QVBoxLayout(print_box)
+        print_lay.setContentsMargins(10, 10, 10, 10)
+        print_lay.setSpacing(8)
+
+        print_head = QHBoxLayout()
+        print_title = QLabel("打印")
+        print_title.setObjectName("ActionTitle")
+        print_head.addWidget(print_title)
+        print_head.addStretch()
+        self._print_total_badge = QLabel("")
+        self._print_total_badge.setObjectName("Muted")
+        print_head.addWidget(self._print_total_badge)
+        print_lay.addLayout(print_head)
+
+        self._job_summary = QLabel("")
+        self._job_summary.setObjectName("PrintSummary")
+        self._job_summary.setWordWrap(True)
+        print_lay.addWidget(self._job_summary)
+
+        action_row = QHBoxLayout()
+        action_row.setSpacing(6)
+        self._btn_print_sample = QPushButton("瓶签")
+        self._btn_print_sample.setObjectName("PrintBtn")
+        self._btn_print_sample.setToolTip("打印样品瓶 / 酒精保存标签")
+        icons.set_button_icon(
+            self._btn_print_sample, "mdi6.printer", color="#ffffff", size=15
+        )
+        self._btn_print_sample.clicked.connect(lambda: self._print("sample"))
+        self._btn_print_tissue = QPushButton("RNA签")
+        self._btn_print_tissue.setObjectName("PrintBtn")
+        self._btn_print_tissue.setProperty("tissue", "true")
+        self._btn_print_tissue.setToolTip("打印 RNA / RNAlater 组织管标签")
+        icons.set_button_icon(
+            self._btn_print_tissue, "mdi6.test-tube", color="#ffffff", size=15
+        )
+        self._btn_print_tissue.clicked.connect(lambda: self._print("tissue"))
+        self._btn_print_both = QPushButton("全部")
+        self._btn_print_both.setObjectName("PrintBtn")
+        self._btn_print_both.setProperty("all", "true")
+        self._btn_print_both.setToolTip("一次发送瓶签和 RNA 签")
+        icons.set_button_icon(
+            self._btn_print_both, "mdi6.printer-check", color="#ffffff", size=15
+        )
+        self._btn_print_both.clicked.connect(self._print_both)
+        for btn in (self._btn_print_sample, self._btn_print_tissue, self._btn_print_both):
+            action_row.addWidget(btn)
+        print_lay.addLayout(action_row)
+        root.addWidget(print_box)
+
         root.addWidget(QLabel("模板"))
         self._template_combo = QComboBox()
         self._template_combo.currentIndexChanged.connect(self._on_template_changed)
@@ -765,25 +819,6 @@ class LabelsView(BaseView):
         self._copies_spin.valueChanged.connect(self._on_copies_changed)
         root.addWidget(self._copies_spin)
 
-        self._job_summary = QLabel("")
-        self._job_summary.setObjectName("JobSummary")
-        self._job_summary.setWordWrap(True)
-        root.addWidget(self._job_summary)
-
-        self._btn_print_sample = QPushButton("打印样品瓶")
-        self._btn_print_sample.setObjectName("PrintBtn")
-        self._btn_print_sample.clicked.connect(lambda: self._print("sample"))
-        self._btn_print_tissue = QPushButton("打印 RNAlater")
-        self._btn_print_tissue.setObjectName("PrintBtn")
-        self._btn_print_tissue.clicked.connect(lambda: self._print("tissue"))
-        # 一键同时打印「样品瓶 + RNAlater 组织管」(单个打印对话框)。
-        # 仅当有 R 前缀标本(组织管桶非空)时才有意义。
-        self._btn_print_both = QPushButton("打印（样品瓶＋组织管）")
-        self._btn_print_both.setObjectName("PrintBtn")
-        self._btn_print_both.clicked.connect(self._print_both)
-        root.addWidget(self._btn_print_sample)
-        root.addWidget(self._btn_print_tissue)
-        root.addWidget(self._btn_print_both)
         root.addStretch()
         return panel
 
@@ -823,6 +858,7 @@ QLabel#JobSummary {{
     color: {p['text']}; background: {p['canvas']}; border: 1px solid {p['line']};
     border-radius: 6px; padding: 10px;
 }}
+QLabel#PrintSummary {{ color: {p['text']}; background: transparent; padding: 0; }}
 QLabel#LabelCanvas, QLabel#SheetCanvas {{
     background: {p['canvas']}; border: 1px solid {p['line']}; border-radius: 8px;
 }}
@@ -848,6 +884,13 @@ QPushButton#PrimaryBtn, QPushButton#PrintBtn {{
     background: {p['accent']}; color: white; border: none; border-radius: 6px;
     padding: 8px 12px; font-weight: 700;
 }}
+QFrame#PrintActions {{
+    background: {p['canvas']}; border: 1px solid {p['line']}; border-radius: 6px;
+}}
+QLabel#ActionTitle {{ color: {p['text']}; font-size: 13px; font-weight: 800; }}
+QPushButton#PrintBtn {{ min-height: 34px; }}
+QPushButton#PrintBtn[tissue="true"] {{ background: {p['accent2']}; }}
+QPushButton#PrintBtn[all="true"] {{ background: {p['text']}; color: {p['pane']}; }}
 QPushButton#PrintBtn:disabled {{
     background: {p['line']}; color: {p['muted']};
 }}
@@ -977,7 +1020,9 @@ QPushButton#PrintBtn:disabled {{
         tissue_job = self._build_job("tissue")
         sample_n = len(sample_job.get("items") or [])
         tissue_n = len(tissue_job.get("items") or [])
-        total = (sample_n + tissue_n) * self._step3.copies()
+        sample_labels = len(sample_job.get("labels") or [])
+        tissue_labels = len(tissue_job.get("labels") or [])
+        total = sample_labels + tissue_labels
         selected_n = len(self._step1.selected_indices())
         self._selected_badge.setText(f"{selected_n} / {len(self._specimens)}")
         # 末尾计入的空白手写标签（仅当前桶为 A4/A5 时）。
@@ -988,12 +1033,13 @@ QPushButton#PrintBtn:disabled {{
             else ""
         )
         self._preview_summary.setText(
-            f"样品瓶 {sample_n} · RNAlater {tissue_n} · 共 {total} 张{blank_note}")
+            f"瓶签 {sample_labels} · RNA签 {tissue_labels} · 共 {total} 张{blank_note}")
         self._job_summary.setText(
-            f"当前会打印：样品瓶 {sample_n} 张，RNAlater {tissue_n} 张。\n"
-            f"当前桶：{'样品瓶' if self._active_bucket == 'sample' else 'RNAlater'} · "
+            f"瓶签 {sample_labels} 张 · RNA签 {tissue_labels} 张\n"
+            f"当前：{'瓶签' if self._active_bucket == 'sample' else 'RNA签'} · "
             f"{self._step3.dims(self._active_bucket).get('w')}×{self._step3.dims(self._active_bucket).get('h')} mm"
         )
+        self._print_total_badge.setText(f"共 {total} 张")
         self._btn_tissue_bucket.setEnabled(tissue_n > 0)
         if self._active_bucket == "tissue" and tissue_n <= 0:
             # 自动回落到样品瓶桶时拼版参数也要跟着换（按 bucket 各存一份）
@@ -1003,6 +1049,9 @@ QPushButton#PrintBtn:disabled {{
             self._sync_imposition_panel()
         self._btn_sample_bucket.setChecked(self._active_bucket == "sample")
         self._btn_tissue_bucket.setChecked(self._active_bucket == "tissue")
+        self._btn_print_sample.setText(f"瓶签 {sample_labels}")
+        self._btn_print_tissue.setText(f"RNA签 {tissue_labels}")
+        self._btn_print_both.setText(f"全部 {total}")
         self._btn_print_sample.setEnabled(sample_n > 0)
         self._btn_print_tissue.setEnabled(tissue_n > 0)
         # 一键打两张只在两桶都有内容时才有意义(否则等同于单独打样品瓶)。
@@ -1485,7 +1534,7 @@ QPushButton#PrintBtn:disabled {{
         self._step4.set_counts(sample_n, tissue_n, self._step3.copies())
         warnings = [
             f"{name}: {w.get('message', '')}"
-            for name, job in (("样品瓶", sample_job), ("RNAlater 组织管", tissue_job))
+            for name, job in (("瓶签", sample_job), ("RNA签", tissue_job))
             for w in (job.get("warnings") or [])
             if w.get("code") != "empty"
         ]
@@ -1577,13 +1626,13 @@ QPushButton#PrintBtn:disabled {{
             QMessageBox.information(
                 self, "打印",
                 "本桶没有可打印标签。\n"
-                + ("（RNAlater 组织管标签仅对 R 前缀标本生成）" if bucket == "tissue" else "")
+                + ("（RNA签仅对 R 前缀标本生成）" if bucket == "tissue" else "")
             )
             return
         self._run_print_dialog([job])
 
     def _print_both(self) -> None:
-        """一键同时打印「样品瓶 + RNAlater 组织管」于单个打印对话框。"""
+        """一键同时打印瓶签 + RNA签，于单个打印对话框。"""
         jobs = [j for j in (self._build_job("sample"), self._build_job("tissue"))
                 if (j.get("items") or [])]
         if not jobs:

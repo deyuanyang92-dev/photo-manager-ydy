@@ -97,6 +97,18 @@ class TestGetExistingDirectory:
             result = get_existing_directory(None, "选择目录")
         assert result == expected
 
+    def test_returns_current_directory_when_no_selection(self, qapp, tmp_path):
+        from app.utils.ui import get_existing_directory
+        from PyQt6.QtWidgets import QDialog
+
+        with mock.patch("app.utils.ui.QFileDialog") as MockFD:
+            inst = MockFD.return_value
+            inst.exec.return_value = QDialog.DialogCode.Accepted
+            inst.selectedFiles.return_value = []
+            inst.directory.return_value.absolutePath.return_value = str(tmp_path)
+            result = get_existing_directory(None, "选择目录", str(tmp_path))
+        assert result == str(tmp_path)
+
     def test_passes_no_native_option(self, qapp):
         from app.utils.ui import get_existing_directory, _NO_NATIVE
 
@@ -131,6 +143,18 @@ class TestGetOpenFileName:
 
 
 class TestFileDialogSorting:
+    def test_priority_terms_match_uid_with_inserted_angle_sequence(self):
+        from app.utils.ui import _priority_terms_match
+
+        assert _priority_terms_match(
+            "GXFCG-BLW-BZC003-3-R-20260618-广西防城港-白龙尾.tif",
+            ["GXFCG-BLW-BZC003-R-20260618"],
+        )
+        assert not _priority_terms_match(
+            "GXFCG-BLW-SC002-RD79-20260618.tif",
+            ["GXFCG-BLW-BZC003-R-20260618"],
+        )
+
     def test_sort_dialog_by_mtime_desc_uses_detail_date_column(self, qapp, tmp_path):
         from app.utils.ui import _NO_NATIVE, _sort_dialog_by_mtime_desc
 
@@ -147,6 +171,119 @@ class TestFileDialogSorting:
         assert tree.header().sortIndicatorSection() == 3
         assert tree.header().sortIndicatorOrder() == Qt.SortOrder.DescendingOrder
         assert dlg.width() >= 820
+
+    def test_sort_dialog_can_pin_priority_files_first(self, qapp, tmp_path):
+        from app.utils.ui import _NO_NATIVE, _sort_dialog_by_mtime_desc
+
+        priority = tmp_path / "GXFCG-BLW-SC002-R-20260618.tif"
+        priority.write_bytes(b"t")
+        other = tmp_path / "unrelated.tif"
+        other.write_bytes(b"u")
+        dlg = QFileDialog(None, "选择照片", str(tmp_path))
+        dlg.setOption(_NO_NATIVE, True)
+
+        _sort_dialog_by_mtime_desc(dlg, priority_paths=[str(priority)])
+
+        tree = next(
+            view for view in dlg.findChildren(QTreeView)
+            if view.objectName() == "treeView"
+        )
+        assert dlg.proxyModel() is not None
+        assert dlg.viewMode() == QFileDialog.ViewMode.Detail
+        assert tree.header().sortIndicatorSection() == 0
+        assert tree.header().sortIndicatorOrder() == Qt.SortOrder.AscendingOrder
+
+    def test_sort_dialog_can_pin_priority_terms_first(self, qapp, tmp_path):
+        from app.utils.ui import _NO_NATIVE, _sort_dialog_by_mtime_desc
+
+        related = tmp_path / "GXFCG-BLW-BZC003-3-R-20260618.tif"
+        related.write_bytes(b"t")
+        other = tmp_path / "P6191317.JPG"
+        other.write_bytes(b"j")
+        dlg = QFileDialog(None, "选择照片", str(tmp_path))
+        dlg.setOption(_NO_NATIVE, True)
+
+        _sort_dialog_by_mtime_desc(
+            dlg,
+            priority_terms=["GXFCG-BLW-BZC003-R-20260618"],
+        )
+
+        tree = next(
+            view for view in dlg.findChildren(QTreeView)
+            if view.objectName() == "treeView"
+        )
+        assert dlg.proxyModel() is not None
+        assert dlg.viewMode() == QFileDialog.ViewMode.Detail
+        assert tree.header().sortIndicatorSection() == 0
+        assert tree.header().sortIndicatorOrder() == Qt.SortOrder.AscendingOrder
+
+    def test_priority_proxy_uses_matching_tif_as_time_anchor(self, qapp, tmp_path):
+        from app.utils.ui import _PriorityFileSortProxy
+
+        related_tif = tmp_path / "GXFCG-BLW-BZC003-3-R-20260618.tif"
+        near_jpg = tmp_path / "P6191292.JPG"
+        far_jpg = tmp_path / "P6191317.JPG"
+        related_tif.write_bytes(b"t")
+        near_jpg.write_bytes(b"n")
+        far_jpg.write_bytes(b"f")
+        anchor = 1_800_000_000
+        near = anchor + 8
+        far = anchor + 86_400
+        for path, ts in ((related_tif, anchor), (near_jpg, near), (far_jpg, far)):
+            path.touch()
+            import os
+            os.utime(path, (ts, ts))
+
+        dlg = QFileDialog(None, "选择照片", str(tmp_path))
+        proxy = _PriorityFileSortProxy(
+            [],
+            ["GXFCG-BLW-BZC003-R-20260618"],
+            parent=dlg,
+        )
+        dlg.setProxyModel(proxy)
+        model = proxy.sourceModel()
+        assert model is not None
+
+        related_idx = model.index(str(related_tif))
+        near_idx = model.index(str(near_jpg))
+        far_idx = model.index(str(far_jpg))
+
+        assert proxy._rank_tuple(related_idx) == (1, 0)
+        assert proxy._rank_tuple(near_idx) == (2, 8)
+        assert proxy._rank_tuple(far_idx) == (2, 86_400)
+
+    def test_priority_proxy_filters_to_matching_tif_and_nearby_jpgs(self, qapp, tmp_path):
+        from app.utils.ui import _PriorityFileSortProxy
+
+        related_tif = tmp_path / "GXFCG-BLW-BZC003-3-R-20260618.tif"
+        near_jpg = tmp_path / "P6191292.JPG"
+        far_jpg = tmp_path / "P6191317.JPG"
+        related_tif.write_bytes(b"t")
+        near_jpg.write_bytes(b"n")
+        far_jpg.write_bytes(b"f")
+        anchor = 1_800_000_000
+        for path, ts in (
+            (related_tif, anchor),
+            (near_jpg, anchor + 8),
+            (far_jpg, anchor + 86_400),
+        ):
+            import os
+            os.utime(path, (ts, ts))
+
+        dlg = QFileDialog(None, "选择照片", str(tmp_path))
+        proxy = _PriorityFileSortProxy(
+            [],
+            ["GXFCG-BLW-BZC003-R-20260618"],
+            ["GXFCG-BLW-BZC003-R-20260618"],
+            dlg,
+        )
+        dlg.setProxyModel(proxy)
+        model = proxy.sourceModel()
+        assert model is not None
+
+        assert proxy._is_related_file(str(related_tif), anchor) is True
+        assert proxy._is_related_file(str(near_jpg), anchor + 8) is True
+        assert proxy._is_related_file(str(far_jpg), anchor + 86_400) is False
 
 
 # ── get_save_file_name ────────────────────────────────────────────────────────
@@ -202,6 +339,35 @@ class TestMessageBoxHelpers:
         with mock.patch.object(QMessageBox, "exec", return_value=QMessageBox.StandardButton.Ok) as m:
             assert critical(None, "错误", "出现严重错误") == QMessageBox.StandardButton.Ok
         m.assert_called_once()
+
+    def test_detailed_message_box_can_copy_diagnostics(self, qapp):
+        from app.utils.ui import critical
+        from PyQt6.QtWidgets import QMessageBox
+
+        qapp.clipboard().clear()
+
+        def fake_exec(box):
+            for button in box.buttons():
+                if button.text() == "复制详情":
+                    button.click()
+                    break
+            return QMessageBox.StandardButton.Ok
+
+        with mock.patch.object(QMessageBox, "exec", fake_exec):
+            result = critical(
+                None,
+                "程序遇到错误",
+                "boom",
+                informative_text="操作没有按预期完成。",
+                detailed_text="Traceback line",
+            )
+
+        copied = qapp.clipboard().text()
+        assert result == QMessageBox.StandardButton.Ok
+        assert "Title: 程序遇到错误" in copied
+        assert "Message: boom" in copied
+        assert "Log:" in copied
+        assert "Traceback line" in copied
 
     def test_warn_with_widget_parent_uses_top_window(self, qapp):
         """warn() should pass the top-level window as parent, not the child."""

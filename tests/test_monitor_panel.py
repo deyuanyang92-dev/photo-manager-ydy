@@ -68,13 +68,19 @@ def panel(qtbot, ctx):
     return w
 
 
-def _jpg_entry(name="photo.jpg", path="/tmp/photo.jpg", is_grouped=False):
+def _jpg_entry(
+    name="photo.jpg",
+    path="/tmp/photo.jpg",
+    is_grouped=False,
+    uid=None,
+):
     e = FileEntry(
         name=name,
         path=path,
         kind="jpg",
         size=1000,
         mtime="2026-01-01T00:00:00+00:00",
+        attributed_specimen_id=uid,
     )
     e.is_grouped = is_grouped
     return e
@@ -139,7 +145,7 @@ class TestClipboardCopyAction:
         assert clipboard.text() == path
 
 
-def test_monitor_panel_extracts_external_jpg_drop_paths(tmp_path):
+def test_monitor_panel_extracts_external_media_drop_paths(tmp_path):
     jpg = tmp_path / "dragged.JPG"
     tif = tmp_path / "result.tif"
     txt = tmp_path / "notes.txt"
@@ -153,7 +159,40 @@ def test_monitor_panel_extracts_external_jpg_drop_paths(tmp_path):
         QUrl.fromLocalFile(str(txt)),
     ])
 
-    assert MonitorPanel._jpg_paths_from_mime(mime) == [str(jpg)]
+    assert MonitorPanel._jpg_paths_from_mime(mime) == [str(jpg), str(tif)]
+
+
+def test_file_card_uses_real_jpg_thumbnail(qtbot, tmp_path):
+    from PIL import Image
+
+    jpg = tmp_path / "thumb.JPG"
+    Image.new("RGB", (120, 80), "red").save(jpg)
+
+    card = _FileCard(_jpg_entry(name=jpg.name, path=str(jpg)))
+    qtbot.addWidget(card)
+
+    assert card._thumb_label.property("hasThumbnail") is True
+    pixmap = card._thumb_label.pixmap()
+    assert pixmap is not None
+    assert not pixmap.isNull()
+    assert pixmap.width() > 22
+    assert pixmap.height() > 22
+
+
+def test_file_card_selection_has_explicit_visual_marker(qtbot):
+    card = _FileCard(_jpg_entry(path="/tmp/selected.jpg"))
+    qtbot.addWidget(card)
+
+    assert card.objectName() == "Card"
+    assert card._select_mark.property("selected") is False
+    assert card._select_mark.toolTip() == "未选"
+
+    card.set_selected(True)
+
+    assert card.objectName() == "CardSelected"
+    assert card._select_mark.property("selected") is True
+    assert card._select_mark.text() == "✓"
+    assert card._select_mark.toolTip() == "已选"
 
 
 # ── 1-D: hide archived filter ─────────────────────────────────────────────────
@@ -227,7 +266,7 @@ class TestPendingViewAndSort:
         from PyQt6.QtWidgets import QPushButton
 
         texts = [b.text() for b in panel.findChildren(QPushButton)]
-        assert "平铺" in texts
+        assert "列表" in texts
         assert "排序" in texts
 
     def test_sort_by_name_reorders_pending_cards(self, panel):
@@ -580,6 +619,48 @@ class TestSelectionAccessors:
         assert panel.selected_all_paths() == []
         assert panel.selected_tiff_paths() == []
 
+    def test_selected_jpg_owner_uids_returns_unique_nonempty_uids(self, panel):
+        panel.load_scan(_scan([
+            _jpg_entry(path="/tmp/a.jpg", uid="UID-1"),
+            _jpg_entry(name="b.jpg", path="/tmp/b.jpg", uid="UID-1"),
+            _jpg_entry(name="c.jpg", path="/tmp/c.jpg"),
+        ]))
+        for card in panel._cards:
+            card.set_selected(True)
+
+        assert panel.selected_jpg_owner_uids() == ["UID-1"]
+
+
+class TestSelectionAddToGroup:
+    def test_selected_owned_jpgs_add_to_their_uid_without_activation(self, panel_with_db, db):
+        uid = "ZJ-TMW-B2-001"
+        panel_with_db.load_scan(_scan([
+            _jpg_entry(path="/tmp/a.jpg", uid=uid),
+            _jpg_entry(name="b.jpg", path="/tmp/b.jpg", uid=uid),
+        ]))
+        for card in panel_with_db._cards:
+            card.set_selected(True)
+
+        panel_with_db._on_selected_add_to_group()
+
+        grouping = grouping_service.load_grouping(db, uid)
+        assert grouping.groups[0].jpg_paths == ["/tmp/a.jpg", "/tmp/b.jpg"]
+
+    def test_selected_unowned_jpgs_add_to_adhoc_without_activation(self, panel_with_db, db):
+        from app.services.grouping_service import ADHOC_GROUPING_UID
+
+        panel_with_db.load_scan(_scan([
+            _jpg_entry(path="/tmp/a.jpg"),
+            _jpg_entry(name="b.jpg", path="/tmp/b.jpg"),
+        ]))
+        for card in panel_with_db._cards:
+            card.set_selected(True)
+
+        panel_with_db._on_selected_add_to_group()
+
+        grouping = grouping_service.load_grouping(db, ADHOC_GROUPING_UID)
+        assert grouping.groups[0].jpg_paths == ["/tmp/a.jpg", "/tmp/b.jpg"]
+
 
 # ── 已归档 TIFF 不进待处理 feed (oracle app.js:3574-3586) ─────────────────────
 
@@ -696,3 +777,40 @@ class TestAutoCompressToggle:
 
         assert states == [True]
         assert panel.auto_compress_enabled() is True
+
+    def test_set_auto_archive_enabled_can_seed_state_without_emit(self, panel):
+        states = []
+        panel.auto_compress_toggled.connect(states.append)
+
+        panel.set_auto_archive_enabled(True)
+
+        assert panel.auto_compress_enabled() is True
+        assert states == []
+
+
+class TestComposePreviewToggle:
+    def test_preview_checkbox_exists_and_defaults_on(self, panel):
+        from PyQt6.QtWidgets import QCheckBox
+
+        preview = next(c for c in panel.findChildren(QCheckBox) if c.text() == "预览")
+
+        assert preview.isChecked()
+        assert panel.compose_preview_enabled() is True
+
+    def test_preview_toggle_emits_state_and_tracks_enabled(self, panel, qtbot):
+        states = []
+        panel.compose_preview_toggled.connect(states.append)
+
+        qtbot.mouseClick(panel._compose_preview_cb, Qt.MouseButton.LeftButton)
+
+        assert states == [False]
+        assert panel.compose_preview_enabled() is False
+
+    def test_set_compose_preview_enabled_can_seed_state_without_emit(self, panel):
+        states = []
+        panel.compose_preview_toggled.connect(states.append)
+
+        panel.set_compose_preview_enabled(False)
+
+        assert panel.compose_preview_enabled() is False
+        assert states == []

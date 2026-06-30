@@ -4,17 +4,16 @@ Faithfully mirrors the web prototype's "目录监控 / 拍照工作台" centre c
 (app.js renderDirectoryMonitor):
 
   ┌ batch/status strip ─ UID + phase + compact JPG/TIFF stats ────────┐
-  ├ primary toolbar ─ 刷新 / 添加照片 / 合成 / 自动归档 / 更多(含分组工具) ─┤
+  ├ primary toolbar ─ 刷新 / 添加照片 / 合成 / 自动归档 / 更多 ─┤
   ├ stream header ─ 待处理照片 · 右键处理文件 ───────────────────────┤
   ├ contextual selection bar ─ appears only after selecting files ─────┤
-  ├ capture stream ─ compact file cards with row/right-click menus ────┤
+  ├ capture stream ─ Explorer-like file rows with row/right-click menus ┤
   └ unattributed warning ─ ⚠️ N 张 JPG 尚未归入任何编号 ─────────────┘
 
-Each capture card carries (web parity):
-  - a gradient "preview" tile (amber for JPG, green for TIFF) with a
-    corner status pill (未关联 / TIFF 成片 / 已归档)
-  - a mono filename + time caption
-  - a colour-coded attribution label pill (attributed / unattributed)
+Each capture row carries:
+  - a small file-type icon
+  - a mono filename
+  - a subdued status/attribution label
 
 Data source: ``monitor_service.scan_project()``.  Service wiring,
 ``load_scan``/``clear``, ``_stat_label`` and the three signals are kept
@@ -29,11 +28,12 @@ Badge palette (mirrors web styles.css):
 """
 from __future__ import annotations
 
+from collections import OrderedDict
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Optional
 
 from PyQt6.QtCore import Qt, QEvent, QMimeData, QUrl, pyqtSignal
-from PyQt6.QtGui import QDrag
+from PyQt6.QtGui import QDrag, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -53,28 +53,15 @@ from PyQt6.QtWidgets import (
 
 from app.config import icons
 from app.services import grouping_service, activation_service
-from app.services.photo_import_service import is_jpg_path
+from app.services.photo_import_service import is_media_path
+from app.utils.image_thumbnail import decode_image_thumbnail
 
 if TYPE_CHECKING:
     from app.app_context import AppContext
     from app.services.monitor_service import ScanResult
 
 
-# ── Gradient preview tiles (QSS can't do radial gradients cleanly) ────────────
-_JPG_PREVIEW = (
-    "border:none; border-top-left-radius:12px; border-bottom-left-radius:12px;"
-    "background: qradialgradient(cx:0.46, cy:0.42, radius:0.62,"
-    " fx:0.46, fy:0.42, stop:0 rgba(232,170,96,0.45),"
-    " stop:0.4 rgba(220,145,76,0.10), stop:1 #0a1d23);"
-)
-_TIFF_PREVIEW = (
-    "border:none; border-top-left-radius:12px; border-bottom-left-radius:12px;"
-    "background: qradialgradient(cx:0.46, cy:0.42, radius:0.62,"
-    " fx:0.46, fy:0.42, stop:0 rgba(66,212,160,0.48),"
-    " stop:0.4 rgba(54,201,143,0.10), stop:1 #091b20);"
-)
-
-# Corner status pill: low-saturation chip, mapped to a theme object name.
+# File status label: low-saturation chip, mapped to a theme object name.
 _CORNER = {
     "raw":      ("未关联",   "ChipRaw"),
     "tiff":     ("TIFF 成片", "ChipTiff"),
@@ -87,13 +74,42 @@ _ATTR = {
     "unattributed": "ChipUnattributed",
     "readonly":     "ChipArchived",
 }
+_FILE_THUMB_SIZE = 40
+_FILE_THUMB_DECODE_SIZE = 128
+_FILE_THUMB_CACHE_LIMIT = 512
+_FILE_THUMB_CACHE: "OrderedDict[tuple[str, int, int], Optional[QPixmap]]" = OrderedDict()
+
+
+def _file_thumb_cache_key(path: str) -> tuple[str, int, int] | None:
+    try:
+        p = Path(path)
+        st = p.stat()
+        return (str(p.resolve()), int(st.st_mtime_ns), int(st.st_size))
+    except Exception:
+        return None
+
+
+def _file_thumb_pixmap(path: str) -> Optional[QPixmap]:
+    key = _file_thumb_cache_key(path)
+    if key is not None and key in _FILE_THUMB_CACHE:
+        _FILE_THUMB_CACHE.move_to_end(key)
+        return _FILE_THUMB_CACHE[key]
+
+    pm = decode_image_thumbnail(path, _FILE_THUMB_DECODE_SIZE)
+    if key is not None:
+        _FILE_THUMB_CACHE[key] = pm
+        _FILE_THUMB_CACHE.move_to_end(key)
+        while len(_FILE_THUMB_CACHE) > _FILE_THUMB_CACHE_LIMIT:
+            _FILE_THUMB_CACHE.popitem(last=False)
+    return pm
 
 
 class _FileCard(QFrame):
-    """A capture-stream card: gradient preview + caption + attribution pill.
+    """A capture-stream row: file icon + caption + attribution pill.
 
     Cards support selection (toggle via _set_selected) for multi-select
-    delete.  Selected cards get a highlight border via object name "CardSelected".
+    actions. Selected cards use object name "CardSelected" plus a fixed
+    left-side selection mark so the state is visible in dense lists.
     """
 
     activate_requested = pyqtSignal(str)      # path
@@ -122,11 +138,12 @@ class _FileCard(QFrame):
         self._setup_ui()
 
     def _setup_ui(self) -> None:
-        self.setFixedHeight(60)
+        self.setFixedHeight(52)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(0)
+        lay.setContentsMargins(8, 5, 8, 5)
+        lay.setSpacing(7)
 
         kind = getattr(self._entry, "kind", "jpg")
         uid = getattr(self._entry, "attributed_specimen_id", None)
@@ -142,33 +159,27 @@ class _FileCard(QFrame):
         else:
             corner_state = "raw"
 
-        # ── Preview tile with corner chip ──
-        preview = QWidget()
-        preview.setFixedWidth(56)
-        preview.setStyleSheet(_TIFF_PREVIEW if kind == "tiff" else _JPG_PREVIEW)
-        pv_lay = QVBoxLayout(preview)
-        pv_lay.setContentsMargins(6, 6, 6, 6)
-        pv_lay.setSpacing(0)
-        c_text, c_obj = _CORNER.get(corner_state, _CORNER["raw"])
-        corner = QLabel(c_text)
-        corner.setObjectName(c_obj)
-        corner.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        pv_lay.addWidget(corner, alignment=Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
-        pv_lay.addStretch()
-        # central format glyph, faint, for a "thumbnail" read
-        glyph = QLabel()
-        glyph_name = "mdi6.image-outline" if kind == "jpg" else "mdi6.file-image-outline"
-        glyph.setPixmap(icons.icon(glyph_name, color="#1f4148").pixmap(20, 20))
-        glyph.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        pv_lay.addWidget(glyph, alignment=Qt.AlignmentFlag.AlignHCenter)
-        pv_lay.addStretch()
-        lay.addWidget(preview)
+        self._select_mark = QLabel("✓")
+        self._select_mark.setObjectName("FileSelectMark")
+        self._select_mark.setProperty("selected", False)
+        self._select_mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._select_mark.setFixedSize(16, 38)
+        self._select_mark.setToolTip("未选")
+        lay.addWidget(self._select_mark)
+
+        self._thumb_label = QLabel()
+        self._thumb_label.setObjectName("FileThumb")
+        self._thumb_label.setFixedSize(_FILE_THUMB_SIZE, _FILE_THUMB_SIZE)
+        self._thumb_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._thumb_label.setToolTip(getattr(self._entry, "path", ""))
+        self._apply_thumbnail(kind)
+        lay.addWidget(self._thumb_label)
 
         # ── Caption + attribution column ──
         body = QWidget()
         body_lay = QVBoxLayout(body)
-        body_lay.setContentsMargins(12, 8, 8, 8)
-        body_lay.setSpacing(5)
+        body_lay.setContentsMargins(0, 0, 0, 0)
+        body_lay.setSpacing(2)
 
         name = getattr(self._entry, "name", None) or Path(getattr(self._entry, "path", "")).name
         name_lbl = QLabel(name)
@@ -176,7 +187,7 @@ class _FileCard(QFrame):
         name_lbl.setToolTip(getattr(self._entry, "path", name))
         body_lay.addWidget(name_lbl)
 
-        # attribution chip row
+        # Attribution/status row.
         attr_row = QHBoxLayout()
         attr_row.setContentsMargins(0, 0, 0, 0)
         attr_row.setSpacing(6)
@@ -193,6 +204,11 @@ class _FileCard(QFrame):
         attr_lbl.setToolTip(uid or "")
         attr_lbl.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         attr_row.addWidget(attr_lbl)
+        c_text, c_obj = _CORNER.get(corner_state, _CORNER["raw"])
+        state_lbl = QLabel(c_text)
+        state_lbl.setObjectName(c_obj)
+        state_lbl.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        attr_row.addWidget(state_lbl)
         attr_row.addStretch()
         body_lay.addLayout(attr_row)
         lay.addWidget(body, stretch=1)
@@ -210,8 +226,25 @@ class _FileCard(QFrame):
         )
         lay.addWidget(menu_btn)
 
-        from app.config.effects import apply_card_shadow
-        apply_card_shadow(self, blur=16, y=3, alpha=55)
+    def _apply_thumbnail(self, kind: str) -> None:
+        path = getattr(self._entry, "path", "")
+        pm = _file_thumb_pixmap(path) if kind in {"jpg", "tiff"} else None
+        if pm is not None and not pm.isNull():
+            self._thumb_label.setProperty("hasThumbnail", True)
+            self._thumb_label.setPixmap(pm.scaled(
+                _FILE_THUMB_SIZE,
+                _FILE_THUMB_SIZE,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            ))
+        else:
+            self._thumb_label.setProperty("hasThumbnail", False)
+            glyph_name = "mdi6.image-outline" if kind == "jpg" else "mdi6.file-image-outline"
+            self._thumb_label.setPixmap(
+                icons.icon(glyph_name, color=icons.TONE_MUTED).pixmap(22, 22)
+            )
+        self._thumb_label.style().unpolish(self._thumb_label)
+        self._thumb_label.style().polish(self._thumb_label)
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
@@ -257,6 +290,10 @@ class _FileCard(QFrame):
 
     def _update_selection_style(self) -> None:
         self.setObjectName("CardSelected" if self._selected else "Card")
+        self._select_mark.setProperty("selected", self._selected)
+        self._select_mark.setToolTip("已选" if self._selected else "未选")
+        self._select_mark.style().unpolish(self._select_mark)
+        self._select_mark.style().polish(self._select_mark)
         self.style().unpolish(self)
         self.style().polish(self)
 
@@ -355,10 +392,11 @@ class MonitorPanel(QWidget):
     refresh_requested = pyqtSignal()
     add_jpg_requested = pyqtSignal()   # emitted when user clicks "添加照片"
     grouping_requested = pyqtSignal()  # emitted when user clicks "分组工具" (opens popup)
-    compose_implicit_requested = pyqtSignal()  # 主界面[合成]：隐式合成未占用JPG
+    compose_implicit_requested = pyqtSignal()  # 主界面[合成]
     organise_selected_requested = pyqtSignal()  # 主界面[整理]：选中 JPG+TIFF 直接归档
     compose_implicit_organise_requested = pyqtSignal()  # 主界面[合成+整理]
-    auto_compress_toggled = pyqtSignal(bool)  # 新 TIFF 自动归档开关
+    auto_compress_toggled = pyqtSignal(bool)  # 自动归档开关
+    compose_preview_toggled = pyqtSignal(bool)  # 主界面“预览”开关
     settings_requested = pyqtSignal()  # emitted from the compact "更多" menu
     phase_clicked = pyqtSignal(str)    # status code: shooting/shot_done/organizing/done
     external_jpgs_dropped = pyqtSignal(list)  # OS drop → list[str] JPG paths
@@ -376,7 +414,7 @@ class MonitorPanel(QWidget):
         self._card_by_key: dict[str, _FileCard] = {}
         self._card_sig_by_key: dict[str, tuple] = {}
         self._hide_archived: bool = False
-        self._view_mode: str = "tiles"
+        self._view_mode: str = "list"
         self._sort_key: str = "default"
         self._sort_reverse: bool = False
         self._drop_targets: list[QWidget] = []
@@ -473,15 +511,24 @@ class MonitorPanel(QWidget):
         add_btn.setToolTip("把已有照片添加进来（导入 incoming-jpg/）")
         add_btn.clicked.connect(self.add_jpg_requested.emit)
         controls.addWidget(add_btn)
-        # 主流程一键合成（隐式消耗）：合成激活编号下未占用的新 JPG → 自动命名 编号-序号。
+        # 主流程一键合成：手选优先；自动归档开时可取激活编号未占用 JPG。
         self._compose_btn = QPushButton("合成")
         self._compose_btn.setObjectName("Primary")
         self._compose_btn.setFixedHeight(28)
         icons.set_button_icon(self._compose_btn, "mdi6.layers-triple-outline",
                               color=icons.TONE_ON_ACCENT, size=14)
-        self._compose_btn.setToolTip("合成当前激活编号下未占用的新 JPG（自动命名 编号-序号）")
+        self._compose_btn.setToolTip("合成选中的 JPG；自动归档开时可取激活编号未占用 JPG")
         self._compose_btn.clicked.connect(self.compose_implicit_requested.emit)
         controls.addWidget(self._compose_btn)
+
+        self._compose_preview_cb = QCheckBox("预览")
+        self._compose_preview_cb.setObjectName("InlineCheck")
+        self._compose_preview_cb.setChecked(True)
+        self._compose_preview_cb.setToolTip(
+            "勾选：合成前确认 JPG，合成后进入 TIFF 预览工作台；取消：直接合成"
+        )
+        self._compose_preview_cb.toggled.connect(self.compose_preview_toggled.emit)
+        controls.addWidget(self._compose_preview_cb)
 
         self._organise_btn = QPushButton("整理")
         self._organise_btn.setObjectName("Outline")
@@ -497,7 +544,7 @@ class MonitorPanel(QWidget):
         self._compose_org_btn.setFixedHeight(28)
         icons.set_button_icon(self._compose_org_btn, "mdi6.archive-check-outline",
                               color=icons.TONE_MUTED, size=14)
-        self._compose_org_btn.setToolTip("合成当前批次后立即归档并移入 results")
+        self._compose_org_btn.setToolTip("合成选中 JPG 后立即整理；自动归档开时可取激活编号未占用 JPG")
         self._compose_org_btn.clicked.connect(
             self.compose_implicit_organise_requested.emit
         )
@@ -507,7 +554,9 @@ class MonitorPanel(QWidget):
         self._auto_toggle.setObjectName("Ghost")
         self._auto_toggle.setFixedHeight(28)
         self._auto_toggle.setCheckable(True)
-        self._auto_toggle.setToolTip("新 TIFF 写入后自动归档")
+        self._auto_toggle.setToolTip(
+            "激活编号时可不手选 JPG 直接合成；合成后自动整理；外部 TIF 出现时自动整理"
+        )
         icons.set_button_icon(self._auto_toggle, "mdi6.checkbox-blank-outline",
                               color=icons.TONE_MUTED, size=15)
         self._auto_toggle.toggled.connect(self._on_auto_toggled)
@@ -546,11 +595,11 @@ class MonitorPanel(QWidget):
         sh_hint.setObjectName("MutedSmall")
         sh.addWidget(sh_hint)
         sh.addStretch()
-        self._view_btn = QPushButton("平铺")
+        self._view_btn = QPushButton("列表")
         self._view_btn.setObjectName("Ghost")
         self._view_btn.setFixedHeight(26)
         self._view_btn.setToolTip("切换待处理照片的查看方式")
-        icons.set_button_icon(self._view_btn, "mdi6.view-grid-outline",
+        icons.set_button_icon(self._view_btn, "mdi6.view-list-outline",
                               color=icons.TONE_MUTED, size=14)
         self._view_btn.clicked.connect(
             lambda: self._show_view_menu(self._view_btn.mapToGlobal(self._view_btn.rect().bottomLeft()))
@@ -718,7 +767,7 @@ class MonitorPanel(QWidget):
             if not raw:
                 continue
             path = Path(raw)
-            if path.is_file() and is_jpg_path(path):
+            if path.is_file() and is_media_path(path):
                 paths.append(str(path))
         return paths
 
@@ -772,10 +821,10 @@ class MonitorPanel(QWidget):
     def load_scan(self, scan_result: "ScanResult") -> None:
         """Populate the grid from a completed scan result.
 
-        The workbench polls this every 2 s.  Rebuilding the whole card grid
-        each tick (tearing down + recreating every ``_FileCard``) is the main
-        UI-jank source, so skip the rebuild when nothing the grid renders has
-        changed since the last scan.
+        The workbench refreshes this from filesystem events plus a low-frequency
+        fallback scan. Rebuilding the whole card grid each scan (tearing down +
+        recreating every ``_FileCard``) is a UI-jank source, so skip the rebuild
+        when nothing the grid renders has changed since the last scan.
         """
         sig = self._scan_signature(scan_result)
         self._scan_result = scan_result
@@ -878,6 +927,8 @@ class MonitorPanel(QWidget):
         uid = getattr(entry, "attributed_specimen_id", None)
         return (
             getattr(entry, "kind", "jpg"),
+            getattr(entry, "mtime", ""),
+            getattr(entry, "size", 0),
             uid,
             bool(uid) and uid == self._active_uid,
             getattr(entry, "composed_tiff", None),
@@ -1122,6 +1173,20 @@ class MonitorPanel(QWidget):
             if getattr(c._entry, "kind", "") == "jpg" and getattr(c._entry, "path", "")
         ]
 
+    def selected_jpg_owner_uids(self) -> list[str]:
+        """Return unique non-empty owner UIDs from selected JPG cards."""
+        owners: list[str] = []
+        seen: set[str] = set()
+        for card in self._selected_cards():
+            entry = card._entry
+            if getattr(entry, "kind", "") != "jpg":
+                continue
+            uid = str(getattr(entry, "attributed_specimen_id", "") or "").strip()
+            if uid and uid not in seen:
+                seen.add(uid)
+                owners.append(uid)
+        return owners
+
     def selected_tiff_paths(self) -> list[str]:
         """Return absolute paths of all currently selected TIFF cards."""
         return [
@@ -1218,12 +1283,17 @@ class MonitorPanel(QWidget):
         db = self.ctx.get_db()
         if db is None:
             return
-        active_uid = activation_service.get_active_uid(db)
-        if not active_uid:
-            QMessageBox.warning(self, "无激活标本", "请先激活一个标本")
+        owners = self.selected_jpg_owner_uids()
+        if len(owners) > 1:
+            QMessageBox.warning(self, "加入分组", "选中的 JPG 属于多个编号，请分开加入分组。")
             return
+        active_uid = activation_service.get_active_uid(db)
+        if owners:
+            target_uid = owners[0]
+        else:
+            target_uid = active_uid or grouping_service.ADHOC_GROUPING_UID
         for jpg_path in jpg_paths:
-            self._add_jpg_to_grouping(db, active_uid, jpg_path)
+            self._add_jpg_to_grouping(db, target_uid, jpg_path)
         self._on_select_none()
         self.refresh_requested.emit()
 
@@ -1295,15 +1365,36 @@ class MonitorPanel(QWidget):
     def _on_refresh(self) -> None:
         self.refresh_requested.emit()
 
-    def _on_auto_toggled(self, on: bool) -> None:
-        """Swap the auto-compress toggle glyph between checked / unchecked."""
+    def _set_auto_toggle_icon(self, on: bool) -> None:
         glyph = "mdi6.checkbox-marked" if on else "mdi6.checkbox-blank-outline"
         tone = icons.TONE_ACCENT if on else icons.TONE_MUTED
         icons.set_button_icon(self._auto_toggle, glyph, color=tone, size=15)
+
+    def _on_auto_toggled(self, on: bool) -> None:
+        """Swap the auto-archive toggle glyph between checked / unchecked."""
+        self._set_auto_toggle_icon(on)
         self.auto_compress_toggled.emit(on)
 
     def auto_compress_enabled(self) -> bool:
         return self._auto_toggle.isChecked()
+
+    def set_auto_archive_enabled(self, on: bool, *, emit: bool = False) -> None:
+        previous = self._auto_toggle.blockSignals(not emit)
+        try:
+            self._auto_toggle.setChecked(bool(on))
+        finally:
+            self._auto_toggle.blockSignals(previous)
+        self._set_auto_toggle_icon(bool(on))
+
+    def compose_preview_enabled(self) -> bool:
+        return self._compose_preview_cb.isChecked()
+
+    def set_compose_preview_enabled(self, on: bool, *, emit: bool = False) -> None:
+        previous = self._compose_preview_cb.blockSignals(not emit)
+        try:
+            self._compose_preview_cb.setChecked(bool(on))
+        finally:
+            self._compose_preview_cb.blockSignals(previous)
 
     def _open_more_menu(self, global_pos) -> None:
         self._build_more_menu().exec(global_pos)
@@ -1332,7 +1423,7 @@ class MonitorPanel(QWidget):
         hide_action.setChecked(self._hide_archived_cb.isChecked())
         hide_action.toggled.connect(self._hide_archived_cb.setChecked)
 
-        auto_action = menu.addAction("新 TIFF 自动归档")
+        auto_action = menu.addAction("自动归档")
         auto_action.setCheckable(True)
         auto_action.setChecked(self._auto_toggle.isChecked())
         auto_action.toggled.connect(self._auto_toggle.setChecked)

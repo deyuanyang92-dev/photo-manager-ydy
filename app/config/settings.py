@@ -90,8 +90,8 @@ class AppSettings:
 
     @property
     def auto_organize_after_compose(self) -> bool:
-        # 「合成后自动整理归档」开关（默认关）。开 → 手动合成出 TIFF 后，自动把
-        # 源 JPG 打包归档+命名+移 results。合成本身仍手动。
+        # 「自动归档」开关（默认关）。开 → 有激活编号时可自动取该编号未占用
+        # JPG 合成；合成出 TIFF 后自动把源 JPG 打包 ZIP+命名+移 results。
         return str(
             self._qs.value("workbench/auto_organize_after_compose", "false")
         ).lower() == "true"

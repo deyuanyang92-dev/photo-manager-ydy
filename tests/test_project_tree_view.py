@@ -8,6 +8,8 @@ import pytest
 
 pytest.importorskip("PyQt6")
 
+from PyQt6.QtCore import Qt
+
 from app.views.project_tree_view import ProjectTreeView
 
 
@@ -62,6 +64,35 @@ def test_builds_tree_from_root(qtbot, tmp_path, ctx):
     # workspace nodes (have project.db) are tagged 工作区; plain folders/regions are not
     assert any("断面a" in t and "工作区" in t for t in child_texts)
     assert any("断面b" in t and "工作区" not in t for t in child_texts)
+
+
+def test_tree_has_context_menu(qtbot, tmp_path, ctx):
+    root = tmp_path / "survey"
+    _make_workspace(root)
+    ctx.settings.project_tree_root = str(root)
+
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    view.on_activate()
+
+    assert view._tree.contextMenuPolicy() == Qt.ContextMenuPolicy.CustomContextMenu
+
+
+def test_rooted_tree_auto_selects_first_item(qtbot, tmp_path, ctx):
+    root = tmp_path / "zhengli"
+    _make_workspace(root)
+    ctx.settings.project_tree_root = str(root)
+
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    view.on_activate()
+
+    top = view._tree.topLevelItem(0)
+    assert top is not None
+    assert view._tree.currentItem() is top
+    assert top.isSelected()
+    assert view._btn_enter.isEnabled()
+    assert view._detail_path.text() == str(root)
 
 
 def _seed_projects_json(path: Path, projects: list) -> None:
@@ -197,6 +228,44 @@ def test_dead_directory_in_json_shown_as_folder(qtbot, tmp_path, ctx, monkeypatc
     except Exception as exc:  # pragma: no cover - defensive
         pytest.fail(f"_enter_selected raised on dead dir: {exc}")
     assert emitted == []
+
+
+def test_enter_workspace_database_locked_warns_without_crashing(
+    qtbot, tmp_path, ctx, monkeypatch
+):
+    app_dir = tmp_path / "isolated-app"
+    app_dir.mkdir()
+    monkeypatch.chdir(app_dir)
+    recent_json = _patch_recent_json(monkeypatch, tmp_path)
+    leaf = tmp_path / "busy"
+    leaf.mkdir()
+    _make_workspace(leaf)
+    _seed_projects_json(recent_json, [{"id": "1", "name": "忙项目", "directory": str(leaf)}])
+
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    view.on_activate()
+    top = view._tree.topLevelItem(0)
+    top.setSelected(True)
+    view._tree.setCurrentItem(top)
+
+    def fail_enter(*_args, **_kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    warnings = []
+    monkeypatch.setattr("app.services.project_service.enter_workspace", fail_enter)
+    monkeypatch.setattr(
+        "app.views.project_tree_view.ui.warn",
+        lambda _parent, title, text: warnings.append((title, text)),
+    )
+    emitted = []
+    view.enter_workspace_requested.connect(lambda p: emitted.append(p))
+
+    view._enter_selected()
+
+    assert emitted == []
+    assert warnings
+    assert warnings[0][0] == "项目数据库正忙"
 
 
 def test_pick_root_after_flat_list_reverts_to_scan(qtbot, tmp_path, ctx, monkeypatch):

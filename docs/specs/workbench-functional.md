@@ -107,6 +107,10 @@ v3 needs a QTimer that fires every 2 s and calls `_refresh_monitor()`.
 
 **Web oracle:** `renderGroupingPanel()` app.js:~5200–5450; `groupingSave()` app.js:5337.
 
+Ownership rule: `新组` follows only the active UID. If no UID is active, it
+creates/edits the unassigned task; selected or draft UIDs do not own it. See
+`docs/specs/photo-grouping-workflow.md`.
+
 ### 5.1 Main action bar
 | Feature | Web | v3 status |
 |---------|-----|-----------|
@@ -155,7 +159,26 @@ v3 needs a QTimer that fires every 2 s and calls `_refresh_monitor()`.
 | Update grouping with archive_zip | `group.archive_zip = result.zip_path` | ✓ |
 | Sequence numbering | `next_result_sequence + build_result_basename` | ✓ |
 
-### 5.5 Undo compose
+### 5.5 Selected JPG compose/organise
+
+**Hard rule:** selecting JPGs in the monitor is an explicit manual workflow. It must never require an active specimen number.
+
+| Selection state | Required behavior |
+|-----------------|-------------------|
+| Active UID exists | Compose / compose+organise selected JPGs under the active UID and auto-name by the active UID's next result sequence. |
+| No active UID, selected JPGs exist | Prompt for either a target UID or a free output name. Target UID means assign/move the JPGs to that UID and auto-name by next sequence. Free output name means TIF and ZIP use the same user-provided stem. Existing attribution is only a hint/default, not an automatic naming decision. |
+| No JPGs selected, auto archive off | Do not compose from the main toolbar. Active UID alone is not permission to auto-select photos. |
+| No JPGs selected, active UID exists, auto archive on | Compose using the active UID's unoccupied attributed JPGs and auto-name by the active UID's next result sequence. |
+
+`自动归档` is the explicit auto mode. It allows active-UID compose without manual JPG selection, runs organise after successful compose, and also reacts to a TIF produced outside the main compose button. External TIF handling with no active UID may use manually selected JPGs; with no active UID and no selected JPGs it must not guess.
+
+This is not optional UX. It prevents the wrong blocker: "请先激活编号" must not appear after the user has already selected JPG files to compose or compose+organise.
+
+Automatic UID naming must advance after existing TIFs/ZIPs. If `UID-1-YYYYMMDD.tif` already exists, the next selected-JPG result for that UID is `UID-2-YYYYMMDD.tif`.
+
+After compose+organise succeeds, archived source JPGs may remain on disk according to deletion safety settings, but they must be hidden from the pending-photo queue once the group has a real ZIP.
+
+### 5.6 Undo compose
 | Feature | Web | v3 status |
 |---------|-----|-----------|
 | Move TIFF to _retired-tiff/ | Server undo endpoint | `_retire_tiff()` | ✓ |
@@ -226,6 +249,8 @@ v3 needs a QTimer that fires every 2 s and calls `_refresh_monitor()`.
 ## 10. Free Compose (无号合成)
 
 **Web oracle:** `freeComposeSelected()` app.js:7982–8010; POST `/api/helicon/compose-groups`.
+
+Do not confuse this with selected-JPG compose/organise in section 5.5. For selected JPGs with a target UID, the result is a normal UID-named result and activation is still not required. For selected unowned JPGs without a target UID, the user must provide a free output stem so the TIF and ZIP share a readable name.
 
 | Feature | Web | v3 status |
 |---------|-----|-----------|

@@ -27,6 +27,7 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication
 
 _APP = None
@@ -239,6 +240,10 @@ class TestTableStructure:
         w = self._make_view()
         assert not w._table.verticalHeader().isVisible()
 
+    def test_table_has_context_menu(self):
+        w = self._make_view()
+        assert w._table.contextMenuPolicy() == Qt.ContextMenuPolicy.CustomContextMenu
+
 
 # ── Table population ──────────────────────────────────────────────────────────
 
@@ -304,6 +309,11 @@ class TestTablePopulation:
         btns = cell.findChildren(QPushButton)
         labels = [b.text() for b in btns]
         assert any("详情" in t for t in labels)
+
+    def test_context_menu_project_lookup(self, tmp_path):
+        w = self._make_view_with_projects(tmp_path, _SAMPLE_PROJECTS)
+        assert w._project_for_table_row(0)["name"] == "厦门潮间带调查"
+        assert w._project_for_table_row(-1) is None
 
 
 # ── Year-filter narrows rows ──────────────────────────────────────────────────

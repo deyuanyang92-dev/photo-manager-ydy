@@ -12,6 +12,7 @@ from app.services.project_tree_service import (
     flatten_workspaces,
     discover_workspaces,
     discover_workspace_candidates,
+    clear_project_tree_cache,
     RESERVED_DIR_NAMES,
 )
 
@@ -111,6 +112,33 @@ def test_does_not_create_anything(tmp_path):
     root.mkdir()
     scan_tree(str(root))
     assert list(root.iterdir()) == []  # scan must not create files/dirs
+
+
+def test_scan_tree_cache_returns_copy(tmp_path):
+    clear_project_tree_cache()
+    root = tmp_path / "r"
+    (root / "a").mkdir(parents=True)
+    tree = scan_tree(str(root))
+    tree["children"].clear()
+
+    fresh = scan_tree(str(root))
+
+    assert [c["name"] for c in fresh["children"]] == ["a"]
+
+
+def test_clear_project_tree_cache_refreshes_deep_change(tmp_path):
+    clear_project_tree_cache()
+    root = tmp_path / "r"
+    child = root / "a"
+    child.mkdir(parents=True)
+    scan_tree(str(root))
+    (child / "b").mkdir()
+
+    clear_project_tree_cache(str(root))
+    tree = scan_tree(str(root))
+
+    a = tree["children"][0]
+    assert [c["name"] for c in a["children"]] == ["b"]
 
 
 def test_flatten_workspaces_preorder():

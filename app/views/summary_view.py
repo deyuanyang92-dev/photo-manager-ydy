@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import csv
 import io
+import os
 import sqlite3
 from collections import Counter
 from datetime import date as _date
@@ -31,9 +32,11 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDateEdit,
+    QDialog,
     QFileDialog,
     QFrame,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -96,6 +99,22 @@ def _date_seg(sp: Specimen) -> str:
     if c and p and c != p:
         return f"{c.replace('-', '')}_{p.replace('-', '')}"
     return (c or p).replace("-", "")
+
+
+def _empty_grouping(proj_code: str = "") -> dict:
+    return {
+        "count": 0,
+        "group_count": 0,
+        "status": "无成果",
+        "projCode": proj_code,
+        "jpg_count": 0,
+        "tiff_count": 0,
+        "zip_count": 0,
+        "tiff_names": "",
+        "tiff_paths": "",
+        "zip_names": "",
+        "zip_paths": "",
+    }
 
 
 # ── Search / date-range filter helpers (Qt-free, unit-testable) ───────────────
@@ -189,10 +208,15 @@ def _build_all_cols() -> list[dict]:
         {"key": "collector",    "label": "采集人",        "get": lambda s, g: s.collector or ""},
         {"key": "photographer", "label": "拍摄人",        "get": lambda s, g: s.photographer or ""},
         {"key": "identifier",   "label": "鉴定人",        "get": lambda s, g: s.identifier or ""},
-        {"key": "compCount",    "label": "成果数",        "get": lambda s, g: str(g.get("count", 0))},
+        {"key": "compCount",    "label": "已合成组数",    "get": lambda s, g: str(g.get("count", 0))},
+        {"key": "tiffCount",    "label": "TIF数",         "get": lambda s, g: str(g.get("tiff_count", 0))},
+        {"key": "jpgCount",     "label": "JPG原图数",     "get": lambda s, g: str(g.get("jpg_count", 0))},
+        {"key": "zipCount",     "label": "ZIP数",         "get": lambda s, g: str(g.get("zip_count", 0))},
+        {"key": "tiffNames",    "label": "TIF文件",       "get": lambda s, g: g.get("tiff_names", "")},
+        {"key": "zipNames",     "label": "ZIP文件",       "get": lambda s, g: g.get("zip_names", "")},
         {"key": "compStatus",   "label": "成果状态",      "get": lambda s, g: g.get("status", "无成果")},
         {"key": "taxoOk",       "label": "分类完整",      "get": lambda s, g: "✓" if _taxo_ok(s) else "✗"},
-        {"key": "rna",          "label": "RNA",           "get": lambda s, g: "✓" if _is_rna(s.storage) else "✗"},
+        {"key": "rna",          "label": "RNA标本",       "get": lambda s, g: "✓" if _is_rna(s.storage) else "✗"},
         {"key": "meta",         "label": "Meta%",         "get": lambda s, g: _meta_score(s)},
         {"key": "notes",        "label": "备注",          "get": lambda s, g: s.notes or ""},
         {"key": "photoNotes",   "label": "拍照备注",      "get": lambda s, g: s.photo_notes or ""},
@@ -208,8 +232,15 @@ _DEFAULT_KEYS = [
     "province", "site", "station", "geoArea",
     "lon", "lat", "storage", "collDate", "photoDate",
     "collector", "photographer",
-    "compCount", "compStatus", "taxoOk", "rna", "meta",
+    "compCount", "tiffCount", "jpgCount", "zipCount", "tiffNames",
+    "compStatus", "taxoOk", "rna", "meta",
 ]
+
+_SCOPE_CURRENT = "current"
+_SCOPE_ALL = "all"
+_SCOPE_SELECTED = "selected"
+_GROUPING_KEY_SEP = "\0"
+_TABLE_AUTOSIZE_CELL_LIMIT = 6000
 
 # Colour constants — refreshed from the LIVE active theme by _refresh_palette()
 # (called at the top of each view's _setup_ui).  Previously hardcoded deep-teal,
@@ -370,13 +401,18 @@ class SummaryView(BaseView):
     def __init__(self, ctx: "AppContext") -> None:
         self._visible_keys: list[str] = list(_DEFAULT_KEYS)
         self._specimens: list[Specimen] = []
-        self._grouping: dict[str, dict] = {}          # uid → {count, status, projCode}
+        self._grouping: dict[str, dict] = {}          # row-key/uid → {count, status, projCode}
         self._project_filter: str = ""                # "" = all
         self._search_text: str = ""                   # cross-column substring filter
         self._date_field: str = "不限日期"            # 不限日期 / 采集日期 / 拍照日期
         self._date_from: str = ""                     # ISO lower bound ("" = open)
         self._date_to: str = ""                       # ISO upper bound ("" = open)
         self._projects: list[dict] = []               # list of {id, name, directory, projectCode?}
+        self._summary_scope: str = _SCOPE_CURRENT
+        self._selected_project_dirs: list[str] = []
+        self._loaded_project_dirs: list[str] = []
+        self._loaded_root: str = ""
+        self._dashboard_snapshot: dict | None = None
         self._picker_open: bool = False
         self._model: Optional[QStandardItemModel] = None
         self._proxy: Optional[QSortFilterProxyModel] = None
@@ -441,6 +477,19 @@ class SummaryView(BaseView):
 
         # Separator spacing between title and controls
         bar.addSpacing(8)
+
+        self._scope_combo = QComboBox()
+        self._scope_combo.setToolTip("选择汇总范围")
+        self._scope_combo.addItem("当前项目", _SCOPE_CURRENT)
+        self._scope_combo.addItem("全部已知项目", _SCOPE_ALL)
+        self._scope_combo.addItem("自选项目", _SCOPE_SELECTED)
+        self._scope_combo.currentIndexChanged.connect(self._on_scope_changed)
+        bar.addWidget(self._scope_combo)
+
+        self._btn_sources = QPushButton("选择项目…")
+        self._btn_sources.setToolTip("勾选最近项目，或添加未在列表中的项目目录")
+        self._btn_sources.clicked.connect(self._open_summary_sources)
+        bar.addWidget(self._btn_sources)
 
         # Project filter combo
         self._filter_combo = QComboBox()
@@ -519,6 +568,11 @@ class SummaryView(BaseView):
         self._btn_cross.clicked.connect(self._open_cross_summary)
         bar.addWidget(self._btn_cross)
 
+        self._btn_result_ledger = QPushButton("🗂 成果台账")
+        self._btn_result_ledger.setToolTip("查看所有已知项目的标本编号、TIF、ZIP 与入库关联状态")
+        self._btn_result_ledger.clicked.connect(self._open_global_results)
+        bar.addWidget(self._btn_result_ledger)
+
         bar.addSpacing(8)
 
         # Save to directory
@@ -584,8 +638,11 @@ class SummaryView(BaseView):
         self._table.keyPressEvent = self._table_key_press
         self._table.setEditTriggers(QTableView.EditTrigger.NoEditTriggers)
         self._table.setSortingEnabled(True)
+        self._table.setWordWrap(False)
         self._table.verticalHeader().setVisible(False)
+        self._table.verticalHeader().setDefaultSectionSize(24)
         self._table.horizontalHeader().setStretchLastSection(False)
+        self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         root.addWidget(self._table, stretch=1)
 
     def _build_dashboard(self) -> QFrame:
@@ -600,7 +657,8 @@ class SummaryView(BaseView):
             ("specimens", "标本"),
             ("alcohol", "酒精固定"),
             ("rna", "RNA"),
-            ("photos", "照片"),
+            ("photos", "JPG照片"),
+            ("tiffs", "TIF成果"),
             ("unassigned", "未分配照片"),
             ("prints", "标签打印"),
         ):
@@ -649,15 +707,28 @@ class SummaryView(BaseView):
     # ── Data loading ──────────────────────────────────────────────────────────
 
     def _load_data(self) -> None:
-        """Load specimens + grouping data from the current project DB."""
+        """Load specimens + grouping data for the selected summary scope."""
         self._specimens = []
         self._grouping = {}
         self._projects = []
+        self._loaded_project_dirs = []
+        self._loaded_root = ""
+        self._dashboard_snapshot = None
 
+        if self._summary_scope in (_SCOPE_ALL, _SCOPE_SELECTED):
+            if self._load_multi_project_data():
+                self._rebuild_filter_combo()
+                self._rebuild_table()
+                return
+
+        self._load_current_project_data()
+        self._rebuild_filter_combo()
+        self._rebuild_table()
+
+    def _load_current_project_data(self) -> None:
+        """Load the current open DB. Kept separate for in-memory test DBs."""
         db: Optional[sqlite3.Connection] = self.ctx.get_db()
         if db is None:
-            self._rebuild_filter_combo()
-            self._rebuild_table()
             return
 
         # Load specimens
@@ -684,25 +755,10 @@ class SummaryView(BaseView):
         except Exception:
             pass  # projects table absent — projCode will be empty
 
-        # Load grouping compact: count + status per uid
+        # Load grouping compact: count/status plus JPG/TIF/ZIP facts per uid.
         try:
-            g_rows = db.execute(
-                "SELECT uid, COUNT(*) as cnt, "
-                "MAX(CASE WHEN status='composed' OR status='organized' THEN 1 ELSE 0 END) as has_done,"
-                "COUNT(CASE WHEN status='composed' OR status='organized' THEN 1 END) as done_cnt "
-                "FROM grouping GROUP BY uid"
-            ).fetchall()
-            for r in g_rows:
-                uid = r[0]
-                total = r[1]
-                done = r[3]
-                if done == 0:
-                    status = "待合成"
-                elif done == total:
-                    status = "已合成"
-                else:
-                    status = "部分合成"
-                self._grouping[uid] = {"count": done, "status": status}
+            from app.services import project_summary_service as pss
+            self._grouping = pss.collect_grouping_summary_for_connection(db, "")
         except Exception:
             self._grouping = {}
 
@@ -712,11 +768,134 @@ class SummaryView(BaseView):
             proj_info = dir_to_proj.get(sp.owner_project_dir or "")
             code = (proj_info or {}).get("project_code") or ""
             if uid not in self._grouping:
-                self._grouping[uid] = {"count": 0, "status": "无成果"}
+                self._grouping[uid] = _empty_grouping(code)
             self._grouping[uid]["projCode"] = code
+            row_key = self._grouping_key_for_specimen(sp)
+            self._grouping[row_key] = dict(self._grouping[uid])
 
-        self._rebuild_filter_combo()
-        self._rebuild_table()
+        current_dir = self._current_project_dir()
+        if current_dir:
+            self._loaded_project_dirs = [current_dir]
+            self._loaded_root = current_dir
+
+    def _load_multi_project_data(self) -> bool:
+        dirs, root = self._summary_dirs_for_scope()
+        if not dirs:
+            return False
+        try:
+            from app.services import project_summary_service as pss
+            payload = pss.collect_specimen_summary_rows(dirs, root)
+        except Exception:
+            return False
+
+        self._specimens = list(payload.get("specimens") or [])
+        self._grouping = dict(payload.get("grouping") or {})
+        self._projects = list(payload.get("projects") or [])
+        self._dashboard_snapshot = payload.get("dashboard") or None
+        self._loaded_project_dirs = list(dirs)
+        self._loaded_root = root
+        return True
+
+    def _current_project_dir(self) -> str:
+        raw = getattr(self.ctx, "current_project_dir", "") or getattr(
+            self.ctx, "current_project_root", ""
+        )
+        if not isinstance(raw, str) or not raw:
+            return ""
+        try:
+            return str(Path(raw).resolve())
+        except OSError:
+            return raw
+
+    @staticmethod
+    def _resolve_dir(path: str) -> str:
+        try:
+            return str(Path(path).resolve())
+        except OSError:
+            return str(path)
+
+    @staticmethod
+    def _common_root(dirs: list[str]) -> str:
+        resolved = [SummaryView._resolve_dir(d) for d in dirs if d]
+        if not resolved:
+            return ""
+        if len(resolved) == 1:
+            return str(Path(resolved[0]).parent)
+        try:
+            return os.path.commonpath(resolved)
+        except Exception:
+            return str(Path(resolved[0]).parent)
+
+    def _known_summary_projects(self) -> list[dict]:
+        seen: set[str] = set()
+        out: list[dict] = []
+
+        def add(directory: str, name: str = "", project_code: str = "") -> None:
+            if not directory:
+                return
+            resolved = self._resolve_dir(directory)
+            if resolved in seen:
+                return
+            seen.add(resolved)
+            out.append({
+                "directory": resolved,
+                "name": name or Path(resolved).name or resolved,
+                "project_code": project_code,
+            })
+
+        current = self._current_project_dir()
+        if current:
+            add(current, "当前项目")
+
+        try:
+            from app.services import project_service
+            recent = project_service.list_projects(
+                project_service.default_user_projects_json_path()
+            )
+        except Exception:
+            recent = []
+        for project in recent:
+            directory = project.get("directory") or project.get("dir") or ""
+            add(
+                directory,
+                str(project.get("name") or ""),
+                str(project.get("project_code") or project.get("projectCode") or ""),
+            )
+
+        for directory in self._selected_project_dirs:
+            add(directory)
+        return out
+
+    def _summary_dirs_for_scope(self) -> tuple[list[str], str]:
+        if self._summary_scope == _SCOPE_ALL:
+            dirs = [p["directory"] for p in self._known_summary_projects()]
+        elif self._summary_scope == _SCOPE_SELECTED:
+            dirs = [self._resolve_dir(d) for d in self._selected_project_dirs if d]
+            if not dirs:
+                current = self._current_project_dir()
+                dirs = [current] if current else []
+        else:
+            current = self._current_project_dir()
+            dirs = [current] if current else []
+
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for directory in dirs:
+            if directory and directory not in seen:
+                deduped.append(directory)
+                seen.add(directory)
+        return deduped, self._common_root(deduped)
+
+    def _grouping_key_for_specimen(self, sp: Specimen) -> str:
+        return f"{sp.owner_project_dir or ''}{_GROUPING_KEY_SEP}{sp.uid or ''}"
+
+    def _grouping_for_specimen(self, sp: Specimen) -> dict:
+        default = _empty_grouping("")
+        return (
+            self._grouping.get(self._grouping_key_for_specimen(sp))
+            or self._grouping.get(sp.uid or "")
+            or default
+        )
 
     def _rebuild_filter_combo(self) -> None:
         """Rebuild the project filter combo from current specimens.
@@ -777,7 +956,7 @@ class SummaryView(BaseView):
 
     def _match_search(self, sp: Specimen, q: str) -> bool:
         """Substring match across every column value (case-insensitive)."""
-        g = self._grouping.get(sp.uid or "", {"count": 0, "status": "无成果", "projCode": ""})
+        g = self._grouping_for_specimen(sp)
         for col in ALL_COLS:
             try:
                 val = col["get"](sp, g)
@@ -808,7 +987,7 @@ class SummaryView(BaseView):
         text_brush   = QBrush(QColor(_C_TEXT))
 
         for row_idx, sp in enumerate(specs):
-            g = self._grouping.get(sp.uid or "", {"count": 0, "status": "无成果", "projCode": ""})
+            g = self._grouping_for_specimen(sp)
             for col_idx, col in enumerate(vis_cols):
                 try:
                     val = col["get"](sp, g)
@@ -843,12 +1022,40 @@ class SummaryView(BaseView):
 
         self._model = model
         self._proxy = proxy
+        sorting = self._table.isSortingEnabled()
+        self._table.setSortingEnabled(False)
         self._table.setModel(proxy)
-        self._table.resizeColumnsToContents()
+        cell_count = len(specs) * max(1, len(vis_cols))
+        if cell_count <= _TABLE_AUTOSIZE_CELL_LIMIT:
+            self._table.resizeColumnsToContents()
+        else:
+            self._apply_fast_column_widths(vis_cols)
+        self._table.setSortingEnabled(sorting)
 
         n = len(specs)
         self._count_lbl.setText(f"{n} 条 · {len(vis_cols)} 列")
         self._refresh_dashboard(specs)
+
+    def _apply_fast_column_widths(self, columns: list[dict]) -> None:
+        widths = {
+            "uid": 180,
+            "nameLat": 180,
+            "nameCn": 120,
+            "geoArea": 180,
+            "notes": 180,
+            "photoNotes": 180,
+            "collector": 110,
+            "photographer": 110,
+            "identifier": 110,
+            "tiffCount": 70,
+            "jpgCount": 90,
+            "zipCount": 70,
+            "tiffNames": 340,
+            "zipNames": 220,
+            "compStatus": 90,
+        }
+        for idx, col in enumerate(columns):
+            self._table.setColumnWidth(idx, widths.get(col["key"], 105))
 
     def _refresh_dashboard(self, specs: Optional[list[Specimen]] = None) -> None:
         specs = list(specs if specs is not None else self._filtered_specimens())
@@ -857,6 +1064,7 @@ class SummaryView(BaseView):
             "alcohol": 0,
             "rna": 0,
             "photos": 0,
+            "tiffs": 0,
             "unassigned": 0,
             "prints": 0,
         }
@@ -874,32 +1082,43 @@ class SummaryView(BaseView):
             photographers[self._person_key(sp.photographer)] += 1
             collectors[self._person_key(sp.collector)] += 1
             identifiers[self._person_key(sp.identifier)] += 1
+            g = self._grouping_for_specimen(sp)
+            totals["tiffs"] += int(g.get("tiff_count") or 0)
 
-        db = self._safe_db()
-        if db is not None:
-            try:
-                row = db.execute(
-                    """
-                    SELECT COUNT(*) AS total,
-                           SUM(CASE WHEN current_assignment_id IS NULL THEN 1 ELSE 0 END) AS unassigned
-                      FROM photos
-                    """
-                ).fetchone()
-                totals["photos"] = int(row["total"] or 0) if row else 0
-                totals["unassigned"] = int(row["unassigned"] or 0) if row else 0
-            except Exception:
-                pass
+        dashboard = self._dashboard_snapshot
+        if dashboard:
+            dt = dashboard.get("totals", {})
+            totals["photos"] = int(dt.get("photo_count") or 0)
+            totals["unassigned"] = int(dt.get("unassigned_photo_count") or 0)
+            totals["prints"] = int(dt.get("label_print_count") or 0)
+            for row in dashboard.get("by_person", {}).get("label_printer", []):
+                label_printers[self._person_key(row.get("name"))] += int(row.get("count") or 0)
+        else:
+            db = self._safe_db()
+            if db is not None:
+                try:
+                    row = db.execute(
+                        """
+                        SELECT COUNT(*) AS total,
+                               SUM(CASE WHEN current_assignment_id IS NULL THEN 1 ELSE 0 END) AS unassigned
+                          FROM photos
+                        """
+                    ).fetchone()
+                    totals["photos"] = int(row["total"] or 0) if row else 0
+                    totals["unassigned"] = int(row["unassigned"] or 0) if row else 0
+                except Exception:
+                    pass
 
-            try:
-                rows = db.execute(
-                    "SELECT actor, SUM(label_count) AS labels FROM label_print_events GROUP BY actor"
-                ).fetchall()
-                for row in rows:
-                    n = int(row["labels"] or 0)
-                    totals["prints"] += n
-                    label_printers[self._person_key(row["actor"])] += n
-            except Exception:
-                pass
+                try:
+                    rows = db.execute(
+                        "SELECT actor, SUM(label_count) AS labels FROM label_print_events GROUP BY actor"
+                    ).fetchall()
+                    for row in rows:
+                        n = int(row["labels"] or 0)
+                        totals["prints"] += n
+                        label_printers[self._person_key(row["actor"])] += n
+                except Exception:
+                    pass
 
         for key, val in totals.items():
             if key in self._dash_values:
@@ -936,6 +1155,41 @@ class SummaryView(BaseView):
     def _on_filter_changed(self, idx: int) -> None:
         self._project_filter = self._filter_combo.currentData() or ""
         self._rebuild_table()
+
+    def _on_scope_changed(self, idx: int) -> None:
+        scope = self._scope_combo.currentData() or _SCOPE_CURRENT
+        if scope == self._summary_scope:
+            return
+        if scope == _SCOPE_SELECTED and not self._selected_project_dirs:
+            current = self._current_project_dir()
+            self._selected_project_dirs = [current] if current else []
+        self._summary_scope = scope
+        self._project_filter = ""
+        self._load_data()
+
+    def _open_summary_sources(self) -> None:
+        from app.widgets.summary_source_dialog import SummarySourceDialog
+
+        dirs, _root = self._summary_dirs_for_scope()
+        selected = dirs if self._summary_scope != _SCOPE_CURRENT else (
+            self._selected_project_dirs or dirs
+        )
+        dlg = SummarySourceDialog(
+            self._known_summary_projects(),
+            selected_dirs=selected,
+            parent=self,
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._selected_project_dirs = dlg.selected_dirs()
+        self._summary_scope = _SCOPE_SELECTED
+        self._project_filter = ""
+        idx = self._scope_combo.findData(_SCOPE_SELECTED)
+        if idx >= 0:
+            self._scope_combo.blockSignals(True)
+            self._scope_combo.setCurrentIndex(idx)
+            self._scope_combo.blockSignals(False)
+        self._load_data()
 
     # ── Search ────────────────────────────────────────────────────────────────
 
@@ -1097,7 +1351,7 @@ class SummaryView(BaseView):
                 writer = csv.writer(f)
                 writer.writerow([c["label"] for c in vis_cols])
                 for sp in specs:
-                    g = self._grouping.get(sp.uid or "", {"count": 0, "status": "无成果"})
+                    g = self._grouping_for_specimen(sp)
                     row = []
                     for col in vis_cols:
                         try:
@@ -1148,6 +1402,12 @@ class SummaryView(BaseView):
         """Open the cross-workspace summary export dialog (Mode B default)."""
         from app.widgets.summary_export_dialog import SummaryExportDialog
         dlg = SummaryExportDialog(ctx=self.ctx, parent=self)
+        dlg.exec()
+
+    def _open_global_results(self) -> None:
+        """Open the global TIFF/ZIP ledger dialog."""
+        from app.widgets.global_results_dialog import GlobalResultsDialog
+        dlg = GlobalResultsDialog(ctx=self.ctx, parent=self)
         dlg.exec()
 
     # ── Save to directory ─────────────────────────────────────────────────────

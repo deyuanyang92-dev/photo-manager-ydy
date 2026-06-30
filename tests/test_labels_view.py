@@ -300,7 +300,7 @@ class TestStep4Output:
         w = self._w(qt_app)
         w.set_counts(sample_n=3, tissue_n=1, copies=2)
         txt = w._summary.text()
-        assert "样品瓶 3" in txt and "RNAlater 组织管 1" in txt
+        assert "瓶签 3" in txt and "RNA签 1" in txt
         assert "总 8" in txt  # (3+1)*2
 
     def test_print_buttons_disabled_when_empty(self, qt_app):
@@ -555,11 +555,19 @@ def _studio(qt_app, specs, paper="a4", blank=0):
 
 
 class TestPrintBothButton:
-    """一键同时打印「样品瓶 + RNAlater 组织管」(保留两个分开按钮)。"""
+    """一键同时打印瓶签 + RNA签，同时保留两个分开按钮。"""
 
     def test_button_exists(self, qt_app):
         v = _studio(qt_app, [_sp()])
         assert hasattr(v, "_btn_print_both")
+
+    def test_print_buttons_use_short_labels_with_real_counts(self, qt_app):
+        v = _studio(qt_app, [_rna_sp()], paper="label")
+        v._copies_spin.setValue(2)
+        v._refresh_print_studio()
+        assert v._btn_print_sample.text() == "瓶签 2"
+        assert v._btn_print_tissue.text() == "RNA签 2"
+        assert v._btn_print_both.text() == "全部 4"
 
     def test_disabled_without_rna(self, qt_app):
         # no R-prefix specimen → tissue bucket empty → 一键打两张 disabled.

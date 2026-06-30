@@ -51,6 +51,11 @@ class TestOpenProjectDb:
         row = conn.execute("PRAGMA journal_mode").fetchone()
         assert row[0] == "wal"
 
+    def test_busy_timeout_set(self, tmp_project):
+        conn = db_manager.open_project_db(tmp_project, create=True)
+        row = conn.execute("PRAGMA busy_timeout").fetchone()
+        assert row[0] >= 8000
+
     def test_row_factory(self, tmp_project):
         conn = db_manager.open_project_db(tmp_project, create=True)
         assert conn.row_factory is sqlite3.Row

@@ -60,6 +60,7 @@ def _fresh_window() -> MainWindow:
     ctx = AppContext()
     ctx.settings._qs.remove("ui/topbar_pinned_views")
     ctx.settings._qs.remove("ui/screenshot_tool_enabled")
+    ctx.settings._qs.remove("ui/screenshot_tool_default_migrated")
     return MainWindow(ctx)
 
 
@@ -68,6 +69,16 @@ def _window_with_screenshot_tool() -> MainWindow:
     ctx = AppContext()
     ctx.settings._qs.remove("ui/topbar_pinned_views")
     ctx.settings._qs.setValue("ui/screenshot_tool_enabled", "true")
+    ctx.settings._qs.setValue("ui/screenshot_tool_default_migrated", "true")
+    return MainWindow(ctx)
+
+
+def _window_without_screenshot_tool() -> MainWindow:
+    set_language("zh")
+    ctx = AppContext()
+    ctx.settings._qs.remove("ui/topbar_pinned_views")
+    ctx.settings._qs.setValue("ui/screenshot_tool_enabled", "false")
+    ctx.settings._qs.setValue("ui/screenshot_tool_default_migrated", "true")
     return MainWindow(ctx)
 
 
@@ -148,6 +159,7 @@ def test_function_menu_groups_all_registered_views():
     assert [a.text() for a in tools_menu.actions() if a.isVisible()] == [
         "标签打印",
         "采集地图",
+        "截图",
     ]
     system_menu = win._nav_group_menus["system"]
     assert "软件更新" in [a.text() for a in system_menu.actions()]
@@ -212,8 +224,20 @@ def test_context_bar_with_project(tmp_path):
 
 # ── Screenshot lives in the grouped tools menu, Settings only configures it ─
 
-def test_screenshot_tool_is_hidden_by_default():
+def test_screenshot_tool_is_visible_by_default():
     win = _fresh_window()
+    for cls in ALL_VIEWS:
+        win.register_view(cls)
+
+    assert not hasattr(win, "_shot_btn")
+    assert win.screenshot_tool_enabled()
+    assert win._shot_menu.menuAction().isVisible()
+    assert win._screenshot_shortcut.isEnabled()
+    assert win._settings_btn.toolTip() == "配置"
+
+
+def test_screenshot_tool_can_be_disabled_by_setting():
+    win = _window_without_screenshot_tool()
     for cls in ALL_VIEWS:
         win.register_view(cls)
 
@@ -221,7 +245,23 @@ def test_screenshot_tool_is_hidden_by_default():
     assert not win.screenshot_tool_enabled()
     assert not win._shot_menu.menuAction().isVisible()
     assert not win._screenshot_shortcut.isEnabled()
-    assert win._settings_btn.toolTip() == "配置"
+
+
+def test_legacy_hidden_screenshot_setting_is_migrated_visible():
+    set_language("zh")
+    ctx = AppContext()
+    ctx.settings._qs.remove("ui/topbar_pinned_views")
+    ctx.settings._qs.setValue("ui/screenshot_tool_enabled", "false")
+    ctx.settings._qs.remove("ui/screenshot_tool_default_migrated")
+
+    win = MainWindow(ctx)
+    for cls in ALL_VIEWS:
+        win.register_view(cls)
+
+    assert win.screenshot_tool_enabled()
+    assert ctx.settings._qs.value("ui/screenshot_tool_enabled") == "true"
+    assert ctx.settings._qs.value("ui/screenshot_tool_default_migrated") == "true"
+    assert win._shot_menu.menuAction().isVisible()
 
 
 def test_screenshot_tool_can_be_enabled_in_tools_menu():
@@ -243,13 +283,13 @@ def test_screenshot_tool_can_be_enabled_in_tools_menu():
     assert win._settings_btn.toolTip() == "配置"
 
 
-def test_screenshot_not_duplicated_as_nav_segment():
+def test_screenshot_is_menu_only_not_nav_segment():
     win = _fresh_window()
     for cls in ALL_VIEWS:
         win.register_view(cls)
 
     assert "截图" not in [btn.text() for btn in win._nav_buttons]
-    assert not win._shot_menu.menuAction().isVisible()
+    assert win._shot_menu.menuAction().isVisible()
 
 
 def test_rebind_screenshot_shortcut_updates_tooltip():
@@ -273,6 +313,7 @@ def test_retranslate_ui_updates_shell_and_grouped_menu():
     assert [a.text() for a in win._nav_group_menus["tools"].actions() if a.isVisible()] == [
         "Label Printing",
         "Collection Map",
+        "Screenshot",
     ]
     assert win._shot_actions["region"].text() == "Region capture    Alt+A"
 

@@ -10,7 +10,7 @@ import sqlite3
 from typing import TYPE_CHECKING, Optional
 
 from app.config.settings import AppSettings
-from app.db.db_manager import get_db, open_project_db
+from app.db.db_manager import get_db, is_database_locked, open_project_db
 
 if TYPE_CHECKING:
     from app.services.collab_service import CollabService
@@ -91,7 +91,8 @@ class AppContext:
             # clearing it here made the app "forget" the project permanently.
             from app.services.project_paths import ProjectUnavailableError
             if (target == self._project_dir
-                    and not isinstance(exc, ProjectUnavailableError)):
+                    and not isinstance(exc, ProjectUnavailableError)
+                    and not is_database_locked(exc)):
                 self._project_dir = None
                 self.settings.last_project_dir = None
             return None

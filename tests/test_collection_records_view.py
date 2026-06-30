@@ -15,6 +15,7 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication
 
 from app.app_context import AppContext
@@ -59,6 +60,12 @@ def test_instantiates_and_loads(qapp, ctx):
     view = CollectionRecordsView(ctx)
     view.on_activate()
     assert view._table.rowCount() == 1
+
+
+def test_table_has_context_menu(qapp, ctx):
+    view = CollectionRecordsView(ctx)
+    view.on_activate()
+    assert view._table.contextMenuPolicy() == Qt.ContextMenuPolicy.CustomContextMenu
 
 
 def test_save_from_form_persists(qapp, ctx):
@@ -199,3 +206,15 @@ def test_table_shows_zone_tag(qapp, ctx):
     view.on_activate()
     # 首列（采区）显示「潮下带」
     assert view._table.item(0, 0).text() == "潮下带"
+
+
+def test_copy_record_key(qapp, ctx):
+    rec = {
+        "province": "ZJ",
+        "site": "SMW",
+        "station": "B2",
+        "collection_date": "20260518",
+    }
+    view = CollectionRecordsView(ctx)
+    view._copy_record_key(rec)
+    assert QApplication.clipboard().text() == "ZJ\tSMW\tB2\t20260518"

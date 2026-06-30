@@ -33,9 +33,10 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QPixmap
+from PyQt6.QtCore import Qt, QUrl, pyqtSignal
+from PyQt6.QtGui import QDesktopServices, QPixmap
 from PyQt6.QtWidgets import (
+    QApplication,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -46,6 +47,7 @@ from PyQt6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMessageBox,
+    QMenu,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -738,6 +740,7 @@ class OverviewView(BaseView):
 
     def __init__(self, ctx: "AppContext") -> None:  # noqa: F821
         self._projects: list[dict] = []
+        self._visible_projects: list[dict] = []
         self._year_filter: Optional[str] = None  # None = "全部"
         # Dynamic year-filter buttons: {year_str: QPushButton}
         self._year_btns: dict[str, QPushButton] = {}
@@ -857,6 +860,8 @@ class OverviewView(BaseView):
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectItems)
         self._table.keyPressEvent = self._table_key_press
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._table.customContextMenuRequested.connect(self._show_table_context_menu)
         self._table.verticalHeader().setVisible(False)
         hdr = self._table.horizontalHeader()
         hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)       # 项目名称 stretches
@@ -993,6 +998,7 @@ class OverviewView(BaseView):
             self._table.setUpdatesEnabled(True)
 
     def _rebuild_table_rows(self, projects: list) -> None:
+        self._visible_projects = list(projects)
         self._table.setRowCount(0)
 
         for proj in projects:
@@ -1063,6 +1069,58 @@ class OverviewView(BaseView):
             )
         else:
             self._status_lbl.setText(f"共 {total} 个项目")
+
+    def _project_for_table_row(self, row: int) -> Optional[dict]:
+        if 0 <= row < len(self._visible_projects):
+            return self._visible_projects[row]
+        return None
+
+    def _show_table_context_menu(self, pos) -> None:
+        row = self._table.indexAt(pos).row()
+        proj = self._project_for_table_row(row)
+        if proj is None:
+            return
+        self._table.selectRow(row)
+
+        directory = proj.get("directory") or proj.get("dir") or ""
+        menu = QMenu(self._table)
+
+        enter_action = menu.addAction("进入工作区")
+        enter_action.triggered.connect(lambda _=False, p=proj: self._on_enter_workspace(p))
+
+        detail_action = menu.addAction("属性 / 详情")
+        detail_action.triggered.connect(lambda _=False, p=proj: self._on_detail(p))
+
+        menu.addSeparator()
+        copy_name_action = menu.addAction("复制项目名称")
+        copy_name_action.triggered.connect(
+            lambda _=False, p=proj: QApplication.clipboard().setText(str(p.get("name") or ""))
+        )
+
+        copy_dir_action = menu.addAction("复制磁盘目录")
+        copy_dir_action.setEnabled(bool(directory))
+        copy_dir_action.triggered.connect(
+            lambda _=False, d=directory: QApplication.clipboard().setText(d)
+        )
+
+        open_dir_action = menu.addAction("打开文件夹")
+        open_dir_action.setEnabled(bool(directory))
+        open_dir_action.triggered.connect(
+            lambda _=False, d=directory: self._open_project_directory(d)
+        )
+
+        menu.exec(self._table.viewport().mapToGlobal(pos))
+
+    def _open_project_directory(self, directory: str) -> None:
+        path = Path(directory) if directory else None
+        if path is None or not path.exists():
+            QMessageBox.warning(
+                self,
+                "打开文件夹",
+                f"目录不存在或磁盘未连接：\n{directory or '—'}",
+            )
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
     def _make_action_cell(self, proj: dict) -> QWidget:
         """Build the 操作 cell with 「进入工作区」 and 「详情」 buttons."""

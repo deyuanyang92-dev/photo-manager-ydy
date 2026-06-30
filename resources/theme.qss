@@ -260,12 +260,71 @@ QFrame#Panel, QFrame#WorkbenchSection, QFrame#PanelCard {
 QFrame#WorkbenchSection {
     border-color: rgba(15,23,42,0.13);
 }
+
+/* ── System-like file rows: incoming-jpg/ and results/ ───────────── */
 QFrame#Card {
+    background: #ffffff;
+    border: 1px solid rgba(15,23,42,0.08);
+    border-radius: 4px;
+}
+QFrame#Card:hover {
+    background: #eef6ff;
+    border-color: rgba(15,23,42,0.13);
+}
+QFrame#CardSelected {
+    background: #d7ebff;
+    border: 1px solid #1d6fd1;
+    border-left: 5px solid #1d6fd1;
+    border-radius: 4px;
+}
+QFrame#Card[resultSelected="true"] {
+    background: #d7ebff;
+    border: 1px solid #1d6fd1;
+    border-left: 5px solid #1d6fd1;
+    border-radius: 4px;
+}
+QFrame#CardSelected QLabel#Mono,
+QFrame#Card[resultSelected="true"] QLabel#Mono {
+    color: #1d6fd1;
+    font-weight: 700;
+}
+QLabel#FileSelectMark {
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 3px;
+    color: transparent;
+    font-size: 12px;
+    font-weight: 900;
+}
+QLabel#FileSelectMark[selected="true"] {
+    background: #1d6fd1;
+    border-color: #1d6fd1;
+    color: #ffffff;
+}
+QLabel#ResultSelectBadge {
+    border: 1px solid rgba(15,23,42,0.22);
+    border-radius: 3px;
+    background: #ffffff;
+    color: transparent;
+    font-size: 11px;
+    font-weight: 700;
+}
+QLabel#ResultSelectBadge[selected="true"] {
+    background: #1d6fd1;
+    border-color: #1d6fd1;
+    color: #ffffff;
+}
+QLabel#FileThumb {
     background: #f8fafc;
     border: 1px solid rgba(15,23,42,0.08);
-    border-radius: 8px;
+    border-radius: 4px;
+    padding: 1px;
 }
-QFrame#Card:hover { border-color: rgba(15,23,42,0.13); }
+QLabel#FileThumb[hasThumbnail="true"] {
+    background: #ffffff;
+    border-color: rgba(15,23,42,0.13);
+}
+
 QFrame#NamingGroup {
     background: #f8fafc;
     border: 1px solid rgba(15,23,42,0.08);

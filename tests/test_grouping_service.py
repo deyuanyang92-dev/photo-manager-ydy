@@ -13,19 +13,37 @@ import os
 import shutil
 import sqlite3
 import tempfile
+import threading
+import time
+import zipfile
 from pathlib import Path
 
 import pytest
 
 from app.services.grouping_service import (
+    ADHOC_GROUPING_UID,
     Group,
     SpecimenGrouping,
     add_explicit_unassign,
+    archive_jpg_count,
     backfill_archive_zips,
+    clear_group_tiff_link,
+    clear_uid_mismatched_result_links,
+    deduplicate_tiff_links,
+    delete_grouping,
     get_explicit_unassigns,
+    is_blank_draft_group,
+    is_composed_group,
     load_grouping,
+    merge_adhoc_groups_for_uid,
+    registered_result_paths,
     remove_explicit_unassign,
+    resolved_archive_zip,
+    result_pair_candidates,
+    result_path_key,
     save_grouping,
+    uid_filename_mismatch,
+    without_blank_draft_groups,
 )
 
 
@@ -61,6 +79,217 @@ class TestLoadGrouping:
         db = _db()
         result = load_grouping(db, "SP1")
         assert result is not None
+
+
+class TestDraftGroupFiltering:
+    def test_blank_draft_group_detected(self):
+        assert is_blank_draft_group(Group(group_index=0))
+
+    def test_group_with_media_is_not_blank(self):
+        assert not is_blank_draft_group(Group(group_index=0, jpg_paths=["/x/a.jpg"]))
+
+    def test_group_with_result_state_is_not_blank(self):
+        assert not is_blank_draft_group(Group(group_index=0, status="composed"))
+
+    def test_without_blank_draft_groups_preserves_real_groups(self):
+        real = Group(group_index=1, output_name="custom")
+        assert without_blank_draft_groups([Group(group_index=0), real]) == [real]
+
+
+class TestResultLinkRules:
+    def test_archive_jpg_count_plain_zip(self, tmp_path):
+        zip_path = tmp_path / "photos.zip"
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("a.jpg", b"a")
+            zf.writestr("b.jpeg", b"b")
+            zf.writestr("notes.txt", b"n")
+
+        assert archive_jpg_count(str(zip_path)) == 2
+
+    def test_archive_jpg_count_legacy_manifest_zip(self, tmp_path):
+        zip_path = tmp_path / "legacy.zip"
+        manifest = {"files": [{"archiveName": "a.jxl"}, {"archiveName": "b.jxl"}]}
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("manifest.json", json.dumps(manifest))
+
+        assert archive_jpg_count(str(zip_path)) == 2
+
+    def test_resolved_archive_zip_prefers_explicit_path(self, tmp_path):
+        explicit = tmp_path / "explicit.zip"
+        sibling = tmp_path / "result.zip"
+        tiff = tmp_path / "result.tif"
+        for path in (explicit, sibling, tiff):
+            path.write_bytes(b"x")
+
+        group = Group(
+            group_index=0,
+            composed_tiff_path=str(tiff),
+            archive_zip=str(explicit),
+        )
+
+        assert resolved_archive_zip(group) == str(explicit)
+
+    def test_resolved_archive_zip_falls_back_to_same_stem_zip(self, tmp_path):
+        tiff = tmp_path / "result.tif"
+        zip_path = tmp_path / "result.zip"
+        tiff.write_bytes(b"t")
+        zip_path.write_bytes(b"z")
+
+        assert resolved_archive_zip(Group(group_index=0, composed_tiff_path=str(tiff))) == str(zip_path)
+
+    def test_result_path_key_normalizes_casefolded_resolved_paths(self, tmp_path):
+        path = tmp_path / "A.TIF"
+        path.write_bytes(b"x")
+
+        assert result_path_key(str(path)) == str(path.resolve()).casefold()
+
+    def test_clear_group_tiff_link_preserves_jpg_membership(self):
+        group = Group(
+            group_index=0,
+            jpg_paths=["/x/a.jpg"],
+            composed_tiff_path="/x/result.tif",
+            archive_zip="/x/result.zip",
+            status="organized",
+            source="external-tif",
+            output_name="result",
+            retired_tiff_paths=["/x/old.tif"],
+        )
+
+        clear_group_tiff_link(group)
+
+        assert group.jpg_paths == ["/x/a.jpg"]
+        assert group.composed_tiff_path is None
+        assert group.archive_zip is None
+        assert group.status == "pending"
+        assert group.source is None
+        assert group.output_name is None
+        assert group.retired_tiff_paths == []
+
+    def test_deduplicate_tiff_links_clears_later_duplicates(self, tmp_path):
+        tiff = tmp_path / "same.tif"
+        tiff.write_bytes(b"x")
+        first = Group(group_index=0, composed_tiff_path=str(tiff), status="organized")
+        second = Group(group_index=1, composed_tiff_path=str(tiff), status="organized")
+
+        assert deduplicate_tiff_links([first, second]) is True
+        assert first.composed_tiff_path == str(tiff)
+        assert second.composed_tiff_path is None
+        assert second.status is None
+
+    def test_is_composed_group_uses_paths_or_state(self):
+        assert is_composed_group(Group(group_index=0, composed_tiff_path="/x/a.tif"))
+        assert is_composed_group(Group(group_index=0, archive_zip="/x/a.zip"))
+        assert is_composed_group(Group(group_index=0, status="organized"))
+        assert not is_composed_group(Group(group_index=0, jpg_paths=["/x/a.jpg"]))
+
+    def test_result_pair_candidates_mark_registered_pairs(self, tmp_path):
+        db = _db()
+        results = tmp_path / "results"
+        results.mkdir()
+        used_tif = results / "used.tif"
+        used_zip = results / "used.zip"
+        free_tif = results / "free.tif"
+        free_zip = results / "free.zip"
+        for path in (used_tif, used_zip, free_tif, free_zip):
+            path.write_bytes(path.suffix.encode())
+        save_grouping(db, "USED-UID", [
+            Group(
+                group_index=0,
+                composed_tiff_path=str(used_tif),
+                archive_zip=str(used_zip),
+                status="organized",
+            )
+        ], clean_phantoms=False)
+
+        used = registered_result_paths(db)
+        candidates = result_pair_candidates(results, used)
+
+        by_stem = {c["stem"]: c for c in candidates}
+        assert by_stem["used"]["associated"] is True
+        assert by_stem["used"]["associated_uid"] == "USED-UID"
+        assert by_stem["free"]["associated"] is False
+
+    def test_uid_filename_mismatch_detects_sibling_specimen_code(self):
+        uid = "FJ-XM-BZC003-T95E-20260601"
+
+        assert uid_filename_mismatch(uid, "FJ-XM-BZC002-T95E-20260601.tif")
+        assert not uid_filename_mismatch(uid, "FJ-XM-BZC003-T95E-20260601.tif")
+        assert not uid_filename_mismatch(ADHOC_GROUPING_UID, "FJ-XM-BZC002.tif")
+
+    def test_clear_uid_mismatched_result_links_removes_wrong_tiff_or_zip(self):
+        uid = "FJ-XM-BZC003-T95E-20260601"
+        wrong_tiff = Group(
+            group_index=0,
+            composed_tiff_path="/x/FJ-XM-BZC002-T95E-20260601.tif",
+            archive_zip="/x/FJ-XM-BZC002-T95E-20260601.zip",
+            status="organized",
+        )
+        wrong_zip = Group(
+            group_index=1,
+            composed_tiff_path="/x/FJ-XM-BZC003-T95E-20260601.tif",
+            archive_zip="/x/FJ-XM-BZC002-T95E-20260601.zip",
+            status="organized",
+        )
+
+        assert clear_uid_mismatched_result_links(uid, [wrong_tiff, wrong_zip]) is True
+        assert wrong_tiff.composed_tiff_path is None
+        assert wrong_tiff.archive_zip is None
+        assert wrong_tiff.status is None
+        assert wrong_zip.composed_tiff_path
+        assert wrong_zip.archive_zip is None
+        assert wrong_zip.status == "composed"
+
+    def test_clear_uid_mismatch_preserves_imported_tif_only_group(self):
+        uid = "FJ-XM-BZC003-T95E-20260601"
+        imported = Group(
+            group_index=0,
+            jpg_paths=[],
+            composed_tiff_path="/x/GXFCG-BLW-BZC002-R-20260618.tif",
+            status="organized",
+        )
+
+        assert clear_uid_mismatched_result_links(uid, [imported]) is False
+        assert imported.composed_tiff_path
+        assert imported.status == "organized"
+
+
+class TestMergeAdhocGroupsForUid:
+    def test_empty_uid_returns_empty_plan(self):
+        db = _db()
+        assert merge_adhoc_groups_for_uid(db, "", [Group(group_index=0)]) == []
+
+    def test_blank_adhoc_groups_are_ignored(self):
+        db = _db()
+        assert merge_adhoc_groups_for_uid(db, "SP1", [Group(group_index=0)]) == []
+
+    def test_new_uid_uses_nonblank_groups(self):
+        db = _db()
+        group = Group(group_index=0, output_name="1")
+        merged = merge_adhoc_groups_for_uid(db, "SP1", [Group(group_index=99), group])
+        assert merged == [group]
+
+    def test_existing_uid_appends_after_existing_groups(self):
+        db = _db()
+        existing = Group(group_index=2, angle_label="existing")
+        save_grouping(db, "SP1", [existing], clean_phantoms=False)
+
+        incoming = Group(group_index=0, output_name="new")
+        merged = merge_adhoc_groups_for_uid(db, "SP1", [incoming])
+
+        assert [g.group_index for g in merged] == [2, 3]
+        assert merged[0].angle_label == "existing"
+        assert merged[1] is incoming
+
+    def test_delete_grouping_removes_rows(self):
+        db = _db()
+        save_grouping(
+            db,
+            ADHOC_GROUPING_UID,
+            [Group(group_index=0, output_name="temp")],
+            clean_phantoms=False,
+        )
+        delete_grouping(db, ADHOC_GROUPING_UID)
+        assert load_grouping(db, ADHOC_GROUPING_UID).groups == []
 
 
 # ── save_grouping ─────────────────────────────────────────────────────────────
@@ -106,6 +335,39 @@ class TestSaveGrouping:
         loaded = load_grouping(db, uid)
         assert len(loaded.groups) == 1
         assert loaded.groups[0].angle_label == "第二次"
+
+    def test_save_retries_transient_database_lock(self):
+        """A short-lived SQLite writer lock should not lose a grouping save."""
+        db_path = Path(self.tmpdir) / "project.db"
+        db = sqlite3.connect(str(db_path), timeout=0.05)
+        db.row_factory = sqlite3.Row
+        locker = sqlite3.connect(
+            str(db_path),
+            timeout=0.05,
+            check_same_thread=False,
+        )
+        save_grouping(db, "INIT", [], clean_phantoms=False)
+        locker.execute("BEGIN IMMEDIATE")
+
+        def release_lock() -> None:
+            time.sleep(0.2)
+            locker.commit()
+            locker.close()
+
+        thread = threading.Thread(target=release_lock)
+        thread.start()
+        try:
+            save_grouping(
+                db,
+                "SP_LOCK",
+                [Group(group_index=0, angle_label="角度1")],
+                clean_phantoms=False,
+            )
+        finally:
+            thread.join(timeout=2.0)
+
+        loaded = load_grouping(db, "SP_LOCK")
+        assert [g.angle_label for g in loaded.groups] == ["角度1"]
 
     def test_multiple_groups_persisted(self):
         db = _db()

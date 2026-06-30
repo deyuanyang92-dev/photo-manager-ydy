@@ -35,6 +35,8 @@ LEGACY_INCOMING_METADATA_FILES: frozenset[str] = frozenset({
     ".specimen-log.json",
 })
 
+_PROJECT_LIST_CACHE: dict[str, tuple[tuple, list[dict]]] = {}
+
 
 # ── Low-level helpers ──────────────────────────────────────────────────────────
 
@@ -255,11 +257,40 @@ def list_projects(user_projects_json_path: str) -> list:
     path = Path(user_projects_json_path)
     if not path.exists():
         return []
+    key = str(path.resolve())
+    sig = _file_signature(path)
+    hit = _PROJECT_LIST_CACHE.get(key)
+    if hit and hit[0] == sig:
+        return [dict(p) for p in hit[1]]
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        return data.get("projects", [])
+        projects = data.get("projects", [])
+        if not isinstance(projects, list):
+            projects = []
+        projects = [dict(p) for p in projects if isinstance(p, dict)]
+        _PROJECT_LIST_CACHE[key] = (sig, [dict(p) for p in projects])
+        return projects
     except (json.JSONDecodeError, OSError):
         return []
+
+
+def clear_project_list_cache(path: str | None = None) -> None:
+    if path is None:
+        _PROJECT_LIST_CACHE.clear()
+        return
+    try:
+        key = str(Path(path).resolve())
+    except OSError:
+        key = str(path)
+    _PROJECT_LIST_CACHE.pop(key, None)
+
+
+def _file_signature(path: Path) -> tuple:
+    try:
+        st = path.stat()
+        return (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return (0, 0)
 
 
 def default_user_projects_json_path() -> str:
@@ -317,6 +348,7 @@ def record_recent_workspace(
             json.dumps({"version": 1, "projects": projects}, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        clear_project_list_cache(user_projects_json_path)
     return projects
 
 
@@ -372,6 +404,7 @@ def save_project_descriptor(
         json.dumps({"version": 1, "projects": projects}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    clear_project_list_cache(user_projects_json_path)
     return projects
 
 
@@ -402,23 +435,30 @@ def enter_workspace(
     # Unavailability (drive unmounted / path gone) MUST surface — do not activate
     # a dead path, or the workbench reads a ghost. Other minor errors are
     # tolerated as before.
+    import sqlite3
+    from app.db.db_manager import is_database_locked
     from app.services.project_paths import ProjectUnavailableError
     try:
         open_project(resolved)
     except ProjectUnavailableError:
         raise
+    except sqlite3.Error as exc:
+        if is_database_locked(exc):
+            raise
     except Exception:
         pass
     ctx.current_project_dir = resolved
     ctx.current_project_root = str(Path(root).resolve()) if root else resolved
     if root:
-        from app.services.project_catalog_service import register_workspace
-        register_workspace(
-            str(Path(root).resolve()),
-            resolved,
-            role="workspace",
-            name=_workspace_display_name(resolved, root),
-        )
+        resolved_root = str(Path(root).resolve())
+        if resolved_root != resolved:
+            from app.services.project_catalog_service import register_workspace
+            register_workspace(
+                resolved_root,
+                resolved,
+                role="workspace",
+                name=_workspace_display_name(resolved, root),
+            )
     if projects_json_path:
         try:
             record_recent_workspace(projects_json_path, resolved, root)

@@ -1210,7 +1210,11 @@ class CoordsView(BaseView):
 
         # 仅首次按内容定初始列宽；之后不再重置，保留用户拖拽的列宽（格式/坐标系切换刷新时）。
         if not self._batch_cols_sized:
-            self._batch_table.resizeColumnsToContents()
+            if self._batch_table.rowCount() * max(1, self._batch_table.columnCount()) <= 5000:
+                self._batch_table.resizeColumnsToContents()
+            else:
+                for col, width in enumerate((32, 260, 220, 120)):
+                    self._batch_table.setColumnWidth(col, width)
             self._batch_table.setColumnWidth(0, 32)
             self._batch_cols_sized = True
 

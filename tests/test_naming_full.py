@@ -84,6 +84,17 @@ class TestParseUidUniqueId:
         assert r.get("resultSequence") is None
         assert r["dateSegment"] == "20260601"
 
+    def test_rejects_single_letter_species_shifted_from_storage(self):
+        assert parse_uid("GXHP-SL-YMC002-R-2-20260616") is None
+
+    def test_allows_r_storage_when_species_code_is_complete(self):
+        uid = "GXHP-SL-YMC002-DLC001-R-20260616"
+        r = parse_uid(uid)
+        assert r is not None
+        assert r["station"] == "YMC002"
+        assert r["speciesId"] == "DLC001"
+        assert r["storage"] == "R"
+
 
 # ── parse_uid — v002 legacy (no station) ─────────────────────────────────
 

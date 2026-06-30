@@ -266,7 +266,11 @@ class CoordImportDialog(QDialog):
                 if not rec.get("ok"):
                     item.setForeground(QColor("#b42318"))
                 table.setItem(row, col, item)
-        table.resizeColumnsToContents()
+        if table.rowCount() * max(1, table.columnCount()) <= 5000:
+            table.resizeColumnsToContents()
+        else:
+            for col, width in enumerate((80, 90, 90, 180, 110, 110, 110, 110)):
+                table.setColumnWidth(col, width)
         table.horizontalHeader().setStretchLastSection(True)
         v.addWidget(table, 1)
 

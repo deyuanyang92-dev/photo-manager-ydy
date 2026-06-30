@@ -33,6 +33,7 @@ from typing import Optional
 from PyQt6.QtCore import QEvent, QPoint, Qt, pyqtSignal
 from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import (
+    QApplication,
     QDialog,
     QFrame,
     QHBoxLayout,
@@ -361,37 +362,12 @@ _BASE_THUMB = 280  # base decode size; zoom scales DOWN from this cached pixmap
 def _decode_thumb(path: str, max_size: int = _BASE_THUMB) -> Optional[QPixmap]:
     """Decode *path* to a QPixmap downscaled to ``max_size`` (KeepAspectRatio).
 
-    Returns None for empty / missing / undecodable paths — callers fall back to
-    an icon placeholder.  TIFF that Qt can't read natively goes through a
-    PIL → temp-PNG path (same as the lightbox).  Never raises.
+    Returns None for empty / missing / undecodable paths.  Callers fall back to
+    an icon placeholder; TIFF decoding uses the shared multi-backend helper.
     """
-    if not path:
-        return None
-    try:
-        if not os.path.exists(path):
-            return None
-    except Exception:
-        return None
-    pm = QPixmap(path)
-    if pm.isNull():
-        try:
-            from PIL import Image
-            import tempfile
-            img = Image.open(path)
-            img.thumbnail((max_size, max_size))
-            tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-            img.save(tmp.name)
-            pm = QPixmap(tmp.name)
-            os.unlink(tmp.name)
-        except Exception:
-            return None
-    if pm.isNull():
-        return None
-    return pm.scaled(
-        max_size, max_size,
-        Qt.AspectRatioMode.KeepAspectRatio,
-        Qt.TransformationMode.SmoothTransformation,
-    )
+    from app.utils.image_thumbnail import decode_image_thumbnail
+
+    return decode_image_thumbnail(path, max_size)
 
 
 # ── Individual result cards ────────────────────────────────────────────────────
@@ -405,6 +381,7 @@ class _ResultCardBase(QFrame):
     _ICON_TINT = "#3a6b75"
 
     def __init__(self, info: dict, thumb_provider=None,
+                 select_fn=None, selected: bool = False,
                  thumb_size: int = _DEFAULT_THUMB,
                  parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -412,14 +389,25 @@ class _ResultCardBase(QFrame):
         self._info = info
         self._thumb_size = thumb_size
         self._thumb_provider = thumb_provider
+        self._select_fn = select_fn
+        self._selected = selected
         self._base_pm: Optional[QPixmap] = None
         self._setup_ui()
+        self.set_selected(selected)
 
     def _setup_ui(self) -> None:
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(10, 6, 8, 6)
-        lay.setSpacing(10)
+        lay.setContentsMargins(8, 5, 8, 5)
+        lay.setSpacing(8)
+
+        self._select_badge = QLabel("")
+        self._select_badge.setObjectName("ResultSelectBadge")
+        self._select_badge.setFixedSize(18, 18)
+        self._select_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._select_badge.setToolTip("单击选择/取消选择")
+        lay.addWidget(self._select_badge)
 
         self._icon = QLabel()
         self._icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -429,9 +417,6 @@ class _ResultCardBase(QFrame):
         body = self._build_body()
         lay.addWidget(body, stretch=1)
 
-        from app.config.effects import apply_card_shadow
-        apply_card_shadow(self, blur=10, y=1, alpha=30)
-
         path = self._info.get("path", "")
         if self._thumb_provider and path:
             self._base_pm = self._thumb_provider(path)
@@ -440,6 +425,41 @@ class _ResultCardBase(QFrame):
     def _build_body(self) -> QWidget:  # override
         return QWidget()
 
+    def _registry_line(self, kind: str, paired_path: str = "") -> str:
+        uid = str(self._info.get("owner_uid") or self._info.get("uid") or "")
+        group_index = self._info.get("group_index")
+        registered = bool(self._info.get("registered", bool(uid)))
+        if uid:
+            where = f"已入库: {uid}"
+            if group_index is not None:
+                where += f" / 组 {int(group_index) + 1}"
+        elif registered:
+            where = "已入库"
+        else:
+            where = "未入库"
+        pair_label = "ZIP" if kind == "tiff" else "TIF"
+        pair = f"已配 {pair_label}" if paired_path else f"缺 {pair_label}"
+        return f"{where} · {pair}"
+
+    def _show_registry_info(self, kind: str, paired_path: str = "") -> None:
+        from PyQt6.QtWidgets import QMessageBox
+
+        uid = str(self._info.get("owner_uid") or self._info.get("uid") or "")
+        group_index = self._info.get("group_index")
+        lines = [
+            f"类型: {'TIFF 成果' if kind == 'tiff' else 'ZIP 归档'}",
+            f"文件: {self._info.get('path') or ''}",
+            f"入库: {'是' if self._info.get('registered', bool(uid)) else '否'}",
+            f"关联编号: {uid or '未关联'}",
+        ]
+        if group_index is not None:
+            lines.append(f"分组: {int(group_index) + 1}")
+        if paired_path:
+            lines.append(f"配对文件: {paired_path}")
+        else:
+            lines.append("配对文件: 未找到")
+        QMessageBox.information(self, "入库/关联信息", "\n".join(lines))
+
     def _icon_pixmap(self) -> Optional[QPixmap]:
         """Override to force a glyph (e.g. ZIP).  Default = decoded thumbnail."""
         return self._base_pm
@@ -447,19 +467,23 @@ class _ResultCardBase(QFrame):
     def _apply_icon(self) -> None:
         s = self._thumb_size
         self._icon.setFixedSize(s, s)
-        self._icon.setStyleSheet("border:none; border-radius:6px; background:transparent;")
+        self._icon.setStyleSheet("border:none; background:transparent;")
         pm = self._icon_pixmap()
         if pm is not None and not pm.isNull():
+            self._icon.setProperty("hasThumbnail", True)
             self._icon.setPixmap(pm.scaled(
                 s, s,
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation,
             ))
         else:
+            self._icon.setProperty("hasThumbnail", False)
             g = min(26, max(12, s - 6))
             self._icon.setPixmap(
                 icons.icon(self._FALLBACK_ICON, color=self._ICON_TINT).pixmap(g, g)
             )
+        self._icon.style().unpolish(self._icon)
+        self._icon.style().polish(self._icon)
 
     def _make_menu_btn(self, tip: str, handler) -> QPushButton:
         b = QPushButton()
@@ -469,6 +493,25 @@ class _ResultCardBase(QFrame):
         icons.set_button_icon(b, "mdi6.dots-vertical", size=14)
         b.clicked.connect(lambda: handler(b.mapToGlobal(b.rect().bottomLeft())))
         return b
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            path = self._info.get("path", "")
+            if self._select_fn and path:
+                self._select_fn(path, self)
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def set_selected(self, selected: bool) -> None:
+        self._selected = bool(selected)
+        self.setProperty("resultSelected", "true" if self._selected else "false")
+        self._select_badge.setText("✓" if self._selected else "")
+        self._select_badge.setProperty("selected", "true" if self._selected else "false")
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self._select_badge.style().unpolish(self._select_badge)
+        self._select_badge.style().polish(self._select_badge)
 
     def set_thumb_size(self, size: int) -> None:
         self._thumb_size = size
@@ -481,11 +524,19 @@ class _TiffCard(_ResultCardBase):
     _FALLBACK_ICON = "mdi6.file-image-outline"
 
     def __init__(self, info: dict, open_fn=None, lightbox_fn=None,
+                 link_fn=None, paired_zip: str = "",
+                 naming_check_fn=None, delete_fn=None,
+                 select_fn=None, selected: bool = False,
                  thumb_provider=None, thumb_size: int = _DEFAULT_THUMB,
                  parent: Optional[QWidget] = None) -> None:
         self._open_fn = open_fn
         self._lightbox_fn = lightbox_fn
+        self._link_fn = link_fn
+        self._paired_zip = paired_zip
+        self._naming_check_fn = naming_check_fn
+        self._delete_fn = delete_fn
         super().__init__(info, thumb_provider=thumb_provider,
+                         select_fn=select_fn, selected=selected,
                          thumb_size=thumb_size, parent=parent)
 
     def _build_body(self) -> QWidget:
@@ -512,6 +563,10 @@ class _TiffCard(_ResultCardBase):
         state_chip.setObjectName("ChipComposed")
         state_chip.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         row.addWidget(state_chip)
+        registry_lbl = QLabel(self._registry_line("tiff", self._paired_zip))
+        registry_lbl.setObjectName("MutedSmall")
+        registry_lbl.setToolTip(self._registry_line("tiff", self._paired_zip))
+        row.addWidget(registry_lbl)
         row.addStretch()
         row.addWidget(self._make_menu_btn("成果操作", self._show_menu))
         body_lay.addLayout(row)
@@ -533,9 +588,27 @@ class _TiffCard(_ResultCardBase):
         preview_action = menu.addAction("打开预览")
         preview_action.setEnabled(bool(self._lightbox_fn and path))
         preview_action.triggered.connect(lambda: self._lightbox_fn(Path(path)))
+        check_action = menu.addAction("检查 TIF 命名格式")
+        check_action.setEnabled(bool(self._naming_check_fn and path))
+        check_action.triggered.connect(lambda: self._naming_check_fn(path))
         open_action = menu.addAction("在文件夹中显示")
         open_action.setEnabled(bool(self._open_fn and path))
         open_action.triggered.connect(lambda: self._open_fn(path))
+        copy_action = menu.addAction("复制路径")
+        copy_action.setEnabled(bool(path))
+        copy_action.triggered.connect(lambda: QApplication.clipboard().setText(path))
+        info_action = menu.addAction("查看入库/关联信息")
+        info_action.triggered.connect(
+            lambda: self._show_registry_info("tiff", self._paired_zip)
+        )
+        menu.addSeparator()
+        link_action = menu.addAction("关联到右侧编号")
+        link_action.setEnabled(bool(self._link_fn and path))
+        link_action.triggered.connect(lambda: self._link_fn(path, self._paired_zip))
+        menu.addSeparator()
+        delete_action = menu.addAction("删除 TIF")
+        delete_action.setEnabled(bool(self._delete_fn and path))
+        delete_action.triggered.connect(lambda: self._delete_fn(path))
         menu.exec(global_pos)
 
 
@@ -546,11 +619,16 @@ class _ArchiveCard(_ResultCardBase):
     _ICON_TINT = "#c9981f"  # Windows zip-folder amber
 
     def __init__(self, info: dict, open_fn=None, restore_fn=None,
+                 link_fn=None, paired_tiff: str = "",
+                 select_fn=None, selected: bool = False,
                  thumb_size: int = _DEFAULT_THUMB,
                  parent: Optional[QWidget] = None) -> None:
         self._open_fn = open_fn
         self._restore_fn = restore_fn
+        self._link_fn = link_fn
+        self._paired_tiff = paired_tiff
         super().__init__(info, thumb_provider=None,
+                         select_fn=select_fn, selected=selected,
                          thumb_size=thumb_size, parent=parent)
 
     def _icon_pixmap(self) -> Optional[QPixmap]:
@@ -582,6 +660,10 @@ class _ArchiveCard(_ResultCardBase):
         state_lbl = QLabel(size_str)
         state_lbl.setObjectName("MutedSmall")
         row.addWidget(state_lbl)
+        registry_lbl = QLabel(self._registry_line("zip", self._paired_tiff))
+        registry_lbl.setObjectName("MutedSmall")
+        registry_lbl.setToolTip(self._registry_line("zip", self._paired_tiff))
+        row.addWidget(registry_lbl)
         row.addStretch()
         row.addWidget(self._make_menu_btn("归档操作", self._show_menu))
         body_lay.addLayout(row)
@@ -599,6 +681,14 @@ class _ArchiveCard(_ResultCardBase):
         open_action = menu.addAction("在文件夹中显示")
         open_action.setEnabled(bool(self._open_fn and path))
         open_action.triggered.connect(lambda: self._open_fn(path))
+        info_action = menu.addAction("查看入库/关联信息")
+        info_action.triggered.connect(
+            lambda: self._show_registry_info("zip", self._paired_tiff)
+        )
+        menu.addSeparator()
+        link_action = menu.addAction("关联到右侧编号")
+        link_action.setEnabled(bool(self._link_fn and path))
+        link_action.triggered.connect(lambda: self._link_fn(self._paired_tiff, path))
         menu.exec(global_pos)
 
 
@@ -746,6 +836,9 @@ class ResultsColumn(QWidget):
     specimen_requested = pyqtSignal(str)  # all-results group header → select UID
     show_all_requested = pyqtSignal()
     current_requested = pyqtSignal()
+    link_result_requested = pyqtSignal(str, str)  # tiff_path, zip_path
+    tiff_naming_check_requested = pyqtSignal(str)  # tiff_path
+    tiff_delete_requested = pyqtSignal(str)  # tiff_path
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -759,6 +852,7 @@ class ResultsColumn(QWidget):
         self._current_tiffs: list[dict] = []
         self._current_zips: list[dict] = []
         self._current_groups: list[dict] = []
+        self._selected_result_paths: set[str] = set()
         self._display_mode = "single"
         self._filename_mode = "full"
         self._setup_ui()
@@ -839,6 +933,16 @@ class ResultsColumn(QWidget):
         self._open_folder_btn.clicked.connect(self._open_results_folder)
         hdr.addWidget(self._open_folder_btn)
 
+        self._link_selected_btn = QPushButton("关联选中")
+        self._link_selected_btn.setObjectName("Outline")
+        self._link_selected_btn.setFixedHeight(28)
+        self._link_selected_btn.setEnabled(False)
+        self._link_selected_btn.setToolTip("选中 1 个 TIF 和 1 个 ZIP 后关联到右侧编号")
+        icons.set_button_icon(self._link_selected_btn, "mdi6.link-variant",
+                              color=icons.TONE_ACCENT, size=14)
+        self._link_selected_btn.clicked.connect(self._emit_link_selected_result)
+        hdr.addWidget(self._link_selected_btn)
+
         self._sort_btn = QPushButton("排序方式")
         self._sort_btn.setObjectName("Ghost")
         self._sort_btn.setFixedHeight(28)
@@ -847,13 +951,13 @@ class ResultsColumn(QWidget):
         self._sort_btn.clicked.connect(self._show_sort_menu)
         hdr.addWidget(self._sort_btn)
 
-        self._tile_btn = QPushButton("平铺")
+        self._tile_btn = QPushButton("两列")
         self._tile_btn.setObjectName("Ghost")
         self._tile_btn.setCheckable(True)
         self._tile_btn.setChecked(True)
         self._tile_btn.setFixedHeight(28)
-        self._tile_btn.setToolTip("平铺为左右两列：左 TIFF，右 ZIP")
-        icons.set_button_icon(self._tile_btn, "mdi6.view-grid-outline",
+        self._tile_btn.setToolTip("切换成果显示方式：列表 / 平铺")
+        icons.set_button_icon(self._tile_btn, "mdi6.view-list-outline",
                               color=icons.TONE_MUTED, size=14)
         self._tile_btn.clicked.connect(self._set_tile_view)
         hdr.addWidget(self._tile_btn)
@@ -885,7 +989,7 @@ class ResultsColumn(QWidget):
         self._rows_container = QWidget()
         self._rows_lay = QVBoxLayout(self._rows_container)
         self._rows_lay.setContentsMargins(0, 2, 0, 2)
-        self._rows_lay.setSpacing(10)
+        self._rows_lay.setSpacing(6)
         self._rows_lay.setAlignment(Qt.AlignmentFlag.AlignTop)
         self._body.setWidget(self._rows_container)
         root.addWidget(self._body, stretch=1)
@@ -906,6 +1010,7 @@ class ResultsColumn(QWidget):
 
         self._current_tiffs = list(composed_tiffs or [])
         self._current_zips = list(archive_zips or [])
+        self._prune_selected_result_paths()
         self._remember_results_dir(composed_tiffs, archive_zips)
         composed_tiffs = list(composed_tiffs or [])
         archive_zips = list(archive_zips or [])
@@ -922,6 +1027,12 @@ class ResultsColumn(QWidget):
                     self._display_info(tinfo),
                     open_fn=self._open_in_explorer,
                     lightbox_fn=lambda p, _paths=all_tiff_paths: self._open_tiff_lightbox(p, _paths),
+                    link_fn=self._emit_link_result,
+                    paired_zip=(zinfo or {}).get("path", "") if zinfo else "",
+                    naming_check_fn=self._emit_tiff_naming_check,
+                    delete_fn=self._emit_tiff_delete,
+                    select_fn=self._toggle_result_selection,
+                    selected=self._is_result_selected(tinfo.get("path", "")),
                     thumb_provider=self._thumb_provider,
                     thumb_size=self._thumb_size,
                 )
@@ -930,6 +1041,10 @@ class ResultsColumn(QWidget):
                 zc = _ArchiveCard(
                     self._display_info(zinfo), open_fn=self._open_in_explorer,
                     restore_fn=lambda p: self.restore_requested.emit(p),
+                    link_fn=self._emit_link_result,
+                    paired_tiff=(tinfo or {}).get("path", "") if tinfo else "",
+                    select_fn=self._toggle_result_selection,
+                    selected=self._is_result_selected(zinfo.get("path", "")),
                     thumb_size=self._thumb_size,
                 )
                 self._cards.append(zc)
@@ -961,6 +1076,7 @@ class ResultsColumn(QWidget):
         self._current_zips = [
             item for g in self._current_groups for item in g.get("zips", [])
         ]
+        self._prune_selected_result_paths()
         self._clear_rows()
         self._remember_results_dir(self._current_tiffs, self._current_zips)
 
@@ -987,6 +1103,12 @@ class ResultsColumn(QWidget):
                         self._display_info(tinfo),
                         open_fn=self._open_in_explorer,
                         lightbox_fn=lambda p, _paths=all_tiff_paths: self._open_tiff_lightbox(p, _paths),
+                        link_fn=self._emit_link_result,
+                        paired_zip=(zinfo or {}).get("path", "") if zinfo else "",
+                        naming_check_fn=self._emit_tiff_naming_check,
+                        delete_fn=self._emit_tiff_delete,
+                        select_fn=self._toggle_result_selection,
+                        selected=self._is_result_selected(tinfo.get("path", "")),
                         thumb_provider=self._thumb_provider,
                         thumb_size=self._thumb_size,
                     )
@@ -995,6 +1117,10 @@ class ResultsColumn(QWidget):
                     zc = _ArchiveCard(
                         self._display_info(zinfo), open_fn=self._open_in_explorer,
                         restore_fn=lambda p: self.restore_requested.emit(p),
+                        link_fn=self._emit_link_result,
+                        paired_tiff=(tinfo or {}).get("path", "") if tinfo else "",
+                        select_fn=self._toggle_result_selection,
+                        selected=self._is_result_selected(zinfo.get("path", "")),
                         thumb_size=self._thumb_size,
                     )
                     self._cards.append(zc)
@@ -1012,11 +1138,96 @@ class ResultsColumn(QWidget):
         self._current_tiffs = []
         self._current_zips = []
         self._current_groups = []
+        self._selected_result_paths.clear()
+        self._sync_link_selected_button()
         self._display_mode = "single"
         self._sync_mode_buttons()
         self._title.setText("成果")
         self._results_dir = ""
         self._show_empty()
+
+    def _emit_link_result(self, tiff_path: str, zip_path: str) -> None:
+        self.link_result_requested.emit(tiff_path or "", zip_path or "")
+
+    def _emit_tiff_naming_check(self, tiff_path: str) -> None:
+        self.tiff_naming_check_requested.emit(tiff_path or "")
+
+    def _emit_tiff_delete(self, tiff_path: str) -> None:
+        self.tiff_delete_requested.emit(tiff_path or "")
+
+    def selected_result_paths(self) -> list[str]:
+        return sorted(self._selected_result_paths)
+
+    def _result_key(self, path: str) -> str:
+        if not path:
+            return ""
+        try:
+            return str(Path(path).resolve())
+        except OSError:
+            return str(path)
+
+    def _is_result_selected(self, path: str) -> bool:
+        key = self._result_key(path)
+        return bool(key and key in self._selected_result_paths)
+
+    def _toggle_result_selection(self, path: str, card=None) -> None:
+        key = self._result_key(path)
+        if not key:
+            return
+        if key in self._selected_result_paths:
+            self._selected_result_paths.remove(key)
+            selected = False
+        else:
+            self._selected_result_paths.add(key)
+            selected = True
+        if card is not None and hasattr(card, "set_selected"):
+            card.set_selected(selected)
+        self._sync_link_selected_button()
+
+    def _prune_selected_result_paths(self) -> None:
+        valid = {
+            self._result_key(info.get("path", ""))
+            for info in self._current_tiffs + self._current_zips
+            if info.get("path")
+        }
+        self._selected_result_paths &= valid
+        self._sync_link_selected_button()
+
+    def _selected_result_pair(self) -> tuple[str, str]:
+        tiffs = [
+            p for p in self._selected_result_paths
+            if Path(p).suffix.lower() in {".tif", ".tiff"}
+        ]
+        zips = [
+            p for p in self._selected_result_paths
+            if Path(p).suffix.lower() == ".zip"
+        ]
+        if len(tiffs) == 1 and len(zips) == 1:
+            return tiffs[0], zips[0]
+        if len(tiffs) == 1 and not zips:
+            sibling = Path(tiffs[0]).with_suffix(".zip")
+            if sibling.is_file():
+                return tiffs[0], str(sibling.resolve())
+        if len(zips) == 1 and not tiffs:
+            for suffix in (".tif", ".tiff"):
+                sibling = Path(zips[0]).with_suffix(suffix)
+                if sibling.is_file():
+                    return str(sibling.resolve()), zips[0]
+        return "", ""
+
+    def _sync_link_selected_button(self) -> None:
+        if not hasattr(self, "_link_selected_btn"):
+            return
+        tiff, zipf = self._selected_result_pair()
+        ok = bool(tiff and zipf and len(self._selected_result_paths) in {1, 2})
+        self._link_selected_btn.setEnabled(ok)
+        count = len(self._selected_result_paths)
+        self._link_selected_btn.setText(f"关联选中 {count}" if count else "关联选中")
+
+    def _emit_link_selected_result(self) -> None:
+        tiff, zipf = self._selected_result_pair()
+        if tiff and zipf and len(self._selected_result_paths) in {1, 2}:
+            self._emit_link_result(tiff, zipf)
 
     # ── Internals ───────────────────────────────────────────────────────────────
 
@@ -1149,7 +1360,9 @@ class ResultsColumn(QWidget):
 
     def _set_tile_view(self, checked: bool) -> None:
         self._tile_view = bool(checked)
-        self._tile_btn.setText("平铺" if self._tile_view else "列表")
+        self._tile_btn.setText("两列" if self._tile_view else "列表")
+        icon_name = "mdi6.view-grid-outline" if self._tile_view else "mdi6.view-list-outline"
+        icons.set_button_icon(self._tile_btn, icon_name, color=icons.TONE_MUTED, size=14)
         if self._display_mode == "many":
             self.load_many(self._current_groups)
         else:

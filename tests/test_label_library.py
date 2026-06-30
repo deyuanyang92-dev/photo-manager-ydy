@@ -7,7 +7,7 @@ Covers spec checklist items:
   - 导入JSON saved as named record
   - per桶尺寸记忆 (QSettings size key)
   - labelEdits逐字段覆盖 → propagated into print job items
-  - 打印样品瓶/打印RNAlater两按钮 disabled when count=0
+  - 瓶签/RNA签两按钮 disabled when count=0
   - 状态栏计数 (_update_status_bar)
 """
 
@@ -480,8 +480,8 @@ class TestLabelsViewFull:
         # 2 specimens, 1 R-prefix → samples 2, RNAlater 1, total (2+1)*1 = 3.
         view = self._loaded(qt_app, [_sp(), _rna_sp()])
         txt = view._step4._summary.text()
-        assert "样品瓶 2" in txt
-        assert "RNAlater 组织管 1" in txt
+        assert "瓶签 2" in txt
+        assert "RNA签 1" in txt
         assert "总 3" in txt
 
     def test_no_selection_allows_blank_sample_print(self, qt_app):

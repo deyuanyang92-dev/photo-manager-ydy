@@ -14,6 +14,9 @@ Model workflow: Opus writes a structured spec in `docs/specs/` → Sonnet implem
 an independent Opus does acceptance. Specs are the implementer's *only* input — if a spec is
 self-contradictory or impossible, **stop and report; do not redesign unilaterally**.
 
+Before changing core workflow behavior, read `docs/PROJECT_MEMORY.md`. It records user-repeated
+requirements that must not be rediscovered through chat.
+
 ## Commands
 
 ```bash
@@ -217,13 +220,19 @@ gates stay in `archive_service.py`. `supp_compression_worker.py` runs it off the
    `archive.js:28-61`): cjxl available + ZIP exists (>32 B) + `verify_manifest_complete` +
    `verify_jxl_recoverable` (djxl actually re-decodes each JXL). **Default delete_jpg=False.**
    If djxl is missing, check (d) fails → JPGs are NOT deleted.
-3. **Import is strictly read-only** (`app/services/import_service.py`): source `data/*.json` is
+3. **Selected-JPG compose/organise does not require active UID.** If the monitor has selected JPGs,
+   `合成` and `合成+整理` must process that explicit selection without showing "请先激活编号".
+   Active UID exists → auto-name under the active UID. No active UID → prompt for target UID or
+   free output stem; target UID assigns/moves JPGs and auto-names, free stem names both TIF and
+   ZIP. Existing JPG attribution is only a hint/default when no UID is active. Full rule:
+   `docs/specs/photo-grouping-workflow.md`.
+4. **Import is strictly read-only** (`app/services/import_service.py`): source `data/*.json` is
    sha256-snapshotted before and re-verified after; any change raises `IntegrityError`. Corrupt
    JSON aborts with no partial writes. Per-row `INSERT OR REPLACE` (idempotent), not
    "skip if table non-empty".
-4. **cjxl flags are exactly `--distance 0 -e <effort>`** (lossless bit-exact). Never
+5. **cjxl flags are exactly `--distance 0 -e <effort>`** (lossless bit-exact). Never
    `--quality`/`--modular`/`-j` (oracle `compress.js:32-39`).
-5. Path safety = stateful `SafePathRegistry`, `..` checked via `relative_to` (oracle
+6. Path safety = stateful `SafePathRegistry`, `..` checked via `relative_to` (oracle
    `server.js:83-102`).
 
 ## Domain gotchas (from real data — getting these wrong has burned prior ports)

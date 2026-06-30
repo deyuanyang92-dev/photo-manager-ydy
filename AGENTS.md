@@ -47,3 +47,11 @@ PRs should explain the user-visible change, list verification commands, link rel
 ## Data Safety & Configuration
 
 Never auto-delete TIFF originals. JPG deletion must only occur after archive integrity checks pass. Avoid committing large generated build outputs unless intentionally updating a release package.
+
+## Workbench Selected-JPG Rule
+
+Read `docs/PROJECT_MEMORY.md` before changing core workflow behavior. It records user-repeated requirements that must not be rediscovered through chat.
+
+Selected JPG compose/organise is a manual workflow and must not require an active specimen number. If an active UID exists, compose selected JPGs under that active UID and auto-name the next result sequence. If no active UID exists, prompt for either a target UID or a free output stem; target UID assigns/moves them and auto-names, free stem names both TIF and ZIP. Existing JPG attribution is only a hint when no UID is active.
+
+The detailed business rule is in `docs/specs/photo-grouping-workflow.md`. Do not reintroduce "请先激活编号" for selected-JPG `合成` or `合成+整理`.

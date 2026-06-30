@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -141,6 +142,7 @@ DEFAULT_PRINT_SETTINGS: dict[str, Any] = {
 _APP_SETTINGS_ORG = "SpecimenPhotoWorkbench"
 _APP_SETTINGS_APP = "标本照片工作台"
 _GLOBAL_PRINT_DEFAULTS_KEY = "print/default_settings"
+_SQLITE_LOCK_RETRY_DELAYS = (0.08, 0.16, 0.32, 0.64, 1.0)
 
 # Built-in preservation methods — constants, never stored in DB (mirrors app.js:549)
 BUILTIN_STORAGES: list[dict[str, Any]] = [
@@ -245,13 +247,38 @@ def merge_print_settings(base: dict[str, Any], override: dict[str, Any]) -> dict
     return result
 
 
+def _is_sqlite_lock_error(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return isinstance(exc, sqlite3.OperationalError) and (
+        "database is locked" in msg
+        or "database table is locked" in msg
+        or "database is busy" in msg
+    )
+
+
+def _rollback_quietly(db: sqlite3.Connection) -> None:
+    try:
+        db.rollback()
+    except Exception:
+        pass
+
+
 def save_setting(db: sqlite3.Connection, key: str, data: dict) -> None:
     """Upsert *data* for *key*."""
-    db.execute(
-        "INSERT OR REPLACE INTO project_settings(setting_key, value_json) VALUES (?,?)",
-        (key, json.dumps(data, ensure_ascii=False)),
-    )
-    db.commit()
+    payload = json.dumps(data, ensure_ascii=False)
+    for delay in (*_SQLITE_LOCK_RETRY_DELAYS, None):
+        try:
+            db.execute(
+                "INSERT OR REPLACE INTO project_settings(setting_key, value_json) VALUES (?,?)",
+                (key, payload),
+            )
+            db.commit()
+            return
+        except sqlite3.OperationalError as exc:
+            if delay is None or not _is_sqlite_lock_error(exc):
+                raise
+            _rollback_quietly(db)
+            time.sleep(delay)
 
 
 # ── Inheritance along the folder tree ──────────────────────────────────────────

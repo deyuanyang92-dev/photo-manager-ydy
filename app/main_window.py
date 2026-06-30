@@ -65,6 +65,7 @@ if TYPE_CHECKING:
     from app.app_context import AppContext
 
 _K_SCREENSHOT_TOOL_ENABLED = "ui/screenshot_tool_enabled"
+_K_SCREENSHOT_DEFAULT_MIGRATED = "ui/screenshot_tool_default_migrated"
 
 
 class _UpdateWorker(QObject):
@@ -130,6 +131,7 @@ class MainWindow(QMainWindow):
         # is pushed off-screen and the topbar reads as crowded.
         self.setMinimumSize(940, 600)
 
+        self._migrate_screenshot_tool_default()
         self._build_shell()
         self._build_status_bar()
         self._wire_collab_status_bar()
@@ -856,9 +858,18 @@ class MainWindow(QMainWindow):
         seq = self.ctx.settings._qs.value("shortcuts/screenshot_region", "", type=str) or ""
         return seq or "Alt+A"
 
+    def _migrate_screenshot_tool_default(self) -> None:
+        """Restore screenshot visibility once for configs saved by older builds."""
+        qs = self.ctx.settings._qs
+        migrated = qs.value(_K_SCREENSHOT_DEFAULT_MIGRATED, "", type=str)
+        if str(migrated).lower() == "true":
+            return
+        qs.setValue(_K_SCREENSHOT_DEFAULT_MIGRATED, "true")
+        qs.setValue(_K_SCREENSHOT_TOOL_ENABLED, "true")
+
     def screenshot_tool_enabled(self) -> bool:
-        """Whether the screenshot menu and hotkey are enabled. Default: off."""
-        raw = self.ctx.settings._qs.value(_K_SCREENSHOT_TOOL_ENABLED, "false")
+        """Whether the screenshot menu and hotkey are enabled. Default: on."""
+        raw = self.ctx.settings._qs.value(_K_SCREENSHOT_TOOL_ENABLED, "true")
         return str(raw).lower() == "true"
 
     def set_screenshot_tool_enabled(self, enabled: bool) -> None:

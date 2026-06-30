@@ -1,7 +1,7 @@
 """test_archive_service.py — TDD tests for archive_service.
 
 Tests the full archive pipeline:
-  - plain JPG ZIP generation
+  - high-compression JXL bridge or plain JPG ZIP fallback generation
   - ZIP creation + testzip
   - SHA-256 pre-delete safety checks
   - TIFF never deleted
@@ -206,16 +206,20 @@ class TestArchiveGroup:
         assert result.ok
         assert os.path.isfile(result.zip_path)
 
-    def test_zip_contains_only_user_facing_jpgs(self):
-        """Manual ZIP extraction must show JPGs directly, not internal files."""
+    def test_zip_uses_internal_jxl_when_tools_available(self):
+        """Default archive is high-compression internal JXL when cjxl/djxl exist."""
         jpg = _make_jpg(self.tmpdir, "img_manifest.jpg")
         tiff = _make_tiff(self.tmpdir, "result_manifest.tif")
         result = archive_group([jpg], tiff, self.tmpdir, delete_jpg=False)
         with zipfile.ZipFile(result.zip_path, "r") as zf:
             names = zf.namelist()
-        assert names == ["img_manifest.jpg"]
-        assert "manifest.json" not in names
-        assert not any(name.lower().endswith(".jxl") for name in names)
+        if has_cjxl() and has_djxl():
+            assert "manifest.json" in names
+            assert "img_manifest.jxl" in names
+            assert result.manifest["format"] == "jxl-zip"
+        else:
+            assert names == ["img_manifest.jpg"]
+            assert result.manifest["format"] == "jpg-zip"
 
     def test_manifest_contains_correct_fields(self):
         """In-memory manifest remains available for UI/status, but is not zipped."""
@@ -223,20 +227,37 @@ class TestArchiveGroup:
         tiff = _make_tiff(self.tmpdir, "result_mfield.tif")
         result = archive_group([jpg], tiff, self.tmpdir, delete_jpg=False)
         manifest = result.manifest
-        assert manifest["version"] == 2
-        assert manifest["format"] == "jpg-zip"
+        assert manifest["format"] in {"jpg-zip", "jxl-zip"}
         assert isinstance(manifest["files"], list)
         assert len(manifest["files"]) == 1
         assert manifest["files"][0]["originalName"] == "img_mfield.jpg"
-        assert manifest["files"][0]["archiveName"] == "img_mfield.jpg"
+        assert manifest["files"][0]["archiveName"] in {"img_mfield.jpg", "img_mfield.jxl"}
 
-    def test_djxl_unavailable_does_not_block_plain_jpg_zip_deletion(self):
-        """Plain JPG ZIP verification does not depend on djxl."""
+    def test_tool_unavailable_falls_back_to_plain_jpg_zip_deletion(self):
+        """Without JXL tools, fallback plain JPG ZIP still verifies and deletes."""
         jpg = _make_jpg(self.tmpdir, "img_safe.jpg")
         tiff = _make_tiff(self.tmpdir, "result_safe.tif")
-        with patch("app.services.archive_service.has_djxl", return_value=False):
-            result = archive_group([jpg], tiff, self.tmpdir, delete_jpg=True)
+        with patch("app.services.archive_service.has_cjxl", return_value=False):
+            with patch("app.services.archive_service.has_djxl", return_value=False):
+                result = archive_group([jpg], tiff, self.tmpdir, delete_jpg=True)
         assert result.ok
+        assert result.manifest["format"] == "jpg-zip"
+        assert result.delete_jpg is True
+        assert not os.path.isfile(jpg)
+
+    def test_jxl_verify_failure_falls_back_to_plain_jpg_zip(self):
+        """Broken JXL bridge is not accepted; exact plain JPG ZIP fallback is used."""
+        jpg = _make_jpg(self.tmpdir, "img_safe.jpg")
+        tiff = _make_tiff(self.tmpdir, "result_safe.tif")
+        with patch("app.services.archive_service.has_cjxl", return_value=True):
+            with patch("app.services.archive_service.has_djxl", return_value=True):
+                with patch(
+                    "app.services.archive_service._verify_jxl_zip_complete",
+                    return_value=CheckResult(ok=False, reason="模拟 JXL 校验失败"),
+                ):
+                    result = archive_group([jpg], tiff, self.tmpdir, delete_jpg=True)
+        assert result.ok
+        assert result.manifest["format"] == "jpg-zip"
         assert result.delete_jpg is True
         assert not os.path.isfile(jpg)
 
@@ -281,13 +302,10 @@ class TestArchiveGroup:
             assert bad is None, f"ZIP corruption detected: {bad}"
 
 
-# ── Red-line #4 contract: cjxl flags are EXACTLY --distance 0 -e <effort> ──────
+# ── Red-line #4 contract: cjxl flags preserve JPEG bitstream exactly ──────────
 
 class TestCjxlFlagsContract:
-    """Lossless bit-exact requires `--distance 0 -e <effort>` and nothing else.
-
-    Forbidden: --quality / --modular / -j (oracle compress.js:32-39).
-    """
+    """Bit-exact JPEG roundtrip requires `--lossless_jpeg=1 -e <effort>`."""
 
     def test_cjxl_flags_exact(self):
         captured = {}
@@ -301,11 +319,11 @@ class TestCjxlFlagsContract:
                 compress_to_jxl("/in.jpg", "/out.jxl", effort=7)
 
         cmd = captured["cmd"]
-        assert cmd == ["cjxl", "/in.jpg", "/out.jxl", "--distance", "0", "-e", "7"]
+        assert cmd == ["cjxl", "/in.jpg", "/out.jxl", "--lossless_jpeg=1", "-e", "7"]
         joined = " ".join(cmd)
         assert "--quality" not in joined
         assert "--modular" not in joined
-        assert "-j" not in cmd  # the lossless-jpeg flag must never appear
+        assert "--distance" not in joined
 
 
 # ── restore_archive — one-click recover original JPGs from a ZIP ───────────────

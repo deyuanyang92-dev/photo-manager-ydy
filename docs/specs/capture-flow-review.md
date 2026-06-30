@@ -115,16 +115,13 @@
 - `app/views/workbench_view.py`：`_on_assign_jpg`(解除黑名单)。
 - `tests/test_monitor_panel.py`：`TestContextMenuUnassign` 新增 4 例。
 
-## 场景6/7：分组 + 合成后自动整理 ✔（部分）
+## 场景6/7：分组 + 自动归档 ✔（部分）
 
 ### 裁决
 - ✅ 手动分组（建组/加照片/改角度标签/删组/合成）可用。
 - ⚠️ **`groupingAutoWatch` 死设置**：设置页有「JPG 入库后自动分组处理」勾+模式，但全软件
-  无人读 → 开=没开（oracle `app.js:3702,6175` 会自动加组+按模式处理）。**未动**（用户把
-  "自动"重新定义为下方「合成后自动整理」）；保留为待办（要么按 oracle 接，要么删）。
-- ➕ **合成后自动整理归档（新开关，默认关）**：用户需求——合成永远手动（软件无法判断哪些
-  JPG 该合成）；开关开时，手动合成出 TIFF 后**自动**把源 JPG 打包压缩(JXL+ZIP)+命名+移
-  results（= 自动跑 `_on_organise_requested`）。**绝不自动删 TIFF**。
+  无人读 → 开=没开（oracle `app.js:3702,6175` 会自动加组+按模式处理）。**未动**；当前自动入口统一收敛到 `自动归档`。
+- ➕ **自动归档（默认关）**：用户需求——有激活编号时，未手选 JPG 也可以点击合成，软件自动取该编号未占用 JPG；合成出 TIFF 后自动把源 JPG 打包压缩(JXL+ZIP)+命名+移 results（= 自动跑 `_on_organise_requested`）。**绝不自动删 TIFF**。
   - `settings.py` `auto_organize_after_compose` 属性 + `settings_view` 复选框。
   - `workbench_view._maybe_auto_organize`，合成成功后调用。
   - 测试 `TestAutoOrganizeAfterCompose`（开/关 2 例）。

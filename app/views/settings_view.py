@@ -53,6 +53,7 @@ from PyQt6.QtWidgets import (
 
 from app.config.i18n import tr
 from app.config.version import APP_VERSION
+from app.utils import diagnostics
 from app.views.base_view import BaseView
 
 if TYPE_CHECKING:
@@ -102,7 +103,7 @@ _K_UI_ICON_GPS = "ui/icon_gps"             # default "📡"
 _K_UI_ICON_MAP = "ui/icon_map"             # default "📍"
 _K_UI_ICON_FOLDER = "ui/icon_folder"       # default "📁"
 _K_UI_ICON_SEARCH = "ui/icon_search"       # default "🔍"
-_K_SCREENSHOT_TOOL_ENABLED = "ui/screenshot_tool_enabled"  # default false
+_K_SCREENSHOT_TOOL_ENABLED = "ui/screenshot_tool_enabled"  # default true
 _K_DEBUG_USE_REAL_COMPRESSION = "debug/use_real_compression"  # default False
 
 _THEME_CHOICES = ("classic_light", "lab_light", "graphite_focus")
@@ -625,33 +626,41 @@ class SettingsView(BaseView):
         self._tabs.addTab(tab, tr("Helicon"))
 
     def _build_tab_archive(self) -> None:
-        """归档 tab — plain JPG ZIP + delete-JPG verification."""
+        """归档 tab — verified JPG archive + delete-JPG verification."""
         tab = _ScrollTab()
         form = QFormLayout()
         form.setHorizontalSpacing(16)
         form.setVerticalSpacing(10)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
-        # Compatibility settings; kept so existing QSettings/tests keep working.
+        format_hint = QLabel(
+            "自动高压缩归档：可用时内部用 JPEG XL 中转压缩；软件浏览/恢复时自动还原为原始 JPG。"
+        )
+        format_hint.setObjectName("Muted")
+        format_hint.setWordWrap(True)
+        form.addRow("归档格式", format_hint)
+
+        # Compatibility settings; kept for existing QSettings/tests, but hidden
+        # from the product UI because archive mode is automatic.
         self._jxl_effort_combo = QComboBox()
         self._jxl_effort_combo.addItems([
-            "普通 ZIP — 直接解压得到 JPG",
-            "普通 ZIP — 兼容旧设置",
+            "自动 — 高压缩中转",
+            "自动 — 兼容旧设置",
         ])
         self._jxl_effort_combo.setToolTip(
-            "归档 ZIP 内直接保存 JPG；普通解压工具打开后不会看到 JXL 或 manifest.json"
+            "归档模式自动选择：优先高压缩中转，失败时退回普通 JPG ZIP"
         )
         self._jxl_effort_combo.currentIndexChanged.connect(self._save_archive)
-        form.addRow("归档格式", self._jxl_effort_combo)
+        self._jxl_effort_combo.hide()
 
         self._jxl_concurrency_spin = QSpinBox()
         self._jxl_concurrency_spin.setRange(1, 8)
         self._jxl_concurrency_spin.setValue(4)
         self._jxl_concurrency_spin.setToolTip(
-            "兼容旧设置；当前普通 ZIP 归档不需要 JPEG XL 并行压缩"
+            "兼容旧设置；当前归档由后台自动选择安全路径"
         )
         self._jxl_concurrency_spin.valueChanged.connect(self._save_archive)
-        form.addRow("并行任务数", self._jxl_concurrency_spin)
+        self._jxl_concurrency_spin.hide()
 
         tab.body.addLayout(form)
         tab.body.addSpacing(16)
@@ -789,15 +798,16 @@ class SettingsView(BaseView):
         self._auto_activate_new_chk.stateChanged.connect(self._save_workbench)
         watch_v.addWidget(self._auto_activate_new_chk)
 
-        # （已移除「JPG 入库后自动分组处理」死开关：重设计后合成永远手动，自动只保留
-        #   下面的「合成后自动整理归档」。）
+        # （已移除「JPG 入库后自动分组处理」死开关：自动归档只在已有激活编号时
+        #   自动取该编号未占用 JPG；没有激活编号时不猜。）
 
-        # 合成后自动整理归档：手动合成出 TIFF 后，自动把源 JPG 打包归档+命名+移
-        # results。合成本身仍手动（软件无法判断哪些 JPG 该合成）。默认关。
-        self._auto_organize_chk = QCheckBox("合成后自动整理归档（源 JPG 打包 ZIP→命名→移 results）")
+        # 自动归档：有激活编号时可不手选 JPG 直接合成；合成成功后自动把源 JPG
+        # 打包成 ZIP+命名+移 results。默认关。
+        self._auto_organize_chk = QCheckBox("自动归档（激活编号可自动取 JPG）")
         self._auto_organize_chk.setChecked(False)
         self._auto_organize_chk.setToolTip(
-            "打开后：你手动合成出 TIFF，软件自动整理归档（不自动删 TIFF）。"
+            "打开后：有激活编号时，点击合成可自动取该编号未占用 JPG；合成后自动打包 "
+            "ZIP 并移入 results；不自动删 TIFF。"
         )
         self._auto_organize_chk.stateChanged.connect(self._save_workbench)
         watch_v.addWidget(self._auto_organize_chk)
@@ -1123,7 +1133,7 @@ class SettingsView(BaseView):
 
         self._screenshot_tool_chk = QCheckBox(tr("启用截图工具"))
         self._screenshot_tool_chk.setToolTip(
-            tr("开启后在 工具箱 > 工具 > 截图 显示入口，并启用区域截图快捷键。")
+            tr("在 工具箱 > 工具 > 截图 显示入口，并启用区域截图快捷键。")
         )
         self._screenshot_tool_chk.stateChanged.connect(
             self._on_screenshot_tool_enabled_changed
@@ -1131,7 +1141,7 @@ class SettingsView(BaseView):
         screenshot_form.addRow(tr("截图入口"), self._screenshot_tool_chk)
 
         screenshot_note = QLabel(
-            tr("默认关闭。需要截图时，在这里开启；关闭后菜单入口隐藏，Alt+A 不再触发截图。")
+            tr("默认开启。关闭后菜单入口隐藏，Alt+A 不再触发截图。")
         )
         screenshot_note.setObjectName("MutedSmall")
         screenshot_note.setWordWrap(True)
@@ -1237,13 +1247,30 @@ class SettingsView(BaseView):
         platform_label.setObjectName("Muted")
         form.addRow("运行环境", platform_label)
 
-        # Log directory (QSettings INI file path)
+        # QSettings INI file path.
         from PyQt6.QtCore import QSettings
         qs = QSettings("SpecimenPhotoWorkbench", "标本照片工作台")
-        log_path_label = QLabel(qs.fileName())
+        settings_path_label = QLabel(qs.fileName())
+        settings_path_label.setObjectName("Mono")
+        settings_path_label.setWordWrap(True)
+        form.addRow("配置文件路径", settings_path_label)
+
+        log_file = diagnostics.setup_logging()
+        log_path_label = QLabel(str(log_file))
         log_path_label.setObjectName("Mono")
         log_path_label.setWordWrap(True)
-        form.addRow("配置文件路径", log_path_label)
+        copy_log_btn = QPushButton("复制路径")
+        copy_log_btn.setObjectName("Secondary")
+        copy_log_btn.clicked.connect(
+            lambda _checked=False, path=str(log_file): QApplication.clipboard().setText(path)
+        )
+        log_row = QWidget()
+        log_layout = QHBoxLayout(log_row)
+        log_layout.setContentsMargins(0, 0, 0, 0)
+        log_layout.setSpacing(8)
+        log_layout.addWidget(log_path_label, 1)
+        log_layout.addWidget(copy_log_btn, 0)
+        form.addRow("日志文件路径", log_row)
 
         tab.body.addLayout(form)
 
@@ -1390,7 +1417,7 @@ class SettingsView(BaseView):
         self._icon_folder_edit.setText(qs.value(_K_UI_ICON_FOLDER, ""))
         self._icon_search_edit.setText(qs.value(_K_UI_ICON_SEARCH, ""))
 
-        raw_screenshot_tool = qs.value(_K_SCREENSHOT_TOOL_ENABLED, "false")
+        raw_screenshot_tool = qs.value(_K_SCREENSHOT_TOOL_ENABLED, "true")
         screenshot_tool_enabled = str(raw_screenshot_tool).lower() == "true"
         self._screenshot_tool_chk.blockSignals(True)
         self._screenshot_tool_chk.setChecked(screenshot_tool_enabled)

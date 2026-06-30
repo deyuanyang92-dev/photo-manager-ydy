@@ -88,3 +88,16 @@ class TestGetDbFailure:
 
         assert ctx.get_db("/readonly/project") is None
         assert ctx.current_project_dir == "/active/project"
+
+    def test_database_locked_keeps_current_project(self, ctx: AppContext, monkeypatch) -> None:
+        ctx.current_project_dir = "/busy/project"
+
+        def fail_open(_path: str):
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr("app.app_context.open_project_db", fail_open)
+
+        assert ctx.get_db() is None
+        assert ctx.current_project_dir == "/busy/project"
+        assert AppSettings().last_project_dir == "/busy/project"
+        assert isinstance(ctx.last_db_error, sqlite3.OperationalError)

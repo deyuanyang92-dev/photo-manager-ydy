@@ -67,6 +67,28 @@ def _add_complete_specimen(db, uid, name="Marphysa sp.", storage="D95E"):
     db.commit()
 
 
+def _add_complete_specimen_with_dates(
+    db,
+    uid,
+    *,
+    collection_date="20260618",
+    photo_date="20260618",
+    name="Marphysa sp.",
+    storage="D95E",
+):
+    db.execute(
+        """
+        INSERT INTO specimens (
+            uid, scientific_name, storage,
+            collection_date, photo_date, owner_project_dir
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (uid, name, storage, collection_date, photo_date, _PROJ),
+    )
+    db.commit()
+
+
 def _add_specimen_with_fields(db, *, uid, species_id, storage):
     db.execute(
         """
@@ -414,6 +436,90 @@ def test_rna_badge_and_missing_species_are_visible_on_row(ctx, db):
     assert rna_badges and "已取 RNA" in rna_badges[0].text()
     assert "RT95E" in rna_badges[0].text()
     assert missing and missing[0].text() == "未填写物种信息"
+
+
+def test_clicking_rna_badge_filters_to_rna_specimens(ctx, db, qtbot):
+    _add_specimen(db, "RNA-CLICK", storage="RT95E")
+    _add_specimen(db, "NONRNA-CLICK", storage="D95E")
+    sb = SpecimenSidebar(ctx)
+    qtbot.addWidget(sb)
+    sb.refresh()
+
+    badge = None
+    for i in range(sb._list.count()):
+        row = sb._list.itemWidget(sb._list.item(i))
+        badges = [
+            w for w in row.findChildren(QLabel)
+            if w.objectName() == "SpecimenRnaBadge"
+        ]
+        if badges:
+            badge = badges[0]
+            break
+    assert badge is not None
+
+    qtbot.mouseClick(badge, Qt.MouseButton.LeftButton)
+
+    assert sb._filter_mode == "rna"
+    assert sb._filter_rna_btn.isChecked() is True
+    assert sb._list.count() == 1
+    assert sb._list.item(0).data(Qt.ItemDataRole.UserRole) == "RNA-CLICK"
+
+
+def test_search_matches_collection_and_photo_dates(ctx, db):
+    _add_complete_specimen_with_dates(
+        db,
+        "DATE-HIT",
+        collection_date="20260618",
+        photo_date="20260619",
+    )
+    _add_complete_specimen_with_dates(
+        db,
+        "DATE-MISS",
+        collection_date="20260701",
+        photo_date="20260702",
+    )
+    sb = SpecimenSidebar(ctx)
+    sb.refresh()
+
+    sb._search.setText("20260619")
+
+    assert sb._list.count() == 1
+    assert sb._list.item(0).data(Qt.ItemDataRole.UserRole) == "DATE-HIT"
+    assert sb._filter_all_btn.text() == "全部 1/2"
+
+
+def test_sort_by_collection_date_newest_first(ctx, db):
+    _add_complete_specimen_with_dates(
+        db,
+        "OLDER",
+        collection_date="20260618",
+    )
+    _add_complete_specimen_with_dates(
+        db,
+        "NEWER",
+        collection_date="20260621",
+    )
+    sb = SpecimenSidebar(ctx)
+    sb.refresh()
+
+    sb._set_sort("collection_date", True, "采集日期 新→旧")
+
+    assert [
+        sb._list.item(i).data(Qt.ItemDataRole.UserRole)
+        for i in range(sb._list.count())
+    ] == ["NEWER", "OLDER"]
+    assert sb._sort_btn.text() == "采集日期"
+
+
+def test_sort_by_rna_priority_keeps_rna_specimens_first(ctx, db):
+    _add_specimen(db, "DNA-FIRST-ALPHABETICALLY", storage="D95E")
+    _add_specimen(db, "RNA-SECOND-ALPHABETICALLY", storage="RT95E")
+    sb = SpecimenSidebar(ctx)
+    sb.refresh()
+
+    sb._set_sort("rna", True, "RNA 优先")
+
+    assert sb._list.item(0).data(Qt.ItemDataRole.UserRole) == "RNA-SECOND-ALPHABETICALLY"
 
 
 def test_refresh_repairs_malformed_uid_from_naming_fields(ctx, db):

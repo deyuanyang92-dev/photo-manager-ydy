@@ -9,7 +9,9 @@ UI can show it and let the user enter any node as a workspace.
 
 from __future__ import annotations
 
+import copy
 import os
+import time
 from pathlib import Path
 
 # 这些子目录是工作区内部结构，不当作"断面/子项目"节点展示。
@@ -28,6 +30,73 @@ _WORKSPACE_MARKER_DIRS: frozenset[str] = frozenset({
     "新拍JPG",
     "results",
 })
+
+_TREE_CACHE_TTL_SECONDS = 2.0
+_SCAN_TREE_CACHE: dict[tuple, tuple[float, dict]] = {}
+_CANDIDATE_CACHE: dict[tuple, tuple[float, list[dict]]] = {}
+
+
+def clear_project_tree_cache(root: str | None = None) -> None:
+    """Clear cached folder scans.
+
+    ``root=None`` clears everything.  Passing a root invalidates entries for
+    that resolved root only; UI actions call this after creating folders or
+    changing project state so the next refresh is immediate and correct.
+    """
+    if root is None:
+        _SCAN_TREE_CACHE.clear()
+        _CANDIDATE_CACHE.clear()
+        return
+    try:
+        resolved = str(Path(root).resolve())
+    except OSError:
+        resolved = str(root)
+    for cache in (_SCAN_TREE_CACHE, _CANDIDATE_CACHE):
+        for key in list(cache):
+            if key and key[0] == resolved:
+                cache.pop(key, None)
+
+
+def _root_fingerprint(root: Path) -> tuple:
+    try:
+        st = root.stat()
+        root_sig = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        root_sig = None
+    try:
+        visible_dir_count = sum(
+            1
+            for entry in os.scandir(root)
+            if not entry.name.startswith(".")
+            and entry.name not in RESERVED_DIR_NAMES
+            and entry.is_dir()
+        )
+    except OSError:
+        visible_dir_count = -1
+    return (root_sig, visible_dir_count)
+
+
+def _cache_key(root: str, max_depth: int) -> tuple:
+    try:
+        resolved = str(Path(root).resolve())
+    except OSError:
+        resolved = str(root)
+    return (resolved, int(max_depth), _root_fingerprint(Path(resolved)))
+
+
+def _cache_get(cache: dict, key: tuple):
+    hit = cache.get(key)
+    if not hit:
+        return None
+    ts, value = hit
+    if time.monotonic() - ts > _TREE_CACHE_TTL_SECONDS:
+        cache.pop(key, None)
+        return None
+    return copy.deepcopy(value)
+
+
+def _cache_put(cache: dict, key: tuple, value) -> None:
+    cache[key] = (time.monotonic(), copy.deepcopy(value))
 
 
 def is_workspace(dir_path: str) -> bool:
@@ -62,7 +131,7 @@ def is_workspace_candidate(dir_path: str) -> bool:
     return False
 
 
-def scan_tree(root: str, max_depth: int = 6) -> dict:
+def scan_tree(root: str, max_depth: int = 6, *, use_cache: bool = True) -> dict:
     """Return a nested node dict for the folder tree under *root*.
 
     Node shape::
@@ -75,6 +144,11 @@ def scan_tree(root: str, max_depth: int = 6) -> dict:
     - Never creates anything; unreadable dirs degrade to no children.
     """
     root_path = Path(root)
+    key = _cache_key(root, max_depth)
+    if use_cache:
+        cached = _cache_get(_SCAN_TREE_CACHE, key)
+        if cached is not None:
+            return cached
 
     def _node(p: Path, depth: int) -> dict:
         children: list[dict] = []
@@ -100,7 +174,10 @@ def scan_tree(root: str, max_depth: int = 6) -> dict:
             "children": children,
         }
 
-    return _node(root_path, 0)
+    tree = _node(root_path, 0)
+    if use_cache:
+        _cache_put(_SCAN_TREE_CACHE, key, tree)
+    return tree
 
 
 def flatten_workspaces(node: dict) -> list[str]:
@@ -137,7 +214,12 @@ def discover_workspaces(root_dir: str, max_depth: int = 6) -> list[dict]:
     return out
 
 
-def discover_workspace_candidates(root_dir: str, max_depth: int = 2) -> list[dict]:
+def discover_workspace_candidates(
+    root_dir: str,
+    max_depth: int = 2,
+    *,
+    use_cache: bool = True,
+) -> list[dict]:
     """Return existing and legacy workspace-like folders under *root_dir*.
 
     This is intentionally broader than :func:`discover_workspaces`: it is used
@@ -145,6 +227,11 @@ def discover_workspace_candidates(root_dir: str, max_depth: int = 2) -> list[dic
     showing a folder that can later be entered and materialised.
     """
     root_path = Path(root_dir)
+    key = _cache_key(root_dir, max_depth)
+    if use_cache:
+        cached = _cache_get(_CANDIDATE_CACHE, key)
+        if cached is not None:
+            return cached
     out: list[dict] = []
 
     def _walk(p: Path, depth: int) -> None:
@@ -180,4 +267,6 @@ def discover_workspace_candidates(root_dir: str, max_depth: int = 2) -> list[dic
                 continue
 
     _walk(root_path, 0)
+    if use_cache:
+        _cache_put(_CANDIDATE_CACHE, key, out)
     return out

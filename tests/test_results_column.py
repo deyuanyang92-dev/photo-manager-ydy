@@ -5,6 +5,8 @@ import sys
 import os
 
 import pytest
+from PyQt6.QtCore import QPoint
+from PyQt6.QtWidgets import QMenu
 
 pytestmark = pytest.mark.skipif(
     "QT_QPA_PLATFORM" not in os.environ and sys.platform != "win32",
@@ -361,6 +363,25 @@ def test_thumb_guard_on_fake_path(qtbot):
     assert len(col.findChildren(_TiffCard)) == 1
 
 
+def test_tiff_card_uses_real_thumbnail_when_decodable(qtbot, tmp_path):
+    """A readable TIFF should render as an image thumbnail, not only a file icon."""
+    from PIL import Image
+    from app.widgets.results_column import ResultsColumn, _TiffCard
+
+    tif = tmp_path / "thumb.tif"
+    Image.new("RGB", (120, 80), "green").save(tif)
+
+    col = ResultsColumn()
+    qtbot.addWidget(col)
+    col.load_uid("UID", [{"path": str(tif), "name": tif.name}], [])
+
+    card = col.findChildren(_TiffCard)[0]
+    assert card._icon.property("hasThumbnail") is True
+    pixmap = card._icon.pixmap()
+    assert pixmap is not None
+    assert not pixmap.isNull()
+
+
 def test_results_column_has_windows_folder_actions(qtbot, tmp_path):
     """The results header exposes Windows-Explorer-style folder and sort actions."""
     from app.widgets.results_column import ResultsColumn
@@ -380,7 +401,7 @@ def test_results_column_has_windows_folder_actions(qtbot, tmp_path):
 
     assert col._open_folder_btn.text() == "打开文件夹"
     assert col._sort_btn.text() == "排序方式"
-    assert col._tile_btn.text() == "平铺"
+    assert col._tile_btn.text() == "两列"
     assert col._tile_btn.isChecked()
     assert col._results_dir == str(tmp_path)
 
@@ -448,6 +469,164 @@ def test_results_tile_view_aligns_tiff_left_zip_right(qtbot):
     assert col._tile_view is True
     assert isinstance(row._rows[0], _TiffCard)
     assert isinstance(row._rows[1], _ArchiveCard)
+
+
+def test_results_column_link_result_signal_uses_paired_paths(qtbot):
+    from app.widgets.results_column import ResultsColumn
+
+    col = ResultsColumn()
+    qtbot.addWidget(col)
+    tiff = "/fake/a.tif"
+    zipf = "/fake/a.zip"
+    col.load_uid(
+        "UID",
+        [{"path": tiff, "name": "a.tif", "seq": 1}],
+        [{"path": zipf, "name": "a.zip", "size": 10, "seq": 1}],
+    )
+
+    with qtbot.waitSignal(col.link_result_requested, timeout=1000) as blocker:
+        col._emit_link_result(tiff, zipf)
+
+    assert blocker.args == [tiff, zipf]
+
+
+def test_tiff_card_context_menu_checks_and_deletes_tiff(qtbot, tmp_path, monkeypatch):
+    from app.widgets.results_column import ResultsColumn, _TiffCard
+
+    col = ResultsColumn()
+    qtbot.addWidget(col)
+    tif = tmp_path / "GXFCG-BLW-BZC003-1-R-20260618.tif"
+    tif.write_bytes(b"tif")
+    col.load_uid(
+        "UID",
+        [{"path": str(tif), "name": tif.name, "seq": 1}],
+        [],
+    )
+    card = next(c for c in col._cards if isinstance(c, _TiffCard))
+
+    def trigger_action(label):
+        def fake_exec(menu, *_args, **_kwargs):
+            next(a for a in menu.actions() if a.text() == label).trigger()
+            return None
+        return fake_exec
+
+    monkeypatch.setattr(QMenu, "exec", trigger_action("检查 TIF 命名格式"))
+    with qtbot.waitSignal(col.tiff_naming_check_requested, timeout=1000) as check:
+        card._show_menu(QPoint(0, 0))
+    assert check.args == [str(tif)]
+
+    monkeypatch.setattr(QMenu, "exec", trigger_action("删除 TIF"))
+    with qtbot.waitSignal(col.tiff_delete_requested, timeout=1000) as delete:
+        card._show_menu(QPoint(0, 0))
+    assert delete.args == [str(tif)]
+
+
+def test_results_column_selection_highlights_and_enables_link_button(qtbot):
+    from app.widgets.results_column import ResultsColumn, _ArchiveCard, _TiffCard
+
+    col = ResultsColumn()
+    qtbot.addWidget(col)
+    tiff = "/fake/a.tif"
+    zipf = "/fake/a.zip"
+    col.load_uid(
+        "UID",
+        [{"path": tiff, "name": "a.tif", "seq": 1}],
+        [{"path": zipf, "name": "a.zip", "size": 10, "seq": 1}],
+    )
+    tiff_card = next(c for c in col._cards if isinstance(c, _TiffCard))
+    zip_card = next(c for c in col._cards if isinstance(c, _ArchiveCard))
+
+    col._toggle_result_selection(tiff, tiff_card)
+
+    assert tiff_card.property("resultSelected") == "true"
+    assert not col._link_selected_btn.isEnabled()
+
+    col._toggle_result_selection(zipf, zip_card)
+
+    assert zip_card.property("resultSelected") == "true"
+    assert col._link_selected_btn.isEnabled()
+    assert len(col.selected_result_paths()) == 2
+
+
+def test_results_column_link_selected_emits_pair(qtbot):
+    from app.widgets.results_column import ResultsColumn
+
+    col = ResultsColumn()
+    qtbot.addWidget(col)
+    tiff = "/fake/a.tif"
+    zipf = "/fake/a.zip"
+    col.load_uid(
+        "UID",
+        [{"path": tiff, "name": "a.tif", "seq": 1}],
+        [{"path": zipf, "name": "a.zip", "size": 10, "seq": 1}],
+    )
+    col._toggle_result_selection(tiff)
+    col._toggle_result_selection(zipf)
+
+    with qtbot.waitSignal(col.link_result_requested, timeout=1000) as blocker:
+        col._link_selected_btn.click()
+
+    assert blocker.args == [tiff, zipf]
+
+
+def test_results_column_single_selected_tiff_can_link_sibling_zip(qtbot, tmp_path):
+    from app.widgets.results_column import ResultsColumn
+
+    col = ResultsColumn()
+    qtbot.addWidget(col)
+    tiff = tmp_path / "a.tif"
+    zipf = tmp_path / "a.zip"
+    tiff.write_bytes(b"tif")
+    zipf.write_bytes(b"zip")
+    col.load_uid(
+        "UID",
+        [{"path": str(tiff), "name": "a.tif", "seq": 1}],
+        [],
+    )
+    col._toggle_result_selection(str(tiff))
+
+    assert col._link_selected_btn.isEnabled()
+    with qtbot.waitSignal(col.link_result_requested, timeout=1000) as blocker:
+        col._link_selected_btn.click()
+
+    assert blocker.args == [str(tiff.resolve()), str(zipf.resolve())]
+
+
+def test_results_cards_show_registry_status(qtbot):
+    from PyQt6.QtWidgets import QLabel
+    from app.widgets.results_column import ResultsColumn, _ArchiveCard, _TiffCard
+
+    col = ResultsColumn()
+    qtbot.addWidget(col)
+    col.load_uid(
+        "UID",
+        [{
+            "path": "/fake/a.tif",
+            "name": "a.tif",
+            "seq": 1,
+            "owner_uid": "UID",
+            "group_index": 0,
+            "registered": True,
+        }],
+        [{
+            "path": "/fake/a.zip",
+            "name": "a.zip",
+            "size": 10,
+            "seq": 1,
+            "owner_uid": "UID",
+            "group_index": 0,
+            "registered": True,
+        }],
+    )
+
+    tiff_card = next(c for c in col._cards if isinstance(c, _TiffCard))
+    zip_card = next(c for c in col._cards if isinstance(c, _ArchiveCard))
+    tiff_text = " ".join(lbl.text() for lbl in tiff_card.findChildren(QLabel))
+    zip_text = " ".join(lbl.text() for lbl in zip_card.findChildren(QLabel))
+    assert "已入库: UID" in tiff_text
+    assert "已配 ZIP" in tiff_text
+    assert "已入库: UID" in zip_text
+    assert "已配 TIF" in zip_text
 
 
 def test_results_sort_by_sequence_orders_pairs(qtbot):

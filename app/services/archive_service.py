@@ -1,6 +1,4 @@
-"""archive_service.py — JPG→ZIP archival with pre-delete safety checks.
-
-Oracle: archive.js:28-61, 150-168; compress.js:32-45.
+"""archive_service.py — JPG archival with pre-delete safety checks.
 
 Safety invariants (hard rules — must never be violated):
   1. TIFF is NEVER deleted.
@@ -9,11 +7,10 @@ Safety invariants (hard rules — must never be violated):
        a. ZIP file exists and size > 32 bytes.
        b. ZIP integrity check passes.
        c. each archived JPG matches original name/size/SHA-256.
-  4. Legacy JXL helpers are kept for restoring older archives only:
-       a. verify_manifest_complete passes (count + names + sizes).
-       b. verify_jxl_recoverable passes (djxl re-decodes each JXL, size > 0).
-  5. cjxl flags: --distance 0 -e <effort>
-     NO --modular / --quality / -j flags.  (Oracle: compress.js:34-39)
+  4. When cjxl/djxl are available, new archives use internal JXL lossless-JPEG
+     transcode for higher compression. The software restores/presents JPGs.
+     If the JXL bridge is unavailable or fails verification, fallback is exact
+     plain-JPG ZIP.
 
 ZipResult fields mirror archive.js archiveJpgGroup return value.
 """
@@ -27,12 +24,13 @@ import shutil
 import subprocess
 import tempfile
 import zipfile
+import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
 
-# ── Effort mapping (mirrors compress.js EFFORT_MAP) ──────────────────────────
+# ── JXL bridge compatibility knobs ───────────────────────────────────────────
 
 EFFORT_MAP = {
     "standard": {"jxl": 7},
@@ -52,6 +50,175 @@ def _sha256_file(path: str) -> str:
         for chunk in iter(lambda: fh.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _archive_jpg_probe(path: str) -> tuple[int, str, int]:
+    """Return size, SHA-256, and the best ZIP method for one JPG."""
+    original_size = os.path.getsize(path)
+    digest = hashlib.sha256()
+    compressor = zlib.compressobj(level=9, wbits=-15)
+    compressed_size = 0
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
+            compressed_size += len(compressor.compress(chunk))
+    compressed_size += len(compressor.flush())
+    method = (
+        zipfile.ZIP_DEFLATED
+        if compressed_size < original_size
+        else zipfile.ZIP_STORED
+    )
+    return original_size, digest.hexdigest(), method
+
+
+def _unique_name(original_name: str, used_names: set[str], suffix: str | None = None) -> str:
+    base = Path(original_name)
+    stem = base.stem
+    ext = suffix if suffix is not None else base.suffix
+    candidate = stem + ext
+    index = 2
+    while candidate in used_names:
+        candidate = f"{stem}-{index}{ext}"
+        index += 1
+    used_names.add(candidate)
+    return candidate
+
+
+def _verify_jxl_zip_complete(zip_path: str, manifest_files: list[dict]) -> CheckResult:
+    """Verify a JXL archive ZIP can restore every original JPG exactly."""
+    if not os.path.isfile(zip_path) or os.path.getsize(zip_path) <= 32:
+        return CheckResult(ok=False, reason="ZIP 生成失败或体积异常")
+    verify_dir = tempfile.mkdtemp(prefix="specimen-verify-jxl-")
+    try:
+        try:
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                bad = zf.testzip()
+                if bad:
+                    return CheckResult(ok=False, reason=f"ZIP 内部文件损坏: {bad}")
+                zf.extractall(verify_dir)
+        except (OSError, zipfile.BadZipFile) as exc:
+            return CheckResult(ok=False, reason=f"ZIP 校验失败：{exc}")
+
+        manifest_path = os.path.join(verify_dir, "manifest.json")
+        if not os.path.isfile(manifest_path):
+            return CheckResult(ok=False, reason="ZIP 清单缺失")
+        with open(manifest_path, "r", encoding="utf-8") as fh:
+            manifest = json.load(fh)
+
+        check_files: list[dict] = []
+        for f in manifest_files:
+            row = dict(f)
+            row["jxlPath"] = os.path.join(verify_dir, row["archiveName"])
+            check_files.append(row)
+        manifest_check = verify_manifest_complete(manifest, check_files)
+        if not manifest_check.ok:
+            return manifest_check
+        return verify_jxl_recoverable(check_files, verify_dir)
+    finally:
+        shutil.rmtree(verify_dir, ignore_errors=True)
+
+
+def _archive_group_jxl(
+    jpg_paths: list[str],
+    zip_path: str,
+    tiff_basename: str,
+    *,
+    delete_jpg: bool,
+    progress_callback: Optional[Callable[[int, int, str], None]] = None,
+) -> ZipResult:
+    """Archive JPGs as internal JXL, with software restore back to JPG."""
+    os.makedirs(str(Path(zip_path).parent), exist_ok=True)
+    temp_dir = tempfile.mkdtemp(prefix="specimen-jxl-")
+    manifest_files: list[dict] = []
+    total_original = 0
+    total_compressed = 0
+    used_names: set[str] = set()
+    total_files = len(jpg_paths)
+    try:
+        for index, jpg_path in enumerate(jpg_paths, start=1):
+            original_name = os.path.basename(jpg_path)
+            archive_name = _unique_name(original_name, used_names, suffix=".jxl")
+            original_size = os.path.getsize(jpg_path)
+            original_sha256 = _sha256_file(jpg_path)
+            jxl_path = os.path.join(temp_dir, archive_name)
+            compress_to_jxl(jpg_path, jxl_path, effort=9)
+            compressed_size = os.path.getsize(jxl_path)
+            manifest_files.append({
+                "originalName": original_name,
+                "archiveName": archive_name,
+                "originalSize": original_size,
+                "compressedSize": compressed_size,
+                "originalSha256": original_sha256,
+                "zipCompression": "jpeg-xl-lossless",
+                "jxlPath": jxl_path,
+            })
+            total_original += original_size
+            total_compressed += compressed_size
+            if progress_callback is not None:
+                progress_callback(index, total_files, original_name)
+
+        manifest = {
+            "version": 3,
+            "createdAt": _iso_now(),
+            "tiffBasename": tiff_basename,
+            "format": "jxl-zip",
+            "method": "jpeg-xl-lossless-transcode",
+            "files": [
+                {k: v for k, v in f.items() if k != "jxlPath"}
+                for f in manifest_files
+            ],
+            "totalOriginal": total_original,
+            "totalCompressed": total_compressed,
+        }
+
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr(
+                "manifest.json",
+                json.dumps(manifest, ensure_ascii=False, indent=2),
+                compress_type=zipfile.ZIP_DEFLATED,
+                compresslevel=9,
+            )
+            for f in manifest_files:
+                zf.write(
+                    f["jxlPath"],
+                    f["archiveName"],
+                    compress_type=zipfile.ZIP_STORED,
+                )
+
+        zip_size = os.path.getsize(zip_path)
+        if zip_size < 32:
+            raise RuntimeError("ZIP 生成失败或体积异常")
+
+        zip_check = _verify_jxl_zip_complete(zip_path, manifest_files)
+        if not zip_check.ok:
+            raise RuntimeError(zip_check.reason or "JXL 归档校验失败")
+
+        actual_delete = bool(delete_jpg)
+        deletion_skipped_reason = ""
+        if actual_delete:
+            for p in jpg_paths:
+                os.unlink(p)
+
+        saved_percent = (
+            max(0, round((1 - total_compressed / total_original) * 100))
+            if total_original > 0
+            else 0
+        )
+        return ZipResult(
+            zip_path=zip_path,
+            zip_size=zip_size,
+            file_count=len(jpg_paths),
+            total_original=total_original,
+            total_compressed=total_compressed,
+            saved_percent=saved_percent,
+            delete_jpg=actual_delete,
+            requested_delete_jpg=bool(delete_jpg),
+            deletion_skipped_reason=deletion_skipped_reason,
+            manifest=manifest,
+            ok=True,
+        )
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 def _check_tool(name: str) -> bool:
@@ -88,7 +255,7 @@ def reset_tool_cache() -> None:
     _djxl_available = None
 
 
-# ── JXL compression ───────────────────────────────────────────────────────────
+# ── JXL bridge helpers ────────────────────────────────────────────────────────
 
 def compress_to_jxl(
     input_path: str,
@@ -97,8 +264,9 @@ def compress_to_jxl(
 ) -> None:
     """Compress *input_path* to JXL at *output_path* using cjxl.
 
-    Flags: --distance 0 -e <effort>  (Oracle: compress.js:35-39)
-    --distance 0 → lossless transcode for JPEG input (bit-exact recoverable).
+    Flags: --lossless_jpeg=1 -e <effort>.
+    For JPEG input, this preserves the original JPEG bitstream so djxl can
+    restore the original .jpg bytes exactly.
     NO --modular, --quality, or -j flags.
 
     Raises RuntimeError if cjxl is not available (caller decides fallback).
@@ -107,7 +275,14 @@ def compress_to_jxl(
     if not has_cjxl():
         raise RuntimeError("cjxl not available")
     subprocess.run(
-        ["cjxl", input_path, output_path, "--distance", "0", "-e", str(effort)],
+        [
+            "cjxl",
+            input_path,
+            output_path,
+            "--lossless_jpeg=1",
+            "-e",
+            str(effort),
+        ],
         check=True,
         capture_output=True,
     )
@@ -267,13 +442,15 @@ def archive_group(
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
     output_dir: Optional[str] = None,
 ) -> ZipResult:
-    """Write original JPGs into a plain ZIP, verify, maybe delete loose JPGs.
+    """Archive original JPGs, verify, maybe delete loose JPGs.
 
     Safety invariants enforced here:
       - TIFF is NEVER deleted (not even accepted as input for deletion).
       - delete_jpg defaults to True, but verification failure always keeps JPGs.
       - Deletion only happens after ZIP integrity + per-file SHA-256 checks pass.
-      - User extraction shows JPG files directly; no manifest.json / .jxl internals.
+      - With cjxl/djxl, ZIP may contain internal JXL to improve compression.
+        Software restore/presentation always converts back to original JPG.
+      - Without working JXL tools, fallback ZIP stores exact JPGs directly.
 
     Oracle: archive.js:67-190.
 
@@ -282,7 +459,7 @@ def archive_group(
         tiff_path:   Path to the composed TIFF (used for naming; never deleted).
         project_dir: Project root (ZIP placed in results/ subdir or same dir as TIFF).
         delete_jpg:  If True, delete JPGs after all safety checks pass.
-        method:      Compression effort level: "standard" | "maximum".
+        method:      Legacy compatibility argument; ignored for new plain-JPG ZIPs.
         output_dir:  Optional explicit ZIP directory.  With an open project,
                      callers pass project results/ so archives never land in
                      the source photo folder.
@@ -299,6 +476,20 @@ def archive_group(
     tiff_basename = Path(tiff_path).stem
     zip_dir = str(Path(output_dir) if output_dir else Path(tiff_path).parent)
     zip_path = os.path.join(zip_dir, tiff_basename + ".zip")
+
+    if has_cjxl() and has_djxl():
+        try:
+            return _archive_group_jxl(
+                jpg_paths,
+                zip_path,
+                tiff_basename,
+                delete_jpg=delete_jpg,
+                progress_callback=progress_callback,
+            )
+        except Exception:
+            # If the high-compression transcode fails on a malformed/unsupported
+            # JPG, keep the workflow usable and fall back to exact plain JPG ZIP.
+            pass
 
     manifest_files: list[dict] = []
     total_original = 0
@@ -321,14 +512,17 @@ def archive_group(
     for index, jpg_path in enumerate(jpg_paths, start=1):
         original_name = os.path.basename(jpg_path)
         archive_name = _unique_archive_name(original_name)
-        original_size = os.path.getsize(jpg_path)
-        original_sha256 = _sha256_file(jpg_path)
+        original_size, original_sha256, zip_method = _archive_jpg_probe(jpg_path)
         manifest_files.append({
             "originalName": original_name,
             "archiveName": archive_name,
             "originalSize": original_size,
             "compressedSize": original_size,
             "originalSha256": original_sha256,
+            "zipCompression": (
+                "deflate9" if zip_method == zipfile.ZIP_DEFLATED else "store"
+            ),
+            "_zipMethod": zip_method,
         })
         total_original += original_size
         if progress_callback is not None:
@@ -339,16 +533,22 @@ def archive_group(
         "createdAt": _iso_now(),
         "tiffBasename": tiff_basename,
         "format": "jpg-zip",
-        "method": "store-original-jpg",
+        "method": "adaptive-plain-jpg-zip",
         "files": [],
         "totalOriginal": total_original,
         "totalCompressed": 0,
     }
 
     os.makedirs(zip_dir, exist_ok=True)
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
+    with zipfile.ZipFile(zip_path, "w") as zf:
         for jpg_path, f in zip(jpg_paths, manifest_files):
-            zf.write(jpg_path, f["archiveName"])
+            zip_method = int(f["_zipMethod"])
+            zf.write(
+                jpg_path,
+                f["archiveName"],
+                compress_type=zip_method,
+                compresslevel=9 if zip_method == zipfile.ZIP_DEFLATED else None,
+            )
 
     zip_size = os.path.getsize(zip_path)
     if zip_size < 32:
@@ -365,7 +565,10 @@ def archive_group(
             total_compressed += compressed_size
 
     manifest["totalCompressed"] = total_compressed
-    manifest["files"] = [dict(f) for f in manifest_files]
+    manifest["files"] = [
+        {k: v for k, v in f.items() if not k.startswith("_")}
+        for f in manifest_files
+    ]
 
     saved_percent = (
         max(0, round((1 - total_compressed / total_original) * 100))
@@ -427,9 +630,8 @@ def restore_archive(
 ) -> RestoreResult:
     """Recover the original JPGs from an archive ZIP (read-only, additive).
 
-    Current archives contain raw JPG entries and are copied out directly.
-    Legacy archives may contain JXL entries; those are re-decoded with djxl
-    back to the original JPG.
+    Archives may contain raw JPG entries or internal JXL entries. JXL entries
+    are decoded with djxl back to the original JPG.
 
     Safety: this only READS the ZIP and WRITES new JPGs under output_dir. It never
     deletes anything. If any .jxl entry is present but djxl is unavailable, it
@@ -457,9 +659,9 @@ def restore_archive(
             names = zf.namelist()
             zf.extractall(temp_dir)
 
-        # ── Build entries: (archiveName, originalName, originalSize|None) ──────
+        # ── Build entries: (archiveName, originalName, originalSize, sha256) ───
         manifest_path = os.path.join(temp_dir, "manifest.json")
-        entries: list[tuple[str, str, Optional[int]]] = []
+        entries: list[tuple[str, str, Optional[int], Optional[str]]] = []
         if os.path.isfile(manifest_path):
             with open(manifest_path, "r", encoding="utf-8") as fh:
                 manifest = json.load(fh)
@@ -468,6 +670,7 @@ def restore_archive(
                     f["archiveName"],
                     f.get("originalName") or f["archiveName"],
                     f.get("originalSize"),
+                    f.get("originalSha256"),
                 ))
         else:
             # manifest 缺失 → 退化:按 ZIP 内文件名还原(.jxl → stem.jpg)
@@ -478,10 +681,10 @@ def restore_archive(
                     original = Path(name).stem + ".jpg"
                 else:
                     original = name
-                entries.append((name, original, None))
+                entries.append((name, original, None, None))
 
         # ── djxl gate: any .jxl but no djxl → abort, write nothing ────────────
-        needs_djxl = any(a.lower().endswith(".jxl") for a, _, _ in entries)
+        needs_djxl = any(a.lower().endswith(".jxl") for a, _, _, _ in entries)
         if needs_djxl and not has_djxl():
             return RestoreResult(
                 output_dir=output_dir,
@@ -490,7 +693,7 @@ def restore_archive(
                 failures=["缺少 djxl 解码工具"],
             )
 
-        for archive_name, original_name, original_size in entries:
+        for archive_name, original_name, original_size, original_sha256 in entries:
             src = os.path.join(temp_dir, archive_name)
             dst = os.path.join(output_dir, original_name)
 
@@ -521,8 +724,16 @@ def restore_archive(
                         )
                         os.unlink(dst)
                         continue
+                    if original_sha256 and _sha256_file(dst) != original_sha256:
+                        failures.append(f"{original_name}：SHA-256 与清单不一致")
+                        os.unlink(dst)
+                        continue
                 else:
                     shutil.copy2(src, dst)
+                    if original_sha256 and _sha256_file(dst) != original_sha256:
+                        failures.append(f"{original_name}：SHA-256 与清单不一致")
+                        os.unlink(dst)
+                        continue
                 restored.append(dst)
             except Exception as e:
                 failures.append(f"{original_name}：{e}")

@@ -10,15 +10,19 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sqlite3
 from typing import TYPE_CHECKING, Optional
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, QUrl, pyqtSignal
+from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
+    QApplication,
     QDialog,
     QFrame,
     QHBoxLayout,
     QInputDialog,
     QLabel,
+    QMenu,
     QPushButton,
     QSplitter,
     QTreeWidget,
@@ -98,6 +102,8 @@ class ProjectTreeView(BaseView):
         self._tree.setHeaderHidden(True)
         self._tree.itemSelectionChanged.connect(self._on_select)
         self._tree.itemDoubleClicked.connect(lambda *_: self._enter_selected())
+        self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._tree.customContextMenuRequested.connect(self._show_tree_context_menu)
         split.addWidget(self._tree)
 
         detail = QWidget()
@@ -163,7 +169,7 @@ class ProjectTreeView(BaseView):
             f"border-radius:5px;padding:5px 12px;font-size:13px;}}"
             f"QPushButton:hover{{background:{border};}}"
             f"QPushButton#Primary{{background:{accent};color:{accent_fg};border:1px solid {accent};}}"
-            f"QPushButton:disabled{{color:{muted};}}"
+            f"QPushButton:disabled{{background:{panel};color:{muted};border:1px solid {border_medium};}}"
             f"QTreeWidget{{background:{bg};color:{text};border:1px solid {border};"
             f"border-radius:6px;font-size:13px;}}"
             f"QTreeWidget::item{{padding:4px 2px;}}"
@@ -200,6 +206,7 @@ class ProjectTreeView(BaseView):
             root_item = self._build_item(tree)
             self._tree.addTopLevelItem(root_item)
             root_item.setExpanded(True)
+            self._select_first_item()
             return
 
         # ── Flat-list mode: every project already recorded in user_projects.json ──
@@ -224,6 +231,15 @@ class ProjectTreeView(BaseView):
         self._empty_state.hide()
         for node in nodes:
             self._tree.addTopLevelItem(self._build_item(node))
+        self._select_first_item()
+
+    def _select_first_item(self) -> None:
+        item = self._tree.topLevelItem(0)
+        if item is None:
+            return
+        self._tree.setCurrentItem(item)
+        item.setSelected(True)
+        self._on_select()
 
     def _load_known_projects_nodes(self) -> list:
         """Synthesize scan_tree-shaped nodes for every project recorded in
@@ -278,6 +294,8 @@ class ProjectTreeView(BaseView):
                 pass
             _add_node(directory, p.get("name") or Path(directory).name)
 
+        has_recorded_projects = bool(nodes)
+
         for attr in ("current_project_root", "current_project_dir"):
             value = getattr(self.ctx, attr, None)
             if value:
@@ -286,19 +304,20 @@ class ProjectTreeView(BaseView):
                 except (OSError, ValueError):
                     pass
 
-        try:
-            # Desktop/dev fallback: when the app itself lives inside a project
-            # dump folder, scan its siblings so old test folders like ceshi6 are
-            # not invisible just because user_projects.json was reset.
-            scan_roots.add(str(Path.cwd().resolve().parent))
-        except OSError:
-            pass
+        if not has_recorded_projects:
+            try:
+                # Fallback only when the recent-project list is empty. Scanning
+                # a broad /mnt workspace on every 项目树 activation is expensive
+                # under WSL/drvfs and makes basic navigation feel frozen.
+                scan_roots.add(str(Path.cwd().resolve().parent))
+            except OSError:
+                pass
 
         # Keep recent projects first, then append discovered legacy/candidate
         # workspaces from nearby roots. Depth 1 is enough for sibling workspaces;
         # depth 2 catches one container folder such as "ceshi/ceshi3".
         nodes.reverse()  # most-recent recorded first
-        for root in sorted(scan_roots):
+        for root in sorted(scan_roots if not has_recorded_projects else set()):
             try:
                 candidates = pts.discover_workspace_candidates(root, max_depth=2)
             except OSError:
@@ -328,6 +347,79 @@ class ProjectTreeView(BaseView):
         if not items:
             return None
         return items[0].data(0, _PATH_ROLE)
+
+    def _show_tree_context_menu(self, pos) -> None:
+        item = self._tree.itemAt(pos)
+        if item is None:
+            return
+        self._tree.setCurrentItem(item)
+        item.setSelected(True)
+        path = item.data(0, _PATH_ROLE)
+        if not path:
+            return
+
+        menu = QMenu(self._tree)
+
+        enter_action = menu.addAction("进入工作区拍照")
+        enter_action.triggered.connect(self._enter_selected)
+
+        new_child_action = menu.addAction("新建子文件夹")
+        new_child_action.triggered.connect(self._new_subfolder)
+
+        menu.addSeparator()
+        summary_action = menu.addAction("汇总导出…")
+        summary_action.triggered.connect(self._open_summary_export)
+
+        station_action = menu.addAction("导入站位总表…")
+        station_action.triggered.connect(self._open_station_import)
+
+        menu.addSeparator()
+        open_action = menu.addAction("打开文件夹")
+        open_action.triggered.connect(lambda _=False, p=path: self._open_directory(p))
+
+        copy_action = menu.addAction("复制路径")
+        copy_action.triggered.connect(
+            lambda _=False, p=path: QApplication.clipboard().setText(str(p))
+        )
+
+        properties_action = menu.addAction("属性")
+        properties_action.triggered.connect(
+            lambda _=False, p=path: self._show_path_properties(str(p))
+        )
+
+        menu.exec(self._tree.viewport().mapToGlobal(pos))
+
+    def _open_directory(self, path: str) -> None:
+        directory = Path(path)
+        if not directory.exists():
+            ui.warn(self, "打开文件夹", f"目录不存在或磁盘未连接：\n{path}")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(directory)))
+
+    def _show_path_properties(self, path: str) -> None:
+        p = Path(path)
+        exists = p.exists()
+        try:
+            child_count = sum(1 for child in p.iterdir() if child.is_dir()) if exists else 0
+        except OSError:
+            child_count = 0
+        try:
+            workspace = pts.is_workspace(path)
+        except OSError:
+            workspace = False
+        kind = "工作区" if workspace else "文件夹"
+        state = "存在" if exists else "不可访问"
+        ui.info(
+            self,
+            "属性",
+            "\n".join([
+                f"名称：{p.name or path}",
+                f"类型：{kind}",
+                f"状态：{state}",
+                f"子文件夹：{child_count}",
+                f"路径：{path}",
+            ]),
+        )
 
     # ── Detail panel ──────────────────────────────────────────────────────────
     def _on_select(self) -> None:
@@ -411,6 +503,7 @@ class ProjectTreeView(BaseView):
         if not path:
             return
         self._root = str(Path(path).resolve())
+        pts.clear_project_tree_cache(self._root)
         self.ctx.settings.project_tree_root = self._root
         self._reload()
 
@@ -455,6 +548,7 @@ class ProjectTreeView(BaseView):
             ui.warn(self, "新建调查区域", f"创建失败：{exc}")
             return
         self._root = str(Path(directory).resolve())
+        pts.clear_project_tree_cache(self._root)
         self.ctx.settings.project_tree_root = self._root
         self._reload()
         ui.info(
@@ -481,6 +575,7 @@ class ProjectTreeView(BaseView):
         except OSError as exc:
             ui.warn(self, "项目树", f"无法创建：{exc}")
             return
+        pts.clear_project_tree_cache(self._root or parent)
         self._reload()
 
     def _enter_selected(self) -> None:
@@ -510,6 +605,7 @@ class ProjectTreeView(BaseView):
             default_user_projects_json_path,
             enter_workspace,
         )
+        from app.db.db_manager import is_database_locked
         from app.services.project_paths import ProjectUnavailableError
         try:
             enter_workspace(
@@ -523,6 +619,18 @@ class ProjectTreeView(BaseView):
                     f"该目录所在磁盘未挂载或路径不可用：\n{path}\n\n"
                     "请接回数据盘后再进入。数据仍在盘上，没有丢失。")
             return
+        except sqlite3.Error as exc:
+            if is_database_locked(exc):
+                ui.warn(
+                    self,
+                    "项目数据库正忙",
+                    "当前项目数据库正在被其它操作占用。\n\n"
+                    "请稍等几秒后重试；如果一直出现，请关闭其它正在打开该项目的程序窗口，"
+                    "或先回到照片工作区停止正在运行的合成/整理任务。",
+                )
+                return
+            raise
+        pts.clear_project_tree_cache(self._root or path)
         self.enter_workspace_requested.emit(path)
         main_win = self.window()
         if hasattr(main_win, "refresh_context_bar"):

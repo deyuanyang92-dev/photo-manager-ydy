@@ -13,6 +13,8 @@ Public API (kept stable — referenced elsewhere):
 
 from __future__ import annotations
 
+import os
+import sys
 from pathlib import Path
 
 # ── Shared typography / radius tokens (same across all themes) ─────────────
@@ -61,6 +63,127 @@ def set_typography(scale=None, family=None) -> None:
 def _scaled_typo() -> dict[str, str]:
     """Current font_* px tokens with _FONT_SCALE applied."""
     return {k: f"{max(1, round(v * _FONT_SCALE))}px" for k, v in _FONT_BASE.items()}
+
+
+def _detect_file_manager_profile() -> str:
+    """Return the platform file-list visual profile.
+
+    Only the workbench file rows use this.  The whole application theme remains
+    user-selectable, while incoming/results rows borrow the local OS file
+    manager's selection and density conventions.
+    """
+    override = os.environ.get("SPECIMEN_FILE_MANAGER_STYLE", "").strip().lower()
+    if override in {"windows", "macos", "linux"}:
+        return override
+    if sys.platform == "win32":
+        return "windows"
+    if sys.platform == "darwin":
+        return "macos"
+    if sys.platform.startswith("linux"):
+        if os.environ.get("WSL_DISTRO_NAME"):
+            return "windows"
+        try:
+            version = Path("/proc/version").read_text(
+                encoding="utf-8", errors="replace"
+            ).lower()
+            if "microsoft" in version:
+                return "windows"
+        except OSError:
+            pass
+        return "linux"
+    return "linux"
+
+
+def _file_manager_qss(t: dict[str, str]) -> str:
+    """QSS for Explorer/Finder/GNOME-like file rows."""
+    profile = _detect_file_manager_profile()
+    if profile == "macos":
+        row_bg = "transparent"
+        row_hover = "rgba(0,0,0,0.045)"
+        row_selected = "#cfe6ff"
+        row_selected_border = "#0a84ff"
+        badge_selected = "#0a84ff"
+        radius = "6px"
+    elif profile == "linux":
+        row_bg = t["panel"]
+        row_hover = "rgba(15,23,42,0.055)"
+        row_selected = "#dbeafe"
+        row_selected_border = "#2563eb"
+        badge_selected = "#2563eb"
+        radius = "4px"
+    else:
+        row_bg = t["panel"]
+        row_hover = "#eef6ff"
+        row_selected = "#d7ebff"
+        row_selected_border = "#1d6fd1"
+        badge_selected = "#1d6fd1"
+        radius = "4px"
+
+    return f"""
+/* ── System-like file rows: incoming-jpg/ and results/ ───────────── */
+QFrame#Card {{
+    background: {row_bg};
+    border: 1px solid {t["border"]};
+    border-radius: {radius};
+}}
+QFrame#Card:hover {{
+    background: {row_hover};
+    border-color: {t["border_medium"]};
+}}
+QFrame#CardSelected {{
+    background: {row_selected};
+    border: 1px solid {row_selected_border};
+    border-left: 5px solid {row_selected_border};
+    border-radius: {radius};
+}}
+QFrame#Card[resultSelected="true"] {{
+    background: {row_selected};
+    border: 1px solid {row_selected_border};
+    border-left: 5px solid {row_selected_border};
+    border-radius: {radius};
+}}
+QFrame#CardSelected QLabel#Mono,
+QFrame#Card[resultSelected="true"] QLabel#Mono {{
+    color: {badge_selected};
+    font-weight: 700;
+}}
+QLabel#FileSelectMark {{
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 3px;
+    color: transparent;
+    font-size: {t["font_sm"]};
+    font-weight: 900;
+}}
+QLabel#FileSelectMark[selected="true"] {{
+    background: {badge_selected};
+    border-color: {badge_selected};
+    color: #ffffff;
+}}
+QLabel#ResultSelectBadge {{
+    border: 1px solid {t["border_strong"]};
+    border-radius: 3px;
+    background: {t["panel"]};
+    color: transparent;
+    font-size: {t["font_xs"]};
+    font-weight: 700;
+}}
+QLabel#ResultSelectBadge[selected="true"] {{
+    background: {badge_selected};
+    border-color: {badge_selected};
+    color: #ffffff;
+}}
+QLabel#FileThumb {{
+    background: {t["panel_2"]};
+    border: 1px solid {t["border"]};
+    border-radius: 4px;
+    padding: 1px;
+}}
+QLabel#FileThumb[hasThumbnail="true"] {{
+    background: {t["panel"]};
+    border-color: {t["border_medium"]};
+}}
+"""
 
 # ── Theme 1: 经典浅色 — Windows/Office conventional light ──────────────────
 
@@ -990,6 +1113,7 @@ def build_qss() -> str:
         f"qlineargradient(x1:0, y1:0, x2:0, y2:1,"
         f" stop:0 {t['topbar_top']}, stop:1 {t['topbar_bottom']})"
     )
+    file_manager_qss = _file_manager_qss(t)
 
     return f"""
 /* ══════════════════════════════════════════════════════════════════
@@ -1253,12 +1377,7 @@ QFrame#Panel, QFrame#WorkbenchSection, QFrame#PanelCard {{
 QFrame#WorkbenchSection {{
     border-color: {t["border_medium"]};
 }}
-QFrame#Card {{
-    background: {t["panel_2"]};
-    border: 1px solid {t["border"]};
-    border-radius: {t["radius"]};
-}}
-QFrame#Card:hover {{ border-color: {t["border_medium"]}; }}
+{file_manager_qss}
 QFrame#NamingGroup {{
     background: {t["panel_2"]};
     border: 1px solid {t["border"]};

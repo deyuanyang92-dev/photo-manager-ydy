@@ -1356,6 +1356,15 @@ class NamingPanel(QWidget):
             issues.append("地区应为字母（如 FJ）")
         if site and len(site) < 2:
             issues.append("样地代码太短")
+        if species_id:
+            if not re.fullmatch(r"[A-Za-z]+\d+", species_id):
+                if re.fullmatch(r"[A-Za-z]", species_id):
+                    issues.append(
+                        "物种缩写应为字母+数字（如 DLC001）；"
+                        f"{species_id.upper()} 更像保存方式，不应填在这里"
+                    )
+                else:
+                    issues.append("物种缩写应为字母+数字（如 DLC001）")
         if col_date and len(col_date) != 8:
             issues.append("采集日期应为 8 位 YYYYMMDD")
         if storage and not any(storage.upper().startswith(c) for c in ("T", "D", "R")):

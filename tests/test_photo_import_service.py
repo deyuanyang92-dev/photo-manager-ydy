@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from app.services.photo_import_service import import_jpgs_to_incoming
+from app.services.photo_import_service import import_jpgs_to_incoming, import_media_to_project
 
 
 def test_import_jpgs_to_incoming_copies_without_moving_original(tmp_path):
@@ -42,3 +42,42 @@ def test_import_jpgs_to_incoming_skips_non_jpg(tmp_path):
 
     assert result.imported_paths == []
     assert result.skipped_paths == [str(tif)]
+
+
+def test_import_media_to_project_splits_jpg_and_tiff(tmp_path):
+    source_dir = tmp_path / "camera"
+    incoming = tmp_path / "project" / "incoming-jpg"
+    results = tmp_path / "project" / "results"
+    source_dir.mkdir()
+    jpg = source_dir / "P6202064.JPG"
+    tif = source_dir / "HeliconFocus.tif"
+    jpg.write_bytes(b"jpg")
+    tif.write_bytes(b"tif")
+
+    result = import_media_to_project([str(jpg), str(tif)], incoming, results)
+
+    assert result.errors == []
+    assert result.skipped_paths == []
+    assert result.imported_jpg_paths == [str((incoming / jpg.name).resolve())]
+    assert result.imported_tiff_paths == [str((results / tif.name).resolve())]
+    assert (incoming / jpg.name).read_bytes() == b"jpg"
+    assert (results / tif.name).read_bytes() == b"tif"
+    assert jpg.read_bytes() == b"jpg"
+    assert tif.read_bytes() == b"tif"
+
+
+def test_import_media_to_project_never_overwrites_tiff(tmp_path):
+    source_dir = tmp_path / "camera"
+    incoming = tmp_path / "project" / "incoming-jpg"
+    results = tmp_path / "project" / "results"
+    source_dir.mkdir()
+    results.mkdir(parents=True)
+    tif = source_dir / "result.tif"
+    tif.write_bytes(b"new")
+    (results / "result.tif").write_bytes(b"old")
+
+    result = import_media_to_project([str(tif)], incoming, results)
+
+    assert (results / "result.tif").read_bytes() == b"old"
+    assert (results / "result-2.tif").read_bytes() == b"new"
+    assert result.imported_tiff_paths == [str((results / "result-2.tif").resolve())]

@@ -149,6 +149,36 @@ class TestListProjects:
         result = list_projects(str(json_path))
         assert result == []
 
+    def test_cached_result_is_returned_as_copy(self, tmp_path):
+        from app.services.project_service import clear_project_list_cache, list_projects
+        json_path = tmp_path / "user_projects.json"
+        _write_projects_json(json_path, [{"id": "1", "name": "A", "directory": "/tmp/a"}])
+        clear_project_list_cache(str(json_path))
+
+        first = list_projects(str(json_path))
+        first[0]["name"] = "mutated"
+        second = list_projects(str(json_path))
+
+        assert second[0]["name"] == "A"
+
+    def test_save_project_descriptor_clears_project_list_cache(self, tmp_path):
+        from app.services.project_service import (
+            clear_project_list_cache,
+            list_projects,
+            save_project_descriptor,
+        )
+        json_path = tmp_path / "user_projects.json"
+        _write_projects_json(json_path, [{"id": "1", "name": "A", "directory": "/tmp/a"}])
+        clear_project_list_cache(str(json_path))
+        assert list_projects(str(json_path))[0]["name"] == "A"
+
+        save_project_descriptor(
+            str(json_path),
+            {"id": "1", "name": "B", "directory": "/tmp/a"},
+        )
+
+        assert list_projects(str(json_path))[0]["name"] == "B"
+
 
 # ── get_incoming_jpg_dir ───────────────────────────────────────────────────
 

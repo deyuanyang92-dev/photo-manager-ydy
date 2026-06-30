@@ -70,6 +70,28 @@ class TestScanMarksGroupedJpg:
         found = next(f for f in result.jpg_files if f.name == "grouped.jpg")
         assert found.is_grouped is True
 
+    def test_scan_hides_jpgs_already_archived_in_group_zip(self):
+        """JPGs in an organized group with a real ZIP are no longer pending."""
+        jpg_path = self._make_jpg("archived.jpg")
+        results_dir = Path(self.tmpdir) / "results"
+        results_dir.mkdir()
+        zip_path = results_dir / "UID-001-1.zip"
+        zip_path.write_bytes(b"zip")
+
+        _ensure_grouping_table(self.db)
+        group = Group(
+            group_index=0,
+            angle_label="A",
+            jpg_paths=[jpg_path],
+            status="organized",
+            archive_zip=str(zip_path),
+        )
+        save_grouping(self.db, "UID-001", [group], clean_phantoms=False)
+
+        result = scan_project(self.tmpdir, self.db)
+
+        assert [f.name for f in result.jpg_files] == []
+
     def test_only_grouped_jpg_marked_not_others(self):
         """Only the jpg_path in grouping gets is_grouped=True; others remain False."""
         jpg_grouped = self._make_jpg("in_group.jpg")

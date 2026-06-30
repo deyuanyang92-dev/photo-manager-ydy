@@ -14,10 +14,11 @@ ZERO 新表：只读已有表（specimens / collection_records / grouping）。�
 """
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 from collections import Counter
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Iterator, Optional
 
 import openpyxl
@@ -50,6 +51,11 @@ _COLLECTION_COLUMNS: tuple[str, ...] = (
 )
 
 _GROUPING_COMPOSED_STATUSES: tuple[str, ...] = ("composed", "organized")
+_GROUPING_KEY_SEP = "\0"
+
+# Table-data cache for the interactive summary page.  Export functions remain
+# uncached because they write files and are normally one-shot operations.
+_SPECIMEN_ROWS_CACHE: dict[tuple, dict] = {}
 
 
 # ── helpers ────────────────────────────────────────────────────────────────────
@@ -79,6 +85,342 @@ def _iter_dbs(dirs: list[str]) -> Iterator[tuple[str, sqlite3.Connection]]:
         except (ProjectUnavailableError, sqlite3.Error):
             continue
         yield d, conn
+
+
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    try:
+        return {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})")}
+    except sqlite3.Error:
+        return set()
+
+
+def _json_path_list(raw) -> list[str]:
+    if raw in (None, ""):
+        return []
+    try:
+        data = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(data, list):
+        return []
+    return [str(item).strip() for item in data if str(item or "").strip()]
+
+
+def _path_basename(path: str) -> str:
+    value = str(path or "").strip()
+    if not value:
+        return ""
+    if "\\" in value:
+        return PureWindowsPath(value).name or value
+    return Path(value).name or value
+
+
+def _joined_basenames(paths: list[str]) -> str:
+    names = [_path_basename(path) for path in paths if str(path or "").strip()]
+    return "；".join(name for name in names if name)
+
+
+def _empty_grouping_summary(project_code: str = "") -> dict:
+    return {
+        "count": 0,
+        "group_count": 0,
+        "status": "无成果",
+        "projCode": project_code,
+        "jpg_count": 0,
+        "tiff_count": 0,
+        "zip_count": 0,
+        "tiff_names": "",
+        "tiff_paths": "",
+        "zip_names": "",
+        "zip_paths": "",
+    }
+
+
+def specimen_grouping_key(workspace_dir: str, uid: str) -> str:
+    """Return a stable grouping key for one specimen row.
+
+    ``uid`` is only unique inside one workspace.  Cross-workspace summary tables
+    therefore key grouping facts by ``workspace_dir + uid`` to avoid silent
+    collisions when two projects contain the same specimen number.
+    """
+    return f"{workspace_dir or ''}{_GROUPING_KEY_SEP}{uid or ''}"
+
+
+def _cache_signature(dirs: list[str], root: str) -> tuple:
+    parts: list[tuple] = []
+    for d in dirs:
+        ws = str(Path(d).resolve())
+        db_path = Path(ws) / "_data" / "project.db"
+        wal_path = Path(str(db_path) + "-wal")
+
+        def _st(path: Path):
+            try:
+                s = path.stat()
+                return (s.st_mtime_ns, s.st_size)
+            except OSError:
+                return None
+
+        parts.append((ws, _st(db_path), _st(wal_path)))
+    return (str(Path(root).resolve()) if root else "", tuple(parts))
+
+
+def clear_specimen_summary_cache() -> None:
+    """Clear cached interactive summary rows.
+
+    Tests and maintenance commands can call this after deliberately mutating
+    many project DBs in-place.
+    """
+    _SPECIMEN_ROWS_CACHE.clear()
+
+
+def _copy_summary_payload(payload: dict) -> dict:
+    return {
+        "specimens": list(payload.get("specimens", [])),
+        "grouping": {k: dict(v) for k, v in payload.get("grouping", {}).items()},
+        "projects": [dict(p) for p in payload.get("projects", [])],
+        "dashboard": dict(payload.get("dashboard") or {}),
+    }
+
+
+def _project_meta(conn: sqlite3.Connection) -> dict:
+    try:
+        row = conn.execute(
+            "SELECT value_json FROM project_settings WHERE setting_key='project_meta'"
+        ).fetchone()
+    except sqlite3.Error:
+        return {}
+    if not row:
+        return {}
+    try:
+        data = json.loads(row[0])
+    except (ValueError, TypeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _project_descriptor(conn: sqlite3.Connection, ws_dir: str, root: str) -> dict:
+    label = _label(ws_dir, root)
+    name = label
+    code = ""
+
+    meta = _project_meta(conn)
+    if meta:
+        name = str(meta.get("name") or name)
+        code = str(meta.get("project_code") or meta.get("code") or code)
+
+    # Older converted databases may carry a projects table.  Treat it as a
+    # best-effort source and keep the newer project_settings value authoritative.
+    try:
+        rows = conn.execute("SELECT directory, name, project_code FROM projects").fetchall()
+    except sqlite3.Error:
+        rows = []
+    for row in rows:
+        d = dict(row)
+        directory = d.get("directory") or ""
+        if directory and os.path.normpath(directory) != os.path.normpath(ws_dir):
+            continue
+        name = str(d.get("name") or name)
+        code = code or str(d.get("project_code") or "")
+        break
+
+    return {
+        "directory": ws_dir,
+        "name": name or Path(ws_dir).name,
+        "project_code": code,
+        "label": label,
+    }
+
+
+def _current_photo_assignment_counts(conn: sqlite3.Connection) -> dict[str, int]:
+    photo_cols = _table_columns(conn, "photos")
+    assignment_cols = _table_columns(conn, "photo_assignments")
+    if not {"current_assignment_id"} <= photo_cols:
+        return {}
+    if not {"assignment_id", "specimen_uid"} <= assignment_cols:
+        return {}
+
+    current_expr = "AND COALESCE(a.is_current, 1)=1" if "is_current" in assignment_cols else ""
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT a.specimen_uid AS uid, COUNT(*) AS n
+              FROM photos p
+              JOIN photo_assignments a ON a.assignment_id = p.current_assignment_id
+             WHERE a.specimen_uid IS NOT NULL
+               AND TRIM(a.specimen_uid) <> ''
+               {current_expr}
+             GROUP BY a.specimen_uid
+            """
+        ).fetchall()
+    except sqlite3.Error:
+        return {}
+    return {str(row["uid"]): int(row["n"] or 0) for row in rows}
+
+
+def collect_grouping_summary_for_connection(
+    conn: sqlite3.Connection,
+    project_code: str = "",
+) -> dict[str, dict]:
+    """Return per-specimen grouping facts for the interactive summary table."""
+    out: dict[str, dict] = {}
+    cols = _table_columns(conn, "grouping")
+    if "uid" not in cols:
+        assigned_counts = _current_photo_assignment_counts(conn)
+        return {
+            uid: {**_empty_grouping_summary(project_code), "jpg_count": count}
+            for uid, count in assigned_counts.items()
+        }
+
+    wanted = ["uid", "status", "jpg_paths", "composed_tiff_path", "archive_zip"]
+    select = ", ".join(
+        name if name in cols else f"NULL AS {name}"
+        for name in wanted
+    )
+    try:
+        rows = conn.execute(f"SELECT {select} FROM grouping").fetchall()
+    except sqlite3.Error:
+        return out
+
+    scratch: dict[str, dict] = {}
+    for row in rows:
+        d = dict(row)
+        uid = str(d.get("uid") or "").strip()
+        if not uid:
+            continue
+        bucket = scratch.setdefault(uid, {
+            "total": 0,
+            "done": 0,
+            "jpg_paths": set(),
+            "tiff_paths": [],
+            "zip_paths": [],
+        })
+        bucket["total"] += 1
+        if str(d.get("status") or "") in _GROUPING_COMPOSED_STATUSES:
+            bucket["done"] += 1
+        for path in _json_path_list(d.get("jpg_paths")):
+            bucket["jpg_paths"].add(path)
+        tiff_path = str(d.get("composed_tiff_path") or "").strip()
+        if tiff_path and tiff_path not in bucket["tiff_paths"]:
+            bucket["tiff_paths"].append(tiff_path)
+        zip_path = str(d.get("archive_zip") or "").strip()
+        if zip_path and zip_path not in bucket["zip_paths"]:
+            bucket["zip_paths"].append(zip_path)
+
+    assigned_counts = _current_photo_assignment_counts(conn)
+    for uid, assigned_count in assigned_counts.items():
+        scratch.setdefault(uid, {
+            "total": 0,
+            "done": 0,
+            "jpg_paths": set(),
+            "tiff_paths": [],
+            "zip_paths": [],
+        })["assigned_count"] = assigned_count
+
+    for uid, bucket in scratch.items():
+        total = int(bucket.get("total") or 0)
+        done = int(bucket.get("done") or 0)
+        if done == 0:
+            status = "待合成" if total else "无成果"
+        elif done == total:
+            status = "已合成"
+        else:
+            status = "部分合成"
+        jpg_count = max(
+            len(bucket.get("jpg_paths") or []),
+            int(bucket.get("assigned_count") or 0),
+        )
+        tiff_paths = list(bucket.get("tiff_paths") or [])
+        zip_paths = list(bucket.get("zip_paths") or [])
+        out[uid] = {
+            "count": done,
+            "group_count": total,
+            "status": status,
+            "projCode": project_code,
+            "jpg_count": jpg_count,
+            "tiff_count": len(tiff_paths),
+            "zip_count": len(zip_paths),
+            "tiff_names": _joined_basenames(tiff_paths),
+            "tiff_paths": "；".join(tiff_paths),
+            "zip_names": _joined_basenames(zip_paths),
+            "zip_paths": "；".join(zip_paths),
+        }
+    return out
+
+
+def _grouping_summary_for_db(conn: sqlite3.Connection, project_code: str) -> dict[str, dict]:
+    return collect_grouping_summary_for_connection(conn, project_code)
+
+
+def collect_specimen_summary_rows(
+    dirs: list[str],
+    root: str,
+    *,
+    use_cache: bool = True,
+) -> dict:
+    """Return interactive summary rows across workspaces.
+
+    Result shape:
+      ``{"specimens": list[Specimen], "grouping": dict, "projects": list[dict],
+      "dashboard": dict}``
+
+    Missing or locked project DBs are skipped, matching the export behavior.
+    """
+    norm_dirs = []
+    seen: set[str] = set()
+    for d in dirs:
+        if not d:
+            continue
+        try:
+            resolved = str(Path(d).resolve())
+        except OSError:
+            resolved = str(d)
+        if resolved not in seen:
+            seen.add(resolved)
+            norm_dirs.append(resolved)
+
+    sig = _cache_signature(norm_dirs, root)
+    if use_cache and sig in _SPECIMEN_ROWS_CACHE:
+        return _copy_summary_payload(_SPECIMEN_ROWS_CACHE[sig])
+
+    specimens: list[Specimen] = []
+    grouping: dict[str, dict] = {}
+    projects: list[dict] = []
+
+    for ws_dir, conn in _iter_dbs(norm_dirs):
+        ws_dir = str(Path(ws_dir).resolve())
+        project = _project_descriptor(conn, ws_dir, root)
+        projects.append(project)
+        project_code = str(project.get("project_code") or "")
+        grouped_by_uid = _grouping_summary_for_db(conn, project_code)
+
+        try:
+            rows = conn.execute("SELECT * FROM specimens ORDER BY uid").fetchall()
+        except sqlite3.Error:
+            continue
+        for row in rows:
+            sp = Specimen.from_row(row)
+            sp.owner_project_dir = ws_dir
+            specimens.append(sp)
+
+            uid = sp.uid or ""
+            key = specimen_grouping_key(ws_dir, uid)
+            grouping[key] = dict(
+                grouped_by_uid.get(
+                    uid,
+                    _empty_grouping_summary(project_code),
+                )
+            )
+
+    dashboard = collect_project_dashboard(norm_dirs, root) if norm_dirs else {}
+    payload = {
+        "specimens": specimens,
+        "grouping": grouping,
+        "projects": projects,
+        "dashboard": dashboard,
+    }
+    if use_cache:
+        _SPECIMEN_ROWS_CACHE[sig] = _copy_summary_payload(payload)
+    return _copy_summary_payload(payload)
 
 
 def _default_out(root: str, suffix: str, ext: str) -> Path:
@@ -161,6 +503,22 @@ def collect_project_dashboard(dirs: list[str], root: str) -> dict:
         except sqlite3.Error:
             pass
 
+        grouping_cols = _table_columns(conn, "grouping")
+        if "uid" in grouping_cols:
+            select = ", ".join(
+                name if name in grouping_cols else f"NULL AS {name}"
+                for name in ("composed_tiff_path", "archive_zip")
+            )
+            try:
+                rows = conn.execute(f"SELECT {select} FROM grouping").fetchall()
+                for row in rows:
+                    if str(row["composed_tiff_path"] or "").strip():
+                        ws["tiff_count"] += 1
+                    if str(row["archive_zip"] or "").strip():
+                        ws["zip_count"] += 1
+            except sqlite3.Error:
+                pass
+
         try:
             assigns = conn.execute(
                 """
@@ -206,6 +564,8 @@ def collect_project_dashboard(dirs: list[str], root: str) -> dict:
             "rna_specimen_count": ws["rna_specimen_count"],
             "photo_count": ws["photo_count"],
             "unassigned_photo_count": ws["unassigned_photo_count"],
+            "tiff_count": ws["tiff_count"],
+            "zip_count": ws["zip_count"],
             "label_print_event_count": ws["label_print_event_count"],
             "sample_label_print_count": ws["sample_label_print_count"],
             "tissue_label_print_count": ws["tissue_label_print_count"],
@@ -221,6 +581,8 @@ def collect_project_dashboard(dirs: list[str], root: str) -> dict:
             "rna_specimen_count": totals["rna_specimen_count"],
             "photo_count": totals["photo_count"],
             "unassigned_photo_count": totals["unassigned_photo_count"],
+            "tiff_count": totals["tiff_count"],
+            "zip_count": totals["zip_count"],
             "label_print_event_count": totals["label_print_event_count"],
             "sample_label_print_count": totals["sample_label_print_count"],
             "tissue_label_print_count": totals["tissue_label_print_count"],
@@ -418,7 +780,7 @@ def _orphan_folder_findings(root: str) -> list[dict]:
     """root 下扫描到的「文件夹存在但非工作区」叶节点（has_data=False 且无子节点）。"""
     out: list[dict] = []
     try:
-        tree = scan_tree(root)
+        tree = scan_tree(root, use_cache=False)
     except OSError:
         return out
 

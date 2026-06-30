@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Optional
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
+    QApplication,
     QAbstractItemView,
     QButtonGroup,
     QFrame,
@@ -30,6 +31,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
+    QMenu,
     QPushButton,
     QScrollArea,
     QTableWidget,
@@ -414,6 +416,8 @@ class CollectionRecordsView(BaseView):
         self._table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.itemSelectionChanged.connect(self._on_row_selected)
+        self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._table.customContextMenuRequested.connect(self._show_table_context_menu)
         self._table.horizontalHeader().setStretchLastSection(True)
         v.addWidget(self._table, 1)
         return pane
@@ -596,6 +600,104 @@ class CollectionRecordsView(BaseView):
         for btn in self._editor_zone_group.buttons():
             btn.setChecked(btn.property("zone") == zone)
         self._rebuild_editor(zone)
+
+    def _record_for_row(self, row: int) -> Optional[dict]:
+        if row < 0 or row >= self._table.rowCount():
+            return None
+        item = self._table.item(row, 0)
+        rid = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+        db = self.ctx.get_db()
+        if db is None or rid is None:
+            return None
+        return next((r for r in crs.list_records(db) if r.get("id") == rid), None)
+
+    def _show_table_context_menu(self, pos) -> None:
+        row = self._table.indexAt(pos).row()
+        rec = self._record_for_row(row)
+
+        menu = QMenu(self._table)
+        if rec is None:
+            new_action = menu.addAction("新建采集记录")
+            new_action.triggered.connect(self._new_record)
+            menu.exec(self._table.viewport().mapToGlobal(pos))
+            return
+
+        self._table.selectRow(row)
+        self._current_id = rec.get("id")
+
+        edit_action = menu.addAction("编辑详情")
+        edit_action.triggered.connect(lambda: self._edit_record_row(row))
+
+        copy_key_action = menu.addAction("复制四键")
+        copy_key_action.triggered.connect(lambda _=False, r=rec: self._copy_record_key(r))
+
+        copy_summary_action = menu.addAction("复制记录摘要")
+        copy_summary_action.triggered.connect(lambda _=False, r=rec: self._copy_record_summary(r))
+
+        menu.addSeparator()
+        new_action = menu.addAction("新建采集记录")
+        new_action.triggered.connect(self._new_record)
+
+        delete_action = menu.addAction("删除记录")
+        delete_action.triggered.connect(self._delete_record)
+
+        menu.addSeparator()
+        properties_action = menu.addAction("属性")
+        properties_action.triggered.connect(
+            lambda _=False, r=rec: self._show_record_properties(r)
+        )
+
+        menu.exec(self._table.viewport().mapToGlobal(pos))
+
+    def _edit_record_row(self, row: int) -> None:
+        if row < 0:
+            return
+        self._table.selectRow(row)
+        self._on_row_selected()
+        self._tabs.setCurrentIndex(1)
+
+    def _copy_record_key(self, rec: dict) -> None:
+        parts = [
+            rec.get("province") or "",
+            rec.get("site") or "",
+            rec.get("station") or "",
+            rec.get("collection_date") or "",
+        ]
+        QApplication.clipboard().setText("\t".join(str(p) for p in parts))
+
+    def _copy_record_summary(self, rec: dict) -> None:
+        keys = [
+            ("采区", _zone_tag(rec.get("zone"))),
+            ("地区", rec.get("province")),
+            ("样地", rec.get("site")),
+            ("站位", rec.get("station")),
+            ("采集日期", rec.get("collection_date")),
+            ("采集人", rec.get("collector")),
+            ("底质", rec.get("habitat")),
+            ("经纬度", self._record_lonlat(rec)),
+        ]
+        text = "\n".join(f"{label}: {value or '—'}" for label, value in keys)
+        QApplication.clipboard().setText(text)
+
+    @staticmethod
+    def _record_lonlat(rec: dict) -> str:
+        lon, lat = rec.get("lon"), rec.get("lat")
+        if lon in (None, "") or lat in (None, ""):
+            return ""
+        return f"{lon}, {lat}"
+
+    def _show_record_properties(self, rec: dict) -> None:
+        lines = [
+            f"采区：{_zone_tag(rec.get('zone'))}",
+            f"地区：{rec.get('province') or '—'}",
+            f"样地：{rec.get('site') or '—'}",
+            f"站位：{rec.get('station') or '—'}",
+            f"采集日期：{rec.get('collection_date') or '—'}",
+            f"采集人：{rec.get('collector') or '—'}",
+            f"经纬度：{self._record_lonlat(rec) or '—'}",
+            f"记录 ID：{rec.get('id') or '—'}",
+        ]
+        QMessageBox.information(self, "采集记录属性", "\n".join(lines))
 
     def _new_record(self) -> None:
         self._current_id = None

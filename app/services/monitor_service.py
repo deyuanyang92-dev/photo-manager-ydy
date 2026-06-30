@@ -20,6 +20,7 @@ Oracle comment: monitor-service.js:107-109.
 from __future__ import annotations
 
 import os
+import json
 import re
 import sqlite3
 from dataclasses import dataclass, field
@@ -31,9 +32,8 @@ from app.utils.path_utils import normalize_path, is_wsl_runtime
 
 
 # Path.resolve() hits the filesystem (an lstat per path component + symlink
-# walk). scan_project runs every 2 s and resolves every JPG twice, so the same
-# paths are re-resolved hundreds of times a second — the dominant scan cost.
-# Symlink topology is static within a session, so memoise by raw path string.
+# walk). monitor scans resolve every JPG more than once, and WSL /mnt drives
+# make that expensive, so memoise by raw path string for the session.
 _RESOLVE_CACHE: dict[str, str] = {}
 
 
@@ -272,6 +272,68 @@ def _list_tiffs(
     return result
 
 
+def _organized_group_jpg_paths(db: sqlite3.Connection) -> set[str]:
+    """Return JPG paths from groups that already have a real archive ZIP."""
+    paths: set[str] = set()
+    try:
+        rows = db.execute(
+            "SELECT jpg_paths, archive_zip, status FROM grouping WHERE uid IS NOT NULL"
+        ).fetchall()
+    except Exception:
+        return paths
+    for row in rows:
+        try:
+            jpg_paths = row["jpg_paths"]
+            archive_zip = row["archive_zip"]
+            status = row["status"]
+        except Exception:
+            jpg_paths = row[0] if len(row) > 0 else ""
+            archive_zip = row[1] if len(row) > 1 else ""
+            status = row[2] if len(row) > 2 else ""
+        if not archive_zip or not os.path.isfile(str(archive_zip)):
+            continue
+        if status and status != "organized":
+            continue
+        try:
+            for path in json.loads(jpg_paths or "[]"):
+                if path:
+                    paths.add(_resolved(path))
+        except Exception:
+            continue
+    return paths
+
+
+def build_attribution_context(
+    project_dir: str,
+    db: sqlite3.Connection,
+) -> AttributionCtx:
+    """Build the full JPG attribution context for monitor scans."""
+    try:
+        from app.services.activation_service import read_activations
+        attr = read_activations(project_dir)
+    except Exception:
+        attr = AttributionCtx()
+
+    try:
+        from app.services.grouping_service import get_explicit_unassigns
+        attr.explicit_unassigns = get_explicit_unassigns(db)
+    except Exception:
+        pass
+
+    try:
+        rows = db.execute("SELECT uid, jpg_paths FROM grouping").fetchall()
+        for row in rows:
+            uid = row[0]
+            paths = json.loads(row[1] or "[]")
+            for path in paths:
+                if path:
+                    attr.path_to_uid[_resolved(path)] = uid
+    except Exception:
+        pass
+
+    return attr
+
+
 # ── scan_project — pure function (IO via OS + db) ─────────────────────────────
 
 def scan_project(
@@ -312,6 +374,16 @@ def scan_project(
 
     # List JPGs
     jpg_files = _list_jpgs(incoming_dir, archived, incoming_subdir + "/")
+    archived_group_paths = _organized_group_jpg_paths(db)
+    if archived_group_paths:
+        before_count = len(jpg_files)
+        jpg_files = [
+            f for f in jpg_files
+            if _resolved(f.path) not in archived_group_paths
+        ]
+        archived_group_count = before_count - len(jpg_files)
+    else:
+        archived_group_count = 0
     # List TIFFs — Oracle: both filters OFF for results/ so all TIFFs visible
     tiff_files = _list_tiffs(
         results_dir_path, processed, results_subdir + "/",
@@ -382,7 +454,7 @@ def scan_project(
         incoming_jpg_dir=incoming_dir,
         results_dir=results_dir_path,
         pending_count=len(jpg_files) + len(tiff_files),
-        archived_jpg_count=len(archived),
+        archived_jpg_count=len(archived) + archived_group_count,
         processed_tiff_count=len(processed),
     )
     return result

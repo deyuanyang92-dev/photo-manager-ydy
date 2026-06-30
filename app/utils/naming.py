@@ -259,6 +259,19 @@ _LEGACY_RE = re.compile(
     + _SPECIES_ID_RE + r"-" + _STORAGE_RE + r"-" + _DATE_SEG_RE + r"$"
 )
 
+_SPECIES_ID_FULL_RE = re.compile(r"^[A-Za-z]+\d+$")
+_STORAGE_CODE_FULL_RE = re.compile(r"^[TDR][A-Za-z0-9]*$", re.IGNORECASE)
+
+
+def _valid_parsed_species_id(value: str) -> bool:
+    """Species codes are voucher prefixes with a numeric suffix, e.g. DLC001."""
+    return bool(_SPECIES_ID_FULL_RE.fullmatch(str(value or "")))
+
+
+def _valid_parsed_storage(value: str) -> bool:
+    """Storage codes are preservation codes; pure sequence/date tokens are invalid."""
+    return bool(_STORAGE_CODE_FULL_RE.fullmatch(str(value or "")))
+
 
 def parse_uid(uid: Optional[str]) -> Optional[dict]:
     """Parse a specimen UID into its component fields.
@@ -279,6 +292,10 @@ def parse_uid(uid: Optional[str]) -> Optional[dict]:
     # 1. Full result-ID (province-site-station-speciesId-seq-storage-date)
     m = _FULL_RE.match(s)
     if m:
+        if not _valid_parsed_species_id(m.group(4)):
+            return None
+        if not _valid_parsed_storage(m.group(6)):
+            return None
         return {
             "province": m.group(1),
             "site": m.group(2),
@@ -293,6 +310,10 @@ def parse_uid(uid: Optional[str]) -> Optional[dict]:
     # 2. UniqueId (province-site-station-speciesId-storage-date)
     m = _UNIQUE_RE.match(s)
     if m:
+        if not _valid_parsed_species_id(m.group(4)):
+            return None
+        if not _valid_parsed_storage(m.group(5)):
+            return None
         return {
             "province": m.group(1),
             "site": m.group(2),
@@ -307,6 +328,10 @@ def parse_uid(uid: Optional[str]) -> Optional[dict]:
     # 3. Legacy v002 (province-site-speciesId-storage-date, no station)
     m = _LEGACY_RE.match(s)
     if m:
+        if not _valid_parsed_species_id(m.group(3)):
+            return None
+        if not _valid_parsed_storage(m.group(4)):
+            return None
         return {
             "province": m.group(1),
             "site": m.group(2),

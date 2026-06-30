@@ -1,6 +1,8 @@
 """test_win_screenshot.py — WSL screenshot delegation helpers (Qt-free)."""
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from app.utils import win_screenshot as ws
 
 
@@ -35,3 +37,19 @@ def test_snipper_falls_back_to_screenclip(monkeypatch):
 def test_snipper_none_without_cmd_exe(monkeypatch):
     monkeypatch.setattr(ws, "_cmd_exe", lambda: None)
     assert ws.windows_snipper_cmd() is None
+
+
+def test_has_snipaste_uses_replace_decode_errors(monkeypatch):
+    ws._has_snipaste.cache_clear()
+    seen = {}
+
+    def fake_run(*args, **kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(returncode=1, stdout="")
+
+    monkeypatch.setattr(ws, "_cmd_exe", lambda: "/cmd.exe")
+    monkeypatch.setattr(ws.subprocess, "run", fake_run)
+
+    assert ws._has_snipaste() is False
+    assert seen["encoding"] == "utf-8"
+    assert seen["errors"] == "replace"

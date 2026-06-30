@@ -34,12 +34,12 @@ def _summarize_jobs(jobs: list[dict]) -> str:
 
     Example output::
 
-        样品瓶 / 酒精: 12 张 · 内置标准 · LABEL
-        RNAlater 组织管: 3 张 · 内置标准 · A4
+        瓶签: 12 张 · 内置标准 · LABEL
+        RNA签: 3 张 · 内置标准 · A4
     """
     lines: list[str] = []
     for job in jobs:
-        bucket = "RNAlater 组织管" if job.get("bucket") == "tissue" else "样品瓶 / 酒精"
+        bucket = "RNA签" if job.get("bucket") == "tissue" else "瓶签"
         items = job.get("items") or []
         tmpl = job.get("template") or {}
         tmpl_name = str(tmpl.get("name") or tmpl.get("code") or "未命名模板")

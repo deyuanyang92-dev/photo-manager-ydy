@@ -23,26 +23,32 @@ grouping_changed()
 from __future__ import annotations
 
 from collections import OrderedDict
-import json
 from pathlib import Path
 import re
-import zipfile
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
-from PyQt6.QtCore import Qt, QSize, pyqtSignal
+from PyQt6.QtCore import Qt, QSize, QTimer, pyqtSignal
+from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
+    QAbstractItemView,
+    QApplication,
     QDialog,
     QDialogButtonBox,
     QCheckBox,
     QFrame,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMessageBox,
+    QMenu,
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -61,47 +67,238 @@ _JPG_EXTS = {".jpg", ".jpeg"}
 _TIFF_EXTS = {".tif", ".tiff"}
 _THUMB_ICON_CACHE_LIMIT = 512
 _THUMB_ICON_CACHE: "OrderedDict[tuple[str, int, int], object]" = OrderedDict()
+_RELATED_THUMB_CACHE: "OrderedDict[tuple[str, int, int, int], object]" = OrderedDict()
+_RELATED_PICKER_NEAR_SECONDS = 30 * 60
+_RELATED_PICKER_DEFAULT_CHECK_SECONDS = 3 * 60
+
+
+def _show_path_in_folder(path: str) -> None:
+    """Reveal *path* in the platform file manager."""
+    import os
+    import subprocess
+    import sys
+
+    if not path:
+        return
+    try:
+        if sys.platform == "win32":
+            subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
+            return
+        try:
+            from app.utils.path_utils import wsl_to_windows
+
+            win_path = wsl_to_windows(path) or path
+            subprocess.Popen(["explorer.exe", "/select,", win_path])
+        except Exception:
+            subprocess.Popen(["xdg-open", str(Path(path).parent)])
+    except Exception:
+        pass
 
 
 def _archive_jpg_count(zip_path: str | None) -> int | None:
     """Return archived JPG count for both plain-JPG and legacy manifest ZIPs."""
-    if not zip_path:
-        return None
-    try:
-        with zipfile.ZipFile(zip_path, "r") as zf:
-            jpg_count = sum(
-                1 for name in zf.namelist()
-                if Path(name).suffix.lower() in _JPG_EXTS
-            )
-            if jpg_count:
-                return jpg_count
-            with zf.open("manifest.json") as fh:
-                manifest = json.loads(fh.read().decode("utf-8"))
-    except Exception:
-        return None
-    files = manifest.get("files") if isinstance(manifest, dict) else None
-    return len(files) if isinstance(files, list) else None
+    return grouping_service.archive_jpg_count(zip_path)
 
 
 def _resolved_archive_zip(group: "Group") -> str | None:
     """Return the registered ZIP or the same-stem ZIP beside the linked TIFF."""
-    explicit = getattr(group, "archive_zip", None)
-    if explicit:
-        return explicit
-    tiff_path = getattr(group, "composed_tiff_path", None)
-    if not tiff_path:
-        return None
-    candidate = Path(tiff_path).with_suffix(".zip")
-    return str(candidate) if candidate.is_file() else None
+    return grouping_service.resolved_archive_zip(group)
+
+
+def _result_path_key(path: str | None) -> str:
+    return grouping_service.result_path_key(path)
+
+
+def _clear_group_tiff_link(group: "Group") -> None:
+    grouping_service.clear_group_tiff_link(group)
+
+
+def _deduplicate_tiff_links(groups: list["Group"]) -> bool:
+    """Keep one group per TIFF path; clear duplicate associations only."""
+    return grouping_service.deduplicate_tiff_links(groups)
+
+
+def _registered_result_paths(db, *, current_uid: str = "",
+                             current_groups: list["Group"] | None = None) -> dict[str, str]:
+    """Return result paths already claimed by grouping rows: path-key -> uid."""
+    return grouping_service.registered_result_paths(
+        db,
+        current_uid=current_uid,
+        current_groups=current_groups,
+    )
+
+
+def _result_pair_candidates(results_dir: str | Path,
+                            used_paths: dict[str, str]) -> list[dict]:
+    """Return same-stem TIFF+ZIP pairs from results/ with association state."""
+    return grouping_service.result_pair_candidates(results_dir, used_paths)
 
 
 def _is_composed_group(group: "Group") -> bool:
     """Groups with finished output belong in the composed row workflow."""
-    return bool(
-        getattr(group, "composed_tiff_path", None)
-        or getattr(group, "archive_zip", None)
-        or getattr(group, "status", None) in {"composed", "organized"}
+    return grouping_service.is_composed_group(group)
+
+
+def _is_blank_draft_group(group: "Group") -> bool:
+    """True for placeholder groups with no user data or result files."""
+    return grouping_service.is_blank_draft_group(group)
+
+
+def _without_blank_draft_groups(groups: list["Group"]) -> list["Group"]:
+    return grouping_service.without_blank_draft_groups(groups)
+
+
+def _uid_core_key(uid: str) -> str:
+    """Return the stable survey/site/station key used for fuzzy media matching."""
+    return grouping_service.uid_core_key(uid)
+
+
+def _uid_parts(uid: str) -> list[str]:
+    return grouping_service.uid_parts(uid)
+
+
+def _uid_match_terms(uid: str) -> list[str]:
+    return grouping_service.uid_match_terms(uid)
+
+
+def _uid_matches_name(uid: str, name: str) -> bool:
+    return grouping_service.uid_matches_name(uid, name)
+
+
+def _filename_tokens(path_or_name: str) -> list[str]:
+    return grouping_service.filename_tokens(path_or_name)
+
+
+def _uid_filename_mismatch(uid: str, path_or_name: str) -> bool:
+    """True when a media filename visibly belongs to a sibling specimen code."""
+    return grouping_service.uid_filename_mismatch(uid, path_or_name)
+
+
+def _clear_uid_mismatched_result_links(uid: str, groups: list["Group"]) -> bool:
+    """Remove result links that visibly belong to another specimen number."""
+    return grouping_service.clear_uid_mismatched_result_links(uid, groups)
+
+
+def _grouping_attribution_ctx(ctx):
+    project_dir = getattr(ctx, "current_project_dir", None)
+    db = ctx.get_db() if project_dir else None
+    if not project_dir or db is None:
+        return None
+    try:
+        from app.services.activation_service import read_activations
+        attr = read_activations(project_dir)
+    except Exception:
+        from app.services.monitor_service import AttributionCtx
+        attr = AttributionCtx()
+    try:
+        attr.explicit_unassigns = grouping_service.get_explicit_unassigns(db)
+    except Exception:
+        pass
+    try:
+        import json as _json
+        from app.services.monitor_service import _resolved
+        rows = db.execute("SELECT uid, jpg_paths FROM grouping").fetchall()
+        for row in rows:
+            row_uid = row[0] if isinstance(row, (tuple, list)) else row["uid"]
+            raw = row[1] if isinstance(row, (tuple, list)) else row["jpg_paths"]
+            for path in _json.loads(raw or "[]"):
+                if path:
+                    attr.path_to_uid[_resolved(path)] = row_uid
+    except Exception:
+        pass
+    return attr
+
+
+def _related_media_candidates(ctx, uid: str, *,
+                              include_jpg: bool = True,
+                              include_tiff: bool = True) -> list[dict]:
+    """Return JPG/TIFF files that are likely related to *uid*."""
+    project_dir = getattr(ctx, "current_project_dir", None)
+    db = ctx.get_db() if project_dir else None
+    if not project_dir or db is None or not uid:
+        return []
+    s = getattr(ctx, "settings", None)
+    inc = getattr(s, "incoming_subdir", None) if s else None
+    res = getattr(s, "results_subdir", None) if s else None
+    inc = inc if isinstance(inc, str) and inc else "incoming-jpg"
+    res = res if isinstance(res, str) and res else "results"
+    try:
+        from app.services.monitor_service import scan_project
+        scan = scan_project(
+            project_dir,
+            db,
+            incoming_subdir=inc,
+            results_subdir=res,
+            attr=_grouping_attribution_ctx(ctx),
+        )
+    except Exception:
+        return []
+
+    out: list[dict] = []
+    if include_jpg:
+        for entry in getattr(scan, "jpg_files", []) or []:
+            reason = ""
+            if getattr(entry, "attributed_specimen_id", None) == uid:
+                reason = "已归属当前编号"
+            elif _uid_matches_name(uid, getattr(entry, "name", "")):
+                reason = "文件名匹配编号"
+            if reason:
+                out.append({
+                    "kind": "jpg",
+                    "path": entry.path,
+                    "name": entry.name,
+                    "reason": reason,
+                    "mtime": entry.mtime,
+                })
+    if include_tiff:
+        for entry in getattr(scan, "tiff_files", []) or []:
+            if _uid_matches_name(uid, getattr(entry, "name", "")):
+                out.append({
+                    "kind": "tiff",
+                    "path": entry.path,
+                    "name": entry.name,
+                    "reason": "文件名匹配编号",
+                    "mtime": entry.mtime,
+                })
+    return sorted(
+        out,
+        key=lambda c: (
+            c.get("kind") != "jpg",
+            -float(c.get("mtime") or 0),
+            str(c.get("name") or "").casefold(),
+        ),
     )
+
+
+def _mtime_text(ts: float) -> str:
+    from app.services.media_discovery_service import mtime_text
+    return mtime_text(ts)
+
+
+def _media_entries_in_dir(root: Path) -> list[dict]:
+    """Return JPG/TIF file metadata with one stat call per child."""
+    from app.services.media_discovery_service import media_entries_in_dir
+    return media_entries_in_dir(root)
+
+
+def _scan_related_files_in_dir(folder: str | Path, uid: str,
+                               *, near_seconds: int = _RELATED_PICKER_NEAR_SECONDS) -> list[dict]:
+    """Find matching TIFFs and the JPG time blocks immediately before them."""
+    from app.services.media_discovery_service import scan_related_files_in_dir
+    return scan_related_files_in_dir(folder, uid, near_seconds=near_seconds)
+
+
+def _scan_all_media_timeline_in_dir(folder: str | Path, uid: str) -> list[dict]:
+    """Return every JPG/TIF in one directory, sorted by modification time."""
+    from app.services.media_discovery_service import scan_all_media_timeline_in_dir
+    return scan_all_media_timeline_in_dir(folder, uid)
+
+
+def _scan_jpgs_near_tiff_in_dir(folder: str | Path, tiff_path: str,
+                                *, near_seconds: int = _RELATED_PICKER_NEAR_SECONDS) -> list[dict]:
+    """Find JPGs in one directory near an already-linked TIFF's timestamp."""
+    from app.services.media_discovery_service import scan_jpgs_near_tiff_in_dir
+    return scan_jpgs_near_tiff_in_dir(folder, tiff_path, near_seconds=near_seconds)
 
 
 def _paths_from_mime(event) -> list[str]:
@@ -127,15 +324,8 @@ def _paths_from_mime(event) -> list[str]:
 
 
 def _split_media_paths(paths: list[str]) -> tuple[list[str], list[str]]:
-    jpgs: list[str] = []
-    tiffs: list[str] = []
-    for p in paths:
-        ext = Path(p).suffix.lower()
-        if ext in _JPG_EXTS:
-            jpgs.append(p)
-        elif ext in _TIFF_EXTS:
-            tiffs.append(p)
-    return jpgs, tiffs
+    from app.services.media_discovery_service import split_media_paths
+    return split_media_paths(paths)
 
 
 def _project_incoming_dir(ctx: "AppContext") -> Path | None:
@@ -147,6 +337,479 @@ def _project_incoming_dir(ctx: "AppContext") -> Path | None:
     if not isinstance(incoming_subdir, str) or not incoming_subdir:
         incoming_subdir = "incoming-jpg"
     return Path(project_dir) / incoming_subdir
+
+
+def _folder_from_picker_selection(selection: str) -> str:
+    """Return the directory to scan after the user selects a file or folder."""
+    try:
+        path = Path(selection)
+        if path.is_dir():
+            return str(path)
+        return str(path.parent)
+    except Exception:
+        return ""
+
+
+def _name_matches_any_term(name: str, terms: list[str]) -> bool:
+    from app.services.media_discovery_service import name_matches_any_term
+    return name_matches_any_term(name, terms)
+
+
+def _normal_dir(path: str | Path | None) -> Path | None:
+    if not path:
+        return None
+    try:
+        p = Path(path).expanduser()
+        if p.is_file():
+            p = p.parent
+        if p.is_dir():
+            return p
+    except Exception:
+        return None
+    return None
+
+
+def _add_dir_shortcut(
+    shortcuts: list[tuple[str, str]],
+    seen: set[str],
+    label: str,
+    path: str | Path | None,
+) -> None:
+    p = _normal_dir(path)
+    if p is None:
+        return
+    key = str(p.resolve()).casefold()
+    if key in seen:
+        return
+    seen.add(key)
+    shortcuts.append((label, str(p)))
+
+
+def _is_broad_scan_root(path: Path) -> bool:
+    from app.services.media_discovery_service import is_broad_scan_root
+    return is_broad_scan_root(path)
+
+
+def _find_related_media_dirs(
+    roots: list[Path],
+    uid: str,
+    *,
+    max_depth: int = 5,
+    max_dirs: int = 1200,
+    limit: int = 8,
+) -> list[Path]:
+    """Find source folders that contain files matching the specimen UID."""
+    from app.services.media_discovery_service import find_related_media_dirs
+    return find_related_media_dirs(
+        roots,
+        uid,
+        max_depth=max_depth,
+        max_dirs=max_dirs,
+        limit=limit,
+    )
+
+
+def _media_thumbnail_pixmap(path: str, size: int = 64):
+    """Return a bounded thumbnail pixmap for JPG/TIF rows, cached by file stat."""
+    try:
+        stat = Path(path).stat()
+        key = (str(Path(path).resolve()), int(stat.st_mtime_ns), int(stat.st_size), size)
+        cached = _RELATED_THUMB_CACHE.get(key)
+        if cached is not None:
+            _RELATED_THUMB_CACHE.move_to_end(key)
+            return cached
+    except Exception:
+        key = None
+    try:
+        from app.utils.image_thumbnail import decode_image_thumbnail
+        pixmap = decode_image_thumbnail(path, max_size=size * 2)
+        if pixmap is None or pixmap.isNull():
+            return None
+        pixmap = pixmap.scaled(
+            size,
+            size,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+    except Exception:
+        return None
+    if key is not None:
+        _RELATED_THUMB_CACHE[key] = pixmap
+        _RELATED_THUMB_CACHE.move_to_end(key)
+        while len(_RELATED_THUMB_CACHE) > _THUMB_ICON_CACHE_LIMIT:
+            _RELATED_THUMB_CACHE.popitem(last=False)
+    return pixmap
+
+
+class _MediaLocationPickerDialog(QDialog):
+    """File/folder browser for directly selecting JPG/TIF or a scan folder."""
+
+    def __init__(
+        self,
+        title: str,
+        start: str = "",
+        *,
+        priority_terms: list[str] | None = None,
+        file_exts: set[str] | None = None,
+        shortcuts: list[tuple[str, str]] | None = None,
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self._priority_terms = [t for t in (priority_terms or []) if str(t or "").strip()]
+        self._file_exts = {e.lower() for e in (file_exts or (_JPG_EXTS | _TIFF_EXTS))}
+        self._shortcuts = self._normal_shortcuts(shortcuts or [])
+        self._thumb_queue: list[tuple[QLabel, str, str]] = []
+        self._selected_paths: list[str] = []
+        self._selected_folder = ""
+        self._current_dir = self._normal_start_dir(start)
+
+        self.setWindowTitle(title)
+        self.setMinimumSize(1040, 640)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(10)
+
+        title_lbl = QLabel(title)
+        title_lbl.setObjectName("Section")
+        root.addWidget(title_lbl)
+
+        path_row = QHBoxLayout()
+        self._path_edit = QLineEdit(str(self._current_dir))
+        self._path_edit.returnPressed.connect(self._go_to_path_text)
+        path_row.addWidget(self._path_edit, stretch=1)
+        go_btn = QPushButton("转到")
+        go_btn.setObjectName("Ghost")
+        go_btn.clicked.connect(self._go_to_path_text)
+        path_row.addWidget(go_btn)
+        up_btn = QPushButton("上一级")
+        up_btn.setObjectName("Ghost")
+        up_btn.clicked.connect(self._go_up)
+        path_row.addWidget(up_btn)
+        use_current = QPushButton("筛选当前目录")
+        use_current.setObjectName("Ghost")
+        use_current.clicked.connect(self._accept_current_dir)
+        path_row.addWidget(use_current)
+        root.addLayout(path_row)
+
+        if self._shortcuts:
+            shortcut_row = QHBoxLayout()
+            shortcut_lbl = QLabel("常用位置")
+            shortcut_lbl.setObjectName("Muted")
+            shortcut_row.addWidget(shortcut_lbl)
+            for label, path in self._shortcuts[:8]:
+                btn = QPushButton(label)
+                btn.setObjectName("Ghost")
+                btn.setToolTip(path)
+                btn.clicked.connect(lambda _checked=False, p=path: self._go_to_dir(p))
+                shortcut_row.addWidget(btn)
+            shortcut_row.addStretch()
+            root.addLayout(shortcut_row)
+
+        hint = QLabel("双击文件夹进入；多选 JPG/TIF 后确定会直接加入；进入目标目录后点“筛选当前目录”再按编号筛选。")
+        hint.setObjectName("Muted")
+        hint.setWordWrap(True)
+        root.addWidget(hint)
+
+        self._table = QTableWidget(0, 5)
+        self._table.setHorizontalHeaderLabels(["缩略图", "名称", "类型", "修改时间", "大小"])
+        self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self._table.setAlternatingRowColors(True)
+        self._table.verticalHeader().setVisible(False)
+        self._table.verticalHeader().setDefaultSectionSize(74)
+        header = self._table.horizontalHeader()
+        header.setSectionsClickable(True)
+        header.setSortIndicatorShown(True)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Interactive)
+        self._table.setColumnWidth(0, 76)
+        self._table.setColumnWidth(1, 520)
+        self._table.setColumnWidth(2, 90)
+        self._table.setColumnWidth(3, 180)
+        self._table.setColumnWidth(4, 90)
+        self._table.itemDoubleClicked.connect(self._on_item_activated)
+        root.addWidget(self._table, stretch=1)
+
+        self._buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        ok = self._buttons.button(QDialogButtonBox.StandardButton.Ok)
+        if ok is not None:
+            ok.setText("确定")
+        self._buttons.accepted.connect(self._accept_selection)
+        self._buttons.rejected.connect(self.reject)
+        root.addWidget(self._buttons)
+
+        self._populate()
+        QTimer.singleShot(0, self._load_next_thumbnail_batch)
+
+    def selected_folder(self) -> str:
+        return self._selected_folder
+
+    def selected_paths(self) -> list[str]:
+        return list(self._selected_paths)
+
+    @staticmethod
+    def _normal_start_dir(start: str) -> Path:
+        try:
+            path = Path(start).expanduser() if start else Path.cwd()
+            if path.is_file():
+                path = path.parent
+            if path.is_dir():
+                return path
+        except Exception:
+            pass
+        return Path.cwd()
+
+    @staticmethod
+    def _normal_shortcuts(shortcuts: list[tuple[str, str]]) -> list[tuple[str, str]]:
+        out: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for label, path in shortcuts:
+            p = _normal_dir(path)
+            if p is None:
+                continue
+            key = str(p.resolve()).casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append((str(label or p.name or p), str(p)))
+        return out
+
+    def _entry_info(self, row: int) -> dict | None:
+        item = self._table.item(row, 1)
+        if item is None:
+            return None
+        data = item.data(Qt.ItemDataRole.UserRole)
+        return data if isinstance(data, dict) else None
+
+    def _current_info(self) -> dict | None:
+        row = self._table.currentRow()
+        if row < 0:
+            return None
+        return self._entry_info(row)
+
+    def _kind_for_file(self, path: Path) -> str:
+        suffix = path.suffix.lower()
+        if suffix in _TIFF_EXTS:
+            return "TIF"
+        if suffix in _JPG_EXTS:
+            return "JPG"
+        return suffix.lstrip(".").upper()
+
+    def _thumbnail_label(self, path: Path, *, is_dir: bool) -> QLabel:
+        label = QLabel()
+        label.setFixedSize(68, 68)
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        label.setObjectName("RelatedThumb")
+        label.setToolTip(str(path))
+        if is_dir:
+            label.setText("DIR")
+            label.setProperty("hasThumbnail", False)
+            return label
+        kind = self._kind_for_file(path)
+        label.setText(kind)
+        label.setProperty("hasThumbnail", False)
+        self._thumb_queue.append((label, str(path), kind))
+        return label
+
+    def _apply_thumbnail(self, label: QLabel, path: str, kind: str) -> None:
+        pixmap = _media_thumbnail_pixmap(path, 64)
+        if pixmap is not None and not pixmap.isNull():
+            label.setPixmap(pixmap)
+            label.setProperty("hasThumbnail", True)
+        else:
+            label.setText(kind or "IMG")
+            label.setProperty("hasThumbnail", False)
+
+    def _load_next_thumbnail_batch(self) -> None:
+        processed = 0
+        while self._thumb_queue and processed < 4:
+            label, path, kind = self._thumb_queue.pop(0)
+            self._apply_thumbnail(label, path, kind)
+            processed += 1
+        if self._thumb_queue:
+            QTimer.singleShot(10, self._load_next_thumbnail_batch)
+
+    def _load_all_thumbnails_now(self) -> None:
+        while self._thumb_queue:
+            label, path, kind = self._thumb_queue.pop(0)
+            self._apply_thumbnail(label, path, kind)
+
+    def _selected_infos(self) -> list[dict]:
+        rows = sorted({index.row() for index in self._table.selectionModel().selectedRows()})
+        if not rows:
+            current = self._current_info()
+            return [current] if current else []
+        infos: list[dict] = []
+        for row in rows:
+            info = self._entry_info(row)
+            if info:
+                infos.append(info)
+        return infos
+
+    def _populate(self) -> None:
+        self._table.setSortingEnabled(False)
+        self._thumb_queue.clear()
+        self._path_edit.setText(str(self._current_dir))
+        entries: list[tuple[bool, bool, float, Path]] = []
+        try:
+            children = list(self._current_dir.iterdir())
+        except OSError:
+            children = []
+        for child in children:
+            is_dir = child.is_dir()
+            if not is_dir and child.suffix.lower() not in self._file_exts:
+                continue
+            try:
+                mtime = child.stat().st_mtime
+            except OSError:
+                mtime = 0
+            related = _name_matches_any_term(child.name, self._priority_terms)
+            entries.append((is_dir, related, mtime, child))
+        entries.sort(
+            key=lambda item: (
+                not item[0],
+                not item[1],
+                -float(item[2] or 0),
+                item[3].name.casefold(),
+            )
+        )
+
+        self._table.setRowCount(len(entries))
+        for row, (is_dir, _related, mtime, path) in enumerate(entries):
+            self._table.setCellWidget(row, 0, self._thumbnail_label(path, is_dir=is_dir))
+            name_item = QTableWidgetItem(path.name)
+            name_item.setToolTip(str(path))
+            name_item.setData(
+                Qt.ItemDataRole.UserRole,
+                {"path": str(path), "is_dir": is_dir},
+            )
+            self._table.setItem(row, 1, name_item)
+
+            kind = "文件夹" if is_dir else self._kind_for_file(path)
+            self._table.setItem(row, 2, QTableWidgetItem(kind))
+            self._table.setItem(row, 3, QTableWidgetItem(_mtime_text(mtime)))
+
+            size = ""
+            if not is_dir:
+                try:
+                    size = f"{path.stat().st_size / 1024 / 1024:.1f} MB"
+                except OSError:
+                    size = ""
+            self._table.setItem(row, 4, QTableWidgetItem(size))
+            self._table.setRowHeight(row, 74)
+
+        self._table.clearSelection()
+        self._table.setCurrentCell(-1, -1)
+        self._table.setSortingEnabled(True)
+        self._table.sortItems(3, Qt.SortOrder.DescendingOrder)
+
+    def _go_up(self) -> None:
+        parent = self._current_dir.parent
+        if parent != self._current_dir and parent.is_dir():
+            self._current_dir = parent
+            self._populate()
+
+    def _go_to_dir(self, path: str) -> None:
+        target = _normal_dir(path)
+        if target is None:
+            return
+        self._current_dir = target
+        self._populate()
+
+    def _go_to_path_text(self) -> None:
+        self._go_to_dir(self._path_edit.text().strip())
+
+    def _accept_current_dir(self) -> None:
+        self._selected_paths = []
+        self._selected_folder = str(self._current_dir)
+        self.accept()
+
+    def _on_item_activated(self, item: QTableWidgetItem) -> None:
+        info = self._entry_info(item.row())
+        if not info:
+            return
+        path = Path(str(info.get("path") or ""))
+        if info.get("is_dir") and path.is_dir():
+            self._current_dir = path
+            self._populate()
+            return
+        self._selected_paths = [str(path)]
+        self._selected_folder = ""
+        self.accept()
+
+    def _accept_selection(self) -> None:
+        infos = self._selected_infos()
+        if not infos:
+            self._selected_paths = []
+            self._selected_folder = str(self._current_dir)
+            self.accept()
+            return
+
+        file_paths = [
+            str(Path(str(info.get("path") or "")))
+            for info in infos
+            if not info.get("is_dir")
+        ]
+        if file_paths:
+            self._selected_paths = file_paths
+            self._selected_folder = ""
+            self.accept()
+            return
+
+        path = Path(str(infos[0].get("path") or ""))
+        self._selected_paths = []
+        self._selected_folder = str(path)
+        self.accept()
+
+
+def _pick_media_paths_or_folder(
+    parent: Optional[QWidget],
+    caption: str,
+    *,
+    start: str = "",
+    priority_terms: list[str] | None = None,
+    file_exts: set[str] | None = None,
+    shortcuts: list[tuple[str, str]] | None = None,
+) -> tuple[list[str], str]:
+    dlg = _MediaLocationPickerDialog(
+        caption,
+        start=start,
+        priority_terms=priority_terms,
+        file_exts=file_exts,
+        shortcuts=shortcuts,
+        parent=parent,
+    )
+    if dlg.exec() != QDialog.DialogCode.Accepted:
+        return [], ""
+    return dlg.selected_paths(), dlg.selected_folder()
+
+
+def _pick_media_location_folder(
+    parent: Optional[QWidget],
+    caption: str,
+    *,
+    start: str = "",
+    priority_terms: list[str] | None = None,
+    file_exts: set[str] | None = None,
+    shortcuts: list[tuple[str, str]] | None = None,
+) -> str:
+    _paths, folder = _pick_media_paths_or_folder(
+        parent,
+        caption,
+        start=start,
+        priority_terms=priority_terms,
+        file_exts=file_exts,
+        shortcuts=shortcuts,
+    )
+    return folder
 
 
 def _resolve_path_for_group(p: str) -> Optional[str]:
@@ -255,9 +918,12 @@ class _ComposedRow(QFrame):
     """A single row in the "已合成" section."""
 
     organise_clicked = pyqtSignal(int)   # group_index
+    link_jpg_clicked = pyqtSignal(int)   # group_index
     undo_clicked = pyqtSignal(int)       # group_index
     selected_changed = pyqtSignal(int, bool)  # group_index, checked
     register_zip_clicked = pyqtSignal(int)  # group_index
+    tiff_naming_check_requested = pyqtSignal(str)  # tiff_path
+    tiff_delete_requested = pyqtSignal(int)  # group_index
 
     def __init__(
         self,
@@ -272,6 +938,7 @@ class _ComposedRow(QFrame):
         self._group = group
         self._selected = selected
         self._display_number = display_number or (group.group_index + 1)
+        self._tiff_path = self._group.composed_tiff_path or ""
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -293,12 +960,19 @@ class _ComposedRow(QFrame):
         lay.addWidget(chip)
 
         # TIFF basename
-        tiff_path = self._group.composed_tiff_path or ""
+        tiff_path = self._tiff_path
         tiff_name = Path(tiff_path).name if tiff_path else "(无 TIFF)"
         tiff_lbl = QLabel(tiff_name)
         tiff_lbl.setObjectName("Mono")
         tiff_lbl.setToolTip(tiff_path)
         tiff_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        if tiff_path:
+            tiff_lbl.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            tiff_lbl.customContextMenuRequested.connect(
+                lambda pos, label=tiff_lbl: self._show_tiff_menu(
+                    label.mapToGlobal(pos)
+                )
+            )
         lay.addWidget(tiff_lbl)
 
         # JPG / archive state badge.  A composed row can have only a TIFF when
@@ -314,6 +988,8 @@ class _ComposedRow(QFrame):
             )
         elif jpg_count:
             count_text = f"{jpg_count} JPG 待整理"
+        elif tiff_path:
+            count_text = "仅TIF 待整理"
         else:
             count_text = "未关联 JPG"
         count_lbl = QLabel(count_text)
@@ -324,29 +1000,53 @@ class _ComposedRow(QFrame):
             else (
                 "已注册 ZIP 归档。"
                 if archive_zip
-                else "此组只有 TIF，尚未关联原始 JPG；请先把对应 JPG 加入组或注册已有 ZIP。"
+                else "此组只有 TIF，可先整理登记到编号；需要 ZIP 时再关联 JPG。"
             )
         )
         lay.addWidget(count_lbl)
 
-        # Organise button
-        org_btn = QPushButton("已整理" if archive_zip else "整理")
+        # Main action button
+        needs_jpg_link = bool(tiff_path) and not jpg_count and not archive_zip
+        org_btn = QPushButton(
+            "已整理" if archive_zip else ("整理TIF" if needs_jpg_link else "整理")
+        )
         org_btn.setObjectName("Primary")
         org_btn.setFixedHeight(28)
-        icons.set_button_icon(org_btn, "mdi6.folder-zip-outline",
-                              color=icons.TONE_ON_ACCENT, size=14)
-        org_btn.setEnabled(bool(jpg_count) and not bool(archive_zip))
+        icons.set_button_icon(
+            org_btn,
+            "mdi6.file-image-outline" if needs_jpg_link else "mdi6.folder-zip-outline",
+            color=icons.TONE_ON_ACCENT,
+            size=14,
+        )
+        org_btn.setEnabled((bool(jpg_count) and not bool(archive_zip)) or needs_jpg_link)
         org_btn.setToolTip(
-            "归档 JPG → ZIP，按设置删除 JPG"
-            if jpg_count and not archive_zip
+            "仅整理登记 TIFF 到当前编号；不生成 ZIP"
+            if needs_jpg_link
             else (
-                "本组已有 ZIP 归档。"
-                if archive_zip
-                else "无法整理：此组未关联 JPG 原片。"
+                "归档 JPG → ZIP，按设置删除 JPG"
+                if jpg_count and not archive_zip
+                else (
+                    "本组已有 ZIP 归档。"
+                    if archive_zip
+                    else "无法整理：此组未关联 JPG 原片。"
+                )
             )
         )
         org_btn.clicked.connect(lambda: self.organise_clicked.emit(self._group.group_index))
         lay.addWidget(org_btn)
+
+        if needs_jpg_link:
+            link_btn = QPushButton("关联JPG")
+            link_btn.setObjectName("Ghost")
+            link_btn.setFixedHeight(28)
+            icons.set_button_icon(
+                link_btn, "mdi6.image-plus-outline", color=icons.TONE_MUTED, size=15
+            )
+            link_btn.setToolTip("按此 TIFF 时间，从原片目录选择并关联 JPG")
+            link_btn.clicked.connect(
+                lambda: self.link_jpg_clicked.emit(self._group.group_index)
+            )
+            lay.addWidget(link_btn)
 
         zip_btn = QPushButton("换ZIP" if archive_zip else "注册ZIP")
         zip_btn.setObjectName("Ghost")
@@ -368,9 +1068,37 @@ class _ComposedRow(QFrame):
         undo_btn.setObjectName("Ghost")
         undo_btn.setFixedSize(30, 28)
         icons.set_button_icon(undo_btn, "mdi6.undo-variant", color=icons.TONE_MUTED, size=15)
-        undo_btn.setToolTip("解除合成关联（TIFF 移到 _retired-tiff/，不删除）")
+        undo_btn.setToolTip("撤销合成：确认后删除 TIFF，并把 JPG 放回自由池")
         undo_btn.clicked.connect(lambda: self.undo_clicked.emit(self._group.group_index))
         lay.addWidget(undo_btn)
+
+    def contextMenuEvent(self, event) -> None:  # noqa: N802
+        if self._tiff_path:
+            self._show_tiff_menu(event.globalPos())
+            event.accept()
+            return
+        super().contextMenuEvent(event)
+
+    def _show_tiff_menu(self, global_pos) -> None:
+        path = self._tiff_path
+        if not path:
+            return
+        menu = QMenu(self)
+        check_action = menu.addAction("检查 TIF 命名格式")
+        copy_action = menu.addAction("复制路径")
+        show_action = menu.addAction("在文件夹中显示")
+        menu.addSeparator()
+        delete_action = menu.addAction("删除 TIF")
+
+        chosen = menu.exec(global_pos)
+        if chosen == check_action:
+            self.tiff_naming_check_requested.emit(path)
+        elif chosen == copy_action:
+            QApplication.clipboard().setText(path)
+        elif chosen == show_action:
+            _show_path_in_folder(path)
+        elif chosen == delete_action:
+            self.tiff_delete_requested.emit(self._group.group_index)
 
 
 # ── Draft group ───────────────────────────────────────────────────────────────
@@ -430,6 +1158,8 @@ class _DraftGroupRow(QFrame):
     add_photos_requested = pyqtSignal(int)    # group_index — 从文件夹选图加入
     output_name_changed = pyqtSignal(int, str)  # group_index, 用户编辑的输出命名
     selected_changed = pyqtSignal(int, bool)  # group_index, checked
+    tiff_naming_check_requested = pyqtSignal(str)  # tiff_path
+    tiff_delete_requested = pyqtSignal(int)  # group_index
 
     def __init__(self, group: "Group", parent: Optional[QWidget] = None,
                  panel: Optional["GroupingPanel"] = None,
@@ -502,12 +1232,14 @@ class _DraftGroupRow(QFrame):
         for p in self._group.jpg_paths:
             item = QListWidgetItem(self._thumb_icon(p), "")
             item.setData(Qt.ItemDataRole.UserRole, p)
+            item.setData(Qt.ItemDataRole.UserRole + 1, "jpg")
             item.setToolTip(Path(p).name)
             self._jpg_list.addItem(item)
         tiff_path = self._group.composed_tiff_path or ""
         if tiff_path:
             tiff_item = QListWidgetItem(self._tiff_icon(), Path(tiff_path).name)
-            tiff_item.setData(Qt.ItemDataRole.UserRole, None)
+            tiff_item.setData(Qt.ItemDataRole.UserRole, tiff_path)
+            tiff_item.setData(Qt.ItemDataRole.UserRole + 1, "tiff")
             tiff_item.setToolTip(tiff_path)
             tiff_item.setFlags(Qt.ItemFlag.NoItemFlags)
             self._jpg_list.addItem(tiff_item)
@@ -529,6 +1261,12 @@ class _DraftGroupRow(QFrame):
                 Qt.TextInteractionFlag.TextSelectableByMouse
             )
             tiff_name_lbl.setToolTip(tiff_path)
+            tiff_name_lbl.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            tiff_name_lbl.customContextMenuRequested.connect(
+                lambda pos, label=tiff_name_lbl: self._show_tiff_menu(
+                    tiff_path, label.mapToGlobal(pos)
+                )
+            )
             root.addWidget(tiff_name_lbl)
 
         # 张数 + 输出名（分两行，避免 TIF 命名被挤没）
@@ -691,19 +1429,42 @@ class _DraftGroupRow(QFrame):
 
 
     def _on_jpg_context_menu(self, pos) -> None:
-        """Right-click context menu on the JPG list — offers 「移除此 JPG」."""
-        from PyQt6.QtWidgets import QMenu
+        """Right-click context menu on a media item."""
         item = self._jpg_list.itemAt(pos)
         if not item:
             return
         path = item.data(Qt.ItemDataRole.UserRole)
         if not path:
             return
+        kind = str(item.data(Qt.ItemDataRole.UserRole + 1) or "jpg")
+        if kind == "tiff":
+            self._show_tiff_menu(path, self._jpg_list.mapToGlobal(pos))
+            return
         menu = QMenu(self)
         action = menu.addAction("移除此 JPG")
         chosen = menu.exec(self._jpg_list.mapToGlobal(pos))
         if chosen == action:
             self.jpg_remove_requested.emit(self._group.group_index, path)
+
+    def _show_tiff_menu(self, path: str, global_pos) -> None:
+        if not path:
+            return
+        menu = QMenu(self)
+        check_action = menu.addAction("检查 TIF 命名格式")
+        copy_action = menu.addAction("复制路径")
+        show_action = menu.addAction("在文件夹中显示")
+        menu.addSeparator()
+        delete_action = menu.addAction("删除 TIF")
+
+        chosen = menu.exec(global_pos)
+        if chosen == check_action:
+            self.tiff_naming_check_requested.emit(path)
+        elif chosen == copy_action:
+            QApplication.clipboard().setText(path)
+        elif chosen == show_action:
+            _show_path_in_folder(path)
+        elif chosen == delete_action:
+            self.tiff_delete_requested.emit(self._group.group_index)
 
 
 # ── Grouping panel ────────────────────────────────────────────────────────────
@@ -891,6 +1652,7 @@ class GroupingPanel(QWidget):
     retroactive_requested = pyqtSignal()
     auto_group_organize_requested = pyqtSignal()
     tiff_naming_check_requested = pyqtSignal()
+    tiff_naming_check_path_requested = pyqtSignal(str)
     helicon_params_requested = pyqtSignal()
     import_tiff_requested = pyqtSignal(str, int)  # uid, group_index  #cursor groupingImportTiff
     archive_zip_registered = pyqtSignal(str, int)  # uid, group_index
@@ -1000,13 +1762,47 @@ class GroupingPanel(QWidget):
             size=14,
         )
         self._tiff_naming_check_btn.setToolTip(
-            "检查 TIF 是否含可识别的标本唯一编号；"
-            "编号后可有附加信息；可导出 CSV"
+            "检查勾选/当前 TIF 命名是否符合项目规则；"
+            "当前无 TIF 时可选择目录批量检查；可导出 CSV"
         )
         self._tiff_naming_check_btn.clicked.connect(
             self.tiff_naming_check_requested.emit
         )
         main_actions.addWidget(self._tiff_naming_check_btn)
+
+        self._related_first_btn = QPushButton("相关优先")
+        self._related_first_btn.setObjectName("Outline")
+        self._related_first_btn.setCheckable(True)
+        self._related_first_btn.setFixedHeight(30)
+        icons.set_button_icon(
+            self._related_first_btn,
+            "mdi6.sort-variant",
+            color=icons.TONE_ACCENT,
+            size=14,
+        )
+        self._related_first_btn.setToolTip(
+            "用于每组「+」选图：开启后，当前编号匹配的 TIF 及其时间附近 JPG 优先显示；"
+            "关闭时按普通修改时间排序"
+        )
+        self._related_first_btn.toggled.connect(self._on_related_first_toggled)
+        main_actions.addWidget(self._related_first_btn)
+
+        self._related_filter_btn = QPushButton("筛相关")
+        self._related_filter_btn.setObjectName("Outline")
+        self._related_filter_btn.setCheckable(True)
+        self._related_filter_btn.setFixedHeight(30)
+        icons.set_button_icon(
+            self._related_filter_btn,
+            "mdi6.filter-outline",
+            color=icons.TONE_ACCENT,
+            size=14,
+        )
+        self._related_filter_btn.setToolTip(
+            "用于每组「+」选图：先选目录，再打开相关文件列表；"
+            "只列当前编号匹配 TIF 及其时间附近 JPG/TIF"
+        )
+        self._related_filter_btn.toggled.connect(self._on_related_filter_toggled)
+        main_actions.addWidget(self._related_filter_btn)
 
         more_btn = QPushButton("⋯ 更多 ▾")
         more_btn.setObjectName("Ghost")
@@ -1024,6 +1820,34 @@ class GroupingPanel(QWidget):
         self._add_btn.clicked.connect(self._add_group)
         self._add_btn.hide()
         main_actions.addWidget(self._add_btn)
+
+        self._import_pending_btn = QPushButton("导入待整理")
+        self._import_pending_btn.setObjectName("Outline")
+        self._import_pending_btn.setFixedHeight(30)
+        icons.set_button_icon(
+            self._import_pending_btn,
+            "mdi6.image-plus-outline",
+            color=icons.TONE_ACCENT,
+            size=14,
+        )
+        self._import_pending_btn.setToolTip("选择 JPG，新建一个待整理分组")
+        self._import_pending_btn.clicked.connect(self._on_import_pending_group)
+        self._import_pending_btn.hide()
+        main_actions.addWidget(self._import_pending_btn)
+
+        self._link_result_pair_btn = QPushButton("关联成品")
+        self._link_result_pair_btn.setObjectName("Outline")
+        self._link_result_pair_btn.setFixedHeight(30)
+        icons.set_button_icon(
+            self._link_result_pair_btn,
+            "mdi6.link-variant",
+            color=icons.TONE_ACCENT,
+            size=14,
+        )
+        self._link_result_pair_btn.setToolTip("选择已有 TIF + ZIP，登记到当前编号")
+        self._link_result_pair_btn.clicked.connect(self._on_link_result_pair)
+        self._link_result_pair_btn.hide()
+        main_actions.addWidget(self._link_result_pair_btn)
 
         self._target_label = QLabel("—")
         self._target_label.setObjectName("Mono")
@@ -1121,7 +1945,13 @@ class GroupingPanel(QWidget):
         """Display all groups for *uid*."""
         self._uid = uid
         self._grouping = grouping
+        mismatches_removed = _clear_uid_mismatched_result_links(uid, self._grouping.groups)
+        if mismatches_removed:
+            self._grouping.groups = _without_blank_draft_groups(self._grouping.groups)
+        duplicates_removed = _deduplicate_tiff_links(self._grouping.groups)
         self._renumber_default_angle_labels()
+        if mismatches_removed or duplicates_removed:
+            self._persist_grouping()
         valid = {g.group_index for g in grouping.groups}
         self._selected_group_indexes &= valid
         short = uid[:30] + ("…" if len(uid) > 30 else "")
@@ -1129,6 +1959,8 @@ class GroupingPanel(QWidget):
         self._target_label.setText(short)
         self._toolbar_widget.show()
         self._add_btn.show()
+        self._import_pending_btn.show()
+        self._link_result_pair_btn.show()
         signature = self._grouping_render_signature(uid, grouping)
         if signature == self._render_signature:
             self._refresh_auto_group_drop_visibility()
@@ -1145,6 +1977,8 @@ class GroupingPanel(QWidget):
         self._target_label.setText("—")
         self._toolbar_widget.hide()
         self._add_btn.hide()
+        self._import_pending_btn.hide()
+        self._link_result_pair_btn.hide()
         self._clear_content()
         self._refresh_auto_group_drop_visibility()
 
@@ -1329,10 +2163,41 @@ class GroupingPanel(QWidget):
         if tiff_ok and tiff_path and self._uid:
             self.import_tiff_requested.emit(self._uid, group_index)
 
+    def _result_file_matches_current_uid(self, path: str, title: str) -> bool:
+        if not self._uid or not _uid_filename_mismatch(self._uid, path):
+            return True
+        QMessageBox.warning(
+            self,
+            title,
+            "文件名编号和当前标本不一致，已拒绝关联。\n\n"
+            f"当前编号：{_uid_core_key(self._uid)}\n"
+            f"选择文件：{Path(path).name}",
+        )
+        return False
+
     def _associate_tiff_with_group(self, target: "Group", tiff_path: str) -> bool:
         """Bind TIFF to *target*; output_name = TIF stem (ZIP 整理同名)."""
+        if not self._result_file_matches_current_uid(tiff_path, "关联 TIFF"):
+            return False
+        new_key = _result_path_key(tiff_path)
+        if self._grouping and new_key:
+            owner = next(
+                (
+                    g for g in self._grouping.groups
+                    if g is not target
+                    and _result_path_key(getattr(g, "composed_tiff_path", None)) == new_key
+                ),
+                None,
+            )
+            if owner is not None:
+                QMessageBox.warning(
+                    self,
+                    "TIFF 已关联",
+                    f"这个 TIFF 已经在 {owner.angle_label or f'组{owner.group_index + 1}'} 中。\n"
+                    "同一个 TIFF 不能重复关联到多个角度。",
+                )
+                return False
         if target.composed_tiff_path and target.composed_tiff_path != tiff_path:
-            from PyQt6.QtWidgets import QMessageBox
             reply = QMessageBox.question(
                 self,
                 "替换 TIFF？",
@@ -1423,12 +2288,20 @@ class GroupingPanel(QWidget):
         """Persist the current in-memory grouping to DB and emit grouping_changed."""
         if not self._grouping or not self._uid:
             return
+        if _clear_uid_mismatched_result_links(self._uid, self._grouping.groups):
+            self._grouping.groups = _without_blank_draft_groups(self._grouping.groups)
+        _deduplicate_tiff_links(self._grouping.groups)
+        self._persist_grouping()
+        self.grouping_changed.emit()
+
+    def _persist_grouping(self) -> None:
+        if not self._grouping or not self._uid:
+            return
         db = self.ctx.get_db()
         if db is not None:
             grouping_service.save_grouping(
                 db, self._uid, self._grouping.groups, clean_phantoms=False
             )
-        self.grouping_changed.emit()
 
     def _build_more_menu(self):
         """Build the ⋯ 更多 dropdown menu."""
@@ -1527,6 +2400,10 @@ class GroupingPanel(QWidget):
                 row.add_photos_requested.connect(self._on_add_photos_from_picker)
                 row.output_name_changed.connect(self._on_output_name_changed)
                 row.selected_changed.connect(self._on_group_selected_changed)
+                row.tiff_naming_check_requested.connect(
+                    self.tiff_naming_check_path_requested.emit
+                )
+                row.tiff_delete_requested.connect(self._on_tiff_delete_requested)
                 strip_lay.addWidget(row)
             hscroll.setWidget(strip)
             self._content_lay.addWidget(hscroll)
@@ -1547,9 +2424,14 @@ class GroupingPanel(QWidget):
                     display_number=display_numbers[id(g)],
                 )
                 row2.organise_clicked.connect(self._on_organise)
+                row2.link_jpg_clicked.connect(self._on_link_jpg_for_composed)
                 row2.undo_clicked.connect(self._on_undo)
                 row2.selected_changed.connect(self._on_group_selected_changed)
                 row2.register_zip_clicked.connect(self._on_register_zip)
+                row2.tiff_naming_check_requested.connect(
+                    self.tiff_naming_check_path_requested.emit
+                )
+                row2.tiff_delete_requested.connect(self._on_tiff_delete_requested)
                 self._content_lay.addWidget(row2)
 
         if not groups:
@@ -1567,21 +2449,29 @@ class GroupingPanel(QWidget):
 
     def _add_group(self) -> None:
         """新增一个空草稿组；编号标本用角度N，无编号任务用结果N。"""
-        if not self._grouping or not self._uid:
+        if self._append_group() is None:
             return
-        from app.services.grouping_service import Group
-        new_index = max((g.group_index for g in self._grouping.groups), default=-1) + 1
-        display_number = len(self._grouping.groups) + 1
-        prefix = self._default_group_label_prefix()
-        new_group = Group(
-            group_index=new_index,
-            angle_label=f"{prefix}{display_number}",
-            jpg_paths=[],
-        )
-        self._grouping.groups.append(new_group)
         self._render_signature = None
         self._rebuild()
         self.grouping_changed.emit()
+
+    def _append_group(self, *, jpg_paths: Optional[list[str]] = None) -> Optional[int]:
+        """Append a draft group and return its group index."""
+        if not self._grouping or not self._uid:
+            return None
+        from app.services.grouping_service import Group
+
+        new_index = max((g.group_index for g in self._grouping.groups), default=-1) + 1
+        display_number = len(self._grouping.groups) + 1
+        prefix = self._default_group_label_prefix()
+        self._grouping.groups.append(
+            Group(
+                group_index=new_index,
+                angle_label=f"{prefix}{display_number}",
+                jpg_paths=list(jpg_paths or []),
+            )
+        )
+        return new_index
 
     # ── Slots ─────────────────────────────────────────────────────────────────
 
@@ -1623,6 +2513,9 @@ class GroupingPanel(QWidget):
         if self._uid:
             self.undo_compose_requested.emit(self._uid, group_index)
 
+    def _on_tiff_delete_requested(self, group_index: int) -> None:
+        self._on_undo(group_index)
+
     def _on_label_changed(self, group_index: int, new_label: str) -> None:
         if not self._grouping:
             return
@@ -1656,6 +2549,26 @@ class GroupingPanel(QWidget):
         """Handle right-click remove from _DraftGroupRow."""
         self.remove_jpg_from_group(group_index, jpg_path)
 
+    def _on_link_jpg_for_composed(self, group_index: int) -> None:
+        """Link original JPGs to an existing TIFF-only composed row."""
+        if not self._grouping:
+            return
+        target = next(
+            (g for g in self._grouping.groups if g.group_index == group_index),
+            None,
+        )
+        if target is None or not target.composed_tiff_path:
+            return
+        start = ""
+        try:
+            start = str(Path(target.composed_tiff_path).parent)
+        except Exception:
+            start = ""
+        jpgs = self._pick_jpgs_for_existing_tiff(target, start=start)
+        if not jpgs:
+            return
+        self.add_jpgs_to_group(group_index, jpgs)
+
     def _on_clear_group(self, group_index: int) -> None:  # #cursor
         """Handle clear-group button from _DraftGroupRow."""
         self.clear_group(group_index)
@@ -1663,6 +2576,81 @@ class GroupingPanel(QWidget):
     def _on_delete_group(self, group_index: int) -> None:  # #cursor
         """Handle delete-group button from _DraftGroupRow."""
         self.delete_group(group_index)
+
+    def _sync_toggle_button_state(self, button: QPushButton, base_text: str) -> None:
+        checked = button.isChecked()
+        button.setText(f"{base_text}:开" if checked else base_text)
+        button.setObjectName("Primary" if checked else "Outline")
+        button.style().unpolish(button)
+        button.style().polish(button)
+
+    def _on_related_first_toggled(self, checked: bool) -> None:
+        self._sync_toggle_button_state(self._related_first_btn, "相关优先")
+
+    def _on_related_filter_toggled(self, checked: bool) -> None:
+        if checked and not self._related_first_btn.isChecked():
+            self._related_first_btn.setChecked(True)
+        self._sync_toggle_button_state(self._related_filter_btn, "筛相关")
+
+    def _group_by_index(self, group_index: int) -> Optional["Group"]:
+        if not self._grouping:
+            return None
+        return next(
+            (g for g in self._grouping.groups if g.group_index == group_index),
+            None,
+        )
+
+    def _start_dir_for_group_picker(self, group_index: int, fallback: str = "") -> str:
+        group = self._group_by_index(group_index)
+        if group is None:
+            return fallback
+        media_paths = list(getattr(group, "jpg_paths", None) or [])
+        tiff_path = getattr(group, "composed_tiff_path", None)
+        if tiff_path:
+            media_paths.insert(0, tiff_path)
+        for path in media_paths:
+            try:
+                parent = Path(path).parent
+            except Exception:
+                continue
+            if parent.is_dir():
+                return str(parent)
+        return fallback
+
+    def _media_location_shortcuts(
+        self,
+        *,
+        start: str = "",
+        uid: str = "",
+    ) -> list[tuple[str, str]]:
+        shortcuts: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        project_dir = _normal_dir(getattr(self.ctx, "current_project_dir", None))
+        settings = getattr(self.ctx, "settings", None)
+        incoming_subdir = getattr(settings, "incoming_subdir", None) if settings else None
+        results_subdir = getattr(settings, "results_subdir", None) if settings else None
+        incoming_subdir = incoming_subdir if isinstance(incoming_subdir, str) and incoming_subdir else "incoming-jpg"
+        results_subdir = results_subdir if isinstance(results_subdir, str) and results_subdir else "results"
+
+        start_dir = _normal_dir(start)
+        sibling_dsc = project_dir.parent / "dsc" if project_dir is not None else None
+        _add_dir_shortcut(shortcuts, seen, "当前起点", start_dir)
+        _add_dir_shortcut(shortcuts, seen, "相机原图", sibling_dsc)
+        if project_dir is not None:
+            _add_dir_shortcut(shortcuts, seen, "incoming-jpg", project_dir / incoming_subdir)
+            _add_dir_shortcut(shortcuts, seen, "results", project_dir / results_subdir)
+            _add_dir_shortcut(shortcuts, seen, "工作目录", project_dir)
+        return shortcuts
+
+    def _preferred_media_location_start(self, start: str, shortcuts: list[tuple[str, str]]) -> str:
+        start_dir = _normal_dir(start)
+        if start_dir is not None and not _is_broad_scan_root(start_dir):
+            return str(start_dir)
+        for _label, path in shortcuts:
+            p = _normal_dir(path)
+            if p is not None:
+                return str(p)
+        return start
 
     def _on_add_photos_from_picker(self, group_index: int) -> None:
         """「+」从文件夹多选 JPG/TIF 加入指定组。"""
@@ -1673,27 +2661,81 @@ class GroupingPanel(QWidget):
         project_dir = getattr(self.ctx, "current_project_dir", None)
         if project_dir:
             pd = Path(project_dir)
+            candidates: list[Path] = []
+            try:
+                from app.services.project_service import get_incoming_jpg_dir
+                candidates.append(Path(get_incoming_jpg_dir(str(pd))))
+            except Exception:
+                pass
             s = getattr(self.ctx, "settings", None)
             inc = getattr(s, "incoming_subdir", None) if s else None
-            inc = inc if isinstance(inc, str) and inc else "incoming-jpg"
-            candidate = pd / inc
-            if candidate.is_dir():
-                start = str(candidate)
-            elif pd.is_dir():
-                start = str(pd)
+            if isinstance(inc, str) and inc:
+                candidates.append(pd / inc)
+            candidates.append(pd / "incoming-jpg")
+            candidates.append(pd / "新拍JPG")
+            candidates.append(pd)
+            for candidate in candidates:
+                if candidate.is_dir():
+                    start = str(candidate)
+                    break
 
         from app.utils.ui import get_open_file_names
+        related_first = bool(getattr(self, "_related_first_btn", None)
+                             and self._related_first_btn.isChecked())
+        filter_related = bool(
+            self._uid
+            and getattr(self, "_related_filter_btn", None)
+            and self._related_filter_btn.isChecked()
+        )
+        if filter_related:
+            related_uid = str(self._uid or "").strip()
+            paths = self._pick_related_files_from_dir(
+                uid=related_uid,
+                start=self._start_dir_for_group_picker(group_index, start),
+            )
+            if paths is None:
+                return
+            if paths:
+                self._add_selected_media_paths_to_group(group_index, paths)
+                return
+            filter_related = False
+
+        priority_paths = []
+        priority_terms = []
+        filter_terms = []
+        if related_first or filter_related:
+            priority_terms = [self._uid] if self._uid else []
+        if filter_related:
+            filter_terms = [self._uid] if self._uid else []
+        caption = "选择 JPG / TIFF 加入分组"
+        if filter_related:
+            caption = f"{caption}（筛相关：{self._uid or '当前编号'}）"
+        elif related_first:
+            caption = f"{caption}（相关优先：{self._uid or '当前编号'}）"
         paths = get_open_file_names(
             self,
-            "选择 JPG / TIFF 加入分组",
+            caption,
             start=start,
             filter=(
                 "JPG 与 TIFF (*.jpg *.jpeg *.JPG *.JPEG *.tif *.tiff *.TIF *.TIFF);;"
                 "JPG (*.jpg *.jpeg *.JPG *.JPEG);;"
                 "TIFF (*.tif *.tiff *.TIF *.TIFF)"
             ),
-            sort_by_mtime=True,
+            # The proxy-backed mtime sorter is useful for related-file review,
+            # but expensive on mounted/network folders. Keep the common "+"
+            # path lightweight; users can enable 相关优先 when they need it.
+            sort_by_mtime=bool(related_first or filter_related),
+            priority_paths=priority_paths,
+            priority_terms=priority_terms,
+            filter_terms=filter_terms,
         )
+        if not paths:
+            return
+
+        self._add_selected_media_paths_to_group(group_index, paths)
+
+    def _add_selected_media_paths_to_group(self, group_index: int, paths: list[str]) -> None:
+        """Add selected JPG/TIFF paths from any picker to a group."""
         if not paths:
             return
 
@@ -1728,6 +2770,252 @@ class GroupingPanel(QWidget):
                     manual_assign(project_dir, self._uid, jpgs)
                 except Exception:
                     pass
+
+    def _pick_related_files_from_dir(
+        self,
+        *,
+        uid: str | None = None,
+        start: str = "",
+    ) -> list[str] | None:
+        """Pick current-UID related files after selecting a visible JPG/TIF."""
+        target_uid = str(uid or self._uid or "").strip()
+        display_key = _uid_core_key(target_uid)
+        if not target_uid:
+            QMessageBox.warning(self, "筛相关", "当前没有激活编号，无法筛选相关文件。")
+            return None
+
+        shortcuts = self._media_location_shortcuts(start=start, uid=target_uid)
+        picker_start = self._preferred_media_location_start(start, shortcuts)
+        selected_paths, folder = _pick_media_paths_or_folder(
+            self,
+            f"选择 {display_key} 相关 JPG/TIF 所在位置",
+            start=picker_start,
+            priority_terms=[],
+            file_exts=_JPG_EXTS | _TIFF_EXTS,
+            shortcuts=shortcuts,
+        )
+        if selected_paths:
+            return selected_paths
+        if not folder:
+            return None
+        if not Path(folder).is_dir():
+            QMessageBox.warning(self, "筛相关", f"无法读取所选位置：\n{folder}")
+            return []
+        return self._select_related_files_from_folder(
+            folder,
+            target_uid,
+            display_key,
+            show_empty_message=True,
+        )
+
+    def _select_related_files_from_folder(
+        self,
+        folder: str,
+        target_uid: str,
+        display_key: str,
+        *,
+        show_empty_message: bool,
+    ) -> list[str] | None:
+        candidates = _scan_related_files_in_dir(folder, target_uid)
+        if not candidates:
+            if show_empty_message:
+                QMessageBox.information(
+                    self,
+                    "筛相关",
+                    f"此目录没有找到 {display_key} 匹配的 TIF，或没有时间附近的 JPG。",
+                )
+            return []
+        dlg = _RelatedFilesPickerDialog(
+            display_key,
+            folder,
+            candidates,
+            all_candidates_loader=lambda: _scan_all_media_timeline_in_dir(folder, target_uid),
+            parent=self,
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return None
+        return dlg.selected_paths()
+
+    def _pick_jpgs_for_existing_tiff(self, group: "Group", *, start: str = "") -> list[str] | None:
+        """Pick JPG originals near an already-linked TIFF's timestamp."""
+        tiff_path = getattr(group, "composed_tiff_path", None) or ""
+        if not tiff_path:
+            return None
+
+        display_key = _uid_core_key(self._uid or Path(tiff_path).stem)
+        shortcuts = self._media_location_shortcuts(start=start, uid=display_key)
+        picker_start = self._preferred_media_location_start(start, shortcuts)
+        selected_paths, folder = _pick_media_paths_or_folder(
+            self,
+            f"选择 {Path(tiff_path).name} 对应 JPG 所在位置",
+            start=picker_start,
+            priority_terms=[],
+            file_exts=_JPG_EXTS,
+            shortcuts=shortcuts,
+        )
+        if selected_paths:
+            jpgs, _tiffs = _split_media_paths(selected_paths)
+            return jpgs
+        if not folder:
+            return None
+        if not Path(folder).is_dir():
+            QMessageBox.warning(self, "关联JPG", f"无法读取所选位置：\n{folder}")
+            return []
+        candidates = _scan_jpgs_near_tiff_in_dir(folder, tiff_path)
+        if not candidates:
+            QMessageBox.information(
+                self,
+                "关联JPG",
+                "此目录没有找到与该 TIF 修改时间接近的 JPG。",
+            )
+            return []
+        dlg = _RelatedFilesPickerDialog(
+            self._uid or "",
+            folder,
+            candidates,
+            title=f"{Path(tiff_path).name} 附近 JPG",
+            parent=self,
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return None
+        jpgs, _tiffs = _split_media_paths(dlg.selected_paths())
+        return jpgs
+
+    def _on_import_pending_group(self) -> None:
+        """Toolbar action: select JPGs and create one pending draft group."""
+        if not self._grouping:
+            return
+
+        start = ""
+        project_dir = getattr(self.ctx, "current_project_dir", None)
+        if project_dir:
+            pd = Path(project_dir)
+            s = getattr(self.ctx, "settings", None)
+            inc = getattr(s, "incoming_subdir", None) if s else None
+            inc = inc if isinstance(inc, str) and inc else "incoming-jpg"
+            candidate = pd / inc
+            if candidate.is_dir():
+                start = str(candidate)
+            elif pd.is_dir():
+                start = str(pd)
+
+        from app.utils.ui import get_open_file_names
+        paths = get_open_file_names(
+            self,
+            "导入 JPG 到待整理分组",
+            start=start,
+            filter="JPG (*.jpg *.jpeg *.JPG *.JPEG)",
+            sort_by_mtime=True,
+        )
+        if not paths:
+            return
+
+        jpgs, _tiffs = _split_media_paths(paths)
+        if not jpgs:
+            QMessageBox.warning(self, "导入待整理", "请选择 JPG 文件。")
+            return
+
+        incoming_dir = _project_incoming_dir(self.ctx)
+        if incoming_dir is not None:
+            from app.services.photo_import_service import import_jpgs_to_incoming
+            result = import_jpgs_to_incoming(list(jpgs), incoming_dir)
+            if result.errors:
+                QMessageBox.warning(
+                    self, "导入待整理部分失败", "\n".join(result.errors[:5])
+                )
+            jpgs = [
+                r for p in result.imported_paths
+                if (r := _resolve_path_for_group(p))
+            ]
+        else:
+            jpgs = [r for p in jpgs if (r := _resolve_path_for_group(p))]
+        if not jpgs:
+            QMessageBox.warning(self, "导入待整理", "没有成功导入 JPG，未创建空分组。")
+            return
+
+        group_index = self._append_group(jpg_paths=jpgs)
+        if group_index is None:
+            return
+        self._render_signature = None
+        self._rebuild()
+        self.grouping_changed.emit()
+
+    def _on_link_result_pair(self) -> None:
+        """Register an existing TIFF+ZIP pair as a finished result for this UID."""
+        if not self._uid or not self._grouping:
+            return
+
+        project_dir = getattr(self.ctx, "current_project_dir", None)
+        if not project_dir:
+            QMessageBox.warning(self, "关联成品", "当前没有打开项目。")
+            return
+
+        s = getattr(self.ctx, "settings", None)
+        res = getattr(s, "results_subdir", None) if s else None
+        res = res if isinstance(res, str) and res else "results"
+        results_dir = Path(project_dir) / res
+        db = None
+        try:
+            db = self.ctx.get_db(project_dir)
+        except Exception:
+            db = None
+        used = _registered_result_paths(
+            db,
+            current_uid=self._uid,
+            current_groups=list(self._grouping.groups),
+        )
+        candidates = [
+            c for c in _result_pair_candidates(results_dir, used)
+            if not _uid_filename_mismatch(self._uid, str(c.get("tiff") or ""))
+            and not _uid_filename_mismatch(self._uid, str(c.get("zip") or ""))
+        ]
+        dlg = _ResultPairPickerDialog(candidates, parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        selected = dlg.selected_pair()
+        if not selected:
+            return
+        tiff_path = _resolve_path_for_group(selected["tiff"])
+        zip_path = str(Path(selected["zip"]))
+        if not tiff_path or not Path(zip_path).is_file():
+            QMessageBox.warning(self, "关联成品", "TIF 或 ZIP 文件不存在。")
+            return
+        if (
+            not self._result_file_matches_current_uid(tiff_path, "关联成品")
+            or not self._result_file_matches_current_uid(zip_path, "关联成品")
+        ):
+            return
+        owner = used.get(_result_path_key(tiff_path)) or used.get(_result_path_key(zip_path))
+        if owner:
+            QMessageBox.warning(
+                self,
+                "关联成品",
+                f"这组成品已经关联到编号：{owner}\n如需改绑，请先在成果区使用“关联到右侧编号”。",
+            )
+            return
+
+        group_index = self._append_group()
+        if group_index is None:
+            return
+        target = next(
+            (g for g in self._grouping.groups if g.group_index == group_index),
+            None,
+        )
+        if target is None:
+            return
+
+        from datetime import datetime, timezone
+        target.composed_tiff_path = tiff_path
+        target.output_name = Path(tiff_path).stem
+        target.archive_zip = zip_path
+        target.status = "organized"
+        target.source = "existing-result-pair"
+        target.updated_at = datetime.now(tz=timezone.utc).isoformat()
+        self._render_signature = None
+        self._rebuild()
+        self.grouping_changed.emit()
+        self.archive_zip_registered.emit(self._uid, group_index)
 
     def _on_import_tiff(self, group_index: int) -> None:  # #cursor groupingImportTiff
         """Open TIFF-import dialog and update the group composedTiffPath."""
@@ -1809,6 +3097,8 @@ class GroupingPanel(QWidget):
             from PyQt6.QtWidgets import QMessageBox
             QMessageBox.warning(self, "注册 ZIP", "请选择 .zip 文件。")
             return
+        if not self._result_file_matches_current_uid(zip_path, "注册 ZIP"):
+            return
 
         if target.archive_zip and target.archive_zip != zip_path:
             from PyQt6.QtWidgets import QMessageBox
@@ -1830,6 +3120,443 @@ class GroupingPanel(QWidget):
         self._rebuild()
         self.grouping_changed.emit()
         self.archive_zip_registered.emit(self._uid, group_index)
+
+
+class _ResultPairPickerDialog(QDialog):
+    """Pick one unclaimed TIFF+ZIP result pair from results/."""
+
+    def __init__(self, candidates: list[dict],
+                 parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._all_candidates = list(candidates or [])
+        self._selected: dict | None = None
+        self.setWindowTitle("关联成品")
+        self.setMinimumSize(760, 460)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(10)
+
+        title = QLabel("选择未关联的 TIF + ZIP 成品")
+        title.setObjectName("Section")
+        root.addWidget(title)
+
+        hint = QLabel("已被其它编号登记的成品默认隐藏，避免重复关联。")
+        hint.setObjectName("MutedSmall")
+        root.addWidget(hint)
+
+        self._show_associated = QCheckBox("显示已关联成品（只读灰显）")
+        self._show_associated.toggled.connect(self._populate)
+        root.addWidget(self._show_associated)
+
+        self._list = QListWidget()
+        self._list.setAlternatingRowColors(True)
+        self._list.currentItemChanged.connect(lambda *_: self._sync_buttons())
+        self._list.itemDoubleClicked.connect(lambda _item: self._accept_selected())
+        root.addWidget(self._list, stretch=1)
+
+        self._empty = QLabel("")
+        self._empty.setObjectName("Muted")
+        self._empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._empty.setWordWrap(True)
+        self._empty.hide()
+        root.addWidget(self._empty)
+
+        self._buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        self._buttons.accepted.connect(self._accept_selected)
+        self._buttons.rejected.connect(self.reject)
+        root.addWidget(self._buttons)
+
+        self._populate()
+
+    def selected_pair(self) -> dict | None:
+        return dict(self._selected) if self._selected else None
+
+    def _populate(self) -> None:
+        self._list.clear()
+        show_associated = self._show_associated.isChecked()
+        visible = [
+            c for c in self._all_candidates
+            if show_associated or not c.get("associated")
+        ]
+        for candidate in visible:
+            self._add_candidate(candidate)
+        if not self._all_candidates:
+            text = "results/ 中没有找到同名的 TIF + ZIP 成品。"
+        elif not visible:
+            text = "所有 TIF + ZIP 成品都已经关联到编号。勾选上方选项可查看。"
+        else:
+            text = ""
+        self._empty.setText(text)
+        self._empty.setVisible(bool(text))
+        self._list.setVisible(bool(visible))
+        self._sync_buttons()
+
+    def _add_candidate(self, candidate: dict) -> None:
+        owner = str(candidate.get("associated_uid") or "")
+        tiff_name = Path(str(candidate.get("tiff") or "")).name
+        zip_name = Path(str(candidate.get("zip") or "")).name
+        status = f"已关联：{owner}" if owner else "未关联"
+        item = QListWidgetItem(f"{status}\n{tiff_name}\n{zip_name}")
+        item.setData(Qt.ItemDataRole.UserRole, candidate)
+        if owner:
+            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+            item.setForeground(Qt.GlobalColor.gray)
+            item.setToolTip(f"已关联到 {owner}，不能在这里重复登记")
+        else:
+            item.setToolTip("双击或选择后确定，关联到当前编号")
+        self._list.addItem(item)
+
+    def _current_candidate(self) -> dict | None:
+        item = self._list.currentItem()
+        if item is None:
+            return None
+        candidate = item.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(candidate, dict) or candidate.get("associated"):
+            return None
+        return candidate
+
+    def _sync_buttons(self) -> None:
+        ok = self._buttons.button(QDialogButtonBox.StandardButton.Ok)
+        if ok is not None:
+            ok.setEnabled(self._current_candidate() is not None)
+
+    def _accept_selected(self) -> None:
+        candidate = self._current_candidate()
+        if candidate is None:
+            return
+        self._selected = dict(candidate)
+        self.accept()
+
+
+class _RelatedFilesPickerDialog(QDialog):
+    """App-owned picker for current UID related JPG/TIFF files."""
+
+    def __init__(
+        self,
+        uid: str,
+        folder: str,
+        candidates: list[dict],
+        *,
+        all_candidates: list[dict] | None = None,
+        all_candidates_loader: Callable[[], list[dict]] | None = None,
+        title: str | None = None,
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self._block_candidates = list(candidates or [])
+        self._all_candidates = list(all_candidates or [])
+        self._all_candidates_loader = all_candidates_loader
+        self._candidates = list(self._block_candidates)
+        self._preserve_checked_paths: set[str] | None = None
+        self._thumb_queue: list[tuple[QLabel, str, str]] = []
+        display_title = title or f"{uid} 相关文件"
+        self.setWindowTitle(display_title)
+        self.setMinimumSize(860, 540)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(10)
+
+        title_lbl = QLabel(display_title)
+        title_lbl.setObjectName("Section")
+        root.addWidget(title_lbl)
+
+        hint = QLabel(
+            f"{folder}\n"
+            "已按修改时间排序；按“先拍 JPG，再合成 TIF”的时间块识别。"
+            " 选择某个 TIF 时，会勾选它前面到上一个 TIF 之间的 JPG。"
+        )
+        hint.setObjectName("Muted")
+        hint.setWordWrap(True)
+        root.addWidget(hint)
+
+        btn_row = QHBoxLayout()
+        select_all = QPushButton("全选")
+        select_all.setObjectName("Ghost")
+        select_all.clicked.connect(lambda: self._set_all_checked(True))
+        btn_row.addWidget(select_all)
+        clear = QPushButton("清空")
+        clear.setObjectName("Ghost")
+        clear.clicked.connect(lambda: self._set_all_checked(False))
+        btn_row.addWidget(clear)
+        if self._all_candidates or self._all_candidates_loader is not None:
+            block_btn = QPushButton("时间块")
+            block_btn.setObjectName("Ghost")
+            block_btn.clicked.connect(lambda: self._replace_candidates(self._block_candidates))
+            btn_row.addWidget(block_btn)
+            all_btn = QPushButton("全部时间线")
+            all_btn.setObjectName("Ghost")
+            all_btn.clicked.connect(self._show_all_timeline)
+            btn_row.addWidget(all_btn)
+        btn_row.addStretch()
+        root.addLayout(btn_row)
+
+        self._table = QTableWidget(0, 6)
+        self._table.setHorizontalHeaderLabels(["", "缩略图", "文件名", "类型", "修改时间", "距TIF"])
+        self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._table.setAlternatingRowColors(True)
+        self._table.verticalHeader().setVisible(False)
+        self._table.verticalHeader().setDefaultSectionSize(74)
+        header = self._table.horizontalHeader()
+        header.setSectionsClickable(True)
+        header.setSortIndicatorShown(True)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Interactive)
+        self._table.setColumnWidth(1, 78)
+        self._table.setColumnWidth(2, 470)
+        self._table.setColumnWidth(3, 80)
+        self._table.setColumnWidth(4, 170)
+        self._table.setColumnWidth(5, 90)
+        root.addWidget(self._table, stretch=1)
+
+        self._syncing_checks = False
+        self._populate()
+        self._table.itemChanged.connect(self._on_check_changed)
+
+        self._buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        self._buttons.accepted.connect(self.accept)
+        self._buttons.rejected.connect(self.reject)
+        root.addWidget(self._buttons)
+
+    def selected_paths(self) -> list[str]:
+        paths: list[str] = []
+        for row in range(self._table.rowCount()):
+            item = self._table.item(row, 0)
+            if item and item.checkState() == Qt.CheckState.Checked:
+                data = item.data(Qt.ItemDataRole.UserRole)
+                path = data.get("path") if isinstance(data, dict) else data
+                if path:
+                    paths.append(str(path))
+        return paths
+
+    def _candidate_for_row(self, row: int) -> dict:
+        check_item = self._table.item(row, 0)
+        if check_item is not None:
+            data = check_item.data(Qt.ItemDataRole.UserRole)
+            if isinstance(data, dict):
+                return data
+        if 0 <= row < len(self._candidates):
+            return self._candidates[row]
+        return {}
+
+    def _replace_candidates(self, candidates: list[dict]) -> None:
+        self._preserve_checked_paths = set(self.selected_paths())
+        self._candidates = list(candidates or [])
+        self._populate()
+
+    def _show_all_timeline(self) -> None:
+        if not self._all_candidates and self._all_candidates_loader is not None:
+            self._all_candidates = list(self._all_candidates_loader() or [])
+        self._replace_candidates(self._all_candidates)
+
+    def _set_all_checked(self, checked: bool) -> None:
+        state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+        self._syncing_checks = True
+        try:
+            for row in range(self._table.rowCount()):
+                item = self._table.item(row, 0)
+                if item is not None:
+                    item.setCheckState(state)
+        finally:
+            self._syncing_checks = False
+
+    def _default_anchor_path(self) -> str:
+        for item in self._candidates:
+            if item.get("anchor"):
+                path = str(item.get("path") or "")
+                if path:
+                    return path
+        for item in self._candidates:
+            if str(item.get("kind") or "").upper() == "TIF":
+                path = str(item.get("path") or "")
+                if path:
+                    return path
+        return ""
+
+    def _checked_for_anchor(self, item: dict, anchor_path: str) -> bool:
+        if not anchor_path:
+            return str(item.get("kind") or "").upper() != "TIF"
+        path = str(item.get("path") or "")
+        if path == anchor_path:
+            return True
+        if "default_related" in item:
+            return (
+                bool(item.get("default_related"))
+                and str(item.get("nearest_anchor") or "") == anchor_path
+            )
+        return (
+            str(item.get("kind") or "").upper() != "TIF"
+            and str(item.get("nearest_anchor") or "") == anchor_path
+            and float(item.get("nearest_seconds") or 0)
+            <= _RELATED_PICKER_DEFAULT_CHECK_SECONDS
+        )
+
+    def _select_anchor_group(self, anchor_path: str) -> None:
+        if not anchor_path:
+            return
+        self._syncing_checks = True
+        try:
+            for row in range(self._table.rowCount()):
+                candidate = self._candidate_for_row(row)
+                item = self._table.item(row, 0)
+                if item is None:
+                    continue
+                checked = self._checked_for_anchor(candidate, anchor_path)
+                item.setCheckState(
+                    Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+                )
+        finally:
+            self._syncing_checks = False
+
+    def _on_check_changed(self, item: QTableWidgetItem) -> None:
+        if self._syncing_checks or item.column() != 0:
+            return
+        if item.checkState() != Qt.CheckState.Checked:
+            return
+        row = item.row()
+        if row < 0:
+            return
+        candidate = self._candidate_for_row(row)
+        if str(candidate.get("kind") or "").upper() != "TIF":
+            return
+        self._select_anchor_group(str(candidate.get("path") or ""))
+
+    def _thumbnail_label(self, item: dict) -> QLabel:
+        path = str(item.get("path") or "")
+        kind = str(item.get("kind") or "").upper()
+        label = QLabel()
+        label.setFixedSize(68, 68)
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        label.setObjectName("RelatedThumb")
+        label.setToolTip(path)
+        label.setText(kind or "IMG")
+        label.setProperty("hasThumbnail", False)
+        if path:
+            self._thumb_queue.append((label, path, kind))
+        return label
+
+    def _apply_thumbnail(self, label: QLabel, path: str, kind: str) -> None:
+        pixmap = _media_thumbnail_pixmap(path, 64)
+        if pixmap is not None and not pixmap.isNull():
+            label.setPixmap(pixmap)
+            label.setProperty("hasThumbnail", True)
+        else:
+            label.setText(kind or "IMG")
+            label.setProperty("hasThumbnail", False)
+
+    def _load_next_thumbnail_batch(self) -> None:
+        processed = 0
+        while self._thumb_queue and processed < 2:
+            label, path, kind = self._thumb_queue.pop(0)
+            self._apply_thumbnail(label, path, kind)
+            processed += 1
+        if self._thumb_queue:
+            QTimer.singleShot(10, self._load_next_thumbnail_batch)
+
+    def _load_all_thumbnails_now(self) -> None:
+        while self._thumb_queue:
+            label, path, kind = self._thumb_queue.pop(0)
+            self._apply_thumbnail(label, path, kind)
+
+    def _distance_text(self, item: dict) -> tuple[str, str]:
+        if item.get("anchor"):
+            return "TIF", "匹配编号的 TIF"
+        seconds = int(item.get("nearest_seconds") or 0)
+        direction = str(item.get("relative_to_tif") or "")
+        prefix = "前" if direction == "before" else "后" if direction == "after" else ""
+        text = f"{prefix}{seconds // 60}:{seconds % 60:02d}"
+        anchor_name = str(item.get("nearest_anchor_name") or "")
+        tooltip = f"距离 {anchor_name} {seconds // 60}分{seconds % 60}秒" if anchor_name else ""
+        return text, tooltip
+
+    def _apply_anchor_row_style(self, row: int, candidate: dict) -> None:
+        if not candidate.get("anchor"):
+            return
+        bg = QColor("#edfdf7")
+        for col in range(self._table.columnCount()):
+            cell = self._table.item(row, col)
+            if cell is not None:
+                cell.setBackground(bg)
+
+    def _populate(self) -> None:
+        self._syncing_checks = True
+        preserve = self._preserve_checked_paths
+        self._preserve_checked_paths = None
+        self._thumb_queue.clear()
+        try:
+            self._table.setSortingEnabled(False)
+            self._table.setRowCount(len(self._candidates))
+            default_anchor = self._default_anchor_path()
+            default_anchor_row = -1
+            for row, item in enumerate(self._candidates):
+                path = str(item.get("path") or "")
+                if path == default_anchor:
+                    default_anchor_row = row
+                check = QTableWidgetItem("")
+                check.setFlags(
+                    Qt.ItemFlag.ItemIsEnabled
+                    | Qt.ItemFlag.ItemIsSelectable
+                    | Qt.ItemFlag.ItemIsUserCheckable
+                )
+                checked = (
+                    path in preserve
+                    if preserve is not None else self._checked_for_anchor(item, default_anchor)
+                )
+                check.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+                check.setData(Qt.ItemDataRole.UserRole, dict(item))
+                self._table.setItem(row, 0, check)
+                self._table.setCellWidget(row, 1, self._thumbnail_label(item))
+                self._table.setRowHeight(row, 74)
+
+                name = QTableWidgetItem(str(item.get("name") or ""))
+                name.setToolTip(path)
+                self._table.setItem(row, 2, name)
+
+                kind = QTableWidgetItem(str(item.get("kind") or ""))
+                self._table.setItem(row, 3, kind)
+
+                mtime = QTableWidgetItem(_mtime_text(float(item.get("mtime") or 0)))
+                self._table.setItem(row, 4, mtime)
+
+                distance, tooltip = self._distance_text(item)
+                distance_item = QTableWidgetItem(distance)
+                if tooltip:
+                    distance_item.setToolTip(tooltip)
+                self._table.setItem(row, 5, distance_item)
+                self._apply_anchor_row_style(row, item)
+        finally:
+            self._syncing_checks = False
+        self._table.horizontalHeader().setSortIndicator(4, Qt.SortOrder.AscendingOrder)
+        self._table.setSortingEnabled(True)
+        if default_anchor_row >= 0:
+            default_anchor_row = self._row_for_path(default_anchor)
+            self._table.setCurrentCell(default_anchor_row, 2)
+            anchor_item = self._table.item(default_anchor_row, 2)
+            if anchor_item is not None:
+                self._table.scrollToItem(
+                    anchor_item,
+                    QAbstractItemView.ScrollHint.PositionAtCenter,
+                )
+        QTimer.singleShot(0, self._load_next_thumbnail_batch)
+
+    def _row_for_path(self, path: str) -> int:
+        for row in range(self._table.rowCount()):
+            candidate = self._candidate_for_row(row)
+            if str(candidate.get("path") or "") == path:
+                return row
+        return -1
 
 
 # ── TIFF Import Dialog ────────────────────────────────────────────────────────

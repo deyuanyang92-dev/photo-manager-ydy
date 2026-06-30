@@ -633,8 +633,11 @@ class ProjectSettingsDrawer(QWidget):
         self._quick_print_mode.addItem("直接发送到指定打印机", "direct")
         self._quick_print_mode.currentIndexChanged.connect(self._save_print_settings)
 
-        self._print_tissue_cb = QCheckBox("RNA 编号同时打印 RNAlater 组织管标签")
-        self._print_tissue_cb.setToolTip("关闭后，工作台编号旁打印按钮只输出一张样品标签。")
+        self._print_tissue_cb = QCheckBox("RNA 编号加打 RNA签")
+        self._print_tissue_cb.setToolTip(
+            "关闭后，工作台编号旁打印按钮只输出瓶签；"
+            "开启后 R 前缀编号额外输出 RNAlater 组织管标签。"
+        )
         self._print_tissue_cb.stateChanged.connect(self._save_print_settings)
 
         lay.addWidget(_settings_group("单张打印", [
@@ -642,7 +645,7 @@ class ProjectSettingsDrawer(QWidget):
             self._print_tissue_cb,
         ]))
 
-        # ── 样品瓶 / 酒精 ─────────────────────────────────────────────────────
+        # ── 瓶签 ─────────────────────────────────────────────────────────────
         self._sample_printer_combo = QComboBox()
         self._sample_printer_combo.setFixedHeight(30)
         self._sample_printer_combo.currentIndexChanged.connect(self._save_print_settings)
@@ -660,24 +663,24 @@ class ProjectSettingsDrawer(QWidget):
         self._populate_quick_paper_combo(self._sample_paper_combo)
         self._sample_paper_combo.currentIndexChanged.connect(self._on_sample_paper_changed)
 
-        self._sample_imposition_btn = QPushButton("酒精标签排版设计…")
+        self._sample_imposition_btn = QPushButton("瓶签排版…")
         self._sample_imposition_btn.setObjectName("Outline")
         self._sample_imposition_btn.setFixedHeight(28)
         self._sample_imposition_btn.clicked.connect(
             lambda: self._open_imposition_designer("sample")
         )
 
-        sample_grp = _settings_group("样品瓶 / 酒精", [
+        sample_grp = _settings_group("瓶签", [
             _row("打印机", self._sample_printer_combo, width=64),
             _row("模板",   self._sample_template_combo, width=64),
             _row("",       self._sample_template_btn, width=64),
             _row("纸张",   self._sample_paper_combo, width=64),
             _row("排版",   self._sample_imposition_btn, width=64),
         ])
-        sample_grp.setToolTip("需要设计或修改模板时，进入「标签打印」页编辑。")
+        sample_grp.setToolTip("样品瓶 / 酒精保存标签；需要设计或修改模板时，进入「标签打印」页编辑。")
         lay.addWidget(sample_grp)
 
-        # ── RNAlater 组织管 ───────────────────────────────────────────────────
+        # ── RNA签 ────────────────────────────────────────────────────────────
         self._tissue_printer_combo = QComboBox()
         self._tissue_printer_combo.setFixedHeight(30)
         self._tissue_printer_combo.currentIndexChanged.connect(self._save_print_settings)
@@ -695,7 +698,7 @@ class ProjectSettingsDrawer(QWidget):
         self._populate_quick_paper_combo(self._tissue_paper_combo)
         self._tissue_paper_combo.currentIndexChanged.connect(self._on_tissue_paper_changed)
 
-        self._tissue_imposition_btn = QPushButton("RNA 标签排版设计…")
+        self._tissue_imposition_btn = QPushButton("RNA签排版…")
         self._tissue_imposition_btn.setObjectName("Outline")
         self._tissue_imposition_btn.setFixedHeight(28)
         self._tissue_imposition_btn.clicked.connect(
@@ -709,7 +712,7 @@ class ProjectSettingsDrawer(QWidget):
         self._tissue_strategy_combo.addItem("加入合版队列", "queue")
         self._tissue_strategy_combo.currentIndexChanged.connect(self._save_print_settings)
 
-        tissue_grp = _settings_group("RNAlater 组织管", [
+        tissue_grp = _settings_group("RNA签", [
             _row("打印机", self._tissue_printer_combo, width=64),
             _row("模板",   self._tissue_template_combo, width=64),
             _row("",       self._tissue_template_btn, width=64),
@@ -718,7 +721,7 @@ class ProjectSettingsDrawer(QWidget):
             _row("策略",   self._tissue_strategy_combo, width=64),
         ])
         tissue_grp.setToolTip(
-            "样品瓶与 RNAlater 可绑同一台或不同打印机；同台且 RNA 用 A4/A5 合版纸时，"
+            "瓶签与 RNA签可绑同一台或不同打印机；同台且 RNA 用 A4/A5 合版纸时，"
             "自动策略会把 RNAlater 标签加入合版队列。模板编辑请进「标签打印」页。"
         )
         lay.addWidget(tissue_grp)
@@ -864,7 +867,6 @@ class ProjectSettingsDrawer(QWidget):
             paper_type = self._effective_sheet_paper_for_bucket(bucket)
             enabled = bool(paper_type) and combo.isEnabled()
             btn.setEnabled(enabled)
-            label = "酒精标签" if bucket == "sample" else "RNA 标签"
             if paper_type:
                 btn.setText(f"设置 {paper_type.upper()} 多标签排版…")
                 btn.setToolTip(f"编辑 {paper_type.upper()} 合版的边距、间距、行列、方向和起始格。")
@@ -935,7 +937,7 @@ class ProjectSettingsDrawer(QWidget):
             demo_data=self._demo_specimen_for_bucket(bucket),
         )
         dlg.setWindowTitle(
-            "酒精标签排版设计" if bucket == "sample" else "RNAlater 标签排版设计"
+            "瓶签排版设计" if bucket == "sample" else "RNA签排版设计"
         )
         if dlg.exec() == QDialog.DialogCode.Accepted:
             label_service.persist_imposition(bucket, dlg.imposition())

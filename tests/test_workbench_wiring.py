@@ -134,28 +134,126 @@ class TestFreeCompose:
 class TestOrganiseCollisionGuard:
     """archive_service does not overwrite silently — workbench checks for ZIP collision."""
 
-    def test_archive_group_creates_zip(self, tmp_path):
-        """archive_group must create a ZIP next to the TIFF (cjxl fallback path)."""
-        from unittest.mock import patch
-        from app.services.archive_service import archive_group
+    def test_archive_group_creates_restorable_zip(self, tmp_path):
+        """archive_group creates an archive that software restores as JPGs."""
+        import hashlib
+        import zipfile
+        from app.services.archive_service import archive_group, restore_archive
         jpg1 = tmp_path / "IMG_001.jpg"
         jpg2 = tmp_path / "IMG_002.jpg"
         jpg1.write_bytes(b"\xff\xd8\xff" * 100)
         jpg2.write_bytes(b"\xff\xd8\xff" * 100)
+        hashes = {
+            jpg1.name: hashlib.sha256(jpg1.read_bytes()).hexdigest(),
+            jpg2.name: hashlib.sha256(jpg2.read_bytes()).hexdigest(),
+        }
         tiff = tmp_path / "result.tif"
         tiff.write_bytes(b"IIX" * 1000)
-        # Patch cjxl as unavailable so archive falls back to storing original JPG
-        with patch("app.services.archive_service._cjxl_available", False):
-            result = archive_group(
-                jpg_paths=[str(jpg1), str(jpg2)],
-                tiff_path=str(tiff),
-                project_dir=str(tmp_path),
-                delete_jpg=False,
-            )
+        result = archive_group(
+            jpg_paths=[str(jpg1), str(jpg2)],
+            tiff_path=str(tiff),
+            project_dir=str(tmp_path),
+            delete_jpg=False,
+        )
         assert result.ok
         assert os.path.isfile(result.zip_path)
         zip_name = Path(result.zip_path).name
         assert zip_name == "result.zip"
+        with zipfile.ZipFile(result.zip_path) as zf:
+            names = sorted(zf.namelist())
+        if result.manifest["format"] == "jxl-zip":
+            assert names == ["IMG_001.jxl", "IMG_002.jxl", "manifest.json"]
+        else:
+            assert names == ["IMG_001.jpg", "IMG_002.jpg"]
+            assert "manifest.json" not in names
+
+        restored_dir = tmp_path / "restored"
+        restored = restore_archive(result.zip_path, str(restored_dir))
+        assert restored.ok
+        assert {
+            path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in restored_dir.glob("*.jpg")
+        } == hashes
+
+    def test_archive_group_deletes_loose_jpg_after_archive_verified(self, tmp_path):
+        """Default product behavior: verified archive replaces loose JPG files."""
+        import hashlib
+        from app.services.archive_service import archive_group, restore_archive
+
+        jpg1 = tmp_path / "IMG_001.jpg"
+        jpg2 = tmp_path / "IMG_002.jpg"
+        jpg1.write_bytes(b"\xff\xd8\xff\xe0jpg1")
+        jpg2.write_bytes(b"\xff\xd8\xff\xe0jpg2")
+        hashes = {
+            jpg1.name: hashlib.sha256(jpg1.read_bytes()).hexdigest(),
+            jpg2.name: hashlib.sha256(jpg2.read_bytes()).hexdigest(),
+        }
+        tiff = tmp_path / "result.tif"
+        tiff.write_bytes(b"tif")
+
+        result = archive_group(
+            jpg_paths=[str(jpg1), str(jpg2)],
+            tiff_path=str(tiff),
+            project_dir=str(tmp_path),
+            delete_jpg=True,
+        )
+
+        assert result.ok
+        assert result.delete_jpg is True
+        assert not jpg1.exists()
+        assert not jpg2.exists()
+        assert tiff.exists()
+
+        restored_dir = tmp_path / "restored"
+        restored = restore_archive(result.zip_path, str(restored_dir))
+        assert restored.ok
+        assert {
+            path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in restored_dir.glob("*.jpg")
+        } == hashes
+
+    def test_archive_group_adaptively_deflates_only_when_smaller(self, tmp_path):
+        """Plain JPG ZIP keeps restoration exact and avoids expanding hard-to-compress files."""
+        import hashlib
+        import zipfile
+
+        from app.services.archive_service import archive_group
+
+        compressible = tmp_path / "compressible.jpg"
+        incompressible = tmp_path / "incompressible.jpg"
+        compressible.write_bytes(b"\xff\xd8" + (b"A" * 8192) + b"\xff\xd9")
+        incompressible.write_bytes(os.urandom(8192))
+        tiff = tmp_path / "result.tif"
+        tiff.write_bytes(b"tif")
+
+        from unittest.mock import patch
+
+        with patch("app.services.archive_service.has_cjxl", return_value=False):
+            with patch("app.services.archive_service.has_djxl", return_value=False):
+                result = archive_group(
+                    jpg_paths=[str(compressible), str(incompressible)],
+                    tiff_path=str(tiff),
+                    project_dir=str(tmp_path),
+                    delete_jpg=False,
+                )
+
+        with zipfile.ZipFile(result.zip_path) as zf:
+            infos = {info.filename: info for info in zf.infolist()}
+            assert infos["compressible.jpg"].compress_type == zipfile.ZIP_DEFLATED
+            assert infos["incompressible.jpg"].compress_type == zipfile.ZIP_STORED
+            for src in (compressible, incompressible):
+                restored = zf.read(src.name)
+                assert hashlib.sha256(restored).hexdigest() == hashlib.sha256(
+                    src.read_bytes()
+                ).hexdigest()
+        methods = {
+            f["archiveName"]: f["zipCompression"]
+            for f in result.manifest["files"]
+        }
+        assert methods == {
+            "compressible.jpg": "deflate9",
+            "incompressible.jpg": "store",
+        }
 
     def test_organize_preview_second_seq_avoids_collision(self, tmp_path):
         """organize_preview must increment seq when seq-1 TIFF already present."""

@@ -70,6 +70,7 @@ CREATE TABLE IF NOT EXISTS specimens (
 );
 CREATE TABLE IF NOT EXISTS grouping (
     uid TEXT, group_index INTEGER,
+    angle_label TEXT, jpg_paths TEXT, composed_tiff_path TEXT,
     status TEXT, source TEXT, created_at TEXT, updated_at TEXT,
     result_sequence INTEGER, archive_zip TEXT,
     retired_tiff_paths TEXT, raw_json TEXT,
@@ -143,6 +144,35 @@ def _insert_specimen_accountable(
         VALUES (?, 'Aplysia californica', 'Aplysiidae', ?, ?, ?, ?, ?)
         """,
         (uid, storage, collector, photographer, identifier, proj),
+    )
+    db.commit()
+
+
+def _insert_grouping_detail(
+    db: sqlite3.Connection,
+    uid: str,
+    group_index: int,
+    *,
+    status: str = "composed",
+    jpg_paths: list[str] | None = None,
+    tiff_path: str = "",
+    zip_path: str = "",
+) -> None:
+    import json
+    db.execute(
+        """
+        INSERT OR REPLACE INTO grouping
+        (uid, group_index, jpg_paths, composed_tiff_path, status, archive_zip)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            uid,
+            group_index,
+            json.dumps(jpg_paths or [], ensure_ascii=False),
+            tiff_path,
+            status,
+            zip_path,
+        ),
     )
     db.commit()
 
@@ -236,12 +266,80 @@ class TestOnActivate:
         assert v._dash_values["alcohol"].text() == "1"
         assert v._dash_values["rna"].text() == "1"
         assert v._dash_values["photos"].text() == "2"
+        assert v._dash_values["tiffs"].text() == "0"
         assert v._dash_values["unassigned"].text() == "1"
         assert v._dash_values["prints"].text() == "2"
         people = v._dash_people.text()
         assert "李四1" in people
         assert "张三2" in people
         assert "周八2" in people
+
+    def test_global_results_button_opens_ledger_dialog(self, monkeypatch) -> None:
+        from app.views.summary_view import SummaryView
+
+        opened = []
+
+        class FakeDialog:
+            def __init__(self, ctx, parent=None):
+                opened.append((ctx, parent))
+
+            def exec(self):
+                opened.append("exec")
+
+        monkeypatch.setattr(
+            "app.widgets.global_results_dialog.GlobalResultsDialog",
+            FakeDialog,
+        )
+        db = _make_db()
+        v = SummaryView(_make_ctx(db=db))
+
+        v._open_global_results()
+
+        assert opened[-1] == "exec"
+        assert opened[0][1] is v
+        assert v._btn_result_ledger.text()
+
+    def test_summary_rows_show_jpg_tiff_zip_and_rna_details(self) -> None:
+        from app.views.summary_view import ALL_COLS, SummaryView
+        db = _make_db()
+        _insert_specimen_accountable(
+            db,
+            "SP-RNA",
+            storage="RD75E",
+            collector="张三",
+            photographer="李四",
+        )
+        _insert_grouping_detail(
+            db,
+            "SP-RNA",
+            0,
+            jpg_paths=["/p/a.jpg", "/p/b.jpg"],
+            tiff_path="/p/results/SP-RNA-1.tif",
+            zip_path="/p/results/SP-RNA-1.zip",
+        )
+        _insert_grouping_detail(
+            db,
+            "SP-RNA",
+            1,
+            status="pending",
+            jpg_paths=["/p/c.jpg"],
+        )
+        v = SummaryView(_make_ctx(db=db))
+        v.on_activate()
+
+        sp = v._specimens[0]
+        g = v._grouping_for_specimen(sp)
+        assert g["tiff_count"] == 1
+        assert g["jpg_count"] == 3
+        assert g["zip_count"] == 1
+        assert g["tiff_names"] == "SP-RNA-1.tif"
+        assert g["status"] == "部分合成"
+        assert v._dash_values["tiffs"].text() == "1"
+
+        by_key = {c["key"]: c for c in ALL_COLS}
+        assert by_key["rna"]["get"](sp, g) == "✓"
+        assert by_key["tiffCount"]["get"](sp, g) == "1"
+        assert by_key["jpgCount"]["get"](sp, g) == "3"
 
 
 # ── Field picker ──────────────────────────────────────────────────────────────
@@ -293,6 +391,55 @@ class TestProjectFilter:
                 break
         specs = view_with_data._filtered_specimens()
         assert len(specs) == 2
+
+
+class TestSummaryScope:
+    def test_scope_controls_exist(self, view_no_project) -> None:
+        assert hasattr(view_no_project, "_scope_combo")
+        assert hasattr(view_no_project, "_btn_sources")
+        assert view_no_project._scope_combo.count() == 3
+
+    def test_selected_scope_loads_multiple_project_dirs(self, tmp_path) -> None:
+        from app.db import db_manager
+        from app.views.summary_view import SummaryView
+
+        root = tmp_path / "survey"
+        dir_a = root / "断面A"
+        dir_b = root / "断面B"
+        dir_a.mkdir(parents=True)
+        dir_b.mkdir(parents=True)
+        db_manager.close_all()
+        try:
+            conn_a = db_manager.open_project_db(str(dir_a), create=True)
+            conn_b = db_manager.open_project_db(str(dir_b), create=True)
+            conn_a.execute(
+                "INSERT INTO specimens (uid, scientific_name, family) VALUES ('UID-DUP', 'Aaa', 'Fam')"
+            )
+            conn_b.execute(
+                "INSERT INTO specimens (uid, scientific_name, family) VALUES ('UID-DUP', 'Bbb', 'Fam')"
+            )
+            conn_a.execute(
+                "INSERT INTO grouping (uid, group_index, status) VALUES ('UID-DUP', 0, 'composed')"
+            )
+            conn_b.execute(
+                "INSERT INTO grouping (uid, group_index, status) VALUES ('UID-DUP', 0, 'pending')"
+            )
+            conn_a.commit()
+            conn_b.commit()
+
+            ctx = _make_ctx(db=None)
+            ctx.current_project_dir = str(dir_a)
+            v = SummaryView(ctx)
+            v._summary_scope = "selected"
+            v._selected_project_dirs = [str(dir_a), str(dir_b)]
+            v.on_activate()
+
+            assert len(v._specimens) == 2
+            statuses = sorted(v._grouping_for_specimen(sp)["status"] for sp in v._specimens)
+            assert statuses == ["已合成", "待合成"]
+            assert v._filter_combo.count() == 3
+        finally:
+            db_manager.close_all()
 
 
 # ── Table model ───────────────────────────────────────────────────────────────

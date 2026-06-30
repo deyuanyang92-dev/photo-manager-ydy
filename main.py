@@ -8,6 +8,7 @@ Usage:
 """
 import sys
 import os
+import logging
 import subprocess
 import tempfile
 import time
@@ -75,6 +76,7 @@ def _writable_runtime_dir() -> Path:
 _runtime_dir = _writable_runtime_dir()
 _mpl_dir = _runtime_dir / "matplotlib"
 _mpl_dir.mkdir(parents=True, exist_ok=True)
+_INSTANCE_LOCK_HANDLE = None
 # Set unconditionally (not setdefault): a stale/unwritable inherited value would
 # bring back the very warning we are killing.
 os.environ["MPLCONFIGDIR"] = str(_mpl_dir)
@@ -346,16 +348,28 @@ def _install_exception_hook(win) -> None:
 
     def _hook(exc_type, exc, tb):
         old_hook(exc_type, exc, tb)
+        detail = "".join(traceback.format_exception(exc_type, exc, tb))
+        try:
+            diagnostics.setup_logging()
+            logging.getLogger("app.uncaught").error(
+                "Uncaught exception",
+                exc_info=(exc_type, exc, tb),
+            )
+        except Exception:  # noqa: BLE001
+            pass
         if _HEADLESS_SMOKE or os.environ.get("QT_QPA_PLATFORM") == "offscreen":
             return
         try:
             from app.utils import ui
-            detail = "".join(traceback.format_exception(exc_type, exc, tb))
             ui.critical(
                 win,
                 "程序遇到错误",
                 str(exc) or exc_type.__name__,
-                informative_text="操作没有按预期完成。展开详细信息可复制给维护者排查。",
+                informative_text=(
+                    "操作没有按预期完成，错误已写入日志。\n"
+                    f"日志文件：{diagnostics.log_path()}\n"
+                    "展开详细信息或点击“复制详情”可复制给维护者排查。"
+                ),
                 detailed_text=detail,
             )
         except Exception:  # noqa: BLE001
@@ -408,10 +422,53 @@ from app.app_context import AppContext
 from app.config.settings import AppSettings
 from app.config.theme import apply_default_font, apply_theme, load_fonts, set_typography
 from app.main_window import MainWindow
+from app.utils import diagnostics
 from app.views.registry import ALL_VIEWS
 
 
+def _acquire_single_instance_lock() -> bool:
+    """Return False when another GUI instance is already running.
+
+    Multiple app windows against the same project can leave SQLite waiting on
+    WAL locks, especially under WSL /mnt drives.  Tests and smoke checks opt out
+    so they can construct windows freely.
+    """
+    global _INSTANCE_LOCK_HANDLE
+    if _HEADLESS_SMOKE or os.environ.get("SPECIMEN_WORKBENCH_ALLOW_MULTI") == "1":
+        return True
+    try:
+        import fcntl
+    except ImportError:
+        return True
+    lock_path = _runtime_dir / "app.lock"
+    try:
+        handle = lock_path.open("a+", encoding="utf-8")
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        handle.seek(0)
+        handle.truncate()
+        handle.write(str(os.getpid()))
+        handle.flush()
+        _INSTANCE_LOCK_HANDLE = handle
+        return True
+    except BlockingIOError:
+        try:
+            handle.close()
+        except Exception:
+            pass
+        return False
+    except OSError:
+        return True
+
+
 def main() -> int:
+    log_path = diagnostics.setup_logging()
+    logging.getLogger(__name__).info(
+        "Application starting argv=%s cwd=%s log=%s",
+        sys.argv,
+        os.getcwd(),
+        log_path,
+    )
+
     # HiDPI: pass through the exact fractional scale (125%/150% on Windows,
     # Retina on macOS) instead of rounding it. Rounding mismatches QSS px
     # font-sizes against widget geometry → clipped/overlapping text on
@@ -437,6 +494,17 @@ def main() -> int:
     if _icon_path.exists():
         app.setWindowIcon(QIcon(str(_icon_path)))
 
+    if not _acquire_single_instance_lock():
+        from PyQt6.QtWidgets import QMessageBox
+        QMessageBox.warning(
+            None,
+            "程序已经在运行",
+            "标本影像已经打开了一个窗口。\n\n"
+            "请先使用已有窗口；如果旧窗口已经看不见，请在 WSL 终端结束旧的 "
+            "`python3 main.py` 进程后再启动。",
+        )
+        return 0
+
     # ── Fonts (bundled Noto Sans/Serif SC + JetBrains Mono if present;
     #    web-parity system fallback otherwise) ──────────────────────────
     load_fonts(app)
@@ -460,6 +528,8 @@ def main() -> int:
     # Performance mode must be set before apply_theme (QSS drops gradients) and
     # before any card widget is built (apply_card_shadow becomes a no-op).
     from app.config import effects as _fx
+    if _is_wsl and not _s._qs.contains("appearance/performance_mode"):
+        _s.performance_mode = True
     _fx.PERFORMANCE_MODE = _s.performance_mode
     app.setStyleSheet(apply_theme(_s.current_theme))
 

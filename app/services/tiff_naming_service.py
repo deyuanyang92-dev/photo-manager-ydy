@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import csv
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -62,23 +63,47 @@ def inspect_tiff_names(
     Validation follows the project's naming-rule component order from settings.
     Invalid names receive a suggestion when specimen field values are available.
     """
+    root = Path(folder).expanduser().resolve()
+    if not root.is_dir():
+        raise ValueError(f"扫描目录不存在: {folder}")
+
+    iterator = root.rglob("*") if recursive else root.iterdir()
+    paths: list[Path] = []
+    for path in iterator:
+        if path.is_file() and path.suffix.lower() in {".tif", ".tiff"}:
+            paths.append(path)
+    return inspect_tiff_paths(
+        paths,
+        current_uid=current_uid,
+        naming_components=naming_components,
+        specimen_values=specimen_values,
+        folder=str(root),
+    )
+
+
+def inspect_tiff_paths(
+    paths: list[str | Path],
+    *,
+    current_uid: Optional[str] = None,
+    naming_components: Optional[list[str]] = None,
+    specimen_values: Optional[dict[str, str]] = None,
+    folder: Optional[str] = None,
+) -> TiffNamingAudit:
+    """Inspect explicit TIFF paths without modifying any files."""
     components = normalize_naming_components(
         naming_components or DEFAULT_NAMING_RULES["components"]
     )
     rules_summary = naming_rules_summary(components)
     normalized_current_uid = normalize_uid(current_uid) if current_uid else None
 
-    root = Path(folder).expanduser().resolve()
-    if not root.is_dir():
-        raise ValueError(f"扫描目录不存在: {folder}")
-
-    iterator = root.rglob("*") if recursive else root.iterdir()
     files: list[tuple[int, Path]] = []
-    for path in iterator:
+    for raw in paths:
+        path = Path(raw).expanduser()
         if not path.is_file() or path.suffix.lower() not in {".tif", ".tiff"}:
             continue
         try:
-            files.append((path.stat().st_mtime_ns, path))
+            resolved = path.resolve()
+            files.append((resolved.stat().st_mtime_ns, resolved))
         except OSError:
             continue
     files.sort(key=lambda item: (item[0], item[1].name.casefold(), str(item[1])))
@@ -146,10 +171,20 @@ def inspect_tiff_names(
             suggested_name=suggestion,
         ))
     return TiffNamingAudit(
-        folder=str(root),
+        folder=str(folder or _common_parent(files)),
         items=items,
         rules_summary=rules_summary,
     )
+
+
+def _common_parent(files: list[tuple[int, Path]]) -> str:
+    if not files:
+        return ""
+    parents = [str(path.parent) for _, path in files]
+    try:
+        return parents[0] if len(parents) == 1 else os.path.commonpath(parents)
+    except Exception:
+        return parents[0]
 
 
 def export_tiff_naming_audit_csv(audit: TiffNamingAudit, path: str) -> None:

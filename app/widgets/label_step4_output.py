@@ -1,7 +1,7 @@
 """label_step4_output.py — Step 4「输出」section.
 
 Mirrors web ``renderLabelStep4`` (app.js:17232-17272): a summary line of the
-counts, two print buttons (样品瓶 / RNAlater 组织管, disabled when their bucket is
+counts, two print buttons (瓶签 / RNA签, disabled when their bucket is
 empty), an optional warning list, and a hint.
 
 Signals
@@ -100,11 +100,13 @@ class LabelStep4Output(QWidget):
 
         brow = QHBoxLayout()
         brow.setSpacing(10)
-        self._btn_sample = QPushButton("打印样品瓶标签")
+        self._btn_sample = QPushButton("瓶签")
         self._btn_sample.setObjectName("PrintBtn")
+        self._btn_sample.setToolTip("打印样品瓶 / 酒精保存标签")
         self._btn_sample.clicked.connect(lambda: self.print_requested.emit("sample"))
-        self._btn_tissue = QPushButton("打印 RNAlater 组织管标签")
+        self._btn_tissue = QPushButton("RNA签")
         self._btn_tissue.setObjectName("PrintBtnTissue")
+        self._btn_tissue.setToolTip("打印 RNA / RNAlater 组织管标签")
         self._btn_tissue.clicked.connect(lambda: self.print_requested.emit("tissue"))
         brow.addWidget(self._btn_sample)
         brow.addWidget(self._btn_tissue)
@@ -117,7 +119,7 @@ class LabelStep4Output(QWidget):
         root.addWidget(self._warn)
         self._warn.hide()
 
-        hint = QLabel("提示：两个按钮分别触发打印对话框；可在对话框里挑不同打印机 / 纸盘 / 纸张。")
+        hint = QLabel("提示：瓶签和 RNA签可分别选择打印机、纸盘和纸张。")
         hint.setStyleSheet(f"color:{_C_MUTED_DIM}; font-size:11px;")
         hint.setWordWrap(True)
         root.addWidget(hint)
@@ -127,11 +129,13 @@ class LabelStep4Output(QWidget):
     def set_counts(self, sample_n: int, tissue_n: int, copies: int) -> None:
         total = (sample_n + tissue_n) * copies
         self._summary.setText(
-            f"样品瓶 {sample_n} · RNAlater 组织管 {tissue_n} · "
+            f"瓶签 {sample_n} · RNA签 {tissue_n} · "
             f"每种 {copies} 份 → 总 {total} 张"
         )
-        self._btn_sample.setText(f"打印样品瓶标签 ({sample_n})")
-        self._btn_tissue.setText(f"打印 RNAlater 组织管标签 ({tissue_n})")
+        sample_labels = sample_n * copies
+        tissue_labels = tissue_n * copies
+        self._btn_sample.setText(f"瓶签 {sample_labels}")
+        self._btn_tissue.setText(f"RNA签 {tissue_labels}")
         self._btn_sample.setEnabled(sample_n > 0)
         self._btn_tissue.setEnabled(tissue_n > 0)
 

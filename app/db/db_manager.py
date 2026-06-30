@@ -14,6 +14,15 @@ _db_cache: dict[str, sqlite3.Connection] = {}
 
 # Load schema SQL once
 _SCHEMA_SQL_PATH = Path(__file__).parent / "schema.sql"
+
+
+def is_database_locked(exc: BaseException) -> bool:
+    """Return True for SQLite lock/busy errors."""
+    return isinstance(exc, sqlite3.OperationalError) and (
+        "database is locked" in str(exc).lower()
+        or "database table is locked" in str(exc).lower()
+        or "database is busy" in str(exc).lower()
+    )
 # darwin_core 视图：原 12 术语逐字复刻 db-utils.js:75-97（仅加 s. 前缀消歧），
 # 在其后**附加**对齐 Darwin Core / Humboldt / OBIS 的标准术语——采集记录(collection_records)
 # 按四键(province/site/station/collection_date) LEFT JOIN 进来，外加导出期常量。
@@ -141,14 +150,40 @@ def open_project_db(project_dir: str, *, create: bool = False) -> sqlite3.Connec
     # MUST open its OWN sqlite3.connect() (do not call get_db()/reuse the
     # cache) — sharing one Connection across threads corrupts cursors even
     # under WAL. (Collab already self-stores; no worker currently hits this.)
-    conn = sqlite3.connect(str(db_path), check_same_thread=False)
+    conn = sqlite3.connect(str(db_path), timeout=8.0, check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=8000")
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.commit()
 
     ensure_schema(conn)
     _db_cache[resolved] = conn
+    return conn
+
+
+def open_project_db_private(project_dir: str) -> sqlite3.Connection:
+    """Open an uncached connection for background workers.
+
+    The GUI thread owns the cached connection returned by ``open_project_db``.
+    Workers must use a private connection so cursors and transactions cannot
+    cross thread boundaries.
+    """
+    from app.services.project_paths import ProjectUnavailableError
+
+    resolved = str(Path(project_dir).resolve())
+    db_path = _project_db_path(resolved)
+    if not db_path.exists():
+        raise ProjectUnavailableError(
+            f"工作区不可用（盘未挂载 / 数据库丢失）：{project_dir}"
+        )
+
+    conn = sqlite3.connect(str(db_path), timeout=8.0)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=8000")
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.commit()
     return conn
 
 
@@ -231,6 +266,10 @@ def close_all() -> None:
     """Close and evict all cached connections. Used in tests and on exit."""
     for conn in list(_db_cache.values()):
         try:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except Exception:
+            pass
+        try:
             conn.close()
         except Exception:
             pass
@@ -242,6 +281,10 @@ def close_project_db(project_dir: str) -> None:
     resolved = str(Path(project_dir).resolve())
     conn = _db_cache.pop(resolved, None)
     if conn:
+        try:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except Exception:
+            pass
         try:
             conn.close()
         except Exception:

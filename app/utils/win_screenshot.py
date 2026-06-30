@@ -52,7 +52,11 @@ def _has_snipaste() -> bool:
     try:
         out = subprocess.run(
             [cmd, "/c", "where", "Snipaste"],
-            capture_output=True, text=True, timeout=8,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=8,
         )
     except (OSError, subprocess.SubprocessError):
         return False
