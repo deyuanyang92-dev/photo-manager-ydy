@@ -2,7 +2,7 @@
 
 ## 直接使用打包版
 
-1. 下载 `SpecimenPhotoWorkbench-v0.03-win64.zip`。
+1. 下载 `SpecimenPhotoWorkbench-v0.4-win64.zip`。
 2. 解压到一个普通目录，例如 `D:\Apps\SpecimenPhotoWorkbench\`。
 3. 双击 `SpecimenPhotoWorkbench.exe` 启动。
 4. 首次使用时，在“项目总览”中新建或打开项目目录。
@@ -40,14 +40,14 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build_windows.ps1
 输出：
 
 - `dist\SpecimenPhotoWorkbench\SpecimenPhotoWorkbench.exe`
-- `dist\SpecimenPhotoWorkbench-v0.03-win64.zip`
+- `dist\SpecimenPhotoWorkbench-v0.4-win64.zip`
 
 ## 可选外部工具
 
 程序本身可以启动和录入数据。以下工具只影响对应高级功能：
 
 - Helicon Focus：用于真实景深合成；未安装时相关功能不可用或需手动处理。
-- JPEG XL `djxl`：仅用于恢复早期 `.jxl` 旧归档；当前新归档是普通 JPG ZIP，不需要 JPEG XL 工具。
+- JPEG XL `cjxl/djxl`：用于更高压缩比的内部 JPG 中转；缺失时自动退回普通 JPG ZIP。
 
 ## 常用操作
 
