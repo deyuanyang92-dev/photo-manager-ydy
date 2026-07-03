@@ -134,7 +134,7 @@ class TestProjectDialogLight:
         dlg._name_edit.setText("规划项目")
         dlg._dir_edit.setText(str(tmp_path))
         with mock.patch("app.views.project_dialog.warn") as m_warn:
-            dlg._on_accept()
+            dlg._accept_valid_project_form()
         m_warn.assert_not_called()
         proj = dlg.result_project()
         assert proj is not None
@@ -150,7 +150,7 @@ class TestProjectDialogLight:
         dlg._dir_edit.setText(str(tmp_path))
         dlg._location_edit.setText("福建·厦门")
         with mock.patch("app.views.project_dialog.warn") as m_warn:
-            dlg._on_accept()                     # 负责人空 → 警告
+            dlg._accept_valid_project_form()                     # 负责人空 → 警告
         m_warn.assert_called_once()
         assert dlg.result_project() is None
 
@@ -159,7 +159,7 @@ class TestProjectDialogLight:
 
 class TestProjectDialogValidation:
     def _accept_with_fields(self, qapp, **fields):
-        """Helper: set fields and trigger _on_accept(), returning result_project()."""
+        """Helper: set fields and trigger _accept_valid_project_form(), returning result_project()."""
         from app.views.project_dialog import ProjectDialog
         dlg = ProjectDialog(mode="new")
         if "name" in fields:
@@ -180,7 +180,7 @@ class TestProjectDialogValidation:
         dlg._name_edit.setText("测试项目")
         # dir is empty — should warn, not accept
         with mock.patch("app.views.project_dialog.warn") as m_warn:
-            dlg._on_accept()
+            dlg._accept_valid_project_form()
         m_warn.assert_called_once()
         assert dlg.result_project() is None
 
@@ -190,7 +190,7 @@ class TestProjectDialogValidation:
         dlg._dir_edit.setText(str(tmp_path))
         # name is empty — should warn
         with mock.patch("app.views.project_dialog.warn") as m_warn:
-            dlg._on_accept()
+            dlg._accept_valid_project_form()
         m_warn.assert_called_once()
         assert dlg.result_project() is None
 
@@ -201,7 +201,7 @@ class TestProjectDialogValidation:
         dlg._dir_edit.setText(str(tmp_path))
         # location empty
         with mock.patch("app.views.project_dialog.warn") as m_warn:
-            dlg._on_accept()
+            dlg._accept_valid_project_form()
         m_warn.assert_called_once()
         assert dlg.result_project() is None
 
@@ -212,7 +212,7 @@ class TestProjectDialogValidation:
         dlg._dir_edit.setText(str(tmp_path))
         dlg._location_edit.setText("厦门")
         with mock.patch("app.views.project_dialog.warn") as m_warn:
-            dlg._on_accept()
+            dlg._accept_valid_project_form()
         m_warn.assert_called_once()
 
     def test_missing_start_date_shows_warning(self, qapp, tmp_path):
@@ -224,7 +224,7 @@ class TestProjectDialogValidation:
         dlg._collector_edit.setText("张三")
         dlg._start_date_edit.clear()
         with mock.patch("app.views.project_dialog.warn") as m_warn:
-            dlg._on_accept()
+            dlg._accept_valid_project_form()
         m_warn.assert_called_once()
 
 
@@ -232,7 +232,7 @@ class TestProjectDialogValidation:
 
 class TestProjectDialogCreateFields:
     def _create_and_accept(self, qapp, tmp_path):
-        """Fully fill a new-mode dialog and call _on_accept()."""
+        """Fully fill a new-mode dialog and call _accept_valid_project_form()."""
         from app.views.project_dialog import ProjectDialog
         dlg = ProjectDialog(mode="new", existing_projects=[])
         dlg._name_edit.setText("厦门多毛类")
@@ -243,7 +243,7 @@ class TestProjectDialogCreateFields:
         dlg._start_date_edit.setText("20260101")
         dlg._end_date_edit.setText("20260115")
         with mock.patch("app.views.project_dialog.warn"):
-            dlg._on_accept()
+            dlg._accept_valid_project_form()
         return dlg.result_project()
 
     def test_returns_dict_on_success(self, qapp, tmp_path):
@@ -297,7 +297,7 @@ class TestProjectDialogCreateFields:
         dlg._collector_edit.setText("张三")
         dlg._start_date_edit.setText("20260101")
         dlg._code_edit.setText("tst-2026-01")
-        dlg._on_accept()
+        dlg._accept_valid_project_form()
         proj = dlg.result_project()
         assert proj["projectCode"] == "TST-2026-01"
 
@@ -310,7 +310,7 @@ class TestProjectDialogCreateFields:
         dlg._collector_edit.setText("张三")
         dlg._start_date_edit.setText("20260101")
         dlg._code_edit.setText("")  # empty → auto
-        dlg._on_accept()
+        dlg._accept_valid_project_form()
         proj = dlg.result_project()
         assert proj["projectCode"].startswith("PRJ-")
 
@@ -322,7 +322,7 @@ class TestProjectDialogOpenMode:
         from app.views.project_dialog import ProjectDialog
         dlg = ProjectDialog(mode="open")
         dlg._dir_edit.setText(str(tmp_path))
-        dlg._on_accept()
+        dlg._accept_valid_project_form()
         proj = dlg.result_project()
         assert proj is not None
         assert proj.get("directory") or proj.get("dir")
@@ -334,7 +334,7 @@ class TestProjectDialogOpenMode:
         dlg = ProjectDialog(mode="open")
         dlg._dir_edit.setText(str(tmp_path))
         dlg._name_edit.clear()  # empty name
-        dlg._on_accept()
+        dlg._accept_valid_project_form()
         proj = dlg.result_project()
         # name should be derived from dir
         assert proj["name"] == tmp_path.name or proj.get("name")
@@ -344,7 +344,7 @@ class TestProjectDialogOpenMode:
         dlg = ProjectDialog(mode="open")
         dlg._dir_edit.setText(str(tmp_path))
         dlg._name_edit.setText("我的工作区")
-        dlg._on_accept()
+        dlg._accept_valid_project_form()
         proj = dlg.result_project()
         assert proj["name"] == "我的工作区"
 
@@ -363,7 +363,7 @@ class TestProjectDialogPersistence:
         dlg._location_edit.setText("福建")
         dlg._collector_edit.setText("张三")
         dlg._start_date_edit.setText("20260601")
-        dlg._on_accept()
+        dlg._accept_valid_project_form()
         proj = dlg.result_project()
         assert proj is not None
 

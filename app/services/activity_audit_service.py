@@ -8,11 +8,11 @@ from datetime import datetime, timezone
 from typing import Iterable, Optional
 
 
-def _now() -> str:
+def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _workspace_id(db) -> Optional[str]:
+def _read_workspace_id(db) -> Optional[str]:
     try:
         row = db.execute("SELECT workspace_id FROM workspace_meta LIMIT 1").fetchone()
         return row["workspace_id"] if row else None
@@ -32,7 +32,7 @@ def log_event(
 ) -> dict:
     """Append a generic immutable audit event."""
     audit_id = str(uuid.uuid4())
-    ts = _now()
+    ts = _utc_now_iso()
     db.execute(
         """
         INSERT INTO audit_log (
@@ -42,7 +42,7 @@ def log_event(
         """,
         (
             audit_id,
-            _workspace_id(db),
+            _read_workspace_id(db),
             actor or "",
             action,
             entity_type,
@@ -74,7 +74,7 @@ def record_label_print_event(
     n_copies = max(1, int(copies or 1))
     n_labels = max(0, int(label_count)) if label_count is not None else len(uids) * n_copies
     event_id = str(uuid.uuid4())
-    ts = _now()
+    ts = _utc_now_iso()
     db.execute(
         """
         INSERT INTO label_print_events (
@@ -84,7 +84,7 @@ def record_label_print_event(
         """,
         (
             event_id,
-            _workspace_id(db),
+            _read_workspace_id(db),
             actor or "",
             bucket,
             template_key or "",

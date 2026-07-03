@@ -25,7 +25,7 @@ import pytest
 from app.db import db_manager
 from app.services.activity_audit_service import record_label_print_event
 from app.services import project_summary_service as pss
-from app.services.photo_asset_service import assign_photo
+from app.services.photo_asset_service import assign_photo_to_specimen
 
 
 # ── helpers ────────────────────────────────────────────────────────────────────
@@ -108,7 +108,7 @@ def _insert_photo(conn, photo_id, *, assigned=False, assigned_by=""):
     )
     conn.commit()
     if assigned:
-        assign_photo(conn, photo_id, "UID-A1", assigned_by=assigned_by)
+        assign_photo_to_specimen(conn, photo_id, "UID-A1", assigned_by=assigned_by)
 
 
 @pytest.fixture(autouse=True)

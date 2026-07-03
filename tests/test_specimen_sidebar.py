@@ -116,6 +116,28 @@ def test_each_specimen_renders_four_phase_dots(ctx, db):
     assert all(isinstance(b, QPushButton) and b.isCheckable() for b in dots.values())
 
 
+def test_grouping_progress_batches_large_uid_lists(ctx, db):
+    from app.services.grouping_service import _ensure_grouping_table
+
+    _ensure_grouping_table(db)
+    uids = [f"U-{i:04d}" for i in range(950)]
+    db.executemany(
+        """
+        INSERT INTO grouping (uid, group_index, jpg_paths, composed_tiff_path, status, archive_zip)
+        VALUES (?, 0, ?, '', 'confirmed', '')
+        """,
+        [(uid, '["a.jpg"]') for uid in uids],
+    )
+    db.commit()
+
+    sb = SpecimenSidebar(ctx)
+    progress = sb._load_grouping_progress(db, uids)
+
+    assert len(progress) == 950
+    assert progress["U-0000"]["grouped"] == 1
+    assert progress["U-0949"]["grouped"] == 1
+
+
 def test_current_phase_dot_is_checked_from_db(ctx, db):
     _add_specimen(db, "U-1")
     activation_service.set_collab_status(db, "U-1", "organizing")

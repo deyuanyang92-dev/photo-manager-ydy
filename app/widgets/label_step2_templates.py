@@ -196,7 +196,7 @@ def _is_light_hex(color: str) -> bool:
     return (0.299 * r + 0.587 * g + 0.114 * b) > 180
 
 
-def _css() -> str:
+def _template_picker_stylesheet() -> str:
     return f"""
 QFrame#TmplCard {{
     background-color: {_C_CARD_BG}; border: 1px solid {_C_BORDER};
@@ -276,7 +276,7 @@ class LabelStep2Templates(QWidget):
     ) -> None:
         super().__init__(parent)
         _refresh_palette()
-        self.setStyleSheet(f"background:{_C_BG}; color:{_C_TEXT};" + _css())
+        self.setStyleSheet(f"background:{_C_BG}; color:{_C_TEXT};" + _template_picker_stylesheet())
         self._libs = libs
         self._specimens: list[dict] = []
         self._selected_indices: list[int] = []
@@ -546,7 +546,7 @@ class LabelStep2Templates(QWidget):
             choose_btn.setObjectName("CardChooseBtn")
             choose_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             choose_btn.clicked.connect(
-                lambda _=False, bk=bucket, k=key: self._choose(bk, k)
+                lambda _=False, bk=bucket, k=key: self._select_template_for_bucket(bk, k)
             )
             meta_row.addWidget(choose_btn)
         meta_row.addStretch()
@@ -565,7 +565,7 @@ class LabelStep2Templates(QWidget):
             prev.setText("—")
         v.addWidget(prev)
 
-        frame.mousePressEvent = lambda _e, bk=bucket, k=key: self._choose(bk, k)  # type: ignore[assignment]
+        frame.mousePressEvent = lambda _e, bk=bucket, k=key: self._select_template_for_bucket(bk, k)  # type: ignore[assignment]
         return {"key": key, "kind": kind, "frame": frame, "preview": prev, "rec_id": rec_id}
 
     def _make_add_card(self, bucket: str) -> QFrame:
@@ -600,7 +600,7 @@ class LabelStep2Templates(QWidget):
 
     # ── Handlers ────────────────────────────────────────────────────────────────
 
-    def _choose(self, bucket: str, key: str) -> None:
+    def _select_template_for_bucket(self, bucket: str, key: str) -> None:
         self._libs[bucket].set_selected_key(key)
         self._rebuild()
         self.config_changed.emit()
@@ -639,7 +639,7 @@ class LabelStep2Templates(QWidget):
         from app.widgets.label_designer_dialog import LabelDesignerDialog
 
         lib = self._libs[bucket]
-        rec = lib.get(rec_id)
+        rec = lib.get_record(rec_id)
         if not rec:
             self._rebuild()
             self.config_changed.emit()
@@ -693,11 +693,14 @@ class LabelStep2Templates(QWidget):
         lib = self._libs[bucket]
         key = lib.selected_key()
         rec_id = id_from_key(key) if is_library_key(key) else None
-        rec = lib.get(rec_id) if rec_id else None
+        rec = lib.get_record(rec_id) if rec_id else None
         is_custom = rec is not None
 
         menu = QMenu(self)
-        menu.addAction("设为当前模板", lambda: self._choose(bucket, key))
+        menu.addAction(
+            "设为当前模板",
+            lambda: self._select_template_for_bucket(bucket, key),
+        )
 
         def _copy_edit() -> None:
             if is_custom and rec_id:
@@ -738,7 +741,7 @@ class LabelStep2Templates(QWidget):
         if not rec_id:
             return
         lib = self._libs[bucket]
-        rec = lib.get(rec_id)
+        rec = lib.get_record(rec_id)
         cur = rec.get("name", "自定义") if rec else "自定义"
         name, ok = QInputDialog.getText(self, "重命名模板", "模板名称：", text=cur)
         if not ok or not name.strip():
@@ -757,7 +760,7 @@ class LabelStep2Templates(QWidget):
     def _delete_confirm(self, bucket: str, rec_id: Optional[str]) -> None:
         if not rec_id:
             return
-        rec = self._libs[bucket].get(rec_id)
+        rec = self._libs[bucket].get_record(rec_id)
         name = rec.get("name", "自定义") if rec else "自定义"
         if ui.question(
             self, "删除模板", f"确认删除自定义模板「{name}」？删除前会自动备份。"
@@ -772,7 +775,7 @@ class LabelStep2Templates(QWidget):
         """
         lib = self._libs[bucket]
         if rec_id:
-            rec = lib.get(rec_id)
+            rec = lib.get_record(rec_id)
             if not rec:
                 ui.warn(self, "导出失败", "没有可导出的模板")
                 return

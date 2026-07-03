@@ -391,7 +391,7 @@ class ScreenshotOverlay(QWidget):
         elif e.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and self._sel is not None:
             self._deliver(self.actionDone)
         elif e.key() == Qt.Key.Key_Z and self._is_cmd(e):
-            self._undo()
+            self._undo_last_annotation()
         elif e.key() == Qt.Key.Key_C and self._is_cmd(e) and self._sel is not None:
             self._deliver(self.actionCopy)
         elif e.key() == Qt.Key.Key_S and self._is_cmd(e) and self._sel is not None:
@@ -461,7 +461,7 @@ class ScreenshotOverlay(QWidget):
             )
             self.update()
 
-    def _undo(self) -> None:
+    def _undo_last_annotation(self) -> None:
         if self._annotations:
             self._annotations.pop()
             self.update()

@@ -14,6 +14,7 @@ from app.widgets.collab_pairing import (
     PairingInfo,
     decode_pairing,
     encode_pairing,
+    generate_group_code,
     qr_available,
 )
 
@@ -34,6 +35,11 @@ class TestRoundTrip:
         info = decode_pairing(encode_pairing("10.0.0.1", 5050, ""))
         assert info.group_code == ""
         assert info.port == 5050
+
+    def test_generated_group_code_is_short_and_prefixed(self):
+        code = generate_group_code("ydy")
+        assert code.startswith("YDY-")
+        assert len(code) == len("YDY-ABC-123")
 
 
 class TestInvalid:

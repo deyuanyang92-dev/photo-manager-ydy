@@ -71,7 +71,7 @@ from app.services.taxonomy_service import (
     TaxonCandidate,
     TaxonomyService,
     VALID_SP_KEYS,
-    _nfkc,
+    _normalize_taxon_match_text,
 )
 
 
@@ -150,8 +150,8 @@ def _highlight_spans(text: str, query: str) -> list[tuple[int, int, bool]]:
     """Return list of (start, end, is_highlight) spans for painting."""
     if not query:
         return [(0, len(text), False)]
-    q = _nfkc(query)
-    t = _nfkc(text)
+    q = _normalize_taxon_match_text(query)
+    t = _normalize_taxon_match_text(text)
     pos = t.find(q)
     if pos < 0:
         return [(0, len(text), False)]
@@ -549,7 +549,7 @@ class TaxonomyInputPanel(QWidget):
         self._search_timer = QTimer(self)
         self._search_timer.setSingleShot(True)
         self._search_timer.setInterval(80)
-        self._search_timer.timeout.connect(self._do_search)
+        self._search_timer.timeout.connect(self._show_debounced_taxonomy_suggestions)
 
         self._build_ui()
         self._popup.item_selected.connect(self._on_item_selected)
@@ -644,7 +644,7 @@ class TaxonomyInputPanel(QWidget):
         self._search_timer.stop()
         self._search_timer.start()
 
-    def _do_search(self) -> None:
+    def _show_debounced_taxonomy_suggestions(self) -> None:
         """Debounced: build candidates and show popup."""
         sp_key = self._active_sp_key
         if sp_key is None:
@@ -698,14 +698,14 @@ class TaxonomyInputPanel(QWidget):
         text = inp.text().strip()
         if not text:
             return
-        q_lower = _nfkc(text).lower()
+        q_lower = _normalize_taxon_match_text(text).lower()
 
         # Step 1: constrained search
         cands = self._svc.search(sp_key, text, context=self._context, max_results=30)
         exact = next(
             (c for c in cands
-             if _nfkc(c.value).lower() == q_lower
-             or (c.cn and _nfkc(c.cn).lower() == q_lower)),
+             if _normalize_taxon_match_text(c.value).lower() == q_lower
+             or (c.cn and _normalize_taxon_match_text(c.cn).lower() == q_lower)),
             None,
         )
 
@@ -720,8 +720,8 @@ class TaxonomyInputPanel(QWidget):
                 if key in seen_keys:
                     continue
                 if (
-                    _nfkc(c.value).lower() == q_lower
-                    or (c.cn and _nfkc(c.cn).lower() == q_lower)
+                    _normalize_taxon_match_text(c.value).lower() == q_lower
+                    or (c.cn and _normalize_taxon_match_text(c.cn).lower() == q_lower)
                 ):
                     # Mark as cross-level source so parent knows
                     exact = TaxonCandidate(

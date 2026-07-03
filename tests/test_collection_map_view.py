@@ -240,7 +240,7 @@ class TestImportCoords:
         target = str(tmp_path / "proj_sel")
         v._project_filter = target
         v._populate_projects = MagicMock()
-        v._reload = MagicMock()
+        v._reload_collection_map_points = MagicMock()
 
         v._on_import_coords()
 
@@ -249,7 +249,7 @@ class TestImportCoords:
         # 导入成功 → 切到该项目并刷新
         assert v._project_filter == target
         v._populate_projects.assert_called_once()
-        v._reload.assert_called_once()
+        v._reload_collection_map_points.assert_called_once()
 
     def test_import_all_projects_prompts_picker(self, tmp_path, monkeypatch):
         """未选具体项目（全部项目）→ 弹项目选择；取消则不开导入对话框。"""
@@ -272,11 +272,11 @@ class TestImportCoords:
 
         v = _view(db=_seed_db())
         v._project_filter = None
-        v._reload = MagicMock()
+        v._reload_collection_map_points = MagicMock()
         v._on_import_coords()
 
         assert opened["import"] is False
-        v._reload.assert_not_called()
+        v._reload_collection_map_points.assert_not_called()
 
 
 class TestExport:
@@ -284,7 +284,7 @@ class TestExport:
         v = _view(db=_seed_db())
         v.on_activate()
         out = tmp_path / "osm.png"
-        v._do_export(str(out))
+        v._export_current_map_view(str(out))
         assert out.exists() and out.stat().st_size > 0
 
     def test_export_pub_pdf(self, tmp_path):
@@ -294,7 +294,7 @@ class TestExport:
         v._activate_basemap({"id": "image:bm.png", "name": "bm", "kind": "image",
                              "source": str(img), "ext": ".png"})
         out = tmp_path / "fig.pdf"
-        v._do_export(str(out))
+        v._export_current_map_view(str(out))
         assert out.exists() and out.stat().st_size > 0
 
 

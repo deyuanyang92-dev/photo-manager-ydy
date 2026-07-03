@@ -60,14 +60,14 @@ def test_upsert_same_path_updates_not_duplicates(tmp_path):
 
 
 def test_assignment_history_keeps_current_only(tmp_path):
-    from app.services.photo_asset_service import assign_photo, upsert_photo_file
+    from app.services.photo_asset_service import assign_photo_to_specimen, upsert_photo_file
 
     project, incoming, db = _project(tmp_path)
     img = incoming / "IMG_0003.JPG"
     _jpg(img)
     row = upsert_photo_file(db, str(project), str(img), specimen_uid="UID-1")
 
-    assign_photo(db, row["photo_id"], "UID-2", assignment_source="manual")
+    assign_photo_to_specimen(db, row["photo_id"], "UID-2", assignment_source="manual")
 
     assignments = db.execute(
         "SELECT specimen_uid, is_current FROM photo_assignments ORDER BY assigned_at"
@@ -76,8 +76,8 @@ def test_assignment_history_keeps_current_only(tmp_path):
     assert [r["is_current"] for r in assignments] == [0, 1]
 
 
-def test_mark_missing_files(tmp_path):
-    from app.services.photo_asset_service import mark_missing_files, upsert_photo_file
+def test_mark_catalog_files_missing_on_disk(tmp_path):
+    from app.services.photo_asset_service import mark_catalog_files_missing_on_disk, upsert_photo_file
 
     project, incoming, db = _project(tmp_path)
     img = incoming / "IMG_0004.JPG"
@@ -85,6 +85,6 @@ def test_mark_missing_files(tmp_path):
     upsert_photo_file(db, str(project), str(img), compute_hash=False)
     img.unlink()
 
-    assert mark_missing_files(db, str(project)) == 1
+    assert mark_catalog_files_missing_on_disk(db, str(project)) == 1
     row = db.execute("SELECT exists_on_disk FROM photo_files").fetchone()
     assert row["exists_on_disk"] == 0

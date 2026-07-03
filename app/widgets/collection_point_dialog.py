@@ -147,7 +147,7 @@ class CollectionPointDialog(QDialog):
         ok = QPushButton("保存")
         ok.setObjectName("Primary")
         ok.setDefault(True)
-        ok.clicked.connect(self._on_accept)
+        ok.clicked.connect(self._accept_valid_collection_point)
         foot.addWidget(cancel)
         foot.addWidget(ok)
         lay.addLayout(foot)
@@ -181,7 +181,7 @@ class CollectionPointDialog(QDialog):
             return None
         return v
 
-    def _on_accept(self) -> None:
+    def _accept_valid_collection_point(self) -> None:
         lon = self._parse_coord(self._lon_edit, -180.0, 180.0, "经度")
         if lon is None:
             return

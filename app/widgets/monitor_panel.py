@@ -1,4 +1,4 @@
-"""monitor_panel.py — Incoming-JPG / results-TIFF capture stream.
+"""monitor_panel.py — capture stream for pending JPG/TIFF files.
 
 Faithfully mirrors the web prototype's "目录监控 / 拍照工作台" centre column
 (app.js renderDirectoryMonitor):
@@ -28,11 +28,11 @@ Badge palette (mirrors web styles.css):
 """
 from __future__ import annotations
 
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Optional
 
-from PyQt6.QtCore import Qt, QEvent, QMimeData, QUrl, pyqtSignal
+from PyQt6.QtCore import Qt, QEvent, QMimeData, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QDrag, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
@@ -78,6 +78,7 @@ _FILE_THUMB_SIZE = 40
 _FILE_THUMB_DECODE_SIZE = 128
 _FILE_THUMB_CACHE_LIMIT = 512
 _FILE_THUMB_CACHE: "OrderedDict[tuple[str, int, int], Optional[QPixmap]]" = OrderedDict()
+_FILE_THUMB_ICON_CACHE: dict[str, QPixmap] = {}
 
 
 def _file_thumb_cache_key(path: str) -> tuple[str, int, int] | None:
@@ -104,6 +105,17 @@ def _file_thumb_pixmap(path: str) -> Optional[QPixmap]:
     return pm
 
 
+def _fallback_thumb_icon(kind: str) -> QPixmap:
+    key = "jpg" if kind == "jpg" else "tiff"
+    cached = _FILE_THUMB_ICON_CACHE.get(key)
+    if cached is not None:
+        return cached
+    glyph_name = "mdi6.image-outline" if key == "jpg" else "mdi6.file-image-outline"
+    pixmap = icons.icon(glyph_name, color=icons.TONE_MUTED).pixmap(22, 22)
+    _FILE_THUMB_ICON_CACHE[key] = pixmap
+    return pixmap
+
+
 class _FileCard(QFrame):
     """A capture-stream row: file icon + caption + attribution pill.
 
@@ -123,11 +135,15 @@ class _FileCard(QFrame):
                  on_add_to_group: Optional[Callable[[str], None]] = None,
                  on_assign_uid: Optional[Callable[[str], None]] = None,
                  on_unassign: Optional[Callable[[str], None]] = None,
-                 drag_paths_for: Optional[Callable[[str], list[str]]] = None) -> None:
+                 drag_paths_for: Optional[Callable[[str], list[str]]] = None,
+                 defer_thumbnail: bool = False) -> None:
         super().__init__(parent)
         self.setObjectName("Card")
         self._entry = entry
         self._active_uid = active_uid
+        self._defer_thumbnail = defer_thumbnail
+        self._thumbnail_loaded = False
+        self._thumbnail_kind = getattr(entry, "kind", "jpg")
         self._selected = False
         self._on_add_to_group = on_add_to_group
         self._on_assign_uid = on_assign_uid
@@ -172,7 +188,10 @@ class _FileCard(QFrame):
         self._thumb_label.setFixedSize(_FILE_THUMB_SIZE, _FILE_THUMB_SIZE)
         self._thumb_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._thumb_label.setToolTip(getattr(self._entry, "path", ""))
-        self._apply_thumbnail(kind)
+        if self._defer_thumbnail and kind in {"jpg", "tiff"}:
+            self._apply_thumbnail_placeholder(kind)
+        else:
+            self.load_thumbnail_now()
         lay.addWidget(self._thumb_label)
 
         # ── Caption + attribution column ──
@@ -226,6 +245,16 @@ class _FileCard(QFrame):
         )
         lay.addWidget(menu_btn)
 
+    def _apply_thumbnail_placeholder(self, kind: str) -> None:
+        self._thumb_label.setProperty("hasThumbnail", False)
+        self._thumb_label.setPixmap(_fallback_thumb_icon(kind))
+
+    def load_thumbnail_now(self) -> None:
+        if self._thumbnail_loaded:
+            return
+        self._thumbnail_loaded = True
+        self._apply_thumbnail(self._thumbnail_kind)
+
     def _apply_thumbnail(self, kind: str) -> None:
         path = getattr(self._entry, "path", "")
         pm = _file_thumb_pixmap(path) if kind in {"jpg", "tiff"} else None
@@ -239,10 +268,7 @@ class _FileCard(QFrame):
             ))
         else:
             self._thumb_label.setProperty("hasThumbnail", False)
-            glyph_name = "mdi6.image-outline" if kind == "jpg" else "mdi6.file-image-outline"
-            self._thumb_label.setPixmap(
-                icons.icon(glyph_name, color=icons.TONE_MUTED).pixmap(22, 22)
-            )
+            self._thumb_label.setPixmap(_fallback_thumb_icon(kind))
         self._thumb_label.style().unpolish(self._thumb_label)
         self._thumb_label.style().polish(self._thumb_label)
 
@@ -378,7 +404,7 @@ class _FileCard(QFrame):
 
 
 class MonitorPanel(QWidget):
-    """Incoming-JPG + results-TIFF capture stream with batch identity header.
+    """Pending JPG/TIFF capture stream with batch identity header.
 
     Signals
     -------
@@ -400,6 +426,7 @@ class MonitorPanel(QWidget):
     settings_requested = pyqtSignal()  # emitted from the compact "更多" menu
     phase_clicked = pyqtSignal(str)    # status code: shooting/shot_done/organizing/done
     external_jpgs_dropped = pyqtSignal(list)  # OS drop → list[str] JPG paths
+    clear_pending_requested = pyqtSignal(list)  # queue clear, never disk delete
 
     def __init__(self, ctx: "AppContext", parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -409,6 +436,10 @@ class MonitorPanel(QWidget):
         self._current_phase: Optional[str] = None
         self._last_scan_sig = None  # change-detection: skip rebuild when unchanged
         self._cards: list[_FileCard] = []  # all current cards (for selection ops)
+        self._thumb_queue: deque[_FileCard] = deque()
+        self._thumb_timer = QTimer(self)
+        self._thumb_timer.setInterval(16)
+        self._thumb_timer.timeout.connect(self._load_next_thumbnail_batch)
         # Incremental rebuild: reuse card widgets across scans keyed by file
         # path, so a single new photo builds one card instead of rebuilding all.
         self._card_by_key: dict[str, _FileCard] = {}
@@ -502,14 +533,15 @@ class MonitorPanel(QWidget):
         refresh_btn.setObjectName("Outline")
         refresh_btn.setFixedHeight(28)
         icons.set_button_icon(refresh_btn, "mdi6.refresh", color=icons.TONE_MUTED, size=15)
-        refresh_btn.clicked.connect(self._on_refresh)
+        refresh_btn.clicked.connect(self._emit_refresh_requested)
         controls.addWidget(refresh_btn)
         add_btn = QPushButton("添加照片")
         add_btn.setObjectName("Outline")
         add_btn.setFixedHeight(28)
         icons.set_button_icon(add_btn, "mdi6.image-plus-outline", color=icons.TONE_MUTED, size=15)
-        add_btn.setToolTip("把已有照片添加进来（导入 incoming-jpg/）")
+        add_btn.setToolTip("把已有照片添加进来（JPG / TIF 进入待处理目录）")
         add_btn.clicked.connect(self.add_jpg_requested.emit)
+        self._add_btn = add_btn
         controls.addWidget(add_btn)
         # 主流程一键合成：手选优先；自动归档开时可取激活编号未占用 JPG。
         self._compose_btn = QPushButton("合成")
@@ -559,7 +591,7 @@ class MonitorPanel(QWidget):
         )
         icons.set_button_icon(self._auto_toggle, "mdi6.checkbox-blank-outline",
                               color=icons.TONE_MUTED, size=15)
-        self._auto_toggle.toggled.connect(self._on_auto_toggled)
+        self._auto_toggle.toggled.connect(self._sync_auto_archive_toggle_and_emit)
         controls.addWidget(self._auto_toggle)
         more_btn = QPushButton()
         more_btn.setObjectName("Ghost")
@@ -631,32 +663,39 @@ class MonitorPanel(QWidget):
         add_group_btn = QPushButton("加入分组")
         add_group_btn.setObjectName("Tiny")
         add_group_btn.setFixedHeight(22)
-        add_group_btn.clicked.connect(self._on_selected_add_to_group)
+        add_group_btn.clicked.connect(self._add_selected_jpgs_to_group)
         sel.addWidget(add_group_btn)
         sel_all_btn = QPushButton("全选")
         sel_all_btn.setObjectName("Tiny")
         sel_all_btn.setFixedHeight(22)
         sel_all_btn.clicked.connect(self._on_select_all)
         sel.addWidget(sel_all_btn)
-        sel_none_btn = QPushButton("清除")
+        sel_none_btn = QPushButton("取消选择")
         sel_none_btn.setObjectName("Tiny")
         sel_none_btn.setFixedHeight(22)
         sel_none_btn.clicked.connect(self._on_select_none)
         sel.addWidget(sel_none_btn)
+        clear_pending_btn = QPushButton("清空队列")
+        clear_pending_btn.setObjectName("Outline")
+        clear_pending_btn.setFixedHeight(24)
+        clear_pending_btn.setToolTip("移出当前待处理队列，不删除原片")
+        icons.set_button_icon(clear_pending_btn, "mdi6.tray-arrow-up", color=icons.TONE_MUTED, size=14)
+        clear_pending_btn.clicked.connect(self._on_clear_pending_files)
+        sel.addWidget(clear_pending_btn)
         self._del_btn = QPushButton("删除")
         self._del_btn.setObjectName("Danger")
         self._del_btn.setFixedHeight(24)
         self._del_btn.setEnabled(False)
         icons.set_button_icon(self._del_btn, "mdi6.delete-outline", color=icons.TONE_DANGER, size=14)
         self._del_btn.setToolTip("删除选中文件（含 TIFF 时二次确认）")
-        self._del_btn.clicked.connect(self._on_delete_clicked)
+        self._del_btn.clicked.connect(self._delete_selected_pending_files)
         sel.addWidget(self._del_btn)
         undo_attr_btn = QPushButton("撤销归属")
         undo_attr_btn.setObjectName("Tiny")
         undo_attr_btn.setFixedHeight(22)
         undo_attr_btn.setToolTip("撤销选中 JPG 的归属")
         icons.set_button_icon(undo_attr_btn, "mdi6.undo", color=icons.TONE_MUTED, size=14)
-        undo_attr_btn.clicked.connect(self._on_selected_unassign)
+        undo_attr_btn.clicked.connect(self._unassign_selected_jpgs)
         sel.addWidget(undo_attr_btn)
         sel.addStretch()
         self._selection_bar.hide()
@@ -833,6 +872,19 @@ class MonitorPanel(QWidget):
         self._last_scan_sig = sig
         self._rebuild_grid()
 
+    def set_import_busy(self, busy: bool) -> None:
+        """Reflect a background add-photo import in the toolbar."""
+        btn = getattr(self, "_add_btn", None)
+        if btn is None:
+            return
+        btn.setEnabled(not busy)
+        btn.setText("导入中..." if busy else "添加照片")
+        btn.setToolTip(
+            "正在把照片复制到待处理目录"
+            if busy
+            else "把已有照片添加进来（JPG / TIF 进入待处理目录）"
+        )
+
     def _scan_signature(self, scan_result: "ScanResult"):
         """Cheap fingerprint of everything the card grid renders.
 
@@ -841,17 +893,17 @@ class MonitorPanel(QWidget):
         if scan_result is None:
             return None
 
-        def fp(e):
+        def rendered_entry_fingerprint(entry):
             return (
-                e.name, e.mtime, e.size,
-                e.attributed_specimen_id, e.is_grouped, e.composed_tiff,
-                e.has_zip,
+                entry.name, entry.mtime, entry.size,
+                entry.attributed_specimen_id, entry.is_grouped, entry.composed_tiff,
+                entry.has_zip,
             )
 
         return (
             self._active_uid,
-            tuple(fp(e) for e in scan_result.jpg_files),
-            tuple(fp(e) for e in scan_result.tiff_files),
+            tuple(rendered_entry_fingerprint(e) for e in scan_result.jpg_files),
+            tuple(rendered_entry_fingerprint(e) for e in scan_result.tiff_files),
         )
 
     def clear(self) -> None:
@@ -946,7 +998,7 @@ class MonitorPanel(QWidget):
                 getattr(entry, "name", "") or Path(getattr(entry, "path", "")).name
             ).lower()
 
-        def key(entry):
+        def sort_key_for_media_entry(entry):
             name = name_value(entry)
             if self._sort_key == "name":
                 return (name,)
@@ -962,7 +1014,7 @@ class MonitorPanel(QWidget):
                 return (uid.lower(), name)
             return (name,)
 
-        return sorted(entries, key=key, reverse=self._sort_reverse)
+        return sorted(entries, key=sort_key_for_media_entry, reverse=self._sort_reverse)
 
     def _drag_paths_for(self, path: str) -> list[str]:
         selected = self.selected_all_paths()
@@ -977,13 +1029,33 @@ class MonitorPanel(QWidget):
             on_assign_uid=self._on_ctx_assign_uid,
             on_unassign=self._on_ctx_unassign,
             drag_paths_for=self._drag_paths_for,
+            defer_thumbnail=True,
         )
         card.assign_requested.connect(self.assign_requested)
         card.deactivate_requested.connect(self.unassign_requested)
         card.selection_toggled.connect(self._on_card_selection_toggled)
         card.delete_requested.connect(self._on_delete_single_requested)
         self._register_drop_target(card)
+        self._queue_thumbnail(card)
         return card
+
+    def _queue_thumbnail(self, card: "_FileCard") -> None:
+        self._thumb_queue.append(card)
+        if not self._thumb_timer.isActive():
+            self._thumb_timer.start()
+
+    def _load_next_thumbnail_batch(self) -> None:
+        loaded = 0
+        while self._thumb_queue and loaded < 4:
+            card = self._thumb_queue.popleft()
+            try:
+                if card.parent() is not None:
+                    card.load_thumbnail_now()
+                    loaded += 1
+            except RuntimeError:
+                continue
+        if not self._thumb_queue:
+            self._thumb_timer.stop()
 
     def _sync_cards(self, all_files: list) -> None:
         """Reconcile the card grid with *all_files*, reusing widgets.
@@ -992,41 +1064,48 @@ class MonitorPanel(QWidget):
         card; everything else is repositioned in place (cheap), so the common
         "one new photo arrived" case builds a single card instead of all.
         """
-        cols = 1 if self._view_mode == "list" else 2
-        desired = {getattr(f, "path", ""): f for f in all_files}
+        was_enabled = self._grid_widget.updatesEnabled()
+        self._grid_widget.setUpdatesEnabled(False)
+        try:
+            cols = 1 if self._view_mode == "list" else 2
+            desired = {getattr(f, "path", ""): f for f in all_files}
 
-        # Drop cards for files that vanished.
-        for key in list(self._card_by_key):
-            if key not in desired:
-                card = self._card_by_key.pop(key)
-                self._card_sig_by_key.pop(key, None)
-                card.setParent(None)
-                card.deleteLater()
-
-        # Detach all remaining cards from the grid (reposition without delete).
-        while self._grid.count():
-            self._grid.takeAt(0)
-
-        self._cards = []
-        for idx, f in enumerate(all_files):
-            key = getattr(f, "path", "")
-            sig = self._card_render_sig(f)
-            card = self._card_by_key.get(key)
-            if card is None or self._card_sig_by_key.get(key) != sig:
-                if card is not None:
+            # Drop cards for files that vanished.
+            for key in list(self._card_by_key):
+                if key not in desired:
+                    card = self._card_by_key.pop(key)
+                    self._card_sig_by_key.pop(key, None)
                     card.setParent(None)
                     card.deleteLater()
-                card = self._make_card(f)
-                self._card_by_key[key] = card
-                self._card_sig_by_key[key] = sig
-            self._grid.addWidget(card, idx // cols, idx % cols)
-            self._cards.append(card)
-        for c in range(cols):
-            self._grid.setColumnStretch(c, 1)
-        for c in range(cols, 3):
-            self._grid.setColumnStretch(c, 0)
+
+            # Detach all remaining cards from the grid (reposition without delete).
+            while self._grid.count():
+                self._grid.takeAt(0)
+
+            self._cards = []
+            for idx, f in enumerate(all_files):
+                key = getattr(f, "path", "")
+                sig = self._card_render_sig(f)
+                card = self._card_by_key.get(key)
+                if card is None or self._card_sig_by_key.get(key) != sig:
+                    if card is not None:
+                        card.setParent(None)
+                        card.deleteLater()
+                    card = self._make_card(f)
+                    self._card_by_key[key] = card
+                    self._card_sig_by_key[key] = sig
+                self._grid.addWidget(card, idx // cols, idx % cols)
+                self._cards.append(card)
+            for c in range(cols):
+                self._grid.setColumnStretch(c, 1)
+            for c in range(cols, 3):
+                self._grid.setColumnStretch(c, 0)
+        finally:
+            self._grid_widget.setUpdatesEnabled(was_enabled)
 
     def _clear_grid(self) -> None:
+        self._thumb_queue.clear()
+        self._thumb_timer.stop()
         while self._grid.count():
             item = self._grid.takeAt(0)
             if item and item.widget():
@@ -1203,15 +1282,8 @@ class MonitorPanel(QWidget):
             if getattr(c._entry, "path", "")
         ]
 
-    def _on_delete_clicked(self) -> None:
-        """Delete selected JPG files.
-
-        Hard rule: TIFF 永远保留 — if any TIFF is selected, show a warning
-        and abort entirely (user must deselect TIFFs first).
-        JPG-only selections go through a confirm dialog then os.unlink.
-
-        Oracle: app.js deleteSelectedFiles() — TIFF guard + os.unlink for JPGs.
-        """
+    def _delete_selected_pending_files(self) -> None:
+        """Delete selected files after explicit confirmation."""
         sel = self._selected_cards()
         if not sel:
             return
@@ -1230,7 +1302,7 @@ class MonitorPanel(QWidget):
             QMessageBox.information(self, "删除", "请先选中要删除的文件。")
             return
 
-        # TIFF 可删（用户主权，覆盖旧「TIFF 永不删」红线），但因 TIFF 是无损母片、
+        # TIFF 可删，但必须是用户明确删除；整理/归档流程不能顺手删 TIFF。
         # 删除不可恢复 → 单独弹确认框；JPG 同样确认。各自确认、删各自确认通过的。
         to_delete: list[str] = []
         if tiff_paths:
@@ -1275,7 +1347,7 @@ class MonitorPanel(QWidget):
                 self._on_select_none()
             self.refresh_requested.emit()
 
-    def _on_selected_add_to_group(self) -> None:
+    def _add_selected_jpgs_to_group(self) -> None:
         jpg_paths = self.selected_jpg_paths()
         if not jpg_paths:
             QMessageBox.information(self, "加入分组", "请先选中 JPG。")
@@ -1297,7 +1369,7 @@ class MonitorPanel(QWidget):
         self._on_select_none()
         self.refresh_requested.emit()
 
-    def _on_selected_unassign(self) -> None:
+    def _unassign_selected_jpgs(self) -> None:
         jpg_paths = self.selected_jpg_paths()
         if not jpg_paths:
             QMessageBox.information(self, "撤销归属", "请先选中 JPG。")
@@ -1362,7 +1434,7 @@ class MonitorPanel(QWidget):
 
     # ── Slots ─────────────────────────────────────────────────────────────────
 
-    def _on_refresh(self) -> None:
+    def _emit_refresh_requested(self) -> None:
         self.refresh_requested.emit()
 
     def _set_auto_toggle_icon(self, on: bool) -> None:
@@ -1370,7 +1442,7 @@ class MonitorPanel(QWidget):
         tone = icons.TONE_ACCENT if on else icons.TONE_MUTED
         icons.set_button_icon(self._auto_toggle, glyph, color=tone, size=15)
 
-    def _on_auto_toggled(self, on: bool) -> None:
+    def _sync_auto_archive_toggle_and_emit(self, on: bool) -> None:
         """Swap the auto-archive toggle glyph between checked / unchecked."""
         self._set_auto_toggle_icon(on)
         self.auto_compress_toggled.emit(on)
@@ -1409,6 +1481,13 @@ class MonitorPanel(QWidget):
 
         menu.addSeparator()
 
+        clear_pending_action = menu.addAction("清空待处理文件...")
+        clear_pending_action.setEnabled(bool(self._cards))
+        clear_pending_action.setToolTip("移出当前待处理队列，不删除原片")
+        clear_pending_action.triggered.connect(self._on_clear_pending_files)
+
+        menu.addSeparator()
+
         settings_action = menu.addAction("项目设置")
         settings_action.triggered.connect(self.settings_requested.emit)
 
@@ -1435,6 +1514,17 @@ class MonitorPanel(QWidget):
         scan_action.setToolTip("旧文件扫描在分组工具/批量整理流程中执行")
 
         return menu
+
+    def _on_clear_pending_files(self) -> None:
+        paths = [
+            getattr(card._entry, "path", "")
+            for card in self._cards
+            if getattr(card._entry, "path", "")
+        ]
+        if not paths:
+            QMessageBox.information(self, "清空队列", "当前队列为空。")
+            return
+        self.clear_pending_requested.emit(paths)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

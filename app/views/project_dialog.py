@@ -237,7 +237,7 @@ class ProjectDialog(QDialog):
         accept_btn.setObjectName("Primary")
         accept_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_box.rejected.connect(self.reject)
-        btn_box.accepted.connect(self._on_accept)
+        btn_box.accepted.connect(self._accept_valid_project_form)
         root.addWidget(btn_box)
 
     # ── Actions ───────────────────────────────────────────────────────────────
@@ -250,7 +250,7 @@ class ProjectDialog(QDialog):
             if not self._name_edit.text():
                 self._name_edit.setText(Path(path).name)
 
-    def _on_accept(self) -> None:
+    def _accept_valid_project_form(self) -> None:
         directory = self._dir_edit.text().strip()
         if not directory:
             warn(self, "新建工作区" if self._mode == "new" else "打开文件夹",

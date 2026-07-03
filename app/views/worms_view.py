@@ -124,7 +124,7 @@ def _rgb_tuple(color: str) -> tuple[int, int, int]:
     return (41, 185, 171)
 
 
-def _tint(color: str, alpha: float) -> str:
+def _rgba_tint(color: str, alpha: float) -> str:
     r, g, b = _rgb_tuple(color)
     return f"rgba({r},{g},{b},{alpha})"
 
@@ -153,20 +153,20 @@ def _refresh_palette() -> None:
     _C_WARN     = g("warn", _C_WARN)
     _C_RUNNING  = g("accent", _C_RUNNING)
     # Alpha tints derived from the live base colours
-    _C_ACCENT_06 = _tint(_C_ACCENT, 0.06)
-    _C_ACCENT_08 = _tint(_C_ACCENT, 0.08)
-    _C_ACCENT_12 = _tint(_C_ACCENT, 0.12)
-    _C_ACCENT_15 = _tint(_C_ACCENT, 0.15)
-    _C_ACCENT_20 = _tint(_C_ACCENT, 0.20)
-    _C_ACCENT_22 = _tint(_C_ACCENT, 0.22)
-    _C_ACCENT_28 = _tint(_C_ACCENT, 0.28)
-    _C_ACCENT_30 = _tint(_C_ACCENT, 0.30)
-    _C_SUCCESS_15 = _tint(_C_SUCCESS, 0.15)
-    _C_DANGER_15 = _tint(_C_DANGER, 0.15)
-    _C_WARN_25 = _tint(_C_WARN, 0.25)
-    _C_BORDER_10 = _tint(_C_BORDER, 0.10)
-    _C_BORDER_20 = _tint(_C_BORDER, 0.20)
-    _C_BORDER_25 = _tint(_C_BORDER, 0.25)
+    _C_ACCENT_06 = _rgba_tint(_C_ACCENT, 0.06)
+    _C_ACCENT_08 = _rgba_tint(_C_ACCENT, 0.08)
+    _C_ACCENT_12 = _rgba_tint(_C_ACCENT, 0.12)
+    _C_ACCENT_15 = _rgba_tint(_C_ACCENT, 0.15)
+    _C_ACCENT_20 = _rgba_tint(_C_ACCENT, 0.20)
+    _C_ACCENT_22 = _rgba_tint(_C_ACCENT, 0.22)
+    _C_ACCENT_28 = _rgba_tint(_C_ACCENT, 0.28)
+    _C_ACCENT_30 = _rgba_tint(_C_ACCENT, 0.30)
+    _C_SUCCESS_15 = _rgba_tint(_C_SUCCESS, 0.15)
+    _C_DANGER_15 = _rgba_tint(_C_DANGER, 0.15)
+    _C_WARN_25 = _rgba_tint(_C_WARN, 0.25)
+    _C_BORDER_10 = _rgba_tint(_C_BORDER, 0.10)
+    _C_BORDER_20 = _rgba_tint(_C_BORDER, 0.20)
+    _C_BORDER_25 = _rgba_tint(_C_BORDER, 0.25)
 
 
 _FALLBACK_DATA_DIR = Path.home() / ".photo_workbench" / "data"
@@ -610,7 +610,7 @@ class _DetailPanel(QWidget):
         self._root.setContentsMargins(16, 16, 16, 16)
         self._root.setSpacing(10)
 
-        self._render()
+        self._render_worms_detail_panel()
 
     # ── Public API ─────────────────────────────────────────────────────
 
@@ -627,7 +627,7 @@ class _DetailPanel(QWidget):
         self._current_tab = self.TAB_OVERVIEW
         self._children_offset = 1
         self._children_has_more = False
-        self._render()
+        self._render_worms_detail_panel()
 
     def show_loading(self, rec: dict) -> None:
         self._rec = rec
@@ -638,7 +638,7 @@ class _DetailPanel(QWidget):
         self._current_tab = self.TAB_OVERVIEW
         self._children_offset = 1
         self._children_has_more = False
-        self._render()
+        self._render_worms_detail_panel()
 
     def show_detail(self, rec: dict, chain: list[dict],
                     synonyms: list[dict], children: list[dict]) -> None:
@@ -650,17 +650,17 @@ class _DetailPanel(QWidget):
         # Detect has_more: ≥50 means there may be more (oracle: app.js ~12674)
         self._children_has_more = len(children) >= 50
         self._children_offset = 1
-        self._render()
+        self._render_worms_detail_panel()
 
     def set_tab(self, tab: str) -> None:
         self._current_tab = tab
-        self._render()
+        self._render_worms_detail_panel()
 
     def update_fill_label(self, specimen_label: str) -> None:
         """Refresh the fill button text after active specimen changes."""
         # Re-render to pick up new label; only meaningful when detail is shown.
         if self._rec is not None:
-            self._render()
+            self._render_worms_detail_panel()
 
     # ── Children pagination ─────────────────────────────────────────
 
@@ -701,11 +701,11 @@ class _DetailPanel(QWidget):
             self._children_has_more = len(more) >= 50
         else:
             self._children_has_more = False
-        self._render()
+        self._render_worms_detail_panel()
 
     # ── Rendering ──────────────────────────────────────────────────────
 
-    def _clear(self) -> None:
+    def _clear_worms_detail_layout(self) -> None:
         while self._root.count():
             item = self._root.takeAt(0)
             if item.widget():
@@ -713,8 +713,8 @@ class _DetailPanel(QWidget):
             elif item.layout():
                 pass  # nested layout — just remove reference
 
-    def _render(self) -> None:
-        self._clear()
+    def _render_worms_detail_panel(self) -> None:
+        self._clear_worms_detail_layout()
 
         if self._rec is None:
             # worms-detail-empty
@@ -982,7 +982,7 @@ class WormsView(BaseView):
             f"  font-size:12px; font-weight:600; }}"
             f"QPushButton#WMatchBtn:hover {{ background:{_C_ACCENT_H}; }}"
         )
-        self._match_btn.clicked.connect(self._on_open_match)
+        self._match_btn.clicked.connect(self._open_batch_taxon_match_dialog)
         title_row.addWidget(self._match_btn)
         header_lay.addLayout(title_row)
 
@@ -1024,7 +1024,7 @@ class WormsView(BaseView):
             f"  font-family:{_MONO}; outline:none; }}"
             f"QLineEdit#WSearchInput:focus {{ border-color:{_C_ACCENT}; }}"
         )
-        self._search_input.returnPressed.connect(self._on_search)
+        self._search_input.returnPressed.connect(self._start_worms_taxon_search)
         sb_lay.addWidget(self._search_input, stretch=1)
 
         # like-toggle (worms-like-toggle)
@@ -1048,7 +1048,7 @@ class WormsView(BaseView):
             f"QPushButton#WSearchBtn:hover {{ background:{_C_ACCENT_H}; }}"
             f"QPushButton#WSearchBtn:disabled {{ background:{_C_PANEL}; color:{_C_DIM}; }}"
         )
-        self._search_btn.clicked.connect(self._on_search)
+        self._search_btn.clicked.connect(self._start_worms_taxon_search)
         sb_lay.addWidget(self._search_btn)
 
         left_lay.addWidget(search_bar)
@@ -1103,8 +1103,8 @@ class WormsView(BaseView):
 
         # Right: detail panel
         self._detail_panel = _DetailPanel()
-        self._detail_panel.fill_requested.connect(self._on_fill_to_specimen)
-        self._detail_panel.child_selected.connect(self._on_result_clicked)
+        self._detail_panel.fill_requested.connect(self._fill_active_specimen_from_worms_record)
+        self._detail_panel.child_selected.connect(self._load_selected_worms_result_detail)
         self._detail_panel.set_service(self._service)
         right_container = QWidget()
         right_container.setStyleSheet("background:transparent;")
@@ -1218,14 +1218,14 @@ class WormsView(BaseView):
 
     # ── Search ─────────────────────────────────────────────────────────
 
-    def _on_open_match(self) -> None:
+    def _open_batch_taxon_match_dialog(self) -> None:
         """Open the batch Match-Taxa wizard (shares this view's WoRMS cache)."""
         from app.widgets.worms_match_dialog import WormsMatchDialog
         if not self._service:
             self._service = self._init_service()
         WormsMatchDialog(self._service, parent=self).exec()
 
-    def _on_search(self) -> None:
+    def _start_worms_taxon_search(self) -> None:
         name = self._search_input.text().strip()
         if not name:
             self._set_status("请输入学名")
@@ -1234,15 +1234,15 @@ class WormsView(BaseView):
             return
 
         like = self._like_cb.isChecked()
-        self._set_busy(True, f'搜索 "{name}"…')
+        self._set_worms_search_busy_state(True, f'搜索 "{name}"…')
         self._clear_results()
 
         worker = _SearchWorker(self._service, name, like)
         thread = QThread(self)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-        worker.finished.connect(self._on_search_done)
-        worker.error.connect(self._on_search_error)
+        worker.finished.connect(self._show_worms_taxon_search_results)
+        worker.error.connect(self._show_worms_taxon_search_error)
         worker.finished.connect(thread.quit)
         worker.error.connect(thread.quit)
         thread.finished.connect(worker.deleteLater)
@@ -1251,8 +1251,8 @@ class WormsView(BaseView):
         self._search_thread = thread
         thread.start()
 
-    def _on_search_done(self, results: list[dict]) -> None:
-        self._set_busy(False)
+    def _show_worms_taxon_search_results(self, results: list[dict]) -> None:
+        self._set_worms_search_busy_state(False)
         self._results = results
         self._clear_results()
 
@@ -1268,14 +1268,14 @@ class WormsView(BaseView):
         stretch_idx = self._result_layout.count() - 1
         for rec in results:
             item_w = _ResultItemWidget(rec)
-            item_w.clicked.connect(self._on_result_clicked)
+            item_w.clicked.connect(self._load_selected_worms_result_detail)
             self._result_layout.insertWidget(stretch_idx, item_w)
             stretch_idx += 1
 
         self._set_status(f"找到 {len(results)} 条结果")
 
-    def _on_search_error(self, msg: str) -> None:
-        self._set_busy(False)
+    def _show_worms_taxon_search_error(self, msg: str) -> None:
+        self._set_worms_search_busy_state(False)
         self._empty_lbl.setText(f"搜索失败: {msg}")
         self._empty_lbl.setStyleSheet(
             f"color:{_C_DANGER}; font-size:12px; background:transparent;"
@@ -1299,7 +1299,7 @@ class WormsView(BaseView):
 
     # ── Result selection ───────────────────────────────────────────────
 
-    def _on_result_clicked(self, rec: dict) -> None:
+    def _load_selected_worms_result_detail(self, rec: dict) -> None:
         self._selected = rec
         valid_id = rec.get("valid_AphiaID") or rec.get("AphiaID")
         if not valid_id:
@@ -1316,8 +1316,8 @@ class WormsView(BaseView):
         thread = QThread(self)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-        worker.finished.connect(self._on_detail_done)
-        worker.error.connect(self._on_detail_error)
+        worker.finished.connect(self._show_selected_worms_result_detail)
+        worker.error.connect(self._show_worms_detail_load_error)
         worker.finished.connect(thread.quit)
         worker.error.connect(thread.quit)
         thread.finished.connect(worker.deleteLater)
@@ -1326,7 +1326,7 @@ class WormsView(BaseView):
         self._detail_thread = thread
         thread.start()
 
-    def _on_detail_done(self, data: dict) -> None:
+    def _show_selected_worms_result_detail(self, data: dict) -> None:
         if self._selected is None:
             return
         self._detail_panel.show_detail(
@@ -1336,12 +1336,12 @@ class WormsView(BaseView):
             data.get("children", []),
         )
 
-    def _on_detail_error(self, msg: str) -> None:
+    def _show_worms_detail_load_error(self, msg: str) -> None:
         self._set_status(f"详情加载失败: {msg}")
 
     # ── Fill to specimen (worms-fill-btn) ──────────────────────────────
 
-    def _on_fill_to_specimen(self, rec: dict) -> None:
+    def _fill_active_specimen_from_worms_record(self, rec: dict) -> None:
         """Apply WoRMS classification fields to the active specimen via ctx.
 
         Field mapping mirrors wormsFillToSpecimen() in app.js ~11447:
@@ -1520,7 +1520,7 @@ class WormsView(BaseView):
 
     # ── UI helpers ─────────────────────────────────────────────────────
 
-    def _set_busy(self, busy: bool, msg: str = "") -> None:
+    def _set_worms_search_busy_state(self, busy: bool, msg: str = "") -> None:
         self._progress.setVisible(busy)
         self._search_btn.setEnabled(not busy)
         if msg:
@@ -1637,7 +1637,7 @@ class WormsMatchDialog(QDialog):
         initial = row.get("species", "")
         if initial:
             self._search_input.setText(initial)
-            self._on_search()
+            self._start_worms_candidate_search()
 
     # ── UI ─────────────────────────────────────────────────────────────────
 
@@ -1666,7 +1666,7 @@ class WormsMatchDialog(QDialog):
             f"  font-family:{_MONO}; }}"
             f"QLineEdit#WMSearchInput:focus {{ border-color:{_C_ACCENT}; }}"
         )
-        self._search_input.returnPressed.connect(self._on_search)
+        self._search_input.returnPressed.connect(self._start_worms_candidate_search)
         bar.addWidget(self._search_input, stretch=1)
 
         self._like_cb = QCheckBox("模糊匹配")
@@ -1682,7 +1682,7 @@ class WormsMatchDialog(QDialog):
             f"  border:none; border-radius:6px; padding:7px 16px; font-size:12px; font-weight:600; }}"
             f"QPushButton#WMSearchBtn:hover {{ background:{_C_ACCENT_H}; }}"
         )
-        search_btn.clicked.connect(self._on_search)
+        search_btn.clicked.connect(self._start_worms_candidate_search)
         bar.addWidget(search_btn)
         root.addLayout(bar)
 
@@ -1765,7 +1765,7 @@ class WormsMatchDialog(QDialog):
             f"QPushButton#WMSaveBtn:disabled {{ background:{_C_PANEL}; color:{_C_DIM}; }}"
             f"QPushButton#WMSaveBtn:hover:enabled {{ background:{_C_ACCENT_H}; }}"
         )
-        self._save_btn.clicked.connect(self._on_save)
+        self._save_btn.clicked.connect(self._accept_selected_worms_candidate)
         actions.addWidget(self._save_btn)
 
         cancel_btn = QPushButton("取消")
@@ -1781,7 +1781,7 @@ class WormsMatchDialog(QDialog):
 
     # ── Search (mirrors searchWormsForTaxonRow app.js ~11777) ───────────────
 
-    def _on_search(self) -> None:
+    def _start_worms_candidate_search(self) -> None:
         name = self._search_input.text().strip()
         if not name:
             return
@@ -1803,8 +1803,8 @@ class WormsMatchDialog(QDialog):
         thread = QThread(self)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-        worker.finished.connect(self._on_search_done)
-        worker.error.connect(self._on_search_error)
+        worker.finished.connect(self._show_worms_candidate_search_results)
+        worker.error.connect(self._show_worms_candidate_search_error)
         worker.finished.connect(thread.quit)
         worker.error.connect(thread.quit)
         thread.finished.connect(worker.deleteLater)
@@ -1812,12 +1812,12 @@ class WormsMatchDialog(QDialog):
         self._search_thread = thread
         thread.start()
 
-    def _on_search_done(self, results: list[dict]) -> None:
+    def _show_worms_candidate_search_results(self, results: list[dict]) -> None:
         self._loading = False
         self._results = results
         self._update_results_list()
 
-    def _on_search_error(self, msg: str) -> None:
+    def _show_worms_candidate_search_error(self, msg: str) -> None:
         self._loading = False
         self._error = f"搜索失败：{msg}"
         self._error_lbl.setText(self._error)
@@ -1826,7 +1826,7 @@ class WormsMatchDialog(QDialog):
 
     # ── Candidate selection (mirrors selectWormsMatchCandidate ~11791) ──────
 
-    def _on_candidate_clicked(self, rec: dict) -> None:
+    def _load_worms_candidate_classification_chain(self, rec: dict) -> None:
         self._selected_rec = rec
         aphia_id = rec.get("valid_AphiaID") or rec.get("AphiaID")
         if not aphia_id:
@@ -1842,8 +1842,8 @@ class WormsMatchDialog(QDialog):
         thread = QThread(self)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-        worker.finished.connect(self._on_chain_done)
-        worker.error.connect(lambda _: self._on_chain_done([]))
+        worker.finished.connect(self._show_worms_candidate_classification_chain)
+        worker.error.connect(lambda _: self._show_worms_candidate_classification_chain([]))
         worker.finished.connect(thread.quit)
         worker.error.connect(thread.quit)
         thread.finished.connect(worker.deleteLater)
@@ -1851,7 +1851,7 @@ class WormsMatchDialog(QDialog):
         self._chain_thread = thread
         thread.start()
 
-    def _on_chain_done(self, chain: list[dict]) -> None:
+    def _show_worms_candidate_classification_chain(self, chain: list[dict]) -> None:
         self._chain = chain
         self._chain_loading = False
         self._save_btn.setEnabled(self._selected_rec is not None)
@@ -1859,7 +1859,7 @@ class WormsMatchDialog(QDialog):
 
     # ── Save (mirrors saveWormsMatchCandidate ~11806) ───────────────────────
 
-    def _on_save(self) -> None:
+    def _accept_selected_worms_candidate(self) -> None:
         if not self._selected_rec:
             return
         self.result_aphia_id = int(
@@ -1938,7 +1938,7 @@ class WormsMatchDialog(QDialog):
                     row_lay.addWidget(_label(bc, color=_C_DIM, size=11))
 
                 _rec = rec  # capture
-                btn_w.mousePressEvent = lambda _e, r=_rec: self._on_candidate_clicked(r)  # type: ignore[method-assign]
+                btn_w.mousePressEvent = lambda _e, r=_rec: self._load_worms_candidate_classification_chain(r)  # type: ignore[method-assign]
                 self._results_layout.addWidget(btn_w)
 
         self._results_layout.addStretch()
@@ -2062,7 +2062,7 @@ class WormsQuickFillDialog(QDialog):
         # Pre-fill and auto-search if query provided
         if initial_query:
             self._search_input.setText(initial_query.strip())
-            self._on_search()
+            self._start_quick_fill_taxon_search()
 
     # ── UI ──────────────────────────────────────────────────────────────────
 
@@ -2086,7 +2086,7 @@ class WormsQuickFillDialog(QDialog):
             f"  font-family:{_MONO}; }}"
             f"QLineEdit#WQSearchInput:focus {{ border-color:{_C_ACCENT}; }}"
         )
-        self._search_input.returnPressed.connect(self._on_search)
+        self._search_input.returnPressed.connect(self._start_quick_fill_taxon_search)
         bar.addWidget(self._search_input, stretch=1)
 
         search_btn = QPushButton("搜索")
@@ -2096,7 +2096,7 @@ class WormsQuickFillDialog(QDialog):
             f"  border:none; border-radius:6px; padding:7px 16px; font-size:12px; font-weight:600; }}"
             f"QPushButton#WQSearchBtn:hover {{ background:{_C_ACCENT_H}; }}"
         )
-        search_btn.clicked.connect(self._on_search)
+        search_btn.clicked.connect(self._start_quick_fill_taxon_search)
         bar.addWidget(search_btn)
         root.addLayout(bar)
 
@@ -2137,7 +2137,7 @@ class WormsQuickFillDialog(QDialog):
 
     # ── Search (oracle: doWormsPopupSearch ~12743) ──────────────────────────
 
-    def _on_search(self) -> None:
+    def _start_quick_fill_taxon_search(self) -> None:
         q = self._search_input.text().strip()
         if not q:
             return
@@ -2154,8 +2154,8 @@ class WormsQuickFillDialog(QDialog):
         thread = QThread(self)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-        worker.finished.connect(self._on_search_done)
-        worker.error.connect(self._on_search_error)
+        worker.finished.connect(self._show_quick_fill_taxon_search_results)
+        worker.error.connect(self._show_quick_fill_taxon_search_error)
         worker.finished.connect(thread.quit)
         worker.error.connect(thread.quit)
         thread.finished.connect(worker.deleteLater)
@@ -2163,7 +2163,7 @@ class WormsQuickFillDialog(QDialog):
         self._search_thread = thread
         thread.start()
 
-    def _on_search_done(self, results: list[dict]) -> None:
+    def _show_quick_fill_taxon_search_results(self, results: list[dict]) -> None:
         self._loading = False
         self._results = results
         self._status_lbl.setText(
@@ -2171,7 +2171,7 @@ class WormsQuickFillDialog(QDialog):
         )
         self._render_results()
 
-    def _on_search_error(self, msg: str) -> None:
+    def _show_quick_fill_taxon_search_error(self, msg: str) -> None:
         self._loading = False
         self._error = msg
         self._status_lbl.setText(f"错误: {msg}")
@@ -2234,7 +2234,7 @@ class WormsQuickFillDialog(QDialog):
                     f"  border-color:{_C_ACCENT}; }}"
                 )
                 _rec = rec  # capture loop var
-                fill_btn.clicked.connect(lambda _checked=False, r=_rec: self._do_fill(r))
+                fill_btn.clicked.connect(lambda _checked=False, r=_rec: self._fill_active_specimen_from_quick_result(r))
                 top.addWidget(fill_btn)
                 row_lay.addLayout(top)
 
@@ -2252,7 +2252,7 @@ class WormsQuickFillDialog(QDialog):
 
     # ── Fill action (oracle: fillBtn click ~12722–12727) ──────────────────
 
-    def _do_fill(self, rec: dict) -> None:
+    def _fill_active_specimen_from_quick_result(self, rec: dict) -> None:
         """Invoke fill_callback with *rec*, then close the dialog.
 
         Chinese fields (*Cn) are never touched — that constraint is

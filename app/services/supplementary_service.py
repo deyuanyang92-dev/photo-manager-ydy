@@ -95,7 +95,7 @@ def resolve_specimen_for_tiff(
     return _row_to_dict(row)
 
 
-def _kind(path: str) -> str:
+def _supplementary_file_kind(path: str) -> str:
     ext = Path(path).suffix.lower()
     if ext in _JPG_EXTS:
         return "jpg"
@@ -120,7 +120,7 @@ def validate_supp_group(
     tiffs: list[str] = []
     unsupported: list[str] = []
     for p in paths:
-        kind = _kind(p)
+        kind = _supplementary_file_kind(p)
         if kind == "jpg":
             jpgs.append(p)
         elif kind == "tiff":

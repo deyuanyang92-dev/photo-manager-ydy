@@ -56,7 +56,7 @@ def known_workspace_dirs(
     """Return known workspace dirs, de-duplicated by resolved path."""
     ordered: list[str] = []
 
-    def add(path: Optional[str]) -> None:
+    def add_unique_workspace_dir(path: Optional[str]) -> None:
         if not path:
             return
         try:
@@ -66,21 +66,21 @@ def known_workspace_dirs(
         if resolved not in ordered:
             ordered.append(resolved)
 
-    add(current_project_dir)
+    add_unique_workspace_dir(current_project_dir)
     if extra_dirs:
         for path in extra_dirs:
-            add(path)
+            add_unique_workspace_dir(path)
 
     if current_project_root:
         try:
             for entry in discover_workspaces(current_project_root):
-                add(entry.get("path"))
+                add_unique_workspace_dir(entry.get("path"))
         except OSError:
             pass
 
     for json_path in _candidate_projects_json_paths():
         for project in list_projects(str(json_path)):
-            add(_project_dir_from_record(project))
+            add_unique_workspace_dir(_project_dir_from_record(project))
 
     return ordered
 

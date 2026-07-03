@@ -47,7 +47,7 @@ _MARGIN_DEFAULT = 8.0
 _GAP_DEFAULT = 2.0
 
 
-def _snap(mm: float) -> float:
+def _snap_mm_to_half_step(mm: float) -> float:
     """Snap to 0.5 mm steps."""
     return round(mm * 2) / 2
 
@@ -193,7 +193,7 @@ class _SheetDesignCanvas(QWidget):
         else:
             return 0.0
         hi = 30.0 if key.startswith("gap") else 50.0
-        return max(0.0, min(hi, _snap(mm)))
+        return max(0.0, min(hi, _snap_mm_to_half_step(mm)))
 
     def _slot_at(self, x: float, y: float) -> Optional[int]:
         geom = self.geometry_info()
@@ -286,7 +286,7 @@ class LabelImpositionDialog(QDialog):
         panel = QVBoxLayout()
         panel.setSpacing(8)
 
-        def _spin(lo: float, hi: float, step: float = 0.5) -> QDoubleSpinBox:
+        def make_mm_spinbox(lo: float, hi: float, step: float = 0.5) -> QDoubleSpinBox:
             s = QDoubleSpinBox()
             s.setRange(lo, hi)
             s.setSingleStep(step)
@@ -327,7 +327,7 @@ class LabelImpositionDialog(QDialog):
         m_grid.setSpacing(6)
         self._margin_spins: dict[str, QDoubleSpinBox] = {}
         for i, key in enumerate(_MARGIN_KEYS):
-            spin = _spin(0.0, 50.0)
+            spin = make_mm_spinbox(0.0, 50.0)
             spin.setValue(_MARGIN_DEFAULT)
             spin.valueChanged.connect(
                 lambda _v, k=key: self._on_margin_spin(k))
@@ -340,9 +340,9 @@ class LabelImpositionDialog(QDialog):
         panel.addWidget(QLabel("标签间距"))
         g_row = QGridLayout()
         g_row.setSpacing(6)
-        self._gap_x = _spin(0.0, 30.0)
+        self._gap_x = make_mm_spinbox(0.0, 30.0)
         self._gap_x.setValue(_GAP_DEFAULT)
-        self._gap_y = _spin(0.0, 30.0)
+        self._gap_y = make_mm_spinbox(0.0, 30.0)
         self._gap_y.setValue(_GAP_DEFAULT)
         self._gap_x.valueChanged.connect(self._on_control_changed)
         self._gap_y.valueChanged.connect(self._on_control_changed)

@@ -12,7 +12,7 @@ from app.services.capture_workflow_service import (
     delete_specimen,
     finalize_supplementary_archive,
     finalize_archived_group,
-    link_result_pair_to_uid,
+    link_result_pair_to_clean_uid,
     move_result_file,
     plan_archive_target,
     persist_grouping_claim,
@@ -322,7 +322,7 @@ def test_finalize_archived_group_requires_worker_zip(tmp_path):
     assert tiff.exists()
 
 
-def test_link_result_pair_to_uid_removes_old_owner_and_registers_target(tmp_path):
+def test_link_result_pair_to_clean_uid_removes_old_owner_and_registers_target(tmp_path):
     db = _db()
     old_uid = "FJ-XM-A01-DLC001-T95E-20260601"
     target_uid = "FJ-XM-A02-DLC002-T95E-20260601"
@@ -344,7 +344,7 @@ def test_link_result_pair_to_uid_removes_old_owner_and_registers_target(tmp_path
         clean_phantoms=False,
     )
 
-    linked = link_result_pair_to_uid(db, target_uid, str(tiff), str(zip_path))
+    linked = link_result_pair_to_clean_uid(db, target_uid, str(tiff), str(zip_path))
 
     assert linked.uid == target_uid
     assert linked.removed_from == [old_uid]

@@ -11,6 +11,7 @@ from PyQt6.QtCore import QSettings, QByteArray
 
 _ORG = "SpecimenPhotoWorkbench"
 _APP = "标本照片工作台"
+_DELETE_JPG_DEFAULT_MIGRATION_KEY = "archive/delete_jpg_default_v2_applied"
 
 
 class AppSettings:
@@ -18,6 +19,14 @@ class AppSettings:
 
     def __init__(self) -> None:
         self._qs = QSettings(_ORG, _APP)
+        self._migrate_delete_jpg_default()
+
+    def _migrate_delete_jpg_default(self) -> None:
+        """Move legacy installs to the current default: no loose JPG after organise."""
+        if str(self._qs.value(_DELETE_JPG_DEFAULT_MIGRATION_KEY, "false")).lower() == "true":
+            return
+        self._qs.setValue("archive/delete_jpg", "true")
+        self._qs.setValue(_DELETE_JPG_DEFAULT_MIGRATION_KEY, "true")
 
     # ── Window geometry ───────────────────────────────────────────────
 
@@ -152,6 +161,11 @@ class AppSettings:
     def delete_jpg_after_archive(self) -> bool:
         return str(self._qs.value("archive/delete_jpg", "true")).lower() == "true"
 
+    @delete_jpg_after_archive.setter
+    def delete_jpg_after_archive(self, val: bool) -> None:
+        self._qs.setValue("archive/delete_jpg", "true" if val else "false")
+        self._qs.setValue(_DELETE_JPG_DEFAULT_MIGRATION_KEY, "true")
+
     # ── Appearance ────────────────────────────────────────────────────
 
     @property
@@ -233,5 +247,6 @@ class AppSettings:
 
     # ── Sync ──────────────────────────────────────────────────────────
 
-    def sync(self) -> None:
+    def flush_to_disk(self) -> None:
+        """Write any pending QSettings changes to persistent storage."""
         self._qs.sync()

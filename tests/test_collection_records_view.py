@@ -124,7 +124,7 @@ def test_zone_filter_switches_grid_columns(qapp, ctx):
     hdrs_it = [view._grid.horizontalHeaderItem(i).text() for i in range(view._grid.columnCount())]
     assert "样方号" in hdrs_it and "潮区" in hdrs_it
     # 切潮下带
-    view._on_zone_filter("subtidal")
+    view._apply_collection_zone_filter("subtidal")
     hdrs_st = [view._grid.horizontalHeaderItem(i).text() for i in range(view._grid.columnCount())]
     assert "水深(m)" in hdrs_st and "采泥器面积(m²)" in hdrs_st and "网型" in hdrs_st
     assert "样方号" not in hdrs_st
@@ -132,7 +132,7 @@ def test_zone_filter_switches_grid_columns(qapp, ctx):
 
 def test_zone_filter_filters_rows_by_zone(qapp, ctx):
     """zone 分段按采区过滤行：潮间带只显潮间带(+ zone NULL 老记录归潮间带)，
-    潮下带只显潮下带，「全部」显所有。修复前 _grid_load 取全部行不过滤。"""
+    潮下带只显潮下带，「全部」显所有。修复前 _load_collection_records_grid 取全部行不过滤。"""
     db = ctx.get_db()
     crs.upsert_record(db, {"province": "ZJ", "site": "SMW", "station": "I1",
                            "collection_date": "20260601", "zone": "intertidal"})
@@ -152,11 +152,11 @@ def test_zone_filter_filters_rows_by_zone(qapp, ctx):
                 out.add(it.text().strip())
         return out
 
-    view._on_zone_filter("intertidal")
+    view._apply_collection_zone_filter("intertidal")
     assert stations() == {"I1", "OLD"}, stations()
-    view._on_zone_filter("subtidal")
+    view._apply_collection_zone_filter("subtidal")
     assert stations() == {"S1"}, stations()
-    view._on_zone_filter("all")
+    view._apply_collection_zone_filter("all")
     assert stations() == {"I1", "S1", "OLD"}, stations()
 
 
@@ -164,7 +164,7 @@ def test_new_record_stamps_zone_from_filter(qapp, ctx):
     db = ctx.get_db()
     view = CollectionRecordsView(ctx)
     view.on_activate()
-    view._on_zone_filter("subtidal")
+    view._apply_collection_zone_filter("subtidal")
     view._new_record()
     assert view._editor_zone == "subtidal"
     view._fields["province"].setText("ZJ")
@@ -192,7 +192,7 @@ def test_zone_filter_all_defaults_new_row_to_intertidal(qapp, ctx):
     db = ctx.get_db()
     view = CollectionRecordsView(ctx)
     view.on_activate()
-    view._on_zone_filter("all")
+    view._apply_collection_zone_filter("all")
     assert view._new_row_zone() == "intertidal"
     view._new_record()
     assert view._editor_zone == "intertidal"

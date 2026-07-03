@@ -159,7 +159,9 @@ class CollectionMapView(BaseView):
         scroll.setWidget(pane)
         return scroll
 
-    def _card(self, title: str, icon_name: str = "") -> tuple[QFrame, QVBoxLayout, QHBoxLayout]:
+    def _create_map_panel_card(
+        self, title: str, icon_name: str = ""
+    ) -> tuple[QFrame, QVBoxLayout, QHBoxLayout]:
         """统一卡片外壳：圆角 + 软阴影 + 图标标题 + 分隔线。返回 (卡片, 内容布局, 标题行)。"""
         from app.config.effects import apply_card_shadow
         from app.widgets._collapse import set_layout_children_visible
@@ -203,7 +205,9 @@ class CollectionMapView(BaseView):
         return card, outer, head_row
 
     def _build_project_card(self) -> QFrame:
-        card, lay, head_row = self._card("项目", "mdi6.folder-multiple-outline")
+        card, lay, head_row = self._create_map_panel_card(
+            "项目", "mdi6.folder-multiple-outline"
+        )
         # 标题行右侧「+」新建项目入口
         self._add_proj_btn = QPushButton()
         self._add_proj_btn.setObjectName("AddProjBtn")
@@ -219,14 +223,14 @@ class CollectionMapView(BaseView):
         self._proj_list.setSpacing(2)
         self._proj_list.setMinimumHeight(142)
         self._proj_list.setMaximumHeight(210)
-        self._proj_list.itemSelectionChanged.connect(self._on_project_changed)
+        self._proj_list.itemSelectionChanged.connect(self._apply_selected_project_filter)
         self._proj_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._proj_list.customContextMenuRequested.connect(self._on_proj_context_menu)
         lay.addWidget(self._proj_list)
         return card
 
     def _build_style_card(self) -> QFrame:
-        card, lay, _hr = self._card("站位标识", "mdi6.map-marker-outline")
+        card, lay, _hr = self._create_map_panel_card("站位标识", "mdi6.map-marker-outline")
         # 实时预览色块
         prev_row = QHBoxLayout()
         prev_row.setContentsMargins(0, 0, 0, 0)
@@ -241,7 +245,7 @@ class CollectionMapView(BaseView):
 
         # 样式表单卡内滚动：滚动条贴在「站位标识」卡右侧，用户能直接看到可下滑。
         self._style_panel = MarkerStylePanel()
-        self._style_panel.style_changed.connect(self._on_style_changed)
+        self._style_panel.style_changed.connect(self._save_and_apply_marker_style)
         style_scroll = QScrollArea()
         style_scroll.setObjectName("StyleScroll")
         style_scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -715,7 +719,7 @@ class CollectionMapView(BaseView):
         self._apply_style()
         self._populate_projects()
         self._load_marker_style()
-        self._reload()
+        self._reload_collection_map_points()
         self._update_edit_buttons()
         self._sync_zoom_slider()
         self._position_zoom_panel()
@@ -794,7 +798,7 @@ class CollectionMapView(BaseView):
         self._proj_list.blockSignals(False)
         self._restyle_proj_selection()
 
-    def _on_project_changed(self) -> None:
+    def _apply_selected_project_filter(self) -> None:
         items = self._proj_list.selectedItems()
         if not items:
             return
@@ -802,7 +806,7 @@ class CollectionMapView(BaseView):
         self._info_card.hide()
         self._restyle_proj_selection()
         self._update_edit_buttons()
-        self._reload()
+        self._reload_collection_map_points()
 
     def _on_add_menu(self) -> None:
         """卡片「+」→ 弹菜单：新建项目 / 打开已有项目（以前用过的工作区）。"""
@@ -853,7 +857,7 @@ class CollectionMapView(BaseView):
             self.ctx.current_project_dir = d
             self._populate_projects()
             self._update_edit_buttons()
-            self._reload()
+            self._reload_collection_map_points()
         except Exception as exc:
             from app.utils.ui import warn
             warn(self, err_title, str(exc))
@@ -926,17 +930,17 @@ class CollectionMapView(BaseView):
                 self._project_filter = directory
             self._on_import_coords()
         elif not is_all and chosen == act_workspace:
-            self._do_open_workspace(directory)
+            self._open_project_workspace(directory)
         elif not is_all and chosen == act_open_dir:
-            self._do_open_in_file_manager(directory)
+            self._open_project_directory_in_file_manager(directory)
         elif not is_all and chosen == act_copy_path:
-            self._do_copy_path(directory)
+            self._copy_project_path_to_clipboard(directory)
         elif not is_all and chosen == act_rename:
-            self._do_rename(directory)
+            self._rename_project_display_name(directory)
         elif not is_all and chosen == act_remove:
-            self._do_remove(directory)
+            self._remove_project_from_known_projects(directory)
 
-    def _do_open_workspace(self, directory) -> None:
+    def _open_project_workspace(self, directory) -> None:
         """切换到该项目的工作区（跳转工作台）。"""
         from app.services.project_paths import project_root_available
         if not project_root_available(directory):
@@ -952,20 +956,20 @@ class CollectionMapView(BaseView):
         if callable(nav):
             nav("workbench")
 
-    def _do_open_in_file_manager(self, directory) -> None:
+    def _open_project_directory_in_file_manager(self, directory) -> None:
         """在系统文件管理器中打开项目目录。"""
         from PyQt6.QtGui import QDesktopServices
         from PyQt6.QtCore import QUrl
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(directory)))
 
-    def _do_copy_path(self, directory) -> None:
+    def _copy_project_path_to_clipboard(self, directory) -> None:
         """复制项目路径到剪贴板。"""
         from PyQt6.QtWidgets import QApplication
         QApplication.clipboard().setText(str(directory))
         from app.utils.ui import info
         info(self, "已复制", f"项目路径已复制到剪贴板：\n{directory}")
 
-    def _do_rename(self, directory) -> None:
+    def _rename_project_display_name(self, directory) -> None:
         """重命名项目显示名称（仅改注册表，不改文件夹名）。"""
         from PyQt6.QtWidgets import QInputDialog
         old_name = self._proj_name_for(directory)
@@ -984,7 +988,7 @@ class CollectionMapView(BaseView):
         except Exception as exc:
             ui.warn(self, "重命名失败", str(exc))
 
-    def _do_remove(self, directory) -> None:
+    def _remove_project_from_known_projects(self, directory) -> None:
         """从项目列表中移除（不删除磁盘文件）。"""
         from PyQt6.QtWidgets import QMessageBox
         name = self._proj_name_for(directory)
@@ -1002,7 +1006,7 @@ class CollectionMapView(BaseView):
                 self._project_filter = None
             self._populate_projects()
             self._update_edit_buttons()
-            self._reload()
+            self._reload_collection_map_points()
         except Exception as exc:
             ui.warn(self, "移除失败", str(exc))
 
@@ -1029,7 +1033,7 @@ class CollectionMapView(BaseView):
             self._project_filter = target_dir
             self._populate_projects()
             self._update_edit_buttons()
-            self._reload()
+            self._reload_collection_map_points()
 
     # ── 编辑模式：点空白新增 · 拖点移动 · 手输经纬度 ──────────────────────────────
 
@@ -1139,25 +1143,25 @@ class CollectionMapView(BaseView):
         p = self._points[idx]
         prov, site, station = p.get("province"), p.get("site"), p.get("station")
         if not (prov and site and station):
-            self._reload()   # 点无站位身份（上层聚合点）→ 不支持移动，复位
+            self._reload_collection_map_points()   # 点无站位身份（上层聚合点）→ 不支持移动，复位
             return
         label = p.get("label") or station
         if ui.question(
             self, "移动站位坐标",
             f"把站位「{label}」的坐标更新为：\n经度 {lon:.6f}  纬度 {lat:.6f}？"
         ) != QMessageBox.StandardButton.Yes:
-            self._reload()   # 用户取消 → 点回到原位
+            self._reload_collection_map_points()   # 用户取消 → 点回到原位
             return
         target_dir = str(p.get("project_dir") or self._project_filter or self._edit_target_project() or "")
         if not target_dir:
-            self._reload()
+            self._reload_collection_map_points()
             return
         db = self.ctx.get_db(target_dir)
         if db is None:
             return
         crs.set_station_coords(db, prov, site, station, lon, lat)
         self._snapshot_quiet(target_dir)
-        self._reload()
+        self._reload_collection_map_points()
 
     def _on_input_coord(self) -> None:
         """手输经纬度 → 同一对话框（坐标留空待填）。"""
@@ -1192,7 +1196,7 @@ class CollectionMapView(BaseView):
                 db, r["province"], r["site"], r["station"], r["lon"], r["lat"]
             )
         self._snapshot_quiet(target_dir)
-        self._reload()
+        self._reload_collection_map_points()
 
     def _effective_ps_for(self, directory) -> tuple[str, str]:
         """该项目的继承 (province, site)，无则空串（与采集记录页同源）。"""
@@ -1265,9 +1269,9 @@ class CollectionMapView(BaseView):
             btn.setChecked(True)
         self._info_card.hide()
         self._update_edit_buttons()
-        self._reload()
+        self._reload_collection_map_points()
 
-    def _reload(self) -> None:
+    def _reload_collection_map_points(self) -> None:
         dbs = self._dbs_for_filter()
         if self._project_filter and dbs:
             self._points = crs.map_points(dbs[0], self._level)
@@ -1293,7 +1297,7 @@ class CollectionMapView(BaseView):
         self._style = self._style_panel.style()
         self._apply_marker_style(self._style)
 
-    def _on_style_changed(self, style: dict) -> None:
+    def _save_and_apply_marker_style(self, style: dict) -> None:
         self._style = style
         db = self.ctx.get_db()
         if db is not None:
@@ -1439,7 +1443,7 @@ class CollectionMapView(BaseView):
             self._zoom_slider.setValue(10)
             self._zoom_slider.blockSignals(False)
         self._update_edit_buttons()
-        self._reload()
+        self._reload_collection_map_points()
 
     def _on_calibrate(self) -> None:
         entry = self._active_basemap or {}
@@ -1451,7 +1455,7 @@ class CollectionMapView(BaseView):
             calib = br.load_calibration(Path(entry["source"]))
             self._pub_map.set_basemap(entry, calibration=calib)
             self._calibrate_btn.setEnabled(calib is None)
-            self._reload()
+            self._reload_collection_map_points()
 
     # ── 导出 ───────────────────────────────────────────────────────────────────
 
@@ -1462,9 +1466,9 @@ class CollectionMapView(BaseView):
             "PDF (*.pdf);;PNG (*.png);;SVG (*.svg);;EPS (*.eps)",
         )
         if path:
-            self._do_export(path)
+            self._export_current_map_view(path)
 
-    def _do_export(self, path: str) -> None:
+    def _export_current_map_view(self, path: str) -> None:
         if self._is_publication_mode():
             self._pub_map.set_points(self._points)
             self._pub_map.export(path)

@@ -172,7 +172,7 @@ def _preset_range(name: str, today) -> tuple:
 
 def _build_all_cols() -> list[dict]:
     """Return list of {key, label, getter(sp, grouping_row)} dicts."""
-    def _geo(sp: Specimen) -> str:
+    def _specimen_geo_area_label(sp: Specimen) -> str:
         if sp.geo_area:
             return sp.geo_area
         parts = [sp.province or ""]
@@ -197,7 +197,7 @@ def _build_all_cols() -> list[dict]:
         {"key": "province",     "label": "省份",          "get": lambda s, g: s.province or ""},
         {"key": "site",         "label": "样地",          "get": lambda s, g: s.site or ""},
         {"key": "station",      "label": "站位",          "get": lambda s, g: s.station or ""},
-        {"key": "geoArea",      "label": "采集地",        "get": lambda s, g: _geo(s)},
+        {"key": "geoArea",      "label": "采集地",        "get": lambda s, g: _specimen_geo_area_label(s)},
         {"key": "lon",          "label": "经度",          "get": lambda s, g: str(s.lon) if s.lon is not None else ""},
         {"key": "lat",          "label": "纬度",          "get": lambda s, g: str(s.lat) if s.lat is not None else ""},
         {"key": "storage",      "label": "保存方式",      "get": lambda s, g: s.storage or ""},
@@ -362,14 +362,18 @@ class _FieldPicker(QFrame):
                 f"QCheckBox{{font-size:12px;color:{_C_TEXT if col['key'] in visible_keys else _C_INACTIVE_TXT};}}"
             )
             key = col["key"]
-            cb.stateChanged.connect(lambda state, k=key: self._on_check(k, state, on_change))
+            cb.stateChanged.connect(
+                lambda state, k=key: self._update_visible_columns_from_checkbox(
+                    k, state, on_change
+                )
+            )
             wrap_layout.addWidget(cb, r, c)
             self._checks[col["key"]] = cb
 
         scroll.setWidget(wrap)
         root.addWidget(scroll)
 
-    def _on_check(self, key: str, state: int, on_change) -> None:
+    def _update_visible_columns_from_checkbox(self, key: str, state: int, on_change) -> None:
         checked = state == Qt.CheckState.Checked.value
         current = [k for k, cb in self._checks.items() if cb.isChecked()]
         if not checked and key in current:
@@ -830,7 +834,9 @@ class SummaryView(BaseView):
         seen: set[str] = set()
         out: list[dict] = []
 
-        def add(directory: str, name: str = "", project_code: str = "") -> None:
+        def add_unique_summary_project(
+            directory: str, name: str = "", project_code: str = ""
+        ) -> None:
             if not directory:
                 return
             resolved = self._resolve_dir(directory)
@@ -845,7 +851,7 @@ class SummaryView(BaseView):
 
         current = self._current_project_dir()
         if current:
-            add(current, "当前项目")
+            add_unique_summary_project(current, "当前项目")
 
         try:
             from app.services import project_service
@@ -856,14 +862,14 @@ class SummaryView(BaseView):
             recent = []
         for project in recent:
             directory = project.get("directory") or project.get("dir") or ""
-            add(
+            add_unique_summary_project(
                 directory,
                 str(project.get("name") or ""),
                 str(project.get("project_code") or project.get("projectCode") or ""),
             )
 
         for directory in self._selected_project_dirs:
-            add(directory)
+            add_unique_summary_project(directory)
         return out
 
     def _summary_dirs_for_scope(self) -> tuple[list[str], str]:

@@ -126,9 +126,48 @@ QFrame#Card {{
     border: 1px solid {t["border"]};
     border-radius: {radius};
 }}
+QFrame#ResultFile {{
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: {radius};
+}}
+QFrame#ResultFile[resultViewMode="large_thumbnail"] {{
+    background: {t["panel_2"]};
+    border: 1px solid {t["border"]};
+    border-radius: {radius};
+}}
+QFrame#ResultFile[resultViewMode="large_thumbnail"] QLabel#Mono {{
+    background: transparent;
+    padding: 1px 4px;
+}}
+QFrame#ResultRow {{
+    background: transparent;
+    border: none;
+}}
+QLabel#ResultSeqBadge {{
+    color: {t["muted_dim"]};
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    font-size: {t["font_xs"]};
+    font-weight: 700;
+}}
+QFrame#ResultRow[pairedColumns="false"] QLabel#ResultSeqBadge {{
+    background: {t["panel_2"]};
+    border-color: {t["border"]};
+}}
+QFrame#ResultPlaceholder {{
+    background: {t["panel_2"]};
+    border: 1px dashed {t["border_medium"]};
+    border-radius: {radius};
+}}
 QFrame#Card:hover {{
     background: {row_hover};
     border-color: {t["border_medium"]};
+}}
+QFrame#ResultFile:hover {{
+    background: {row_hover};
+    border-color: {t["border"]};
 }}
 QFrame#CardSelected {{
     background: {row_selected};
@@ -142,10 +181,21 @@ QFrame#Card[resultSelected="true"] {{
     border-left: 5px solid {row_selected_border};
     border-radius: {radius};
 }}
+QFrame#ResultFile[resultSelected="true"] {{
+    background: {row_selected};
+    border: 1px solid {row_selected_border};
+    border-left: 3px solid {row_selected_border};
+    border-radius: {radius};
+}}
 QFrame#CardSelected QLabel#Mono,
-QFrame#Card[resultSelected="true"] QLabel#Mono {{
+QFrame#Card[resultSelected="true"] QLabel#Mono,
+QFrame#ResultFile[resultSelected="true"] QLabel#Mono {{
     color: {badge_selected};
     font-weight: 700;
+}}
+QLabel#ResultMeta {{
+    color: {t["muted_dim"]};
+    font-size: {t["font_xs"]};
 }}
 QLabel#FileSelectMark {{
     background: transparent;
@@ -172,6 +222,37 @@ QLabel#ResultSelectBadge[selected="true"] {{
     background: {badge_selected};
     border-color: {badge_selected};
     color: #ffffff;
+}}
+QFrame#ResultPairIndicator {{
+    background: transparent;
+    border: none;
+}}
+QFrame#ResultPairLine {{
+    background: {t["border_medium"]};
+    border: none;
+}}
+QFrame#ResultPairLine[hasPair="false"] {{
+    background: transparent;
+}}
+QFrame#ResultPairLine[selected="true"] {{
+    background: {badge_selected};
+}}
+QLabel#ResultPairArrow {{
+    color: {t["muted"]};
+    background: transparent;
+    border: none;
+    font-size: {t["font_sm"]};
+    font-weight: 600;
+}}
+QLabel#ResultPairArrow[hasPair="false"] {{
+    color: transparent;
+    background: transparent;
+    border-color: transparent;
+}}
+QLabel#ResultPairArrow[selected="true"] {{
+    color: {badge_selected};
+    background: transparent;
+    border-color: transparent;
 }}
 QLabel#FileThumb {{
     background: {t["panel_2"]};

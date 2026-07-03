@@ -102,7 +102,7 @@ def project_tree_dirs(root: Optional[str], workspace: str, max_depth: int = 6) -
 
     out: List[str] = []
 
-    def _walk(p: Path, depth: int) -> None:
+    def append_project_tree_dirs(p: Path, depth: int) -> None:
         # ``base`` is resolved once above and every descendant comes directly
         # from scandir(base). Re-resolving each node makes Path.realpath issue
         # lstat calls for every path component, which is extremely expensive
@@ -120,11 +120,11 @@ def project_tree_dirs(root: Optional[str], workspace: str, max_depth: int = 6) -
                 continue
             try:
                 if entry.is_dir():
-                    _walk(Path(entry.path), depth + 1)
+                    append_project_tree_dirs(Path(entry.path), depth + 1)
             except OSError:
                 continue
 
-    _walk(base, 0)
+    append_project_tree_dirs(base, 0)
     current = str(ws)
     if current not in out:
         out.append(current)
@@ -230,7 +230,7 @@ class WorkspaceBreadcrumb(QWidget):
 
     # ── 重建 ─────────────────────────────────────────────────────────────
 
-    def _clear(self) -> None:
+    def _clear_breadcrumb_widgets(self) -> None:
         while self._lay.count():
             it = self._lay.takeAt(0)
             w = it.widget()
@@ -253,7 +253,7 @@ class WorkspaceBreadcrumb(QWidget):
             resolved = str(Path(ws).resolve())
             if self._current_history_entry() != resolved:
                 self._record_history(resolved)
-        self._clear()
+        self._clear_breadcrumb_widgets()
         chain = self._chain()
         if not chain:
             self._build_placeholder()

@@ -71,7 +71,7 @@ def _project_slot(project_dir: str) -> Path:
     return user_backup_root() / f"{name}-{digest}"
 
 
-def _tag(now_tag: Optional[str]) -> str:
+def _snapshot_timestamp_tag(now_tag: Optional[str]) -> str:
     return now_tag or datetime.now().strftime("%Y%m%d-%H%M%S")
 
 
@@ -89,7 +89,7 @@ def snapshot_project(project_dir: str, keep: int = _KEEP_DEFAULT,
             return None
         slot = _project_slot(project_dir)
         slot.mkdir(parents=True, exist_ok=True)
-        target = slot / f"project-{_tag(now_tag)}.db"
+        target = slot / f"project-{_snapshot_timestamp_tag(now_tag)}.db"
         src_conn = sqlite3.connect(f"file:{src}?mode=ro", uri=True)
         try:
             dst_conn = sqlite3.connect(str(target))
@@ -114,7 +114,7 @@ def snapshot_projects_json(json_path: str, keep: int = _KEEP_DEFAULT,
             return None
         slot = user_backup_root() / "user_projects"
         slot.mkdir(parents=True, exist_ok=True)
-        target = slot / f"user_projects-{_tag(now_tag)}.json"
+        target = slot / f"user_projects-{_snapshot_timestamp_tag(now_tag)}.json"
         shutil.copyfile(src, target)
         _prune(slot, "user_projects-*.json", keep)
         return target

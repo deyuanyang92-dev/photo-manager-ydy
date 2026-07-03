@@ -37,7 +37,7 @@ from app.utils.path_utils import normalize_path, is_wsl_runtime
 _RESOLVE_CACHE: dict[str, str] = {}
 
 
-def _resolved(path: str) -> str:
+def _resolve_cached_path(path: str) -> str:
     """Cached ``str(Path(path).resolve())``."""
     r = _RESOLVE_CACHE.get(path)
     if r is None:
@@ -94,6 +94,8 @@ class AttributionCtx:
     assign_to_uid: dict = field(default_factory=dict)
     # P3: sorted activation events [{specimenUniqueId, eventAt}]
     activations: list = field(default_factory=list)
+    # JPGs already consumed by an organized group whose ZIP exists.
+    organized_group_paths: set = field(default_factory=set)
 
 
 # ── Pure attribution function ─────────────────────────────────────────────────
@@ -118,7 +120,7 @@ def attribute_jpg(
     monitor-service.js:107-109 explains: old photos (mtime < activation) would
     never be attributed if we compared against mtime.
     """
-    rp = _resolved(entry.path)
+    rp = _resolve_cached_path(entry.path)
 
     # P0: blacklist → None
     if rp in attr.explicit_unassigns:
@@ -181,15 +183,54 @@ def set_first_seen_at(db: sqlite3.Connection, name: str, ts: str) -> None:
     db.commit()
 
 
+def _batched_values(values: list, size: int = 900):
+    for i in range(0, len(values), size):
+        yield values[i:i + size]
+
+
+def _load_first_seen_times(db: sqlite3.Connection, names: list[str]) -> dict[str, str]:
+    """Return persisted firstSeenAt values for *names* in batched queries."""
+    unique_names = [n for n in dict.fromkeys(names) if n]
+    if not unique_names:
+        return {}
+    found: dict[str, str] = {}
+    for chunk in _batched_values(unique_names):
+        placeholders = ",".join("?" for _ in chunk)
+        rows = db.execute(
+            f"SELECT name, first_seen_at FROM seen_files WHERE name IN ({placeholders})",
+            chunk,
+        ).fetchall()
+        for row in rows:
+            try:
+                found[row["name"]] = row["first_seen_at"]
+            except Exception:
+                found[row[0]] = row[1]
+    return found
+
+
+def _insert_missing_first_seen_times(
+    db: sqlite3.Connection,
+    rows: list[tuple[str, str]],
+) -> None:
+    """Insert many firstSeenAt rows with one transaction."""
+    if not rows:
+        return
+    with db:
+        db.executemany(
+            "INSERT OR IGNORE INTO seen_files (name, first_seen_at) VALUES (?, ?)",
+            rows,
+        )
+
+
 # ── Scan helpers ──────────────────────────────────────────────────────────────
 
-def _iso_mtime(full_path: str) -> str:
+def _file_mtime_iso(full_path: str) -> str:
     """Return ISO-8601 mtime for a path."""
     st = os.stat(full_path)
     return datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat()
 
 
-def _file_entry(full_path: str, name: str, kind: str, detail: str = "") -> FileEntry:
+def _build_file_entry(full_path: str, name: str, kind: str, detail: str = "") -> FileEntry:
     """Build a FileEntry from a real file."""
     st = os.stat(full_path)
     return FileEntry(
@@ -202,7 +243,7 @@ def _file_entry(full_path: str, name: str, kind: str, detail: str = "") -> FileE
     )
 
 
-def _list_jpgs(
+def _list_pending_jpg_entries(
     jpg_dir: str,
     archived_set: set,
     detail_prefix: str,
@@ -225,14 +266,14 @@ def _list_jpgs(
         full = os.path.join(jpg_dir, name)
         try:
             if os.path.isfile(full):
-                e = _file_entry(full, name, "jpg", detail_prefix + " · 未关联原片")
+                e = _build_file_entry(full, name, "jpg", detail_prefix + " · 未关联原片")
                 result.append(e)
         except OSError:
             pass
     return result
 
 
-def _list_tiffs(
+def _list_tiff_entries(
     tiff_dir: str,
     processed_set: set,
     detail_prefix: str,
@@ -262,7 +303,7 @@ def _list_tiffs(
         full = os.path.join(tiff_dir, name)
         try:
             if os.path.isfile(full):
-                e = _file_entry(full, name, "tiff", detail_prefix + " · TIFF")
+                e = _build_file_entry(full, name, "tiff", detail_prefix + " · TIFF")
                 e.basename = base
                 # Check co-located zip
                 e.has_zip = os.path.isfile(os.path.join(tiff_dir, base + ".zip"))
@@ -272,7 +313,7 @@ def _list_tiffs(
     return result
 
 
-def _organized_group_jpg_paths(db: sqlite3.Connection) -> set[str]:
+def _jpg_paths_with_existing_archive(db: sqlite3.Connection) -> set[str]:
     """Return JPG paths from groups that already have a real archive ZIP."""
     paths: set[str] = set()
     try:
@@ -297,7 +338,32 @@ def _organized_group_jpg_paths(db: sqlite3.Connection) -> set[str]:
         try:
             for path in json.loads(jpg_paths or "[]"):
                 if path:
-                    paths.add(_resolved(path))
+                    paths.add(_resolve_cached_path(path))
+        except Exception:
+            continue
+    return paths
+
+
+def _jpg_paths_in_grouping_rows(db: sqlite3.Connection) -> set[str]:
+    """Return JPG paths from grouping rows that have a real UID."""
+    paths: set[str] = set()
+    try:
+        rows = db.execute(
+            "SELECT jpg_paths FROM grouping WHERE uid IS NOT NULL"
+        ).fetchall()
+    except Exception:
+        return paths
+    for row in rows:
+        try:
+            raw = row["jpg_paths"]
+        except Exception:
+            raw = row[0] if len(row) > 0 else ""
+        if not raw:
+            continue
+        try:
+            for path in json.loads(raw):
+                if path:
+                    paths.add(_resolve_cached_path(path))
         except Exception:
             continue
     return paths
@@ -321,13 +387,34 @@ def build_attribution_context(
         pass
 
     try:
-        rows = db.execute("SELECT uid, jpg_paths FROM grouping").fetchall()
+        rows = db.execute(
+            "SELECT uid, jpg_paths, archive_zip, status FROM grouping"
+        ).fetchall()
         for row in rows:
-            uid = row[0]
-            paths = json.loads(row[1] or "[]")
+            try:
+                uid = row["uid"]
+                raw_paths = row["jpg_paths"]
+                archive_zip = row["archive_zip"]
+                status = row["status"]
+            except Exception:
+                uid = row[0] if len(row) > 0 else None
+                raw_paths = row[1] if len(row) > 1 else ""
+                archive_zip = row[2] if len(row) > 2 else ""
+                status = row[3] if len(row) > 3 else ""
+            paths = json.loads(raw_paths or "[]")
             for path in paths:
-                if path:
-                    attr.path_to_uid[_resolved(path)] = uid
+                if not path:
+                    continue
+                rp = _resolve_cached_path(path)
+                if uid:
+                    attr.path_to_uid[rp] = uid
+                if (
+                    uid
+                    and archive_zip
+                    and (not status or status == "organized")
+                    and os.path.isfile(str(archive_zip))
+                ):
+                    attr.organized_group_paths.add(rp)
     except Exception:
         pass
 
@@ -348,7 +435,7 @@ def scan_project(
 ) -> ScanResult:
     """Scan *project_dir* and return a ScanResult.
 
-    - Lists JPGs in incoming-jpg/, TIFFs in results/.
+    - Lists JPGs in incoming-jpg/, TIFFs in incoming-jpg/ and results/.
     - Assigns / updates firstSeenAt in the DB (seen_files table).
       Oracle: monitor-service.js:354-366 — first time a JPG is seen,
       record now; never overwrite existing record.
@@ -373,33 +460,50 @@ def scan_project(
     ensure_seen_files_table(db)
 
     # List JPGs
-    jpg_files = _list_jpgs(incoming_dir, archived, incoming_subdir + "/")
-    archived_group_paths = _organized_group_jpg_paths(db)
+    jpg_files = _list_pending_jpg_entries(incoming_dir, archived, incoming_subdir + "/")
+    if attr is not None:
+        archived_group_paths = getattr(attr, "organized_group_paths", set()) or set()
+    else:
+        archived_group_paths = _jpg_paths_with_existing_archive(db)
     if archived_group_paths:
         before_count = len(jpg_files)
         jpg_files = [
             f for f in jpg_files
-            if _resolved(f.path) not in archived_group_paths
+            if _resolve_cached_path(f.path) not in archived_group_paths
         ]
         archived_group_count = before_count - len(jpg_files)
     else:
         archived_group_count = 0
-    # List TIFFs — Oracle: both filters OFF for results/ so all TIFFs visible
-    tiff_files = _list_tiffs(
-        results_dir_path, processed, results_subdir + "/",
+    # List TIFFs from the pending incoming area and from legacy/results scans.
+    incoming_tiffs = _list_tiff_entries(
+        incoming_dir, processed, incoming_subdir + "/",
         skip_processed=False, skip_if_zip=False,
     )
+    results_tiffs = []
+    try:
+        same_tiff_dir = Path(incoming_dir).resolve() == Path(results_dir_path).resolve()
+    except OSError:
+        same_tiff_dir = incoming_dir == results_dir_path
+    if not same_tiff_dir:
+        results_tiffs = _list_tiff_entries(
+            results_dir_path, processed, results_subdir + "/",
+            skip_processed=False, skip_if_zip=False,
+        )
+    tiff_files = incoming_tiffs + results_tiffs
 
     # ── firstSeenAt: persist on first sight, never overwrite ─────────────────
     # Oracle: monitor-service.js:356-366
     now_iso = datetime.now(tz=timezone.utc).isoformat()
+    seen_by_name = _load_first_seen_times(db, [f.name for f in jpg_files])
+    new_seen_rows: list[tuple[str, str]] = []
     for f in jpg_files:
-        existing = get_first_seen_at(db, f.name)
+        existing = seen_by_name.get(f.name)
         if existing is None:
-            set_first_seen_at(db, f.name, now_iso)
+            new_seen_rows.append((f.name, now_iso))
             f.first_seen_at = now_iso
         else:
             f.first_seen_at = existing
+    _insert_missing_first_seen_times(db, new_seen_rows)
 
     # ── Attribution ───────────────────────────────────────────────────────────
     if attr is not None:
@@ -407,41 +511,45 @@ def scan_project(
             f.attributed_specimen_id = attribute_jpg(f, attr)
 
     try:
-        from app.services.photo_asset_service import upsert_photo_file
-        for f in jpg_files:
-            upsert_photo_file(
-                db,
-                resolved,
-                f.path,
-                storage_role="incoming",
-                photo_kind="original",
-                specimen_uid=f.attributed_specimen_id,
-                assignment_source="monitor_attribution",
-                first_seen_at=f.first_seen_at,
-                compute_hash=False,
-            )
+        from app.services.photo_asset_service import upsert_photo_files_lightweight
+        upsert_photo_files_lightweight(
+            db,
+            resolved,
+            [
+                (f.path, f.attributed_specimen_id, f.first_seen_at)
+                for f in jpg_files
+            ],
+            storage_role="incoming",
+            photo_kind="original",
+            assignment_source="monitor_attribution",
+        )
     except Exception:
-        pass
+        try:
+            from app.services.photo_asset_service import upsert_photo_file
+            for f in jpg_files:
+                upsert_photo_file(
+                    db,
+                    resolved,
+                    f.path,
+                    storage_role="incoming",
+                    photo_kind="original",
+                    specimen_uid=f.attributed_specimen_id,
+                    assignment_source="monitor_attribution",
+                    first_seen_at=f.first_seen_at,
+                    compute_hash=False,
+                    read_metadata=False,
+                )
+        except Exception:
+            pass
 
     # ── is_grouped: mark JPGs that appear in grouping table ──────────────────
-    # Query all jpg_paths from rows where uid IS NOT NULL; parse JSON lists.
-    grouped_paths: set[str] = set()
-    try:
-        rows = db.execute(
-            "SELECT jpg_paths FROM grouping WHERE uid IS NOT NULL"
-        ).fetchall()
-        for row in rows:
-            raw = row[0] if isinstance(row, (tuple, list)) else row["jpg_paths"]
-            if raw:
-                import json as _json
-                for p in _json.loads(raw):
-                    if p:
-                        grouped_paths.add(_resolved(p))
-    except Exception:
-        pass  # table may not exist; degrade gracefully
+    if attr is not None:
+        grouped_paths = set(getattr(attr, "path_to_uid", {}).keys())
+    else:
+        grouped_paths = _jpg_paths_in_grouping_rows(db)
 
     for f in jpg_files:
-        f.is_grouped = _resolved(f.path) in grouped_paths
+        f.is_grouped = _resolve_cached_path(f.path) in grouped_paths
 
     # Sort by mtime desc (mirrors monitor-service.js:368-370)
     jpg_files.sort(key=lambda f: f.mtime, reverse=True)

@@ -271,7 +271,7 @@ class CollectionRecordsView(BaseView):
             btn.setProperty("zone", z)
             if z == self._zone_filter:
                 btn.setChecked(True)
-            btn.clicked.connect(lambda _checked=False, zz=z: self._on_zone_filter(zz))
+            btn.clicked.connect(lambda _checked=False, zz=z: self._apply_collection_zone_filter(zz))
             self._zone_group.addButton(btn)
             h.addWidget(btn)
         h.addStretch()
@@ -330,19 +330,19 @@ class CollectionRecordsView(BaseView):
         bar.addWidget(self._grid_ps_lbl)
         bar.addStretch()
         btn_add = QPushButton("＋ 加一行")
-        btn_add.clicked.connect(lambda: self._grid_add_row(inherit=True))
+        btn_add.clicked.connect(lambda: self._add_collection_record_grid_row(inherit=True))
         bar.addWidget(btn_add)
         btn_fill = QPushButton("↓ 向下填充")
         btn_fill.setToolTip("把当前格的值填到本列下方所有行")
-        btn_fill.clicked.connect(self._grid_fill_down)
+        btn_fill.clicked.connect(self._fill_current_collection_record_column_down)
         bar.addWidget(btn_fill)
         btn_save = QPushButton("保存表格")
         btn_save.setObjectName("Primary")
-        btn_save.clicked.connect(self._grid_save)
+        btn_save.clicked.connect(self._save_collection_records_grid)
         bar.addWidget(btn_save)
         self._btn_export = QPushButton("⬇ 导出模板")
         self._btn_export.setToolTip("导出当前采区 Excel 模板（含已有记录），离线填好后再导入")
-        self._btn_export.clicked.connect(self._grid_export_template)
+        self._btn_export.clicked.connect(self._export_collection_records_template)
         bar.addWidget(self._btn_export)
         btn_import = QPushButton("⬆ 导入Excel")
         btn_import.setToolTip("按模板（固定列）导入；配合「导出模板」往返")
@@ -384,7 +384,7 @@ class CollectionRecordsView(BaseView):
             self._zone_hint.setText(
                 f"新行采区：{_ZONE_LABELS.get(self._new_row_zone())}"
             )
-        self._grid_load()
+        self._load_collection_records_grid()
 
     def _new_row_zone(self) -> str:
         """新建行落入的采区：「全部」时默认潮间带（用户主用）。"""
@@ -415,7 +415,7 @@ class CollectionRecordsView(BaseView):
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self._table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self._table.itemSelectionChanged.connect(self._on_row_selected)
+        self._table.itemSelectionChanged.connect(self._load_selected_collection_record)
         self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._table.customContextMenuRequested.connect(self._show_table_context_menu)
         self._table.horizontalHeader().setStretchLastSection(True)
@@ -522,10 +522,10 @@ class CollectionRecordsView(BaseView):
     def on_activate(self) -> None:
         self._apply_style()
         self._apply_zone_to_grid()
-        self._reload()
+        self._reload_collection_records()
         self._consume_pending_filter()
 
-    def _on_zone_filter(self, z: str) -> None:
+    def _apply_collection_zone_filter(self, z: str) -> None:
         self._zone_filter = z
         self._apply_zone_to_grid()
 
@@ -558,7 +558,7 @@ class CollectionRecordsView(BaseView):
 
     # ── Data ──────────────────────────────────────────────────────────────────
 
-    def _reload(self) -> None:
+    def _reload_collection_records(self) -> None:
         self._table.blockSignals(True)
         self._table.setUpdatesEnabled(False)
         try:
@@ -581,7 +581,7 @@ class CollectionRecordsView(BaseView):
             self._table.blockSignals(False)
         self._count_lbl.setText(f"{len(records)} 条")
 
-    def _on_row_selected(self) -> None:
+    def _load_selected_collection_record(self) -> None:
         items = self._table.selectedItems()
         if not items:
             return
@@ -653,7 +653,7 @@ class CollectionRecordsView(BaseView):
         if row < 0:
             return
         self._table.selectRow(row)
-        self._on_row_selected()
+        self._load_selected_collection_record()
         self._tabs.setCurrentIndex(1)
 
     def _copy_record_key(self, rec: dict) -> None:
@@ -730,7 +730,7 @@ class CollectionRecordsView(BaseView):
             data["id"] = self._current_id
         rid = crs.upsert_record(db, data)
         self._current_id = rid
-        self._reload()
+        self._reload_collection_records()
         self._apply_zone_to_grid()
         self._select_row_by_id(rid)
 
@@ -743,7 +743,7 @@ class CollectionRecordsView(BaseView):
             return
         crs.delete_record(db, self._current_id)
         self._current_id = None
-        self._reload()
+        self._reload_collection_records()
         self._apply_zone_to_grid()
         self._new_record()
 
@@ -768,7 +768,7 @@ class CollectionRecordsView(BaseView):
         except Exception:
             return ("", "")
 
-    def _grid_load(self) -> None:
+    def _load_collection_records_grid(self) -> None:
         """Fill the batch grid from the project's records + one blank trailing row."""
         prov, site = self._effective_ps()
         if prov or site:
@@ -809,7 +809,7 @@ class CollectionRecordsView(BaseView):
                 item.setData(Qt.ItemDataRole.UserRole, rec or None)
             self._grid.setItem(row, col, item)
 
-    def _grid_add_row(self, *, inherit: bool = True) -> None:
+    def _add_collection_record_grid_row(self, *, inherit: bool = True) -> None:
         """Append a blank row, inheriting 采集日期/采集人 from the last row +
         stamping the current zone filter."""
         carry: dict = {"zone": self._new_row_zone()}
@@ -822,7 +822,7 @@ class CollectionRecordsView(BaseView):
                         carry[key] = it.text().strip()
         self._grid_append_row(carry or None)
 
-    def _grid_fill_down(self) -> None:
+    def _fill_current_collection_record_column_down(self) -> None:
         cur = self._grid.currentItem()
         if cur is None:
             return
@@ -835,7 +835,7 @@ class CollectionRecordsView(BaseView):
                 self._grid.setItem(row, col, it)
             it.setText(text)
 
-    def _grid_save(self) -> None:
+    def _save_collection_records_grid(self) -> None:
         """Upsert every non-blank grid row. 地区/样地 come from inheritance;
         zone comes from the row origin or the current filter for new rows."""
         db = self.ctx.get_db()
@@ -867,15 +867,15 @@ class CollectionRecordsView(BaseView):
             crs.upsert_record(db, data)
             saved += 1
 
-        self._reload()
-        self._grid_load()
+        self._reload_collection_records()
+        self._load_collection_records_grid()
         msg = f"已保存 {saved} 条。"
         if skipped_no_ps:
             msg += f"  {skipped_no_ps} 行缺地区/样地未保存（请先在项目设置或上层目录填写）。"
         self._grid_status_lbl.setText(msg)
 
     # ── Excel 模板导出 / 导入 ─────────────────────────────────────────────────────
-    def _grid_export_template(self) -> None:
+    def _export_collection_records_template(self) -> None:
         from app.utils import ui
         db = self.ctx.get_db()
         if db is None:
@@ -912,8 +912,8 @@ class CollectionRecordsView(BaseView):
             return
         from app.services import collection_record_io as crio
         rep = crio.import_file(db, path)
-        self._reload()
-        self._grid_load()
+        self._reload_collection_records()
+        self._load_collection_records_grid()
         if not rep.ok:
             self._grid_status_lbl.setText("导入失败：" + "；".join(rep.errors[:3]))
             return
@@ -934,8 +934,8 @@ class CollectionRecordsView(BaseView):
         dlg = CoordImportDialog(db, parent=self)
         if dlg.exec():
             self._snapshot_current()
-            self._reload()
-            self._grid_load()
+            self._reload_collection_records()
+            self._load_collection_records_grid()
             self._grid_status_lbl.setText("导入完成（自定义映射）。")
 
     def _snapshot_current(self) -> None:

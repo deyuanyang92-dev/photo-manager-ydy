@@ -13,6 +13,7 @@ from typing import Optional, TYPE_CHECKING
 
 from PyQt6.QtCore import QTimer, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
+    QApplication,
     QButtonGroup,
     QDialog,
     QFrame,
@@ -29,7 +30,7 @@ from PyQt6.QtWidgets import (
 )
 
 from app.config.icons import icon
-from app.utils.ui import centre_on_screen
+from app.utils.ui import center_on
 
 if TYPE_CHECKING:
     from app.app_context import AppContext
@@ -52,9 +53,10 @@ class CollabSetupWizard(QDialog):
 
         self._step = 1
         self._is_create = True  # True = create, False = join
+        self._pending_pair_info = None
 
         self._build_ui()
-        centre_on_screen(self)
+        center_on(self, parent)
 
     # ── UI construction ────────────────────────────────────────────────────
 
@@ -77,9 +79,9 @@ class CollabSetupWizard(QDialog):
         # Radio buttons
         rb_lay = QHBoxLayout()
         self._rb_group = QButtonGroup(self)
-        self._rb_create = QRadioButton("创建新协作组")
+        self._rb_create = QRadioButton("第一台电脑：创建协作")
         self._rb_create.setChecked(True)
-        self._rb_join = QRadioButton("加入已有协作组")
+        self._rb_join = QRadioButton("其他电脑：粘贴配对码加入")
         self._rb_group.addButton(self._rb_create, 0)
         self._rb_group.addButton(self._rb_join, 1)
         self._rb_group.idToggled.connect(self._on_mode_toggled)
@@ -89,14 +91,21 @@ class CollabSetupWizard(QDialog):
         s1.addLayout(rb_lay)
 
         # Group code
-        gc_lay = QHBoxLayout()
+        self._group_code_frame = QWidget()
+        gc_lay = QHBoxLayout(self._group_code_frame)
+        gc_lay.setContentsMargins(0, 0, 0, 0)
         gc_label = QLabel("协作组码:")
         gc_label.setFixedWidth(80)
         self._group_code_edit = QLineEdit()
-        self._group_code_edit.setPlaceholderText("例如 SMW-2026")
+        self._group_code_edit.setPlaceholderText("自动生成")
+        try:
+            from app.widgets.collab_pairing import generate_group_code
+            self._group_code_edit.setText(generate_group_code())
+        except Exception:  # noqa: BLE001
+            pass
         gc_lay.addWidget(gc_label)
         gc_lay.addWidget(self._group_code_edit, 1)
-        s1.addLayout(gc_lay)
+        s1.addWidget(self._group_code_frame)
 
         # Operator name
         op_lay = QHBoxLayout()
@@ -105,7 +114,7 @@ class CollabSetupWizard(QDialog):
         self._operator_edit = QLineEdit()
         self._operator_edit.setPlaceholderText("例如 小王")
         # Pre-fill from settings
-        existing = self.ctx.settings.value("user/current_user", "", type=str)
+        existing = self._settings_value("user/current_user", "")
         if existing:
             self._operator_edit.setText(existing)
         op_lay.addWidget(op_label)
@@ -116,7 +125,7 @@ class CollabSetupWizard(QDialog):
         self._pairing_frame = QFrame()
         pf_lay = QHBoxLayout(self._pairing_frame)
         pf_lay.setContentsMargins(0, 0, 0, 0)
-        pf_label = QLabel("或粘贴配对码:")
+        pf_label = QLabel("配对码:")
         pf_label.setFixedWidth(80)
         self._pairing_edit = QLineEdit()
         self._pairing_edit.setPlaceholderText("粘贴队友的配对码")
@@ -148,6 +157,21 @@ class CollabSetupWizard(QDialog):
         addr_lay.addWidget(self._addr_display, 1)
         addr_lay.addWidget(self._copy_btn)
         s2.addLayout(addr_lay)
+
+        # Pairing display
+        pair_lay = QHBoxLayout()
+        pair_label = QLabel("配对码:")
+        pair_label.setFixedWidth(80)
+        self._pairing_display = QLineEdit()
+        self._pairing_display.setReadOnly(True)
+        self._pairing_display.setText("等待启动…")
+        self._copy_pairing_btn = QPushButton("复制")
+        self._copy_pairing_btn.setObjectName("Ghost")
+        self._copy_pairing_btn.clicked.connect(self._on_copy_pairing)
+        pair_lay.addWidget(pair_label)
+        pair_lay.addWidget(self._pairing_display, 1)
+        pair_lay.addWidget(self._copy_pairing_btn)
+        s2.addLayout(pair_lay)
 
         # Peer table
         s2.addWidget(QLabel("已连接的设备:"))
@@ -204,6 +228,7 @@ class CollabSetupWizard(QDialog):
         self._next_btn.clicked.connect(self._go_next)
         footer.addWidget(self._next_btn)
         root.addLayout(footer)
+        self._update_mode_ui()
 
     # ── Step navigation ────────────────────────────────────────────────────
 
@@ -211,40 +236,52 @@ class CollabSetupWizard(QDialog):
         if not checked:
             return
         self._is_create = btn_id == 0
+        self._update_mode_ui()
+
+    def _update_mode_ui(self) -> None:
+        self._group_code_frame.setVisible(self._is_create)
         self._pairing_frame.setVisible(not self._is_create)
+        self._next_btn.setText("开启协作" if self._is_create else "加入协作")
 
     def _go_next(self) -> None:
         if self._step == 1:
-            # Validate inputs
-            code = self._group_code_edit.text().strip()
-            if not code:
-                self._group_code_edit.setFocus()
-                return
-
-            # Handle pairing code for join mode
+            self._pending_pair_info = None
             if not self._is_create:
                 pairing_text = self._pairing_edit.text().strip()
-                if pairing_text:
+                if not pairing_text:
+                    self._pairing_edit.setFocus()
+                    return
+                try:
+                    from app.widgets.collab_pairing import decode_pairing
+                    self._pending_pair_info = decode_pairing(pairing_text)
+                except ValueError:
+                    self._pairing_edit.setFocus()
+                    return
+                code = self._pending_pair_info.group_code
+                self._group_code_edit.setText(code)
+            else:
+                code = self._group_code_edit.text().strip()
+                if not code:
                     try:
-                        from app.widgets.collab_pairing import decode_pairing
-                        info = decode_pairing(pairing_text)
-                        code = info.group_code
+                        from app.widgets.collab_pairing import generate_group_code
+                        code = generate_group_code()
                         self._group_code_edit.setText(code)
-                        # Auto-connect to the peer
-                        svc = getattr(self.ctx, "collab_service", None)
-                        if svc:
-                            svc.add_manual_peer(info.ip, info.port)
-                    except ValueError:
-                        pass  # Invalid pairing code, ignore
+                    except Exception:  # noqa: BLE001
+                        pass
+                if not code:
+                    self._group_code_edit.setFocus()
+                    return
 
             # Start the service
             self._start_service(code)
+            self._connect_pending_pair()
             self._step = 2
-            self._step_label.setText("步骤 2/2: 等待队友连接")
+            self._step_label.setText("步骤 2/2: 连接队友")
             self._step1.hide()
             self._step2.show()
             self._back_btn.show()
-            self._next_btn.setText("完成，开始协作")
+            self._next_btn.setText("完成")
+            self._refresh_share_fields()
 
         elif self._step == 2:
             # Finish
@@ -260,7 +297,7 @@ class CollabSetupWizard(QDialog):
             self._step2.hide()
             self._step1.show()
             self._back_btn.hide()
-            self._next_btn.setText("下一步 →")
+            self._update_mode_ui()
 
     # ── Service helpers ────────────────────────────────────────────────────
 
@@ -272,27 +309,57 @@ class CollabSetupWizard(QDialog):
 
         # Persist settings
         s = self.ctx.settings
-        s.setValue("collab/enabled", True)
-        s.setValue("collab/team_code", group_code)
+        self._set_setting("collab/enabled", True)
+        self._set_setting("collab/team_code", group_code)
+        try:
+            s.collab_enabled = True
+            s.team_code = group_code
+            s.flush_to_disk()
+        except Exception:  # noqa: BLE001
+            pass
 
         operator = self._operator_edit.text().strip()
         if operator:
-            s.setValue("user/current_user", operator)
+            self._set_setting("user/current_user", operator)
 
         # Configure service
         svc.set_group_code(group_code)
-        project_name = self.ctx.settings.value("last_project_dir", "", type=str)
+        project_name = getattr(self.ctx, "current_project_dir", "") or getattr(s, "last_project_dir", "") or ""
         if not svc.is_running():
-            svc.start(project_name=project_name, group_code=group_code)
+            svc.start(
+                project_name=project_name,
+                group_code=group_code,
+                project_dir=getattr(self.ctx, "current_project_dir", None) or project_name,
+            )
 
         # Wire signals for step 2 updates
         svc.server_ready.connect(self._on_server_ready)
         svc.peers_changed.connect(self._refresh_peers)
 
-    def _on_server_ready(self, port: int) -> None:
+    def _connect_pending_pair(self) -> None:
         svc = getattr(self.ctx, "collab_service", None)
-        if svc:
-            self._addr_display.setText(svc.local_address())
+        info = self._pending_pair_info
+        if svc is None or info is None:
+            return
+        svc.add_manual_peer(info.ip, info.port)
+
+    def _on_server_ready(self, port: int) -> None:
+        self._refresh_share_fields()
+
+    def _refresh_share_fields(self) -> None:
+        svc = getattr(self.ctx, "collab_service", None)
+        if not svc:
+            return
+        addr = svc.local_address()
+        self._addr_display.setText(addr)
+        try:
+            from app.widgets.collab_pairing import encode_pairing
+            ip, port_s = addr.rsplit(":", 1)
+            code = encode_pairing(ip, int(port_s), svc.group_code)
+            self._pairing_display.setText(code)
+            QApplication.clipboard().setText(code)
+        except Exception:  # noqa: BLE001
+            self._pairing_display.setText("暂时无法生成")
 
     def _refresh_peers(self) -> None:
         svc = getattr(self.ctx, "collab_service", None)
@@ -307,8 +374,28 @@ class CollabSetupWizard(QDialog):
     # ── Button handlers ────────────────────────────────────────────────────
 
     def _on_copy_addr(self) -> None:
-        from PyQt6.QtWidgets import QApplication
         QApplication.clipboard().setText(self._addr_display.text())
+
+    def _on_copy_pairing(self) -> None:
+        text = self._pairing_display.text().strip()
+        if text and text not in {"等待启动…", "暂时无法生成"}:
+            QApplication.clipboard().setText(text)
+
+    def _settings_value(self, key: str, default: str = "") -> str:
+        settings = getattr(self.ctx, "settings", None)
+        qs = getattr(settings, "_qs", settings)
+        try:
+            return str(qs.value(key, default, type=str))
+        except Exception:  # noqa: BLE001
+            return default
+
+    def _set_setting(self, key: str, value: object) -> None:
+        settings = getattr(self.ctx, "settings", None)
+        qs = getattr(settings, "_qs", settings)
+        try:
+            qs.setValue(key, value)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _on_scan(self) -> None:
         svc = getattr(self.ctx, "collab_service", None)

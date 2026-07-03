@@ -22,6 +22,7 @@ def _make_ctx(db=None):
     ctx.get_db.return_value = db
     ctx.current_project_dir = None
     ctx.settings.auto_activate_on_new_specimen = False
+    ctx.settings.delete_jpg_after_archive = True
     ctx.settings.current_theme = "dark"
     return ctx
 
@@ -85,6 +86,28 @@ def test_fields_enabled_after_refresh_with_db(qtbot, db):
     d.refresh()
     assert d._province_edit.isEnabled()
     assert d._person_edits["collector"].isEnabled()
+
+
+def test_drawer_has_delete_jpg_after_archive_checkbox(qtbot):
+    from app.widgets.project_settings_drawer import ProjectSettingsDrawer
+    ctx = _make_ctx()
+    d = ProjectSettingsDrawer(ctx)
+    qtbot.addWidget(d)
+    assert hasattr(d, "_delete_jpg_after_archive_cb")
+    assert d._delete_jpg_after_archive_cb.isChecked() is True
+
+
+def test_delete_jpg_after_archive_toggle_persists(qtbot):
+    from app.widgets.project_settings_drawer import ProjectSettingsDrawer
+    ctx = _make_ctx()
+    ctx.settings.flush_to_disk = MagicMock()
+    d = ProjectSettingsDrawer(ctx)
+    qtbot.addWidget(d)
+
+    d._delete_jpg_after_archive_cb.setChecked(False)
+
+    assert ctx.settings.delete_jpg_after_archive is False
+    ctx.settings.flush_to_disk.assert_called()
 
 
 def test_personnel_roundtrip(qtbot, db):
@@ -280,7 +303,7 @@ def test_storage_save_upserts_builtin_override(qtbot, db):
     qtbot.addWidget(d)
     d.refresh()
     d._load_storage_edit_form("T79", "新的 T79 说明")
-    d._on_save_storage()
+    d._save_custom_storage_option()
     custom = load_custom_storages(db)
     assert custom[0]["code"] == "T79"
     assert custom[0]["detail"] == "新的 T79 说明"
@@ -294,7 +317,7 @@ def test_storage_save_emits_change_and_supports_multiline(qtbot, db):
     d.refresh()
     d._load_storage_edit_form("D95E", "第一行\n第二行详细说明")
     with qtbot.waitSignal(d.storages_changed, timeout=1000):
-        d._on_save_storage()
+        d._save_custom_storage_option()
     assert "已保存" in d._storage_save_status.text()
     assert d._new_code_edit.text() == "D95E"
 
@@ -308,7 +331,7 @@ def test_builtin_override_remains_visible_in_custom_list(qtbot, db):
     qtbot.addWidget(d)
     d.refresh()
     d._load_storage_edit_form("T79", "项目修正说明")
-    d._on_save_storage()
+    d._save_custom_storage_option()
 
     texts = []
     for i in range(d._custom_list_lay.count()):

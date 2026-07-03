@@ -54,6 +54,12 @@ class AppContext:
         self._project_dir = path
         if path:
             self.settings.last_project_dir = path
+        svc = getattr(self, "collab_service", None)
+        if svc is not None and hasattr(svc, "set_project_dir"):
+            try:
+                svc.set_project_dir(path)
+            except Exception:
+                pass
 
     # ── Project root (folder-tree inheritance anchor) ─────────────────
     # The survey-root folder that bounds the settings-inheritance walk

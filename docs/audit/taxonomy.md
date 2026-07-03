@@ -48,7 +48,7 @@
 | Web function | Line | Qt location | Status | Notes |
 |---|---|---|---|---|
 | `ensureTaxonPopupEl` | 1142 | `TaxonPopup.__init__` | ✓ | popup created once |
-| `showTaxonPopup` | 1179 | `TaxonPopup.show_below` + `_do_search` | ✓ | |
+| `showTaxonPopup` | 1179 | `TaxonPopup.show_below` + `_show_debounced_taxonomy_suggestions` | ✓ | |
 | `hideTaxonPopup` | 1215 | `TaxonPopup.hide()` | ✓ | |
 | `renderTaxonPopup` | 1221 | `TaxonItemDelegate.paint` + `TaxonPopup.populate` | ✓ | drag handle ✓, CN dual column ✓, source badge ✓ |
 | `formatTaxonPath` | 1337 | `_format_path` | ✓ | |
@@ -84,7 +84,7 @@ inputs were never back-filled on blur.
 | `taxonExport` | 11718 | `_on_export` | ✓ | xlsx + csv |
 | `resolveTaxonMapping` | 11742 | `_on_resolve_mapping` | ✓ | calls `WormsService.resolve_mapping` |
 | `openTaxonRowMenu` / `renderTaxonRowMenu` | 11755 | `_on_row_context_menu` | ✓ | QMenu with WoRMS match, review, bulk update, edit/delete |
-| `searchWormsForTaxonRow` | 11777 | `_WormsSearchWorker` + `_WormsMatchDialog._do_search` | ✓ | background QThread |
+| `searchWormsForTaxonRow` | 11777 | `_WormsSearchWorker` + `_WormsMatchDialog._start_worms_match_search` | ✓ | background QThread |
 | `renderTaxonJobPanel` | 11979 | `_refresh_job_panel` + job panel frame in `_setup_ui` | ✓ | progress label + bar + pause/resume/retry buttons |
 | `renderTaxonReviewModal` | 12012 | `_TaxonReviewDialog` | ✓ | candidates list + 采用 + 标记未找到 |
 | `openTaxonomyTableModal` | 12036 | `_RecordDialog` | ✓ | add/edit dialog |

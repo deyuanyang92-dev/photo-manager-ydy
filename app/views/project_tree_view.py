@@ -100,7 +100,7 @@ class ProjectTreeView(BaseView):
 
         self._tree = QTreeWidget()
         self._tree.setHeaderHidden(True)
-        self._tree.itemSelectionChanged.connect(self._on_select)
+        self._tree.itemSelectionChanged.connect(self._update_detail_panel_for_selected_project)
         self._tree.itemDoubleClicked.connect(lambda *_: self._enter_selected())
         self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._tree.customContextMenuRequested.connect(self._show_tree_context_menu)
@@ -184,15 +184,15 @@ class ProjectTreeView(BaseView):
             # Restore an EXPLICIT user-chosen root only. Never guess by walking
             # current_project_dir.parent — that produced wrong roots (a drive's
             # project dump dir is not a survey root) and hid the real projects
-            # the user already created. With no root, _reload shows every
+            # the user already created. With no root, _reload_project_tree shows every
             # recorded project as a flat list instead.
             saved = self.ctx.settings.project_tree_root
             if saved and Path(saved).is_dir():
                 self._root = saved
-        self._reload()
+        self._reload_project_tree()
 
     # ── Data / tree build ─────────────────────────────────────────────────────
-    def _reload(self) -> None:
+    def _reload_project_tree(self) -> None:
         self._tree.clear()
         self._btn_enter.setEnabled(False)
         self._btn_summary.setEnabled(False)
@@ -239,11 +239,11 @@ class ProjectTreeView(BaseView):
             return
         self._tree.setCurrentItem(item)
         item.setSelected(True)
-        self._on_select()
+        self._update_detail_panel_for_selected_project()
 
     def _load_known_projects_nodes(self) -> list:
         """Synthesize scan_tree-shaped nodes for every project recorded in
-        ``user_projects.json``. Used by ``_reload`` in flat-list mode (no survey
+        ``user_projects.json``. Used by ``_reload_project_tree`` in flat-list mode (no survey
         root selected) so already-created projects are recognized without the
         user having to pick a common parent folder.
 
@@ -422,7 +422,7 @@ class ProjectTreeView(BaseView):
         )
 
     # ── Detail panel ──────────────────────────────────────────────────────────
-    def _on_select(self) -> None:
+    def _update_detail_panel_for_selected_project(self) -> None:
         path = self._selected_path()
         if not path:
             self._btn_enter.setEnabled(False)
@@ -505,7 +505,7 @@ class ProjectTreeView(BaseView):
         self._root = str(Path(path).resolve())
         pts.clear_project_tree_cache(self._root)
         self.ctx.settings.project_tree_root = self._root
-        self._reload()
+        self._reload_project_tree()
 
     def _new_region(self) -> None:
         """Scaffold a 调查区域 root: create the folder, seed region-level
@@ -550,7 +550,7 @@ class ProjectTreeView(BaseView):
         self._root = str(Path(directory).resolve())
         pts.clear_project_tree_cache(self._root)
         self.ctx.settings.project_tree_root = self._root
-        self._reload()
+        self._reload_project_tree()
         ui.info(
             self,
             "新建调查区域",
@@ -576,7 +576,7 @@ class ProjectTreeView(BaseView):
             ui.warn(self, "项目树", f"无法创建：{exc}")
             return
         pts.clear_project_tree_cache(self._root or parent)
-        self._reload()
+        self._reload_project_tree()
 
     def _enter_selected(self) -> None:
         path = self._selected_path()

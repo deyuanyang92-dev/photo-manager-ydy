@@ -610,15 +610,17 @@ class _LayoutDualBucket(_LabelLayoutBase):
                 chip.setFixedHeight(28)
                 b = bucket
 
-                def _pick(checked: bool, _k: str = tkey, _b: str = b,
-                          _attr: str = key_attr, _lib: LabelTemplateLibrary = lib) -> None:
+                def select_sheet_template_chip(
+                    checked: bool, _k: str = tkey, _b: str = b,
+                    _attr: str = key_attr, _lib: LabelTemplateLibrary = lib,
+                ) -> None:
                     if checked:
                         setattr(self, _attr, _k)
                         _lib.set_selected_key(_k)
                         self._rebuild_jobs()
                         self._update_previews()
 
-                chip.clicked.connect(_pick)
+                chip.clicked.connect(select_sheet_template_chip)
                 row.addWidget(chip)
 
             row.addStretch()
@@ -637,7 +639,7 @@ class _LayoutDualBucket(_LabelLayoutBase):
         lib = self._sample_lib if bucket == "sample" else self._tissue_lib
         if is_library_key(key):
             rec_id = id_from_key(key)
-            rec = lib.get(rec_id)
+            rec = lib.get_record(rec_id)
             if rec and rec.get("template"):
                 return normalize_template(rec["template"])
             key = "tissueCompact" if bucket == "tissue" else "standard"
@@ -768,10 +770,10 @@ class _CollapsibleSection(QWidget):
         self._body.setVisible(self._expanded)
         self._arrow_lbl.setText("▾" if self._expanded else "▸")
 
-    def body(self) -> QWidget:
+    def content_widget(self) -> QWidget:
         return self._body
 
-    def body_layout(self) -> QVBoxLayout:
+    def content_layout(self) -> QVBoxLayout:
         return self._body_layout
 
     def set_title(self, title: str) -> None:
@@ -869,7 +871,7 @@ class _LayoutStream(_LabelLayoutBase):
 
         # Section 1: Specimens
         self._sec_specimens = _CollapsibleSection("🔍 选标本")
-        spec_body = self._sec_specimens.body_layout()
+        spec_body = self._sec_specimens.content_layout()
 
         # Action buttons row
         actions_row = QHBoxLayout()
@@ -902,12 +904,12 @@ class _LayoutStream(_LabelLayoutBase):
 
         # Section 2: Sample template
         self._sec_sample = _CollapsibleSection("🧪 样品模板")
-        self._build_template_section(self._sec_sample.body_layout(), "sample")
+        self._build_template_section(self._sec_sample.content_layout(), "sample")
         self._content_layout.addWidget(self._sec_sample)
 
         # Section 3: Tissue template
         self._sec_tissue = _CollapsibleSection("🧬 RNA 模板")
-        self._build_template_section(self._sec_tissue.body_layout(), "tissue")
+        self._build_template_section(self._sec_tissue.content_layout(), "tissue")
         self._sec_tissue.setVisible(False)
         self._content_layout.addWidget(self._sec_tissue)
 
@@ -1121,15 +1123,17 @@ class _LayoutStream(_LabelLayoutBase):
                 chip.setChecked(tkey == current_key)
                 chip.setFixedHeight(28)
 
-                def _pick(checked: bool, _k: str = tkey, _attr: str = key_attr,
-                          _lib: LabelTemplateLibrary = lib) -> None:
+                def select_stream_template_chip(
+                    checked: bool, _k: str = tkey, _attr: str = key_attr,
+                    _lib: LabelTemplateLibrary = lib,
+                ) -> None:
                     if checked:
                         setattr(self, _attr, _k)
                         _lib.set_selected_key(_k)
                         self._rebuild_jobs()
                         self._update_stream_previews()
 
-                chip.clicked.connect(_pick)
+                chip.clicked.connect(select_stream_template_chip)
                 row.addWidget(chip)
             row.addStretch()
 
@@ -1147,7 +1151,7 @@ class _LayoutStream(_LabelLayoutBase):
         lib = self._sample_lib if bucket == "sample" else self._tissue_lib
         if is_library_key(key):
             rec_id = id_from_key(key)
-            rec = lib.get(rec_id)
+            rec = lib.get_record(rec_id)
             if rec and rec.get("template"):
                 return normalize_template(rec["template"])
             key = "tissueCompact" if bucket == "tissue" else "standard"
@@ -1637,15 +1641,17 @@ class _LayoutCinema(_LabelLayoutBase):
             chip.setChecked(tkey == current_key)
             chip.setFixedHeight(28)
 
-            def _pick(checked: bool, _k: str = tkey, _attr: str = key_attr,
-                      _lib: LabelTemplateLibrary = lib) -> None:
+            def select_cinema_template_chip(
+                checked: bool, _k: str = tkey, _attr: str = key_attr,
+                _lib: LabelTemplateLibrary = lib,
+            ) -> None:
                 if checked:
                     setattr(self, _attr, _k)
                     _lib.set_selected_key(_k)
                     self._rebuild_jobs()
                     self._update_cinema_preview()
 
-            chip.clicked.connect(_pick)
+            chip.clicked.connect(select_cinema_template_chip)
             self._cinema_tmpl_row.addWidget(chip)
         self._cinema_tmpl_row.addStretch()
 
@@ -1685,7 +1691,7 @@ class _LayoutCinema(_LabelLayoutBase):
         lib = self._sample_lib if bucket == "sample" else self._tissue_lib
         if is_library_key(key):
             rec_id = id_from_key(key)
-            rec = lib.get(rec_id)
+            rec = lib.get_record(rec_id)
             if rec and rec.get("template"):
                 return normalize_template(rec["template"])
             key = "tissueCompact" if bucket == "tissue" else "standard"

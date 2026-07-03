@@ -94,6 +94,20 @@ def _scan(jpg_entries, tiff_entries=None):
     )
 
 
+def test_import_busy_disables_add_photo_button(panel):
+    from PyQt6.QtWidgets import QPushButton
+
+    button = next(b for b in panel.findChildren(QPushButton) if b.text() == "添加照片")
+
+    panel.set_import_busy(True)
+    assert not button.isEnabled()
+    assert button.text() == "导入中..."
+
+    panel.set_import_busy(False)
+    assert button.isEnabled()
+    assert button.text() == "添加照片"
+
+
 # ── 1-C: clipboard copy action ────────────────────────────────────────────────
 
 class TestClipboardCopyAction:
@@ -177,6 +191,19 @@ def test_file_card_uses_real_jpg_thumbnail(qtbot, tmp_path):
     assert not pixmap.isNull()
     assert pixmap.width() > 22
     assert pixmap.height() > 22
+
+
+def test_monitor_panel_defers_grid_thumbnail_decode(qtbot, panel, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        "app.widgets.monitor_panel._file_thumb_pixmap",
+        lambda path: calls.append(path) or None,
+    )
+
+    panel.load_scan(_scan([_jpg_entry(path="/tmp/deferred.jpg")]))
+
+    assert calls == []
+    qtbot.waitUntil(lambda: calls == ["/tmp/deferred.jpg"], timeout=1000)
 
 
 def test_file_card_selection_has_explicit_visual_marker(qtbot):
@@ -555,8 +582,8 @@ def _tiff_entry(name="FJ-XM-B2-DLC001-1-T95E-20260601.tif",
 
 
 class TestTiffDelete:
-    """用户主权：TIFF 可手动删除（带确认框），覆盖旧「TIFF 永不删」UI 封锁。
-    自动整理/归档仍绝不删 TIFF（见 test_archive_service.test_tiff_never_deleted）。"""
+    """用户主权：TIFF 可手动删除（带确认框）。
+    自动整理/归档不能顺手删 TIFF；那是另一条明确动作。"""
 
     def test_tiff_card_has_delete_action(self, qtbot):
         card = _FileCard(_tiff_entry(path="/fake/r.tif"))
@@ -641,7 +668,7 @@ class TestSelectionAddToGroup:
         for card in panel_with_db._cards:
             card.set_selected(True)
 
-        panel_with_db._on_selected_add_to_group()
+        panel_with_db._add_selected_jpgs_to_group()
 
         grouping = grouping_service.load_grouping(db, uid)
         assert grouping.groups[0].jpg_paths == ["/tmp/a.jpg", "/tmp/b.jpg"]
@@ -656,7 +683,7 @@ class TestSelectionAddToGroup:
         for card in panel_with_db._cards:
             card.set_selected(True)
 
-        panel_with_db._on_selected_add_to_group()
+        panel_with_db._add_selected_jpgs_to_group()
 
         grouping = grouping_service.load_grouping(db, ADHOC_GROUPING_UID)
         assert grouping.groups[0].jpg_paths == ["/tmp/a.jpg", "/tmp/b.jpg"]
@@ -756,10 +783,46 @@ class TestGroupingInMoreMenu:
         texts = [b.text() for b in panel.findChildren(QPushButton)]
         assert "分组" not in texts
 
+    def test_selection_bar_uses_explicit_clear_labels(self, panel):
+        from PyQt6.QtWidgets import QPushButton
+        texts = [b.text() for b in panel.findChildren(QPushButton)]
+        assert "取消选择" in texts
+        assert "清空队列" in texts
+        assert "清除" not in texts
+
+    def test_clear_queue_button_emits_clear_request_without_deleting(self, panel, qtbot):
+        from PyQt6.QtWidgets import QPushButton
+        panel.load_scan(_scan([_jpg_entry(path="/tmp/a.jpg")], [_tiff_entry(path="/tmp/b.tif")]))
+        panel._delete_paths = MagicMock()
+
+        button = next(b for b in panel.findChildren(QPushButton) if b.text() == "清空队列")
+        with qtbot.waitSignal(panel.clear_pending_requested, timeout=1000) as blocker:
+            button.click()
+
+        assert blocker.args == [["/tmp/a.jpg", "/tmp/b.tif"]]
+        panel._delete_paths.assert_not_called()
+
     def test_more_menu_contains_grouping_action(self, panel):
         menu = panel._build_more_menu()
         labels = [a.text() for a in menu.actions() if not a.isSeparator()]
         assert "分组工具" in labels
+
+    def test_more_menu_contains_clear_pending_action(self, panel):
+        menu = panel._build_more_menu()
+        labels = [a.text() for a in menu.actions() if not a.isSeparator()]
+        assert "清空待处理文件..." in labels
+
+    def test_clear_pending_action_emits_clear_request_without_deleting(self, panel, qtbot):
+        panel.load_scan(_scan([_jpg_entry(path="/tmp/a.jpg")], [_tiff_entry(path="/tmp/b.tif")]))
+        panel._delete_paths = MagicMock()
+
+        menu = panel._build_more_menu()
+        action = next(a for a in menu.actions() if a.text() == "清空待处理文件...")
+        with qtbot.waitSignal(panel.clear_pending_requested, timeout=1000) as blocker:
+            action.trigger()
+
+        assert blocker.args == [["/tmp/a.jpg", "/tmp/b.tif"]]
+        panel._delete_paths.assert_not_called()
 
     def test_grouping_action_emits_signal(self, panel, qtbot):
         menu = panel._build_more_menu()

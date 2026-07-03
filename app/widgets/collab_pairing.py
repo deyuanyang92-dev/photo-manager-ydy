@@ -11,6 +11,8 @@ pattern; callers fall back to the text code when QR is unavailable.
 from __future__ import annotations
 
 import base64
+import secrets
+import string
 from dataclasses import dataclass
 from typing import Optional
 
@@ -28,6 +30,14 @@ def encode_pairing(ip: str, port: int, group_code: str) -> str:
     """Encode connection details into a compact, copy-pasteable code."""
     raw = f"{_PREFIX}|{ip}|{int(port)}|{group_code}".encode("utf-8")
     return base64.urlsafe_b64encode(raw).decode("ascii")
+
+
+def generate_group_code(prefix: str = "TEAM") -> str:
+    """Return a short human-readable collaboration group code."""
+    alphabet = string.ascii_uppercase + string.digits
+    body = "".join(secrets.choice(alphabet) for _ in range(6))
+    cleaned_prefix = "".join(ch for ch in prefix.upper() if ch.isalnum())[:8] or "TEAM"
+    return f"{cleaned_prefix}-{body[:3]}-{body[3:]}"
 
 
 def decode_pairing(code: str) -> PairingInfo:

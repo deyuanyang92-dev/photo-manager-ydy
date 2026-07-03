@@ -4,7 +4,7 @@ Tests the full archive pipeline:
   - high-compression JXL bridge or plain JPG ZIP fallback generation
   - ZIP creation + testzip
   - SHA-256 pre-delete safety checks
-  - TIFF never deleted
+  - archive/organise does not auto-delete TIFF
   - delete_jpg=False → no deletion
   - all ZIP preconditions satisfied → deletion happens
   - legacy JXL restore behavior still works
@@ -191,12 +191,12 @@ class TestArchiveGroup:
         assert result.delete_jpg is True
         assert not os.path.isfile(jpg)
 
-    def test_tiff_never_deleted(self):
-        """TIFF must never be deleted under any circumstances."""
+    def test_archive_group_does_not_auto_delete_tiff(self):
+        """archive_group must not auto-delete TIFF while deleting loose JPGs."""
         jpg = _make_jpg(self.tmpdir, "img001.jpg")
         tiff = _make_tiff(self.tmpdir, "result.tif")
         result = archive_group([jpg], tiff, self.tmpdir, delete_jpg=True)
-        assert os.path.isfile(tiff), "TIFF must NEVER be deleted"
+        assert os.path.isfile(tiff), "archive_group must not delete TIFF"
 
     def test_zip_created(self):
         """A ZIP file must be created."""

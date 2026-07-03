@@ -332,7 +332,7 @@ class PublicationMapWidget(QWidget):
             return
         lons = [p["lon"] for p in pts]
         lats = [p["lat"] for p in pts]
-        xs, ys = gc.project_many(self._calib_model, lons, lats)
+        xs, ys = gc.project_lonlat_to_pixels(self._calib_model, lons, lats)
         self._do_scatter(ax, xs, ys, pts)
 
     def _scatter_lonlat(self, ax) -> None:

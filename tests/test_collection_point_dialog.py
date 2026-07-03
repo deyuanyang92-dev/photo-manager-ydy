@@ -38,7 +38,7 @@ class TestCollectionPointDialog:
         )
         dlg._station_edit.setText("B5")
         dlg._date_edit.setText("20260622")
-        dlg._on_accept()
+        dlg._accept_valid_collection_point()
         r = dlg.result_point()
         assert r is not None
         assert r["action"] == "new"
@@ -57,7 +57,7 @@ class TestCollectionPointDialog:
         )
         assert dlg._rb_bind.isChecked()
         # 默认选第一站 B2
-        dlg._on_accept()
+        dlg._accept_valid_collection_point()
         r = dlg.result_point()
         assert r["action"] == "bind"
         assert r["province"] == "ZJ" and r["site"] == "SMW" and r["station"] == "B2"
@@ -70,7 +70,7 @@ class TestCollectionPointDialog:
         )
         dlg._station_edit.setText("")   # 缺站位
         with patch(_MSGBOX):
-            dlg._on_accept()
+            dlg._accept_valid_collection_point()
         assert dlg.result_point() is None   # 未确认
 
     def test_invalid_coord_blocks_accept(self):
@@ -82,7 +82,7 @@ class TestCollectionPointDialog:
         dlg._date_edit.setText("20260622")
         dlg._lon_edit.setText("abc")    # 非数字
         with patch(_MSGBOX):
-            dlg._on_accept()
+            dlg._accept_valid_collection_point()
         assert dlg.result_point() is None
 
     def test_coord_out_of_range_blocks_accept(self):
@@ -94,7 +94,7 @@ class TestCollectionPointDialog:
         dlg._date_edit.setText("20260622")
         dlg._lat_edit.setText("999")    # 越界
         with patch(_MSGBOX):
-            dlg._on_accept()
+            dlg._accept_valid_collection_point()
         assert dlg.result_point() is None
 
     def test_bind_disabled_when_no_stations(self):
@@ -113,7 +113,7 @@ class TestCollectionPointDialog:
         dlg._lon_edit.setText("121.55")
         dlg._station_edit.setText("B5")
         dlg._date_edit.setText("20260622")
-        dlg._on_accept()
+        dlg._accept_valid_collection_point()
         r = dlg.result_point()
         assert abs(r["lon"] - 121.55) < 1e-6
 

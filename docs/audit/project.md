@@ -12,12 +12,12 @@ Legend: ✓ covered  ◐ partial  ✗ missing  –N/A (internal helper, not a UI
 
 | Web function (app.js line) | Qt equivalent | Status |
 |---|---|---|
-| `projectPathConfig` (1707) | `project_service.get_incoming_jpg_dir/get_results_dir` | ✓ |
-| `projectIncomingPathFor` (1715) | `project_service.get_incoming_jpg_dir` | ✓ |
-| `projectResultsPathFor` (1721) | `project_service.get_results_dir` | ✓ |
+| `projectPathConfig` (1707) | `project_service.resolve_incoming_jpg_dir/resolve_results_dir` | ✓ |
+| `projectIncomingPathFor` (1715) | `project_service.resolve_incoming_jpg_dir` | ✓ |
+| `projectResultsPathFor` (1721) | `project_service.resolve_results_dir` | ✓ |
 | `projectSubdirLabel` (1727) | N/A — UI label only | –N/A |
-| `projectIncomingPath` (1732) | `project_service.get_incoming_jpg_dir` | ✓ |
-| `projectResultsPath` (1740) | `project_service.get_results_dir` | ✓ |
+| `projectIncomingPath` (1732) | `project_service.resolve_incoming_jpg_dir` | ✓ |
+| `projectResultsPath` (1740) | `project_service.resolve_results_dir` | ✓ |
 | `isUserCreatedProject` (1871) | implicit in `list_projects` (skips demo) | ✓ |
 | `repairDoubledProjectDir` (2012) | N/A — localStorage quirk, irrelevant in Qt | –N/A |
 | `projectDirKeys` (2027) | N/A — path normalization internal | –N/A |
@@ -97,7 +97,7 @@ Legend: ✓ covered  ◐ partial  ✗ missing  –N/A (internal helper, not a UI
 | Web function | Qt equivalent | Status |
 |---|---|---|
 | `currentWorkspaceProject` (1624) | `AppContext.current_project_dir` | ✓ |
-| `inferSubdirFromPath` (1673) | `project_service.get_incoming_jpg_dir` | ✓ |
+| `inferSubdirFromPath` (1673) | `project_service.resolve_incoming_jpg_dir` | ✓ |
 | `normalizeProjectPathFields` (1684) | `project_service.open_project` + normalize | ✓ |
 | `loadWorkspaceState` (2654) | `AppContext` restore | ✓ |
 | `monitorScanQueryParams` (1748) | `monitor_service` | ✓ |

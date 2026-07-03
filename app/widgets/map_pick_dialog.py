@@ -52,11 +52,11 @@ class MapPickDialog(QDialog):
         self._search_edit.setPlaceholderText("搜索地名，如：杭州西湖")
         self._search_btn = QPushButton("搜索")
         self._search_btn.setObjectName("Outline")
-        self._search_btn.clicked.connect(self._do_search)
-        self._search_edit.returnPressed.connect(self._do_search)
+        self._search_btn.clicked.connect(self._search_map_for_place_text)
+        self._search_edit.returnPressed.connect(self._search_map_for_place_text)
         self._locate_btn = QPushButton("📍当前位置")
         self._locate_btn.setObjectName("Outline")
-        self._locate_btn.clicked.connect(self._do_locate)
+        self._locate_btn.clicked.connect(self._locate_current_map_position)
         search_row.addWidget(self._search_edit, 1)
         search_row.addWidget(self._search_btn)
         search_row.addWidget(self._locate_btn)
@@ -97,12 +97,12 @@ class MapPickDialog(QDialog):
         except ValueError:
             pass
 
-    def _do_search(self) -> None:
+    def _search_map_for_place_text(self) -> None:
         q = self._search_edit.text().strip()
         if q:
             self._tile_map.search_place(q)
 
-    def _do_locate(self) -> None:
+    def _locate_current_map_position(self) -> None:
         self._coord_lbl.setText("定位中…")
         self._locate_btn.setEnabled(False)
         self._tile_map.locate_current()

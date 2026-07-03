@@ -47,12 +47,12 @@ class MarkerStylePanel(QWidget):
         super().__init__(parent)
         self.setObjectName("MarkerStylePanel")
         self._style = {**_DEFAULT, **(initial or {})}
-        self._build()
+        self._build_style_controls()
         self._load_into_controls()
 
     # ── UI ──────────────────────────────────────────────────────────────────────
 
-    def _build(self) -> None:
+    def _build_style_controls(self) -> None:
         from app.widgets._form_row import form_row
 
         v = QVBoxLayout(self)
@@ -69,42 +69,42 @@ class MarkerStylePanel(QWidget):
             lbl.setObjectName("StyleSection")
             v.addWidget(lbl)
 
-        def row(label, w, help_text=None):
-            if isinstance(w, (QSpinBox, QDoubleSpinBox, QComboBox, QPushButton)):
-                w.setFixedHeight(30)
-            fr = form_row(label, w, help_text=help_text, label_width=_LW)
-            v.addWidget(fr)
-            return fr
+        def add_style_form_row(label, widget, help_text=None):
+            if isinstance(widget, (QSpinBox, QDoubleSpinBox, QComboBox, QPushButton)):
+                widget.setFixedHeight(30)
+            form_row_widget = form_row(label, widget, help_text=help_text, label_width=_LW)
+            v.addWidget(form_row_widget)
+            return form_row_widget
 
         section("外观")
 
         self._shape = QComboBox()
         self._shape.addItems(_SHAPES)
         self._shape.currentIndexChanged.connect(self._on_change)
-        row("形状", self._shape)
+        add_style_form_row("形状", self._shape)
 
         self._size = QSpinBox()
         self._size.setRange(8, 600)
         self._size.valueChanged.connect(self._on_change)
-        row("大小", self._size, help_text="站位点直径（地图像素）")
+        add_style_form_row("大小", self._size, help_text="站位点直径（地图像素）")
 
         fill_color, self._fill_edit, self._fill_btn = self._color_input("fill")
-        row("填充", fill_color)
+        add_style_form_row("填充", fill_color)
 
         edge_color, self._edge_edit, self._edge_btn = self._color_input("edge")
-        row("描边", edge_color)
+        add_style_form_row("描边", edge_color)
 
         self._edge_w = QDoubleSpinBox()
         self._edge_w.setRange(0.0, 6.0)
         self._edge_w.setSingleStep(0.2)
         self._edge_w.valueChanged.connect(self._on_change)
-        row("描边宽", self._edge_w)
+        add_style_form_row("描边宽", self._edge_w)
 
         self._alpha = QDoubleSpinBox()
         self._alpha.setRange(0.1, 1.0)
         self._alpha.setSingleStep(0.05)
         self._alpha.valueChanged.connect(self._on_change)
-        row("不透明", self._alpha)
+        add_style_form_row("不透明", self._alpha)
 
         section("标签")
 
@@ -116,12 +116,12 @@ class MarkerStylePanel(QWidget):
         for key, txt in _LABEL_SOURCES:
             self._label_source.addItem(txt, key)
         self._label_source.currentIndexChanged.connect(self._on_change)
-        self._row_label_src = row("字段", self._label_source, help_text="标签显示哪个字段")
+        self._row_label_src = add_style_form_row("字段", self._label_source, help_text="标签显示哪个字段")
 
         self._label_size = QSpinBox()
         self._label_size.setRange(5, 40)
         self._label_size.valueChanged.connect(self._on_change)
-        self._row_label_size = row("字号", self._label_size)
+        self._row_label_size = add_style_form_row("字号", self._label_size)
 
         footer = QHBoxLayout()
         footer.setContentsMargins(0, 2, 0, 0)
@@ -221,7 +221,7 @@ class MarkerStylePanel(QWidget):
         if col.isValid():
             self._style[key] = col.name()
             self._paint_color(key, col.name())
-            self._emit()
+            self._emit_style_changed()
 
     def _on_color_edited(self, key: str) -> None:
         edit = self._fill_edit if key == "fill" else self._edge_edit
@@ -234,12 +234,12 @@ class MarkerStylePanel(QWidget):
             return
         self._style[key] = col.name()
         self._paint_color(key, col.name())
-        self._emit()
+        self._emit_style_changed()
 
     def _on_change(self, *_a) -> None:
         self._collect()
         self._sync_label_enabled()
-        self._emit()
+        self._emit_style_changed()
 
     def _collect(self) -> None:
         self._style.update({
@@ -258,7 +258,7 @@ class MarkerStylePanel(QWidget):
             "label_size": self._label_size.value(),
         })
 
-    def _emit(self) -> None:
+    def _emit_style_changed(self) -> None:
         self.style_changed.emit(dict(self._style))
 
     # ── 公共 API ──────────────────────────────────────────────────────────────
@@ -273,4 +273,4 @@ class MarkerStylePanel(QWidget):
 
     def reset_style(self) -> None:
         self.set_style(dict(_DEFAULT))
-        self._emit()
+        self._emit_style_changed()

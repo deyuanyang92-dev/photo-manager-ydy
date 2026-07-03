@@ -27,11 +27,12 @@ clear()
 from __future__ import annotations
 
 import os
+from collections import deque
 from pathlib import Path
 from typing import Optional
 
-from PyQt6.QtCore import QEvent, QPoint, Qt, pyqtSignal
-from PyQt6.QtGui import QPixmap
+from PyQt6.QtCore import QEvent, QPoint, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QImage, QPainter, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
     QDialog,
@@ -59,10 +60,34 @@ class _PanImageLabel(QLabel):
         super().__init__(parent)
         self._scroll_area: Optional[QScrollArea] = None
         self._last_pos: Optional[QPoint] = None
+        self._preview_pixmap = QPixmap()
         self.setCursor(Qt.CursorShape.OpenHandCursor)
 
     def set_scroll_area(self, scroll_area: QScrollArea) -> None:
         self._scroll_area = scroll_area
+
+    def set_preview_pixmap(self, pixmap: QPixmap, logical_width: int, logical_height: int) -> None:
+        self._preview_pixmap = QPixmap(pixmap)
+        self.setText("")
+        self.resize(max(1, int(logical_width)), max(1, int(logical_height)))
+        self.update()
+
+    def clear_preview_pixmap(self) -> None:
+        self._preview_pixmap = QPixmap()
+        self.update()
+
+    def pixmap(self) -> Optional[QPixmap]:
+        if self._preview_pixmap.isNull():
+            return None
+        return QPixmap(self._preview_pixmap)
+
+    def paintEvent(self, event) -> None:
+        if self._preview_pixmap.isNull():
+            super().paintEvent(event)
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        painter.drawPixmap(self.rect(), self._preview_pixmap)
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
@@ -104,6 +129,9 @@ class _TiffLightboxDialog(QDialog):
         self._index = initial_index
         self._base_pixmap = QPixmap()
         self._fit_to_window = True
+        self._preview_sharpen_downscale = True
+        self._scaled_cache_key = None
+        self._scaled_cache = QPixmap()
 
         layout = QVBoxLayout(self)
 
@@ -115,7 +143,7 @@ class _TiffLightboxDialog(QDialog):
         self._scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._image_label = _PanImageLabel()
         self._image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._image_label.setMinimumSize(800, 550)
+        self._image_label.setMinimumSize(1, 1)
         self._image_label.setScaledContents(False)
         self._image_label.set_scroll_area(self._scroll)
         self._scroll.setWidget(self._image_label)
@@ -140,6 +168,16 @@ class _TiffLightboxDialog(QDialog):
         fit_btn = QPushButton("适合窗口")
         fit_btn.clicked.connect(self._fit_current)
         zoom_row.addWidget(fit_btn)
+        actual_btn = QPushButton("100%")
+        actual_btn.setToolTip("按原始像素显示 (Ctrl+1)")
+        actual_btn.clicked.connect(self._actual_size)
+        zoom_row.addWidget(actual_btn)
+        self._sharpen_btn = QPushButton("锐化")
+        self._sharpen_btn.setCheckable(True)
+        self._sharpen_btn.setChecked(True)
+        self._sharpen_btn.setToolTip("缩小时增强预览清晰度")
+        self._sharpen_btn.toggled.connect(self._set_preview_sharpen)
+        zoom_row.addWidget(self._sharpen_btn)
         layout.addLayout(zoom_row)
 
         nav_row = QHBoxLayout()
@@ -203,26 +241,19 @@ class _TiffLightboxDialog(QDialog):
             f"{path.name}  ({self._index + 1} / {len(self._paths)})"
         )
 
-        pixmap = QPixmap(str(path))
-        if pixmap.isNull():
-            try:
-                from PIL import Image
-                import tempfile
-                img = Image.open(str(path))
-                img.thumbnail((2400, 1800))
-                tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-                img.save(tmp.name)
-                pixmap = QPixmap(tmp.name)
-                os.unlink(tmp.name)
-            except Exception:
-                pass
-
-        if not pixmap.isNull():
+        pixmap = _decode_preview_pixmap(str(path))
+        if pixmap is not None and not pixmap.isNull():
             self._base_pixmap = pixmap
+            self._scaled_cache_key = None
+            self._scaled_cache = QPixmap()
+            self._update_info_label()
             self._fit_to_window = True
             self._render_current()
         else:
             self._base_pixmap = QPixmap()
+            self._scaled_cache_key = None
+            self._scaled_cache = QPixmap()
+            self._image_label.clear_preview_pixmap()
             self._image_label.setText(f"无法预览: {path.name}")
 
         self._prev_btn.setEnabled(self._index > 0)
@@ -231,31 +262,106 @@ class _TiffLightboxDialog(QDialog):
     def _render_current(self) -> None:
         if self._base_pixmap.isNull():
             return
+        src_w = max(1, self._base_pixmap.width())
+        src_h = max(1, self._base_pixmap.height())
+        dpr = self._preview_device_pixel_ratio()
         if self._fit_to_window:
             viewport = self._scroll.viewport().size()
-            scaled = self._base_pixmap.scaled(
-                max(120, viewport.width() - 24),
-                max(120, viewport.height() - 24),
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            ratio = int((scaled.width() / max(1, self._base_pixmap.width())) * 100)
+            max_w = max(120, int((viewport.width() - 24) * dpr))
+            max_h = max(120, int((viewport.height() - 24) * dpr))
+            scale = min(max_w / src_w, max_h / src_h)
+            scale = max(0.01, scale)
+            target_w = max(1, int(src_w * scale))
+            target_h = max(1, int(src_h * scale))
+            ratio = int(round(scale * 100))
             self._zoom_slider.blockSignals(True)
             self._zoom_slider.setValue(max(25, min(400, ratio)))
             self._zoom_slider.blockSignals(False)
-            self._zoom_value.setText("适合窗口")
+            self._zoom_value.setText(f"适合窗口 {ratio}%")
         else:
             pct = self._zoom_slider.value()
+            target_w = max(1, int(src_w * pct / 100))
+            target_h = max(1, int(src_h * pct / 100))
+            self._zoom_value.setText(f"{pct}%")
+        scaled = self._scaled_preview_pixmap(target_w, target_h, dpr)
+        logical_w = max(1, int(round(target_w / dpr)))
+        logical_h = max(1, int(round(target_h / dpr)))
+        self._image_label.set_preview_pixmap(scaled, logical_w, logical_h)
+
+    def _preview_device_pixel_ratio(self) -> float:
+        ratio = self._scroll.viewport().devicePixelRatioF()
+        if ratio <= 0:
+            screen = self.screen()
+            ratio = screen.devicePixelRatio() if screen is not None else 1.0
+        return max(1.0, float(ratio))
+
+    def _scaled_preview_pixmap(self, width: int, height: int, dpr: float) -> QPixmap:
+        width = max(1, int(width))
+        height = max(1, int(height))
+        sharpen = (
+            self._preview_sharpen_downscale
+            and width < self._base_pixmap.width()
+            and height < self._base_pixmap.height()
+        )
+        key = (width, height, round(float(dpr), 3), sharpen)
+        if self._scaled_cache_key == key and not self._scaled_cache.isNull():
+            return QPixmap(self._scaled_cache)
+        if width == self._base_pixmap.width() and height == self._base_pixmap.height():
+            scaled = QPixmap(self._base_pixmap)
+        else:
             scaled = self._base_pixmap.scaled(
-                max(1, int(self._base_pixmap.width() * pct / 100)),
-                max(1, int(self._base_pixmap.height() * pct / 100)),
+                width,
+                height,
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation,
             )
-            self._zoom_value.setText(f"{pct}%")
-        self._image_label.setText("")
-        self._image_label.setPixmap(scaled)
-        self._image_label.resize(scaled.size())
+        if sharpen:
+            scaled = self._sharpen_preview_pixmap(scaled)
+        self._scaled_cache_key = key
+        self._scaled_cache = QPixmap(scaled)
+        return scaled
+
+    def _sharpen_preview_pixmap(self, pixmap: QPixmap) -> QPixmap:
+        try:
+            from PIL import Image, ImageFilter
+        except Exception:
+            return pixmap
+        image = pixmap.toImage().convertToFormat(QImage.Format.Format_RGBA8888)
+        width = image.width()
+        height = image.height()
+        if width <= 1 or height <= 1:
+            return pixmap
+        ptr = image.bits()
+        ptr.setsize(image.sizeInBytes())
+        pil = Image.frombuffer(
+            "RGBA",
+            (width, height),
+            bytes(ptr),
+            "raw",
+            "RGBA",
+            image.bytesPerLine(),
+            1,
+        )
+        pil = pil.filter(ImageFilter.UnsharpMask(radius=0.8, percent=110, threshold=2))
+        raw = pil.tobytes("raw", "RGBA")
+        qimage = QImage(raw, width, height, width * 4, QImage.Format.Format_RGBA8888)
+        return QPixmap.fromImage(qimage.copy())
+
+    def _set_preview_sharpen(self, enabled: bool) -> None:
+        self._preview_sharpen_downscale = bool(enabled)
+        self._scaled_cache_key = None
+        self._scaled_cache = QPixmap()
+        self._render_current()
+
+    def _update_info_label(self) -> None:
+        path = self._paths[self._index]
+        if self._base_pixmap.isNull():
+            size_text = ""
+        else:
+            size_text = f" · 原图 {self._base_pixmap.width()}×{self._base_pixmap.height()} px"
+        self._info_label.setText(
+            f"{path.name}  ({self._index + 1} / {len(self._paths)}){size_text}"
+        )
 
     def _on_zoom_changed(self, _value: int) -> None:
         self._fit_to_window = False
@@ -353,10 +459,12 @@ class _TiffLightboxDialog(QDialog):
 
 # ── Thumbnail decode (cached at ResultsColumn level) ───────────────────────────
 
-_MIN_THUMB = 32
-_MAX_THUMB = 96
 _DEFAULT_THUMB = 48
+_LARGE_THUMB_MIN_SIZE = 128
 _BASE_THUMB = 280  # base decode size; zoom scales DOWN from this cached pixmap
+_PREVIEW_MAX_SIZE = None
+_MIN_PAIRED_COLUMNS_WIDTH = 640
+_LARGE_THUMB_CARD_EXTRA_HEIGHT = 52
 
 
 def _decode_thumb(path: str, max_size: int = _BASE_THUMB) -> Optional[QPixmap]:
@@ -368,6 +476,18 @@ def _decode_thumb(path: str, max_size: int = _BASE_THUMB) -> Optional[QPixmap]:
     from app.utils.image_thumbnail import decode_image_thumbnail
 
     return decode_image_thumbnail(path, max_size)
+
+
+def _decode_preview_pixmap(
+    path: str,
+    max_size: Optional[int] = _PREVIEW_MAX_SIZE,
+) -> Optional[QPixmap]:
+    """Decode a preview pixmap using the shared robust image backends."""
+    from app.utils.image_thumbnail import decode_image_pixmap, decode_image_thumbnail
+
+    if max_size is None:
+        return decode_image_pixmap(path, use_cache=False)
+    return decode_image_thumbnail(path, max_size=max_size, use_cache=False)
 
 
 # ── Individual result cards ────────────────────────────────────────────────────
@@ -383,12 +503,23 @@ class _ResultCardBase(QFrame):
     def __init__(self, info: dict, thumb_provider=None,
                  select_fn=None, selected: bool = False,
                  thumb_size: int = _DEFAULT_THUMB,
+                 result_view_mode: str = "list",
+                 defer_thumbnail: bool = False,
                  parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
-        self.setObjectName("Card")
+        self.setObjectName("ResultFile")
+        self.setMinimumWidth(0)
+        self._result_view_mode = (
+            "large_thumbnail"
+            if result_view_mode == "large_thumbnail"
+            else "list"
+        )
+        self.setProperty("resultViewMode", self._result_view_mode)
         self._info = info
         self._thumb_size = thumb_size
         self._thumb_provider = thumb_provider
+        self._defer_thumbnail = defer_thumbnail
+        self._thumbnail_loaded = False
         self._select_fn = select_fn
         self._selected = selected
         self._base_pm: Optional[QPixmap] = None
@@ -398,25 +529,84 @@ class _ResultCardBase(QFrame):
     def _setup_ui(self) -> None:
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(8, 5, 8, 5)
-        lay.setSpacing(8)
+        if self._result_view_mode == "large_thumbnail":
+            self._setup_large_thumbnail_ui()
+        else:
+            self._setup_list_ui()
 
-        self._select_badge = QLabel("")
-        self._select_badge.setObjectName("ResultSelectBadge")
-        self._select_badge.setFixedSize(18, 18)
-        self._select_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._select_badge.setToolTip("单击选择/取消选择")
+        path = self._info.get("path", "")
+        if self._thumb_provider and path and not self._defer_thumbnail:
+            self.load_thumbnail_now()
+        self._apply_icon()
+
+    def _create_select_badge(self) -> QLabel:
+        badge = QLabel("")
+        badge.setObjectName("ResultSelectBadge")
+        badge.setFixedSize(18, 18)
+        badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        badge.setToolTip("单击选择/取消选择")
+        return badge
+
+    def _create_icon_label(self) -> QLabel:
+        icon_label = QLabel()
+        icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon_label.setFixedSize(self._display_thumb_size(), self._display_thumb_size())
+        return icon_label
+
+    def _setup_list_ui(self) -> None:
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(7, 4, 7, 4)
+        lay.setSpacing(7)
+
+        self._select_badge = self._create_select_badge()
         lay.addWidget(self._select_badge)
 
-        self._icon = QLabel()
-        self._icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._icon.setFixedSize(self._thumb_size, self._thumb_size)
+        self._icon = self._create_icon_label()
         lay.addWidget(self._icon)
 
         body = self._build_body()
+        body.setMinimumWidth(0)
+        body.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         lay.addWidget(body, stretch=1)
 
+    def _setup_large_thumbnail_ui(self) -> None:
+        self.setMinimumHeight(self._large_thumbnail_min_height())
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(8, 8, 8, 8)
+        lay.setSpacing(5)
+
+        media_row = QHBoxLayout()
+        media_row.setContentsMargins(0, 0, 0, 0)
+        media_row.setSpacing(8)
+        self._select_badge = self._create_select_badge()
+        media_row.addWidget(
+            self._select_badge,
+            alignment=Qt.AlignmentFlag.AlignTop,
+        )
+        media_row.addStretch()
+        self._icon = self._create_icon_label()
+        media_row.addWidget(self._icon, alignment=Qt.AlignmentFlag.AlignCenter)
+        media_row.addStretch()
+        media_row.addSpacing(self._select_badge.width())
+        lay.addLayout(media_row)
+
+        body = self._build_body()
+        body.setMinimumWidth(0)
+        body.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        lay.addWidget(body)
+
+    def _display_thumb_size(self) -> int:
+        if self._result_view_mode == "large_thumbnail":
+            return max(_LARGE_THUMB_MIN_SIZE, self._thumb_size)
+        return self._thumb_size
+
+    def _large_thumbnail_min_height(self) -> int:
+        return self._display_thumb_size() + _LARGE_THUMB_CARD_EXTRA_HEIGHT
+
+    def load_thumbnail_now(self) -> None:
+        if self._thumbnail_loaded:
+            return
+        self._thumbnail_loaded = True
         path = self._info.get("path", "")
         if self._thumb_provider and path:
             self._base_pm = self._thumb_provider(path)
@@ -425,7 +615,7 @@ class _ResultCardBase(QFrame):
     def _build_body(self) -> QWidget:  # override
         return QWidget()
 
-    def _registry_line(self, kind: str, paired_path: str = "") -> str:
+    def _registry_line(self, kind: str, counterpart_path: str = "") -> str:
         uid = str(self._info.get("owner_uid") or self._info.get("uid") or "")
         group_index = self._info.get("group_index")
         registered = bool(self._info.get("registered", bool(uid)))
@@ -438,10 +628,10 @@ class _ResultCardBase(QFrame):
         else:
             where = "未入库"
         pair_label = "ZIP" if kind == "tiff" else "TIF"
-        pair = f"已配 {pair_label}" if paired_path else f"缺 {pair_label}"
+        pair = f"已配 {pair_label}" if counterpart_path else f"缺 {pair_label}"
         return f"{where} · {pair}"
 
-    def _show_registry_info(self, kind: str, paired_path: str = "") -> None:
+    def _show_registry_info(self, kind: str, counterpart_path: str = "") -> None:
         from PyQt6.QtWidgets import QMessageBox
 
         uid = str(self._info.get("owner_uid") or self._info.get("uid") or "")
@@ -454,8 +644,8 @@ class _ResultCardBase(QFrame):
         ]
         if group_index is not None:
             lines.append(f"分组: {int(group_index) + 1}")
-        if paired_path:
-            lines.append(f"配对文件: {paired_path}")
+        if counterpart_path:
+            lines.append(f"配对文件: {counterpart_path}")
         else:
             lines.append("配对文件: 未找到")
         QMessageBox.information(self, "入库/关联信息", "\n".join(lines))
@@ -465,7 +655,7 @@ class _ResultCardBase(QFrame):
         return self._base_pm
 
     def _apply_icon(self) -> None:
-        s = self._thumb_size
+        s = self._display_thumb_size()
         self._icon.setFixedSize(s, s)
         self._icon.setStyleSheet("border:none; background:transparent;")
         pm = self._icon_pixmap()
@@ -478,21 +668,13 @@ class _ResultCardBase(QFrame):
             ))
         else:
             self._icon.setProperty("hasThumbnail", False)
-            g = min(26, max(12, s - 6))
+            glyph_cap = 76 if self._result_view_mode == "large_thumbnail" else 26
+            g = min(glyph_cap, max(12, s - 6))
             self._icon.setPixmap(
                 icons.icon(self._FALLBACK_ICON, color=self._ICON_TINT).pixmap(g, g)
             )
         self._icon.style().unpolish(self._icon)
         self._icon.style().polish(self._icon)
-
-    def _make_menu_btn(self, tip: str, handler) -> QPushButton:
-        b = QPushButton()
-        b.setObjectName("Ghost")
-        b.setFixedSize(24, 24)
-        b.setToolTip(tip)
-        icons.set_button_icon(b, "mdi6.dots-vertical", size=14)
-        b.clicked.connect(lambda: handler(b.mapToGlobal(b.rect().bottomLeft())))
-        return b
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
@@ -515,6 +697,8 @@ class _ResultCardBase(QFrame):
 
     def set_thumb_size(self, size: int) -> None:
         self._thumb_size = size
+        if self._result_view_mode == "large_thumbnail":
+            self.setMinimumHeight(self._large_thumbnail_min_height())
         self._apply_icon()
 
 
@@ -528,6 +712,8 @@ class _TiffCard(_ResultCardBase):
                  naming_check_fn=None, delete_fn=None,
                  select_fn=None, selected: bool = False,
                  thumb_provider=None, thumb_size: int = _DEFAULT_THUMB,
+                 result_view_mode: str = "list",
+                 defer_thumbnail: bool = False,
                  parent: Optional[QWidget] = None) -> None:
         self._open_fn = open_fn
         self._lightbox_fn = lightbox_fn
@@ -537,7 +723,10 @@ class _TiffCard(_ResultCardBase):
         self._delete_fn = delete_fn
         super().__init__(info, thumb_provider=thumb_provider,
                          select_fn=select_fn, selected=selected,
-                         thumb_size=thumb_size, parent=parent)
+                         thumb_size=thumb_size,
+                         result_view_mode=result_view_mode,
+                         defer_thumbnail=defer_thumbnail,
+                         parent=parent)
 
     def _build_body(self) -> QWidget:
         body = QWidget()
@@ -552,24 +741,24 @@ class _TiffCard(_ResultCardBase):
         )
         name_lbl = QLabel(name)
         name_lbl.setObjectName("Mono")
+        name_lbl.setMinimumWidth(0)
+        name_lbl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        if self._result_view_mode == "large_thumbnail":
+            name_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            name_lbl.setWordWrap(True)
+            name_lbl.setMaximumHeight(42)
         full_name = self._info.get("name") or Path(self._info.get("path", "")).name
         name_lbl.setToolTip(self._info.get("path", full_name))
         body_lay.addWidget(name_lbl)
 
-        row = QHBoxLayout()
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(6)
-        state_chip = QLabel("已合成")
-        state_chip.setObjectName("ChipComposed")
-        state_chip.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        row.addWidget(state_chip)
-        registry_lbl = QLabel(self._registry_line("tiff", self._paired_zip))
-        registry_lbl.setObjectName("MutedSmall")
+        registry_lbl = QLabel(f"TIF · {self._registry_line('tiff', self._paired_zip)}")
+        registry_lbl.setObjectName("ResultMeta")
+        registry_lbl.setMinimumWidth(0)
+        registry_lbl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        if self._result_view_mode == "large_thumbnail":
+            registry_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         registry_lbl.setToolTip(self._registry_line("tiff", self._paired_zip))
-        row.addWidget(registry_lbl)
-        row.addStretch()
-        row.addWidget(self._make_menu_btn("成果操作", self._show_menu))
-        body_lay.addLayout(row)
+        body_lay.addWidget(registry_lbl)
         return body
 
     def mouseDoubleClickEvent(self, event) -> None:
@@ -622,6 +811,7 @@ class _ArchiveCard(_ResultCardBase):
                  link_fn=None, paired_tiff: str = "",
                  select_fn=None, selected: bool = False,
                  thumb_size: int = _DEFAULT_THUMB,
+                 result_view_mode: str = "list",
                  parent: Optional[QWidget] = None) -> None:
         self._open_fn = open_fn
         self._restore_fn = restore_fn
@@ -629,7 +819,9 @@ class _ArchiveCard(_ResultCardBase):
         self._paired_tiff = paired_tiff
         super().__init__(info, thumb_provider=None,
                          select_fn=select_fn, selected=selected,
-                         thumb_size=thumb_size, parent=parent)
+                         thumb_size=thumb_size,
+                         result_view_mode=result_view_mode,
+                         parent=parent)
 
     def _icon_pixmap(self) -> Optional[QPixmap]:
         # A ZIP has no preview — always the zip-folder glyph (like Windows).
@@ -648,25 +840,28 @@ class _ArchiveCard(_ResultCardBase):
         )
         name_lbl = QLabel(name)
         name_lbl.setObjectName("Mono")
+        name_lbl.setMinimumWidth(0)
+        name_lbl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        if self._result_view_mode == "large_thumbnail":
+            name_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            name_lbl.setWordWrap(True)
+            name_lbl.setMaximumHeight(42)
         full_name = self._info.get("name") or Path(self._info.get("path", "")).name
         name_lbl.setToolTip(self._info.get("path", full_name))
         body_lay.addWidget(name_lbl)
 
         size_bytes = self._info.get("size", 0)
         size_str = _fmt_size(size_bytes) if size_bytes else "已归档"
-        row = QHBoxLayout()
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(6)
-        state_lbl = QLabel(size_str)
-        state_lbl.setObjectName("MutedSmall")
-        row.addWidget(state_lbl)
-        registry_lbl = QLabel(self._registry_line("zip", self._paired_tiff))
-        registry_lbl.setObjectName("MutedSmall")
+        registry_lbl = QLabel(
+            f"ZIP · {size_str} · {self._registry_line('zip', self._paired_tiff)}"
+        )
+        registry_lbl.setObjectName("ResultMeta")
+        registry_lbl.setMinimumWidth(0)
+        registry_lbl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        if self._result_view_mode == "large_thumbnail":
+            registry_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         registry_lbl.setToolTip(self._registry_line("zip", self._paired_tiff))
-        row.addWidget(registry_lbl)
-        row.addStretch()
-        row.addWidget(self._make_menu_btn("归档操作", self._show_menu))
-        body_lay.addLayout(row)
+        body_lay.addWidget(registry_lbl)
         return body
 
     def contextMenuEvent(self, event) -> None:
@@ -695,9 +890,10 @@ class _ArchiveCard(_ResultCardBase):
 def _placeholder(text: str) -> QWidget:
     """Muted box shown when a sequence has no files."""
     f = QFrame()
-    f.setObjectName("Card")
+    f.setObjectName("ResultPlaceholder")
+    f.setMinimumWidth(0)
     lay = QVBoxLayout(f)
-    lay.setContentsMargins(10, 10, 10, 10)
+    lay.setContentsMargins(8, 6, 8, 6)
     lbl = QLabel(text)
     lbl.setObjectName("Muted")
     lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -706,40 +902,132 @@ def _placeholder(text: str) -> QWidget:
     return f
 
 
+class _ResultPairIndicator(QFrame):
+    """Visual indicator for a visible TIFF/ZIP pair in two-column mode."""
+
+    def __init__(
+        self,
+        tiff_path: str = "",
+        zip_path: str = "",
+        *,
+        has_pair: bool = False,
+        selected: bool = False,
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setObjectName("ResultPairIndicator")
+        self.setFixedWidth(24)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        self._pair_paths = (
+            [str(tiff_path or ""), str(zip_path or "")]
+            if has_pair else []
+        )
+        self._has_pair = bool(has_pair)
+
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self._left_line = QFrame()
+        self._left_line.setObjectName("ResultPairLine")
+        self._left_line.setFixedHeight(1)
+        lay.addWidget(self._left_line, stretch=1)
+
+        self._arrow = QLabel("→" if has_pair else "")
+        self._arrow.setObjectName("ResultPairArrow")
+        self._arrow.setFixedSize(16, 18)
+        self._arrow.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._arrow.setToolTip("同一成果：左侧 TIF 对应右侧 ZIP" if has_pair else "")
+        lay.addWidget(self._arrow)
+
+        self._right_line = QFrame()
+        self._right_line.setObjectName("ResultPairLine")
+        self._right_line.setFixedHeight(1)
+        lay.addWidget(self._right_line, stretch=1)
+
+        self._apply_state(selected)
+
+    def visible_pair_paths(self) -> list[str]:
+        return list(self._pair_paths)
+
+    def set_selected(self, selected: bool) -> None:
+        self._apply_state(selected)
+
+    def _apply_state(self, selected: bool) -> None:
+        for widget in (self, self._arrow, self._left_line, self._right_line):
+            widget.setProperty("hasPair", "true" if self._has_pair else "false")
+            widget.setProperty("selected", "true" if selected else "false")
+            widget.style().unpolish(widget)
+            widget.style().polish(widget)
+
+
 class _ResultRow(QFrame):
     """One result sequence with optional aligned TIFF / ZIP columns."""
 
     def __init__(self, seq_label: str, tiff_row=None, zip_row=None,
-                 *, tile_view: bool = True,
+                 *, show_paired_columns: bool = True,
                  parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setObjectName("ResultRow")
+        self.setProperty("pairedColumns", "true" if show_paired_columns else "false")
+        self.setMinimumWidth(0)
         self._rows = [r for r in (tiff_row, zip_row) if r is not None]
-        v = QVBoxLayout(self)
-        v.setContentsMargins(0, 0, 0, 8)
-        v.setSpacing(4)
+        self._pair_indicator = None
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
 
-        hdr = QLabel(seq_label)
-        hdr.setObjectName("MutedSmall")
-        v.addWidget(hdr)
+        seq_badge = QLabel(_compact_result_sequence_label(seq_label))
+        seq_badge.setObjectName("ResultSeqBadge")
+        seq_badge.setFixedWidth(34)
+        seq_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        seq_badge.setToolTip(seq_label)
+        row.addWidget(seq_badge)
 
         if not self._rows:
-            v.addWidget(_placeholder("无成果"))
-        elif tile_view:
-            row = QHBoxLayout()
-            row.setContentsMargins(0, 0, 0, 0)
-            row.setSpacing(10)
-            row.addWidget(tiff_row if tiff_row is not None else _placeholder("无 TIFF"), stretch=1)
-            row.addWidget(zip_row if zip_row is not None else _placeholder("无 ZIP"), stretch=1)
-            v.addLayout(row)
+            row.addWidget(_placeholder("无成果"), stretch=1)
+        elif show_paired_columns:
+            row.addWidget(
+                tiff_row if tiff_row is not None else _placeholder("无 TIFF"),
+                stretch=1,
+            )
+            has_pair = tiff_row is not None and zip_row is not None
+            tiff_path = tiff_row._info.get("path", "") if has_pair else ""
+            zip_path = zip_row._info.get("path", "") if has_pair else ""
+            selected = bool(
+                has_pair
+                and getattr(tiff_row, "_selected", False)
+                and getattr(zip_row, "_selected", False)
+            )
+            self._pair_indicator = _ResultPairIndicator(
+                tiff_path, zip_path, has_pair=has_pair, selected=selected
+            )
+            row.addWidget(self._pair_indicator)
+            row.addWidget(
+                zip_row if zip_row is not None else _placeholder("无 ZIP"),
+                stretch=1,
+            )
         else:
+            stack = QVBoxLayout()
+            stack.setContentsMargins(0, 0, 0, 0)
+            stack.setSpacing(4)
             for r in self._rows:
-                v.addWidget(r)
+                stack.addWidget(r)
+            row.addLayout(stack, stretch=1)
 
     def set_thumb_size(self, size: int) -> None:
         for r in self._rows:
             if hasattr(r, "set_thumb_size"):
                 r.set_thumb_size(size)
+
+
+def _compact_result_sequence_label(seq_label: str) -> str:
+    text = str(seq_label or "").strip()
+    prefix = "成果 "
+    if text.startswith(prefix) and text[len(prefix):].strip():
+        return text[len(prefix):].strip()
+    return text or "·"
 
 
 class _SpecimenResultHeader(QFrame):
@@ -843,11 +1131,21 @@ class ResultsColumn(QWidget):
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self._thumb_size = _DEFAULT_THUMB
+        self._result_view_mode = "list"
         self._thumb_cache: dict = {}
+        self._thumb_queue: deque[_ResultCardBase] = deque()
+        self._thumb_timer = QTimer(self)
+        self._thumb_timer.setInterval(20)
+        self._thumb_timer.timeout.connect(self._load_next_thumbnail_batch)
+        self._layout_refresh_timer = QTimer(self)
+        self._layout_refresh_timer.setSingleShot(True)
+        self._layout_refresh_timer.setInterval(60)
+        self._layout_refresh_timer.timeout.connect(self._refresh_layout_if_needed)
         self._cards: list = []
         self._collapsed = False
         self._sort_key = "seq"
-        self._tile_view = True
+        self._paired_columns_enabled = True
+        self._paired_selection_enabled = False
         self._results_dir: str = ""
         self._current_tiffs: list[dict] = []
         self._current_zips: list[dict] = []
@@ -855,6 +1153,7 @@ class ResultsColumn(QWidget):
         self._selected_result_paths: set[str] = set()
         self._display_mode = "single"
         self._filename_mode = "full"
+        self._rendered_paired_columns = True
         self._setup_ui()
 
     # ── UI ────────────────────────────────────────────────────────────────────
@@ -877,7 +1176,7 @@ class ResultsColumn(QWidget):
         # ── Header row: collapse + title + count + zoom ──
         hdr = QHBoxLayout()
         hdr.setContentsMargins(0, 0, 0, 0)
-        hdr.setSpacing(10)
+        hdr.setSpacing(8)
 
         self._collapse_btn = QPushButton("▾")
         self._collapse_btn.setObjectName("Ghost")
@@ -897,83 +1196,44 @@ class ResultsColumn(QWidget):
         self._count.setObjectName("MutedSmall")
         hdr.addWidget(self._count)
 
-        self._current_mode_btn = QPushButton("当前编号")
+        self._current_mode_btn = QPushButton("当前")
         self._current_mode_btn.setObjectName("Ghost")
         self._current_mode_btn.setCheckable(True)
         self._current_mode_btn.setChecked(True)
-        self._current_mode_btn.setFixedHeight(28)
+        self._current_mode_btn.setFixedSize(44, 28)
         self._current_mode_btn.setToolTip("只显示当前选中编号的 TIFF 和 ZIP")
         self._current_mode_btn.clicked.connect(lambda: self.current_requested.emit())
         hdr.addWidget(self._current_mode_btn)
 
-        self._all_mode_btn = QPushButton("全部编号")
+        self._all_mode_btn = QPushButton("全部")
         self._all_mode_btn.setObjectName("Ghost")
         self._all_mode_btn.setCheckable(True)
-        self._all_mode_btn.setFixedHeight(28)
+        self._all_mode_btn.setFixedSize(44, 28)
         self._all_mode_btn.setToolTip("按编号分组显示当前项目全部 TIFF 和 ZIP")
         self._all_mode_btn.clicked.connect(lambda: self.show_all_requested.emit())
         hdr.addWidget(self._all_mode_btn)
         hdr.addStretch()
 
-        self._filename_btn = QPushButton("文件名")
-        self._filename_btn.setObjectName("Ghost")
-        self._filename_btn.setFixedHeight(28)
-        self._filename_btn.setToolTip("切换成果卡片显示完整文件名或唯一编号")
-        icons.set_button_icon(self._filename_btn, "mdi6.text-box-outline",
+        self._paired_selection_btn = QPushButton("联选")
+        self._paired_selection_btn.setObjectName("Ghost")
+        self._paired_selection_btn.setCheckable(True)
+        self._paired_selection_btn.setChecked(False)
+        self._paired_selection_btn.setFixedSize(56, 28)
+        self._paired_selection_btn.clicked.connect(self._set_paired_selection_enabled)
+        hdr.addWidget(self._paired_selection_btn)
+        self._update_paired_selection_button_state()
+
+        self._options_btn = QPushButton("")
+        self._options_btn.setObjectName("Ghost")
+        self._options_btn.setFixedSize(28, 28)
+        self._options_btn.setToolTip("结果显示与排序选项")
+        icons.set_button_icon(self._options_btn, "mdi6.dots-vertical",
                               color=icons.TONE_MUTED, size=14)
-        self._filename_btn.clicked.connect(self._show_filename_menu)
-        hdr.addWidget(self._filename_btn)
+        self._options_btn.clicked.connect(self._show_results_options_menu)
+        hdr.addWidget(self._options_btn)
 
-        self._open_folder_btn = QPushButton("打开文件夹")
-        self._open_folder_btn.setObjectName("Outline")
-        self._open_folder_btn.setFixedHeight(28)
-        self._open_folder_btn.setToolTip("在 Windows 文件资源管理器中打开 results 文件夹")
-        icons.set_button_icon(self._open_folder_btn, "mdi6.folder-open-outline",
-                              color=icons.TONE_ACCENT, size=14)
-        self._open_folder_btn.clicked.connect(self._open_results_folder)
-        hdr.addWidget(self._open_folder_btn)
-
-        self._link_selected_btn = QPushButton("关联选中")
-        self._link_selected_btn.setObjectName("Outline")
-        self._link_selected_btn.setFixedHeight(28)
-        self._link_selected_btn.setEnabled(False)
-        self._link_selected_btn.setToolTip("选中 1 个 TIF 和 1 个 ZIP 后关联到右侧编号")
-        icons.set_button_icon(self._link_selected_btn, "mdi6.link-variant",
-                              color=icons.TONE_ACCENT, size=14)
-        self._link_selected_btn.clicked.connect(self._emit_link_selected_result)
-        hdr.addWidget(self._link_selected_btn)
-
-        self._sort_btn = QPushButton("排序方式")
-        self._sort_btn.setObjectName("Ghost")
-        self._sort_btn.setFixedHeight(28)
-        self._sort_btn.setToolTip("按文件名、类型、大小或修改时间排序")
-        icons.set_button_icon(self._sort_btn, "mdi6.sort", color=icons.TONE_MUTED, size=14)
-        self._sort_btn.clicked.connect(self._show_sort_menu)
-        hdr.addWidget(self._sort_btn)
-
-        self._tile_btn = QPushButton("两列")
-        self._tile_btn.setObjectName("Ghost")
-        self._tile_btn.setCheckable(True)
-        self._tile_btn.setChecked(True)
-        self._tile_btn.setFixedHeight(28)
-        self._tile_btn.setToolTip("切换成果显示方式：列表 / 平铺")
-        icons.set_button_icon(self._tile_btn, "mdi6.view-list-outline",
-                              color=icons.TONE_MUTED, size=14)
-        self._tile_btn.clicked.connect(self._set_tile_view)
-        hdr.addWidget(self._tile_btn)
-
-        zoom_lbl = QLabel("缩放")
-        zoom_lbl.setObjectName("MutedSmall")
-        hdr.addWidget(zoom_lbl)
-        self._zoom = QSlider(Qt.Orientation.Horizontal)
-        self._zoom.setMinimum(_MIN_THUMB)
-        self._zoom.setMaximum(_MAX_THUMB)
-        self._zoom.setValue(self._thumb_size)
-        self._zoom.setFixedWidth(120)
-        self._zoom.setToolTip("调整结果展示框大小")
-        self._zoom.valueChanged.connect(self._set_zoom)
-        hdr.addWidget(self._zoom)
         root.addLayout(hdr)
+        self._update_options_button_tooltip()
 
         divider = QFrame()
         divider.setObjectName("Divider")
@@ -982,10 +1242,14 @@ class ResultsColumn(QWidget):
 
         # ── Body: scrollable paired rows ──
         self._body = QScrollArea()
+        self._body.setObjectName("ResultsScroll")
         self._body.setWidgetResizable(True)
         self._body.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._body.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         self._body.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._body.customContextMenuRequested.connect(self._show_body_menu)
+        self._body.viewport().installEventFilter(self)
+        self._body.verticalScrollBar().setSingleStep(36)
         self._rows_container = QWidget()
         self._rows_lay = QVBoxLayout(self._rows_container)
         self._rows_lay.setContentsMargins(0, 2, 0, 2)
@@ -1003,7 +1267,7 @@ class ResultsColumn(QWidget):
                  archive_zips: list) -> None:
         """Populate the paired rows for the given specimen UID."""
         self._display_mode = "single"
-        self._sync_mode_buttons()
+        self._update_mode_button_state()
         self._current_groups = []
         self._clear_rows()
         self._title.setText("成果")
@@ -1015,6 +1279,8 @@ class ResultsColumn(QWidget):
         composed_tiffs = list(composed_tiffs or [])
         archive_zips = list(archive_zips or [])
         rows = self._sort_rows(_pair_results(composed_tiffs, archive_zips))
+        show_paired_columns = self._should_show_paired_columns()
+        self._rendered_paired_columns = show_paired_columns
         all_tiff_paths = [
             Path(tinfo["path"]) for _label, tinfo, _zinfo in rows
             if tinfo is not None and tinfo.get("path")
@@ -1035,8 +1301,11 @@ class ResultsColumn(QWidget):
                     selected=self._is_result_selected(tinfo.get("path", "")),
                     thumb_provider=self._thumb_provider,
                     thumb_size=self._thumb_size,
+                    result_view_mode=self._result_view_mode,
+                    defer_thumbnail=True,
                 )
                 self._cards.append(tc)
+                self._queue_thumbnail(tc)
             if zinfo is not None:
                 zc = _ArchiveCard(
                     self._display_info(zinfo), open_fn=self._open_in_explorer,
@@ -1046,21 +1315,26 @@ class ResultsColumn(QWidget):
                     select_fn=self._toggle_result_selection,
                     selected=self._is_result_selected(zinfo.get("path", "")),
                     thumb_size=self._thumb_size,
+                    result_view_mode=self._result_view_mode,
                 )
                 self._cards.append(zc)
             self._rows_lay.addWidget(
-                _ResultRow(seq_label, tc, zc, tile_view=self._tile_view)
+                _ResultRow(
+                    seq_label, tc, zc,
+                    show_paired_columns=show_paired_columns,
+                )
             )
 
         n = len(rows)
         self._count.setText(f"{n} 项")
+        self._update_options_button_tooltip()
         if not n:
             self._show_empty()
 
     def load_many(self, groups: list[dict]) -> None:
         """Populate results for multiple specimen UIDs, grouped by UID."""
         self._display_mode = "many"
-        self._sync_mode_buttons()
+        self._update_mode_button_state()
         self._title.setText("全部成果")
         self._current_groups = [
             {
@@ -1082,6 +1356,8 @@ class ResultsColumn(QWidget):
 
         total_rows = 0
         visible_groups = 0
+        show_paired_columns = self._should_show_paired_columns()
+        self._rendered_paired_columns = show_paired_columns
         for group in self._current_groups:
             rows = self._sort_rows(_pair_results(group["tiffs"], group["zips"]))
             if not rows:
@@ -1111,8 +1387,11 @@ class ResultsColumn(QWidget):
                         selected=self._is_result_selected(tinfo.get("path", "")),
                         thumb_provider=self._thumb_provider,
                         thumb_size=self._thumb_size,
+                        result_view_mode=self._result_view_mode,
+                        defer_thumbnail=True,
                     )
                     self._cards.append(tc)
+                    self._queue_thumbnail(tc)
                 if zinfo is not None:
                     zc = _ArchiveCard(
                         self._display_info(zinfo), open_fn=self._open_in_explorer,
@@ -1122,13 +1401,18 @@ class ResultsColumn(QWidget):
                         select_fn=self._toggle_result_selection,
                         selected=self._is_result_selected(zinfo.get("path", "")),
                         thumb_size=self._thumb_size,
+                        result_view_mode=self._result_view_mode,
                     )
                     self._cards.append(zc)
                 self._rows_lay.addWidget(
-                    _ResultRow(seq_label, tc, zc, tile_view=self._tile_view)
+                    _ResultRow(
+                        seq_label, tc, zc,
+                        show_paired_columns=show_paired_columns,
+                    )
                 )
 
         self._count.setText(f"{visible_groups} 编号 / {total_rows} 项")
+        self._update_options_button_tooltip()
         if not total_rows:
             self._show_empty("暂无成果：当前项目还没有已整理结果")
 
@@ -1139,9 +1423,8 @@ class ResultsColumn(QWidget):
         self._current_zips = []
         self._current_groups = []
         self._selected_result_paths.clear()
-        self._sync_link_selected_button()
         self._display_mode = "single"
-        self._sync_mode_buttons()
+        self._update_mode_button_state()
         self._title.setText("成果")
         self._results_dir = ""
         self._show_empty()
@@ -1174,60 +1457,99 @@ class ResultsColumn(QWidget):
         key = self._result_key(path)
         if not key:
             return
-        if key in self._selected_result_paths:
-            self._selected_result_paths.remove(key)
-            selected = False
+
+        keys = {key}
+        if self._paired_selection_enabled:
+            tiff_key, zip_key = self._visible_result_pair_for(key)
+            if tiff_key and zip_key:
+                keys = {tiff_key, zip_key}
+
+        selected = not all(k in self._selected_result_paths for k in keys)
+        if selected:
+            self._selected_result_paths.update(keys)
         else:
-            self._selected_result_paths.add(key)
-            selected = True
-        if card is not None and hasattr(card, "set_selected"):
-            card.set_selected(selected)
-        self._sync_link_selected_button()
+            self._selected_result_paths.difference_update(keys)
+        for c in self._cards:
+            c_key = self._result_key(c._info.get("path", ""))
+            if c_key in keys and hasattr(c, "set_selected"):
+                c.set_selected(c_key in self._selected_result_paths)
+        self._update_visible_pair_indicator_state()
 
     def _prune_selected_result_paths(self) -> None:
-        valid = {
+        valid = self._visible_result_keys()
+        self._selected_result_paths &= valid
+        self._update_visible_pair_indicator_state()
+
+    def _visible_result_keys(self) -> set[str]:
+        return {
             self._result_key(info.get("path", ""))
             for info in self._current_tiffs + self._current_zips
             if info.get("path")
         }
-        self._selected_result_paths &= valid
-        self._sync_link_selected_button()
 
-    def _selected_result_pair(self) -> tuple[str, str]:
-        tiffs = [
-            p for p in self._selected_result_paths
-            if Path(p).suffix.lower() in {".tif", ".tiff"}
-        ]
-        zips = [
-            p for p in self._selected_result_paths
-            if Path(p).suffix.lower() == ".zip"
-        ]
-        if len(tiffs) == 1 and len(zips) == 1:
-            return tiffs[0], zips[0]
-        if len(tiffs) == 1 and not zips:
-            sibling = Path(tiffs[0]).with_suffix(".zip")
-            if sibling.is_file():
-                return tiffs[0], str(sibling.resolve())
-        if len(zips) == 1 and not tiffs:
-            for suffix in (".tif", ".tiff"):
-                sibling = Path(zips[0]).with_suffix(suffix)
-                if sibling.is_file():
-                    return str(sibling.resolve()), zips[0]
+    def _visible_result_pair_for(self, path: str) -> tuple[str, str]:
+        target_key = self._result_key(path)
+        if not target_key:
+            return "", ""
+        groups = (
+            self._current_groups
+            if self._current_groups
+            else [{"tiffs": self._current_tiffs, "zips": self._current_zips}]
+        )
+        for group in groups:
+            for _label, tinfo, zinfo in _pair_results(
+                list(group.get("tiffs") or []),
+                list(group.get("zips") or []),
+            ):
+                if not tinfo or not zinfo:
+                    continue
+                tiff_key = self._result_key(tinfo.get("path", ""))
+                zip_key = self._result_key(zinfo.get("path", ""))
+                if tiff_key and zip_key and target_key in {tiff_key, zip_key}:
+                    return tiff_key, zip_key
         return "", ""
 
-    def _sync_link_selected_button(self) -> None:
-        if not hasattr(self, "_link_selected_btn"):
-            return
-        tiff, zipf = self._selected_result_pair()
-        ok = bool(tiff and zipf and len(self._selected_result_paths) in {1, 2})
-        self._link_selected_btn.setEnabled(ok)
-        count = len(self._selected_result_paths)
-        self._link_selected_btn.setText(f"关联选中 {count}" if count else "关联选中")
+    def _update_visible_pair_indicator_state(self) -> None:
+        for indicator in self._rows_container.findChildren(_ResultPairIndicator):
+            keys = [self._result_key(p) for p in indicator.visible_pair_paths()]
+            keys = [k for k in keys if k]
+            indicator.set_selected(bool(keys) and all(
+                k in self._selected_result_paths for k in keys
+            ))
 
-    def _emit_link_selected_result(self) -> None:
-        tiff, zipf = self._selected_result_pair()
-        if tiff and zipf and len(self._selected_result_paths) in {1, 2}:
-            self._emit_link_result(tiff, zipf)
+    def _set_paired_selection_enabled(self, checked: bool) -> None:
+        self._paired_selection_enabled = bool(checked)
+        self._update_paired_selection_button_state()
+        self._update_options_button_tooltip()
+
+    def _update_paired_selection_button_state(self) -> None:
+        if not hasattr(self, "_paired_selection_btn"):
+            return
+        self._paired_selection_btn.blockSignals(True)
+        self._paired_selection_btn.setChecked(self._paired_selection_enabled)
+        self._paired_selection_btn.blockSignals(False)
+        self._paired_selection_btn.setObjectName(
+            "Outline" if self._paired_selection_enabled else "Ghost"
+        )
+        icon_name = (
+            "mdi6.checkbox-marked-outline"
+            if self._paired_selection_enabled
+            else "mdi6.checkbox-blank-outline"
+        )
+        color = (
+            icons.TONE_ACCENT
+            if self._paired_selection_enabled
+            else icons.TONE_MUTED
+        )
+        icons.set_button_icon(
+            self._paired_selection_btn, icon_name, color=color, size=14
+        )
+        state = "开" if self._paired_selection_enabled else "关"
+        self._paired_selection_btn.setToolTip(
+            f"联选：{state}；开启后单击 TIF/ZIP 会同时选择当前可见配对"
+        )
+        self._paired_selection_btn.style().unpolish(self._paired_selection_btn)
+        self._paired_selection_btn.style().polish(self._paired_selection_btn)
 
     # ── Internals ───────────────────────────────────────────────────────────────
 
@@ -1239,7 +1561,27 @@ class ResultsColumn(QWidget):
         self._thumb_cache[path] = pm
         return pm
 
+    def _queue_thumbnail(self, card: "_ResultCardBase") -> None:
+        self._thumb_queue.append(card)
+        if not self._thumb_timer.isActive():
+            self._thumb_timer.start()
+
+    def _load_next_thumbnail_batch(self) -> None:
+        loaded = 0
+        while self._thumb_queue and loaded < 2:
+            card = self._thumb_queue.popleft()
+            try:
+                if card.parent() is not None:
+                    card.load_thumbnail_now()
+                    loaded += 1
+            except RuntimeError:
+                continue
+        if not self._thumb_queue:
+            self._thumb_timer.stop()
+
     def _clear_rows(self) -> None:
+        self._thumb_queue.clear()
+        self._thumb_timer.stop()
         while self._rows_lay.count():
             it = self._rows_lay.takeAt(0)
             if it and it.widget():
@@ -1271,32 +1613,143 @@ class ResultsColumn(QWidget):
         else:
             self.load_uid("", self._current_tiffs, self._current_zips)
 
-    def _show_filename_menu(self) -> None:
+    def _should_show_paired_columns(self) -> bool:
+        if not self._paired_columns_enabled:
+            return False
+        width = 0
+        if hasattr(self, "_body"):
+            width = self._body.viewport().width()
+        if width <= 0:
+            width = self.width()
+        if width <= 0 or not self.isVisible():
+            return True
+        return width >= _MIN_PAIRED_COLUMNS_WIDTH
+
+    def _schedule_layout_refresh(self) -> None:
+        if hasattr(self, "_layout_refresh_timer"):
+            self._layout_refresh_timer.start()
+
+    def _refresh_layout_if_needed(self) -> None:
+        if not (self._current_tiffs or self._current_zips or self._current_groups):
+            return
+        show_paired_columns = self._should_show_paired_columns()
+        if show_paired_columns != self._rendered_paired_columns:
+            self._refresh_current_results()
+
+    def eventFilter(self, obj, event) -> bool:
+        if hasattr(self, "_body") and obj is self._body.viewport():
+            if event.type() == QEvent.Type.Resize:
+                self._schedule_layout_refresh()
+        return super().eventFilter(obj, event)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._schedule_layout_refresh()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._schedule_layout_refresh()
+
+    def _show_results_options_menu(self) -> None:
+        self._show_results_options_menu_at(
+            self._options_btn.mapToGlobal(self._options_btn.rect().bottomLeft())
+        )
+
+    def _show_body_menu(self, pos) -> None:
+        self._show_results_options_menu_at(
+            self._body.viewport().mapToGlobal(pos),
+            include_open=True,
+        )
+
+    def _show_results_options_menu_at(self, global_pos, *,
+                                      include_open: bool = False) -> None:
         menu = QMenu(self)
+        if include_open or self._results_dir:
+            open_act = menu.addAction("打开 results 文件夹")
+            open_act.setEnabled(bool(self._results_dir))
+            open_act.triggered.connect(self._open_results_folder)
+            menu.addSeparator()
+
+        view_menu = menu.addMenu("显示方式")
+        for key, label in (
+            ("list", "列表"),
+            ("large_thumbnail", "大缩略图"),
+        ):
+            act = view_menu.addAction(label)
+            act.setCheckable(True)
+            act.setChecked(self._result_view_mode == key)
+            act.triggered.connect(
+                lambda _=False, k=key: self._set_result_view_mode(k)
+            )
+
+        name_menu = menu.addMenu("显示名称")
         for key, label in (
             ("full", "完整文件名"),
             ("uid", "唯一编号"),
         ):
-            act = menu.addAction(("✓ " if self._filename_mode == key else "") + label)
+            act = name_menu.addAction(label)
+            act.setCheckable(True)
+            act.setChecked(self._filename_mode == key)
             act.triggered.connect(lambda _=False, k=key: self._set_filename_mode(k))
-        menu.exec(self._filename_btn.mapToGlobal(self._filename_btn.rect().bottomLeft()))
+
+        sort_menu = menu.addMenu("排序")
+        for key, label in (
+            ("seq", "顺序"),
+            ("name", "名称"),
+            ("type", "类型"),
+            ("size", "大小"),
+            ("mtime", "修改时间"),
+        ):
+            act = sort_menu.addAction(label)
+            act.setCheckable(True)
+            act.setChecked(self._sort_key == key)
+            act.triggered.connect(lambda _=False, k=key: self._set_sort_key(k))
+
+        thumb_menu = menu.addMenu("缩略图大小")
+        for size, label in (
+            (48, "小"),
+            (72, "中"),
+            (112, "大"),
+            (144, "最大"),
+        ):
+            act = thumb_menu.addAction(label)
+            act.setCheckable(True)
+            act.setChecked(self._thumb_size == size)
+            act.triggered.connect(lambda _=False, s=size: self._set_zoom(s))
+
+        menu.addSeparator()
+        columns_act = menu.addAction("双栏对照")
+        columns_act.setCheckable(True)
+        columns_act.setChecked(self._paired_columns_enabled)
+        columns_act.triggered.connect(self._set_paired_columns_enabled)
+
+        paired_selection_act = menu.addAction("联选 TIF/ZIP")
+        paired_selection_act.setCheckable(True)
+        paired_selection_act.setChecked(self._paired_selection_enabled)
+        paired_selection_act.triggered.connect(self._set_paired_selection_enabled)
+
+        menu.exec(global_pos)
 
     def _set_filename_mode(self, mode: str) -> None:
         if mode not in {"full", "uid"} or mode == self._filename_mode:
             return
         self._filename_mode = mode
-        self._filename_btn.setText("唯一编号" if mode == "uid" else "文件名")
+        self._update_options_button_tooltip()
+        self._refresh_current_results()
+
+    def _set_result_view_mode(self, mode: str) -> None:
+        if mode not in {"list", "large_thumbnail"} or mode == self._result_view_mode:
+            return
+        self._result_view_mode = mode
+        self._update_options_button_tooltip()
         self._refresh_current_results()
 
     def _set_zoom(self, size: int) -> None:
-        """Resize every result display-box (the 缩放 control)."""
+        """Resize every result thumbnail."""
         self._thumb_size = size
-        if self._zoom.value() != size:
-            self._zoom.blockSignals(True)
-            self._zoom.setValue(size)
-            self._zoom.blockSignals(False)
         for c in self._cards:
             c.set_thumb_size(size)
+        self._update_options_button_tooltip()
 
     def _set_collapsed(self, collapsed: bool) -> None:
         """Collapse / expand the whole results area (single toggle)."""
@@ -1305,7 +1758,7 @@ class ResultsColumn(QWidget):
         self._collapse_btn.setText("▸" if collapsed else "▾")
         self._collapse_btn.setChecked(collapsed)
 
-    def _sync_mode_buttons(self) -> None:
+    def _update_mode_button_state(self) -> None:
         is_many = self._display_mode == "many"
         for btn, checked in (
             (self._current_mode_btn, not is_many),
@@ -1318,55 +1771,47 @@ class ResultsColumn(QWidget):
             btn.style().polish(btn)
             btn.blockSignals(False)
 
-    def _show_sort_menu(self) -> None:
-        self._show_sort_menu_at(self._sort_btn.mapToGlobal(self._sort_btn.rect().bottomLeft()))
-
-    def _show_body_menu(self, pos) -> None:
-        self._show_sort_menu_at(self._body.viewport().mapToGlobal(pos), include_open=True)
-
-    def _show_sort_menu_at(self, global_pos, *, include_open: bool = False) -> None:
-        menu = QMenu(self)
-        if include_open:
-            open_act = menu.addAction("打开 results 文件夹")
-            open_act.setEnabled(bool(self._results_dir))
-            open_act.triggered.connect(self._open_results_folder)
-            menu.addSeparator()
-        for key, label in (
-            ("seq", "按顺序"),
-            ("name", "按名称"),
-            ("type", "按类型"),
-            ("size", "按大小"),
-            ("mtime", "按修改时间"),
-        ):
-            act = menu.addAction(("✓ " if self._sort_key == key else "") + label)
-            act.triggered.connect(lambda _=False, k=key: self._set_sort_key(k))
-        menu.exec(global_pos)
-
     def _set_sort_key(self, key: str) -> None:
         if key not in {"seq", "name", "type", "size", "mtime"}:
             return
         self._sort_key = key
-        self._sort_btn.setText({
+        self._update_options_button_tooltip()
+        if self._display_mode == "many":
+            self.load_many(self._current_groups)
+        else:
+            self.load_uid("", self._current_tiffs, self._current_zips)
+
+    def _set_paired_columns_enabled(self, checked: bool) -> None:
+        self._paired_columns_enabled = bool(checked)
+        self._update_options_button_tooltip()
+        if self._display_mode == "many":
+            self.load_many(self._current_groups)
+        else:
+            self.load_uid("", self._current_tiffs, self._current_zips)
+
+    def _update_options_button_tooltip(self) -> None:
+        if not hasattr(self, "_options_btn"):
+            return
+        view = "大缩略图" if self._result_view_mode == "large_thumbnail" else "列表"
+        filename = "唯一编号" if self._filename_mode == "uid" else "完整文件名"
+        sort_label = {
             "seq": "顺序",
             "name": "名称",
             "type": "类型",
             "size": "大小",
             "mtime": "修改时间",
-        }[key])
-        if self._display_mode == "many":
-            self.load_many(self._current_groups)
-        else:
-            self.load_uid("", self._current_tiffs, self._current_zips)
-
-    def _set_tile_view(self, checked: bool) -> None:
-        self._tile_view = bool(checked)
-        self._tile_btn.setText("两列" if self._tile_view else "列表")
-        icon_name = "mdi6.view-grid-outline" if self._tile_view else "mdi6.view-list-outline"
-        icons.set_button_icon(self._tile_btn, icon_name, color=icons.TONE_MUTED, size=14)
-        if self._display_mode == "many":
-            self.load_many(self._current_groups)
-        else:
-            self.load_uid("", self._current_tiffs, self._current_zips)
+        }.get(self._sort_key, "顺序")
+        columns = (
+            "双栏对照"
+            if self._paired_columns_enabled and self._rendered_paired_columns
+            else "单列"
+        )
+        if self._paired_columns_enabled and not self._rendered_paired_columns:
+            columns = "单列(宽度不足)"
+        paired = "联选开" if self._paired_selection_enabled else "联选关"
+        self._options_btn.setToolTip(
+            f"结果选项：{view} / {filename} / {sort_label} / {self._thumb_size}px / {columns} / {paired}"
+        )
 
     def _sort_rows(self, rows: list) -> list:
         def stat_value(info: dict, attr: str, default=0):
@@ -1394,7 +1839,7 @@ class ResultsColumn(QWidget):
             except Exception:
                 return (0, str(seq).lower())
 
-        def key(row):
+        def sort_key_for_result_pair(row):
             _label, tinfo, zinfo = row
             primary = tinfo or zinfo or {}
             name = file_name(primary)
@@ -1413,7 +1858,7 @@ class ResultsColumn(QWidget):
                         name.lower())
             return name_key
 
-        return sorted(list(rows or []), key=key)
+        return sorted(list(rows or []), key=sort_key_for_result_pair)
 
     def _remember_results_dir(self, composed_tiffs: list, archive_zips: list) -> None:
         for info in list(composed_tiffs or []) + list(archive_zips or []):

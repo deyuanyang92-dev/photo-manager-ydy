@@ -157,7 +157,7 @@ class TestSearch:
         results = svc.search("family", "多鳞")
         assert any(c.value == "Polynoidae" for c in results)
 
-    def test_nfkc_normalisation(self, svc):
+    def test_full_width_query_matches_normal_taxon_text(self, svc):
         """Full-width ASCII characters should match after NFKC normalisation."""
         # ｐ = U+FF50 (full-width p) normalises to p
         results = svc.search("family", "ｐolynoi")
@@ -322,11 +322,11 @@ class TestUpdate:
         })
         records, _ = svc.all_records(source_filter="user")
         rec_id = records[0]["recordId"]
-        result = svc.update(rec_id, {"familyCn": "多鳞虫科_updated"})
+        result = svc.update_user_record(rec_id, {"familyCn": "多鳞虫科_updated"})
         assert result["familyCn"] == "多鳞虫科_updated"
 
     def test_update_nonexistent_returns_none(self, svc):
-        result = svc.update("user:doesnotexist", {"familyCn": "x"})
+        result = svc.update_user_record("user:doesnotexist", {"familyCn": "x"})
         assert result is None
 
     def test_update_persists_to_disk(self, svc, tmp_dirs):
@@ -337,7 +337,7 @@ class TestUpdate:
         })
         records, _ = svc.all_records(source_filter="user")
         rec_id = records[0]["recordId"]
-        svc.update(rec_id, {"orderCn": "叶须虫目_new"})
+        svc.update_user_record(rec_id, {"orderCn": "叶须虫目_new"})
         data = json.loads(user_p.read_text())
         assert data[0]["orderCn"] == "叶须虫目_new"
 
@@ -349,7 +349,7 @@ class TestUpdate:
             "family": "Polynoidae", "species": "Halosydna brevisetosa",
         })
         records, _ = svc.all_records(source_filter="user")
-        svc.update(records[0]["recordId"], {"classCn": "x"})
+        svc.update_user_record(records[0]["recordId"], {"classCn": "x"})
         assert seed_p.read_text() == original
 
 
@@ -363,11 +363,11 @@ class TestDelete:
         })
         records, _ = svc.all_records(source_filter="user")
         rec_id = records[0]["recordId"]
-        assert svc.delete(rec_id) is True
+        assert svc.delete_user_record(rec_id) is True
         assert svc.user_count() == 0
 
     def test_delete_nonexistent_returns_false(self, svc):
-        assert svc.delete("user:doesnotexist") is False
+        assert svc.delete_user_record("user:doesnotexist") is False
 
     def test_delete_persists_to_disk(self, svc, tmp_dirs):
         _, user_p = tmp_dirs
@@ -376,7 +376,7 @@ class TestDelete:
             "family": "Polynoidae", "species": "Halosydna brevisetosa",
         })
         records, _ = svc.all_records(source_filter="user")
-        svc.delete(records[0]["recordId"])
+        svc.delete_user_record(records[0]["recordId"])
         data = json.loads(user_p.read_text())
         assert data == []
 
@@ -388,7 +388,7 @@ class TestDelete:
             "family": "Polynoidae", "species": "Halosydna brevisetosa",
         })
         records, _ = svc.all_records(source_filter="user")
-        svc.delete(records[0]["recordId"])
+        svc.delete_user_record(records[0]["recordId"])
         assert seed_p.read_text() == original
 
 
@@ -406,8 +406,8 @@ class TestSeedImmutability:
         records, _ = svc.all_records(source_filter="user")
         if records:
             rid = records[0]["recordId"]
-            svc.update(rid, {"classCn": "changed"})
-            svc.delete(rid)
+            svc.update_user_record(rid, {"classCn": "changed"})
+            svc.delete_user_record(rid)
 
     def test_seed_unchanged_after_learn_update_delete(self, svc, tmp_dirs):
         seed_p, user_p = tmp_dirs
@@ -461,7 +461,7 @@ class TestHistory:
         })
         records, _ = svc.all_records(source_filter="user")
         rec_id = records[0]["recordId"]
-        svc.update(rec_id, {"familyCn": "多鳞虫科_v2"})
+        svc.update_user_record(rec_id, {"familyCn": "多鳞虫科_v2"})
         records2, _ = svc.all_records(source_filter="user")
         hist = records2[0].get("history", [])
         assert len(hist) == 1
@@ -478,7 +478,7 @@ class TestHistory:
         records, _ = svc.all_records(source_filter="user")
         rec_id = records[0]["recordId"]
         for i in range(15):
-            svc.update(rec_id, {"orderCn": f"叶须虫目_v{i}"})
+            svc.update_user_record(rec_id, {"orderCn": f"叶须虫目_v{i}"})
         records2, _ = svc.all_records(source_filter="user")
         hist = records2[0].get("history", [])
         assert len(hist) <= 10
@@ -491,7 +491,7 @@ class TestHistory:
         })
         records, _ = svc.all_records(source_filter="user")
         rec_id = records[0]["recordId"]
-        svc.update(rec_id, {"orderCn": "叶须虫目_new"})
+        svc.update_user_record(rec_id, {"orderCn": "叶须虫目_new"})
         data = json.loads(user_p.read_text())
         hist = data[0].get("history", [])
         assert len(hist) == 1
@@ -505,7 +505,7 @@ class TestHistory:
         })
         records, _ = svc.all_records(source_filter="user")
         rec_id = records[0]["recordId"]
-        svc.update(rec_id, {"classCn": "多毛纲"})
+        svc.update_user_record(rec_id, {"classCn": "多毛纲"})
         records2, _ = svc.all_records(source_filter="user")
         before = records2[0]["history"][0]["before"]
         expected_keys = {
@@ -1008,7 +1008,7 @@ class TestTaxonomyViewSmoke:
         })
         records, _ = svc.all_records(source_filter="user")
         rec_id = records[0]["recordId"]
-        svc.update(rec_id, {"classCn": "多毛纲"})
+        svc.update_user_record(rec_id, {"classCn": "多毛纲"})
         records2, _ = svc.all_records(source_filter="user")
         rec = records2[0]
         assert "history" in rec

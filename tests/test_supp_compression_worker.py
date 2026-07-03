@@ -76,7 +76,7 @@ def test_worker_emits_finished_with_zipresult(qtbot, tmp_path):
     assert os.path.isfile(result.zip_path)
     # started_archiving carried the jpg count + tiff stem.
     assert captured["started"] == (2, "FJ-XM-B2-DLC001-1-T95E-20260601")
-    # TIFF never touched (red-line #1).
+    # Archive worker does not auto-delete TIFF.
     assert os.path.isfile(tiff)
 
 

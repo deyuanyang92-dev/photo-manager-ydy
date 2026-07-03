@@ -134,7 +134,7 @@ def activate(project_dir: str, db: sqlite3.Connection, uid: str) -> dict:
     if not uid:
         raise ValueError("uid 不能为空")
 
-    now = _iso_now()
+    now = _utc_now_iso()
     _ensure_tasks_table(db)
 
     # Deactivate all others (mutual exclusion)
@@ -178,7 +178,7 @@ def deactivate(project_dir: str, db: sqlite3.Connection, uid: str) -> dict:
     if not uid:
         raise ValueError("uid 不能为空")
 
-    now = _iso_now()
+    now = _utc_now_iso()
     _ensure_tasks_table(db)
     db.execute(
         "UPDATE tasks SET is_active = 0 WHERE uid = ?", (uid,)
@@ -205,7 +205,7 @@ def manual_assign(project_dir: str, uid: str, jpg_paths: list[str]) -> dict:
     if not jpg_paths:
         return {"ok": True, "assigned": True, "count": 0}
 
-    now = _iso_now()
+    now = _utc_now_iso()
     resolved_paths = [str(Path(p).resolve()) for p in jpg_paths]
 
     _append_event(project_dir, {
@@ -290,7 +290,7 @@ def set_collab_status(db: sqlite3.Connection, uid: str, status: str) -> None:
         except (json.JSONDecodeError, TypeError):
             raw = {}
     raw["status"] = status
-    raw["updatedAt"] = _iso_now()
+    raw["updatedAt"] = _utc_now_iso()
     db.execute(
         """
         INSERT INTO tasks (uid, raw_json) VALUES (?, ?)
@@ -320,10 +320,10 @@ def resolve_phase(collab_svc, db, uid: str) -> Optional[str]:
 
     Shared by the workbench batch bar and the sidebar phase dots so both read
     the same source of truth.  *collab_svc* is duck-typed (any object with a
-    ``store.get(uid).status.value``); pass None when collab is off.
+    ``store.get_task(uid).status.value``); pass None when collab is off.
     """
     try:
-        task = collab_svc.store.get(uid) if collab_svc is not None else None
+        task = collab_svc.store.get_task(uid) if collab_svc is not None else None
         if task is not None:
             return task.status.value if hasattr(task.status, "value") else str(task.status)
     except Exception:
@@ -335,5 +335,5 @@ def resolve_phase(collab_svc, db, uid: str) -> Optional[str]:
 
 # ── Internal helpers ───────────────────────────────────────────────────────────
 
-def _iso_now() -> str:
+def _utc_now_iso() -> str:
     return datetime.now(tz=timezone.utc).isoformat()

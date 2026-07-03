@@ -173,11 +173,11 @@ class _ResultLightboxDialog(QDialog):
         ftr.addStretch()
         self._prev_btn = QPushButton("← 上一张")
         self._prev_btn.setObjectName("Outline")
-        self._prev_btn.clicked.connect(self._prev)
+        self._prev_btn.clicked.connect(self._show_previous_result_preview)
         ftr.addWidget(self._prev_btn)
         self._next_btn = QPushButton("下一张 →")
         self._next_btn.setObjectName("Outline")
-        self._next_btn.clicked.connect(self._next)
+        self._next_btn.clicked.connect(self._show_next_result_preview)
         ftr.addWidget(self._next_btn)
         ftr.addStretch()
         ftr_widget = QWidget()
@@ -185,9 +185,9 @@ class _ResultLightboxDialog(QDialog):
         ftr_widget.setStyleSheet("border-top: 1px solid #ddd;")
         layout.addWidget(ftr_widget)
 
-        self._refresh()
+        self._refresh_result_preview()
 
-    def _refresh(self) -> None:
+    def _refresh_result_preview(self) -> None:
         if not self._items:
             self._name_lbl.setText("（无成果）")
             self._pos_lbl.setText("")
@@ -216,17 +216,17 @@ class _ResultLightboxDialog(QDialog):
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
-        self._refresh()
+        self._refresh_result_preview()
 
-    def _prev(self) -> None:
+    def _show_previous_result_preview(self) -> None:
         if self._idx > 0:
             self._idx -= 1
-            self._refresh()
+            self._refresh_result_preview()
 
-    def _next(self) -> None:
+    def _show_next_result_preview(self) -> None:
         if self._idx < len(self._items) - 1:
             self._idx += 1
-            self._refresh()
+            self._refresh_result_preview()
 
 
 # ── Subdir control widget ─────────────────────────────────────────────────────
@@ -263,8 +263,8 @@ class _SubdirControlWidget(QWidget):
         from app.services.project_service import (
             INCOMING_JPG_DIR,
             RESULTS_DIR,
-            get_incoming_jpg_dir,
-            get_results_dir,
+            resolve_incoming_jpg_dir,
+            resolve_results_dir,
         )
 
         self._project_dir = project_dir
@@ -273,9 +273,9 @@ class _SubdirControlWidget(QWidget):
 
         # Determine current subdir name
         if which == "incoming":
-            current_path = get_incoming_jpg_dir(project_dir)
+            current_path = resolve_incoming_jpg_dir(project_dir)
         else:
-            current_path = get_results_dir(project_dir)
+            current_path = resolve_results_dir(project_dir)
         self._current = Path(current_path).name
 
         lay = QHBoxLayout(self)
@@ -671,7 +671,7 @@ class _NewProjectDialog(QDialog):
         btns = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
-        btns.accepted.connect(self._on_accept)
+        btns.accepted.connect(self._accept_valid_project_candidate)
         btns.rejected.connect(self.reject)
 
         root = QVBoxLayout(self)
@@ -686,7 +686,7 @@ class _NewProjectDialog(QDialog):
             if not self._name_edit.text():
                 self._name_edit.setText(Path(path).name)
 
-    def _on_accept(self) -> None:
+    def _accept_valid_project_candidate(self) -> None:
         name = self._name_edit.text().strip()
         directory = self._dir_edit.text().strip()
         if not directory:

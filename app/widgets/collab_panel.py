@@ -155,7 +155,7 @@ class CollabPanel(QWidget):
         self._scan_btn.clicked.connect(self._on_scan)
         action_row.addWidget(self._scan_btn)
 
-        self._setup_btn = QPushButton("设置向导")
+        self._setup_btn = QPushButton("一键协作")
         self._setup_btn.setObjectName("Outline")
         self._setup_btn.setFixedHeight(26)
         self._setup_btn.clicked.connect(self._on_setup_wizard)
@@ -380,7 +380,7 @@ class CollabPanel(QWidget):
         svc = self._svc
         if svc is None:
             return
-        tasks = sorted(svc.store.all(), key=lambda t: t.updated_at, reverse=True)
+        tasks = sorted(svc.store.list_tasks(), key=lambda t: t.updated_at, reverse=True)
         self._task_title.setText(f"任务清单 ({len(tasks)})")
         self._task_table.setRowCount(len(tasks))
         for row, task in enumerate(tasks):
@@ -485,7 +485,7 @@ class CollabPanel(QWidget):
     def _on_assign(self, uid: str) -> None:
         if self._svc is None:
             return
-        task = self._svc.store.get(uid)
+        task = self._svc.store.get_task(uid)
         current = task.assignee if task else ""
         name, ok = QInputDialog.getText(
             self, "分配编号", f"分配 {uid} 给谁拍摄？", text=current or ""
@@ -497,7 +497,7 @@ class CollabPanel(QWidget):
             from app.services.collab_service import TaskStatus
             self._svc.store.update_status(uid, TaskStatus.ASSIGNED, assignee=name)
         except ValueError:
-            t = self._svc.store.get(uid)
+            t = self._svc.store.get_task(uid)
             if t:
                 t.assignee = name
         self._broadcast_status_update(uid, "assigned")
@@ -564,23 +564,43 @@ class CollabPanel(QWidget):
             return
         code = code.strip()
         svc.set_group_code(code)
-        self.ctx.settings.setValue("collab/team_code", code)
+        self.ctx.settings.team_code = code
+        try:
+            self.ctx.settings.flush_to_disk()
+        except Exception:  # noqa: BLE001
+            pass
         self._group_code_label.setText(code or "（未设置）")
 
     def _on_show_pairing(self) -> None:
         svc = self._svc
         if svc is None or not svc.is_running():
             return
-        from app.widgets.collab_pairing import encode_pairing, make_qr_pixmap, qr_available
+        from app.widgets.collab_pairing import (
+            encode_pairing,
+            generate_group_code,
+            make_qr_pixmap,
+            qr_available,
+        )
+        if not svc.group_code:
+            new_code = generate_group_code()
+            svc.set_group_code(new_code)
+            self.ctx.settings.team_code = new_code
+            try:
+                self.ctx.settings.flush_to_disk()
+            except Exception:  # noqa: BLE001
+                pass
         addr = svc.local_address()
         parts = addr.split(":")
         ip = parts[0] if parts else ""
         port = int(parts[1]) if len(parts) > 1 else 5050
         code = encode_pairing(ip, port, svc.group_code)
+        cb = QApplication.clipboard()
+        if cb:
+            cb.setText(code)
 
         dlg = QMessageBox(self)
         dlg.setWindowTitle("配对码")
-        dlg.setText(f"配对码 (发送给队友):\n\n{code}")
+        dlg.setText(f"配对码已复制:\n\n{code}")
         dlg.setDetailedText("")
         if qr_available():
             qr = make_qr_pixmap(code)
@@ -600,7 +620,6 @@ class CollabPanel(QWidget):
             return
         svc = self._svc
         if svc:
-            svc.add_manual_peer(info.ip, info.port)
             if info.group_code:
                 current = svc.group_code
                 if current and current != info.group_code:
@@ -614,7 +633,21 @@ class CollabPanel(QWidget):
                     if reply != QMessageBox.StandardButton.Yes:
                         return
                 svc.set_group_code(info.group_code)
-                self.ctx.settings.setValue("collab/team_code", info.group_code)
+                self.ctx.settings.team_code = info.group_code
+            self.ctx.settings.collab_enabled = True
+            try:
+                self.ctx.settings.flush_to_disk()
+            except Exception:  # noqa: BLE001
+                pass
+            if not svc.is_running():
+                project_dir = self._current_project_dir()
+                svc.start(
+                    project_name=project_dir,
+                    group_code=info.group_code,
+                    project_dir=project_dir,
+                )
+            svc.add_manual_peer(info.ip, info.port)
+            self._refresh_all()
 
     def _on_manual_connect(self) -> None:
         """Manually add a peer from the IP/port inputs (mDNS-failure fallback).
@@ -672,6 +705,13 @@ class CollabPanel(QWidget):
         self._svc = getattr(self.ctx, "collab_service", None)
         self._connect_signals()
         self._refresh_all()
+
+    def _current_project_dir(self) -> str:
+        return str(
+            getattr(self.ctx, "current_project_dir", "")
+            or getattr(getattr(self.ctx, "settings", None), "last_project_dir", "")
+            or ""
+        )
 
     # ── Initial data load ──────────────────────────────────────────────────
 

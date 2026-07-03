@@ -79,6 +79,7 @@ def _make_ctx(project_dir: str | None = None, db: sqlite3.Connection | None = No
     ctx.settings.auto_activate_on_new_specimen = False
     ctx.settings.auto_organize_after_compose = False
     ctx.settings.silent_compose = False
+    ctx.settings.delete_jpg_after_archive = True
     ctx.collab_service = None
     return ctx
 
@@ -1258,6 +1259,108 @@ class TestMonitorPanel:
         w.load_scan(result)
 
 
+class TestWorkbenchMonitorAttribution:
+    def test_no_active_clears_historical_jpg_attribution_for_monitor_display_only(self):
+        from app.services.monitor_service import FileEntry, ScanResult
+        from app.views.workbench_view import WorkbenchView
+
+        w = WorkbenchView(_make_ctx())
+        result = ScanResult(
+            project_dir="/fake",
+            jpg_files=[
+                FileEntry(
+                    name="IMG_001.jpg",
+                    path="/fake/IMG_001.jpg",
+                    kind="jpg",
+                    size=1000,
+                    mtime="2026-06-01T00:00:00+00:00",
+                    attributed_specimen_id="OLD-UID",
+                )
+            ],
+        )
+
+        display_result = w._monitor_display_scan_result(result)
+
+        assert display_result.jpg_files[0].attributed_specimen_id is None
+        assert result.jpg_files[0].attributed_specimen_id == "OLD-UID"
+
+    def test_apply_scan_keeps_raw_attribution_but_hides_monitor_owner_when_no_active(self):
+        from app.services.monitor_service import FileEntry, ScanResult
+        from app.views.workbench_view import WorkbenchView
+
+        w = WorkbenchView(_make_ctx())
+        result = ScanResult(
+            project_dir="/fake",
+            jpg_files=[
+                FileEntry(
+                    name="IMG_001.jpg",
+                    path="/fake/IMG_001.jpg",
+                    kind="jpg",
+                    size=1000,
+                    mtime="2026-06-01T00:00:00+00:00",
+                    attributed_specimen_id="OLD-UID",
+                )
+            ],
+        )
+
+        w._apply_monitor_scan_result(result)
+
+        assert w._last_scan_result.jpg_files[0].attributed_specimen_id == "OLD-UID"
+        assert w._monitor._scan_result.jpg_files[0].attributed_specimen_id is None
+        assert result.jpg_files[0].attributed_specimen_id == "OLD-UID"
+
+    def test_display_filter_does_not_break_later_active_attributed_lookup(self, tmp_path):
+        from app.services.monitor_service import FileEntry, ScanResult
+        from app.views.workbench_view import WorkbenchView
+
+        db = _make_db(":memory:")
+        ctx = _make_ctx(project_dir=str(tmp_path), db=db)
+        w = WorkbenchView(ctx)
+        jpg = tmp_path / "IMG_001.jpg"
+        result = ScanResult(
+            project_dir=str(tmp_path),
+            jpg_files=[
+                FileEntry(
+                    name=jpg.name,
+                    path=str(jpg),
+                    kind="jpg",
+                    size=1000,
+                    mtime="2026-06-01T00:00:00+00:00",
+                    attributed_specimen_id="ACTIVE-UID",
+                )
+            ],
+        )
+
+        w._apply_monitor_scan_result(result)
+
+        assert w._get_attributed_jpg_paths("ACTIVE-UID") == [str(jpg)]
+
+    def test_active_keeps_jpg_attribution_for_monitor(self, monkeypatch):
+        from app.services.monitor_service import FileEntry, ScanResult
+        from app.views.workbench_view import WorkbenchView
+
+        w = WorkbenchView(_make_ctx())
+        monkeypatch.setattr(w, "_get_active_uid", lambda: "ACTIVE-UID")
+        result = ScanResult(
+            project_dir="/fake",
+            jpg_files=[
+                FileEntry(
+                    name="IMG_001.jpg",
+                    path="/fake/IMG_001.jpg",
+                    kind="jpg",
+                    size=1000,
+                    mtime="2026-06-01T00:00:00+00:00",
+                    attributed_specimen_id="ACTIVE-UID",
+                )
+            ],
+        )
+
+        display_result = w._monitor_display_scan_result(result)
+
+        assert display_result.jpg_files[0].attributed_specimen_id == "ACTIVE-UID"
+        assert display_result is result
+
+
 # ── ResultsColumn ─────────────────────────────────────────────────────────────
 
 class TestResultsColumn:
@@ -1691,10 +1794,10 @@ class TestWorkbenchWormsFill:
 # ── Delete with TIFF warning ───────────────────────────────────────────────────
 
 class TestDeleteWithTiffWarning:
-    """Test that MonitorPanel._on_delete_clicked identifies TIFF in selection and deletes JPGs."""
+    """Test that MonitorPanel._delete_selected_pending_files identifies TIFF in selection and deletes JPGs."""
 
     def test_actual_jpg_deletion(self, tmp_path):
-        """_on_delete_clicked must actually call os.unlink on confirmed JPG paths."""
+        """_delete_selected_pending_files must actually call os.unlink on confirmed JPG paths."""
         from app.widgets.monitor_panel import MonitorPanel
         from app.services.monitor_service import FileEntry, ScanResult
         ctx = _make_ctx()
@@ -1714,11 +1817,11 @@ class TestDeleteWithTiffWarning:
         from unittest.mock import patch
         from PyQt6.QtWidgets import QMessageBox
         with patch.object(QMessageBox, 'question', return_value=QMessageBox.StandardButton.Yes):
-            w._on_delete_clicked()
+            w._delete_selected_pending_files()
         assert not os.path.exists(jpg_path), "JPG must be deleted after confirm"
 
     def test_tiff_delete_asks_confirm_then_deletes(self, tmp_path):
-        """TIFF 可删（用户推翻旧「TIFF 永不删」UI 封锁）：删前弹确认框，确认才删。"""
+        """TIFF 可删：删前弹确认框，确认才删。"""
         from app.widgets.monitor_panel import MonitorPanel, _FileCard
         ctx = _make_ctx()
         w = MonitorPanel(ctx)
@@ -1742,7 +1845,7 @@ class TestDeleteWithTiffWarning:
         from PyQt6.QtWidgets import QMessageBox
         with patch.object(QMessageBox, "question",
                           return_value=QMessageBox.StandardButton.Yes) as mq:
-            w._on_delete_clicked()
+            w._delete_selected_pending_files()
             mq.assert_called_once()      # 弹了确认框
         assert not tif.exists()          # 确认 → 真删
 
@@ -1773,7 +1876,7 @@ class TestDeleteWithTiffWarning:
         assert not w._del_btn.isEnabled()
 
     def test_tiff_path_detection(self):
-        """_on_delete_clicked must detect .tif / .tiff paths in selection."""
+        """_delete_selected_pending_files must detect .tif / .tiff paths in selection."""
         from app.widgets.monitor_panel import _FileCard, MonitorPanel
         ctx = _make_ctx()
         w = MonitorPanel(ctx)
@@ -1977,8 +2080,129 @@ class TestWorkbenchImportMedia:
 
         assert sorted(Path(p).name for p in imported) == ["HeliconFocus.tif", "P6202064.JPG"]
         assert (project / "incoming-jpg" / "P6202064.JPG").read_bytes() == b"jpg"
-        assert (project / "results" / "HeliconFocus.tif").read_bytes() == b"tif"
+        assert (project / "incoming-jpg" / "HeliconFocus.tif").read_bytes() == b"tif"
         w._refresh_monitor.assert_called_once()
+
+    def test_add_photos_button_starts_background_import(self, tmp_path, monkeypatch):
+        """User-facing add-photo action must not copy files on the GUI thread."""
+        from PyQt6.QtWidgets import QFileDialog
+        from app.views.workbench_view import WorkbenchView
+
+        class _Signal:
+            def __init__(self):
+                self.callbacks = []
+
+            def connect(self, callback):
+                self.callbacks.append(callback)
+
+        class FakeImportWorker:
+            instances = []
+
+            def __init__(self, source_paths, incoming_dir, parent=None):
+                self.source_paths = list(source_paths)
+                self.incoming_dir = incoming_dir
+                self.parent = parent
+                self.started_import = _Signal()
+                self.completed = _Signal()
+                self.failed = _Signal()
+                self.finished = _Signal()
+                self.started = False
+                FakeImportWorker.instances.append(self)
+
+            def isRunning(self):
+                return self.started
+
+            def start(self):
+                self.started = True
+
+            def deleteLater(self):
+                pass
+
+        project = tmp_path / "project"
+        camera = tmp_path / "camera"
+        project.mkdir()
+        camera.mkdir()
+        jpg = camera / "P6202064.JPG"
+        jpg.write_bytes(b"jpg")
+
+        monkeypatch.setattr(
+            QFileDialog,
+            "getOpenFileNames",
+            lambda *args, **kwargs: ([str(jpg)], ""),
+        )
+        monkeypatch.setattr(
+            "app.workers.photo_import_worker.PhotoImportWorker",
+            FakeImportWorker,
+        )
+
+        w = WorkbenchView(_make_ctx(project_dir=str(project)))
+        w._import_media_paths = MagicMock()
+        w._refresh_monitor = MagicMock()
+
+        w._on_add_jpg_files()
+
+        assert len(FakeImportWorker.instances) == 1
+        worker = FakeImportWorker.instances[0]
+        assert worker.source_paths == [str(jpg)]
+        assert Path(worker.incoming_dir) == project / "incoming-jpg"
+        assert worker.started is True
+        w._import_media_paths.assert_not_called()
+        w._refresh_monitor.assert_not_called()
+        assert not w._monitor._add_btn.isEnabled()
+
+    def test_background_import_finish_refreshes_monitor(self, tmp_path):
+        from app.services.photo_import_service import PhotoImportResult
+        from app.views.workbench_view import WorkbenchView
+
+        project = tmp_path / "project"
+        project.mkdir()
+        jpg = project / "incoming-jpg" / "P6202064.JPG"
+        result = PhotoImportResult(
+            imported_paths=[str(jpg)],
+            imported_jpg_paths=[str(jpg)],
+        )
+        w = WorkbenchView(_make_ctx(project_dir=str(project)))
+        w._refresh_monitor = MagicMock()
+
+        w._on_photo_import_finished(
+            result,
+            source="添加照片",
+            incoming_label="incoming-jpg",
+            project_dir=str(project),
+        )
+
+        w._refresh_monitor.assert_called_once()
+
+    def test_clear_pending_queue_uses_safe_clear_service_not_delete(self, tmp_path, monkeypatch):
+        from app.services.photo_import_service import PendingClearResult
+        from app.views.workbench_view import WorkbenchView
+
+        project = tmp_path / "project"
+        project.mkdir()
+        incoming_file = project / "incoming-jpg" / "wrong.tif"
+        calls = []
+
+        def fake_clear_pending(project_dir, paths):
+            calls.append((project_dir, list(paths)))
+            return PendingClearResult(stashed_paths=[str(project / "_data" / "cleared-pending" / "wrong.tif")])
+
+        monkeypatch.setattr(
+            "app.services.photo_import_service.clear_pending_imports",
+            fake_clear_pending,
+        )
+        w = WorkbenchView(_make_ctx(project_dir=str(project)))
+        w._refresh_monitor = MagicMock()
+        w._monitor._on_select_none = MagicMock()
+        w._monitor._delete_paths = MagicMock()
+        w._status_message = MagicMock()
+
+        w._on_clear_pending_queue([str(incoming_file)])
+
+        assert calls == [(str(project), [str(incoming_file)])]
+        w._monitor._delete_paths.assert_not_called()
+        w._monitor._on_select_none.assert_called_once()
+        w._refresh_monitor.assert_called_once()
+        w._status_message.assert_called_once()
 
 
 class TestResultsColumnOpenExplorer:
@@ -2198,10 +2422,10 @@ class TestGroupingPanelCaptureActions:
         # Body starts NOT explicitly hidden (checked=True on toggle btn).
         assert not w._group_body.isHidden()
         # Simulate toggle off
-        w._on_group_toggle(False)
+        w._set_group_editor_expanded(False)
         assert w._group_body.isHidden()
         # Toggle back on
-        w._on_group_toggle(True)
+        w._set_group_editor_expanded(True)
         assert not w._group_body.isHidden()
 
     def test_phase_pills_exist(self):
@@ -2452,7 +2676,7 @@ class TestMetadataPanelGeocode:
         w._lon.setText("abc")
         w._lat.setText("25.6")
         with _mock.patch("app.utils.ui.warn") as warn_mock:
-            w._do_auto_reverse()
+            w._auto_fill_geo_area_from_lon_lat()
             warn_mock.assert_not_called()
         assert w._geo_status.text()  # inline status set
 
@@ -2825,8 +3049,33 @@ class TestSupplementaryArchival:
             MW.return_value = inst
             w._run_supplementary([jpg, tiff])
         inst.start.assert_called_once()
+        assert MW.call_args.kwargs["delete_jpg"] is False
         assert w._supp_pending is not None
         assert w._supp_pending.uid == "FJ-XM-B2-DLC001-T95E-20260601"
+        db.close()
+
+    def test_supplementary_default_deletes_loose_jpg_after_archive(self, qt_app, tmp_path):
+        """Default organise setting passes delete_jpg=True to the archive worker."""
+        from unittest.mock import patch, MagicMock
+        from app.views.workbench_view import WorkbenchView
+
+        proj, db = self._project_with_specimen(tmp_path)
+        ctx = _make_ctx(proj, db)
+        w = WorkbenchView(ctx)
+        incoming = os.path.join(proj, "incoming-jpg")
+        jpg = os.path.join(incoming, "a.jpg")
+        tiff = os.path.join(incoming, "FJ-XM-B2-DLC001-1-T95E-20260601.tif")
+        Path(jpg).write_bytes(b"x")
+        Path(tiff).write_bytes(b"x")
+
+        with patch("app.workers.supp_compression_worker.SuppCompressionWorker") as MW, \
+                patch("app.utils.ui.warn"), patch("app.utils.ui.info"):
+            inst = MagicMock()
+            MW.return_value = inst
+            w._run_supplementary([jpg, tiff])
+
+        inst.start.assert_called_once()
+        assert MW.call_args.kwargs["delete_jpg"] is True
         db.close()
 
     def test_finished_moves_tiff_and_zip_to_results(self, qt_app, tmp_path):
@@ -2868,7 +3117,7 @@ class TestSupplementaryArchival:
             "TIFF must be moved into results/"
         assert os.path.isfile(os.path.join(results_dir, os.path.basename(zip_))), \
             "ZIP must be moved into results/"
-        # Source TIFF moved (data preserved at dest, never destroyed).
+        # Source TIFF moved into results; this is organise, not deletion.
         assert not os.path.isfile(tiff)
         db.close()
 
@@ -2923,7 +3172,7 @@ class TestPhasePillWiring:
 
         w._on_phase_clicked("shooting")
 
-        assert ctx.collab_service.store.get("U1").status is TaskStatus.SHOOTING
+        assert ctx.collab_service.store.get_task("U1").status is TaskStatus.SHOOTING
         assert activation_service.get_collab_status(db, "U1") == "shooting"
         assert w._monitor._phase_pills["shooting"].isChecked()
 
@@ -2953,7 +3202,7 @@ class TestPhasePillWiring:
 
         w._on_phase_clicked("done")  # 跳格,人工标记应成功
 
-        assert ctx.collab_service.store.get("U1").status is TaskStatus.DONE
+        assert ctx.collab_service.store.get_task("U1").status is TaskStatus.DONE
         assert activation_service.get_collab_status(db, "U1") == "done"
         assert w._monitor._phase_pills["done"].isChecked()
         assert not w._monitor._phase_pills["shooting"].isChecked()
@@ -2961,7 +3210,7 @@ class TestPhasePillWiring:
     def test_click_without_active_uid_is_noop(self, tmp_path):
         w, ctx, db = self._make_view(tmp_path)
         w._on_phase_clicked("shooting")  # 无激活编号,不应崩溃
-        assert ctx.collab_service.store.get("shooting") is None
+        assert ctx.collab_service.store.get_task("shooting") is None
         assert all(not b.isChecked() for b in w._monitor._phase_pills.values())
 
     # ── _on_phase_mark: 侧边栏点点 → 标记任意编号(无需激活) ──────────────────
@@ -2976,7 +3225,7 @@ class TestPhasePillWiring:
         w._on_phase_mark("OTHER", "organizing")  # OTHER 未激活
 
         assert activation_service.get_collab_status(db, "OTHER") == "organizing"
-        assert ctx.collab_service.store.get("OTHER").status is TaskStatus.ORGANIZING
+        assert ctx.collab_service.store.get_task("OTHER").status is TaskStatus.ORGANIZING
         # 激活编号未被改动 / 仍激活
         assert activation_service.get_active_uid(db) == "ACTIVE"
 
@@ -2999,11 +3248,11 @@ class TestPhasePillWiring:
         w._on_phase_mark("B", "shot_done")
         w._on_phase_mark("B", "organizing")
         w._on_phase_mark("B", "done")
-        assert ctx.collab_service.store.get("B").status is TaskStatus.DONE
+        assert ctx.collab_service.store.get_task("B").status is TaskStatus.DONE
 
         w._on_phase_mark("B", "organizing")  # 回退
 
-        assert ctx.collab_service.store.get("B").status is TaskStatus.ORGANIZING
+        assert ctx.collab_service.store.get_task("B").status is TaskStatus.ORGANIZING
         assert activation_service.get_collab_status(db, "B") == "organizing"
 
 
@@ -3027,7 +3276,7 @@ class TestActivateBehaviour:
         w, ctx, db = self._make_view(tmp_path)
         w._on_sidebar_activate("FJ-XM-B2-AAA001-T95E-20260601")
         uid = "FJ-XM-B2-AAA001-T95E-20260601"
-        assert ctx.collab_service.store.get(uid).status is TaskStatus.SHOOTING
+        assert ctx.collab_service.store.get_task(uid).status is TaskStatus.SHOOTING
         assert activation_service.get_collab_status(db, uid) == "shooting"
 
     def test_activate_keeps_existing_later_phase(self, tmp_path):
@@ -3039,7 +3288,7 @@ class TestActivateBehaviour:
             w._on_phase_mark(uid, s)
         w._on_sidebar_activate(uid)
         # 激活不得把已有更高阶段重置回 shooting
-        assert ctx.collab_service.store.get(uid).status is TaskStatus.ORGANIZING
+        assert ctx.collab_service.store.get_task(uid).status is TaskStatus.ORGANIZING
 
     def test_switch_active_warns_old_keeps_photos(self, tmp_path, monkeypatch):
         w, ctx, db = self._make_view(tmp_path)
@@ -3911,7 +4160,7 @@ class TestPostHocTiffRecognition:
         )
         w._save_timer.start()
 
-        w._on_import_tiff(uid, 0)
+        w._persist_imported_group_tiff(uid, 0)
 
         assert not w._save_timer.isActive()
         saved = load_grouping(db, uid).groups[0]
@@ -4479,6 +4728,98 @@ class TestImplicitCompose:
         w._on_compose_implicit()
         assert calls == [(self.UID, 0)]
 
+    def test_compose_implicit_organise_with_preview_waits_for_interactive_compose(
+        self, tmp_path, monkeypatch
+    ):
+        selected = [str(tmp_path / "a.jpg"), str(tmp_path / "b.jpg")]
+        w, ctx, db = self._make_view(tmp_path, [])
+        ctx.settings.silent_compose = False
+        monkeypatch.setattr(w, "_get_active_uid", lambda: self.UID)
+        monkeypatch.setattr(w._monitor, "selected_jpg_paths", lambda: selected)
+        monkeypatch.setattr(w, "_assign_selected_jpgs_to_uid", lambda uid, paths: None)
+        monkeypatch.setattr(
+            w,
+            "_compose_group_headless",
+            lambda *a, **k: pytest.fail("preview-on compose+organise must not run headless"),
+        )
+        calls = []
+
+        def _fake_interactive(uid, idx, **kw):
+            calls.append(("compose-preview", idx, callable(kw.get("on_composed"))))
+            kw["on_composed"](True)
+
+        monkeypatch.setattr(w, "_on_compose_requested", _fake_interactive)
+        monkeypatch.setattr(
+            w,
+            "_on_organise_requested",
+            lambda uid, idx, **kw: calls.append(
+                ("organise", idx, kw.get("silent_batch"), callable(kw.get("on_complete")))
+            ) or True,
+        )
+
+        w._on_compose_implicit(organise=True)
+
+        assert calls == [
+            ("compose-preview", 0, True),
+            ("organise", 0, True, True),
+        ]
+
+    def test_interactive_compose_notifies_callback_after_preview_save(
+        self, tmp_path, monkeypatch
+    ):
+        from app.services.grouping_service import ADHOC_GROUPING_UID, Group, save_grouping
+        import app.services.helicon_service as helicon_service
+        import app.views.workbench_view as workbench_view
+
+        jpgs = []
+        for name in ("a.jpg", "b.jpg"):
+            path = tmp_path / name
+            path.write_bytes(b"\xff\xd8\xff")
+            jpgs.append(str(path))
+        w, ctx, db = self._make_view(tmp_path, [])
+        save_grouping(
+            db,
+            ADHOC_GROUPING_UID,
+            [Group(group_index=0, jpg_paths=jpgs, output_name="preview-output")],
+            clean_phantoms=False,
+        )
+        monkeypatch.setattr(w, "_show_compose_preview", lambda paths: list(paths))
+        monkeypatch.setattr(helicon_service, "detect_helicon", lambda: "/fake/Helicon.exe")
+
+        def _fake_stack(jpg_paths, output_path, params, on_finished, on_failed):
+            Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+            Path(output_path).write_bytes(b"II*\x00fake")
+            on_finished(output_path)
+
+        class FakeComposeDialog:
+            ACTION_SAVE = "save"
+            ACTION_CANCEL = "cancel"
+            ACTION_RECOMPOSE = "recompose"
+
+            def __init__(self, jpg_paths, tiff_path, params, **kwargs):
+                self._params = dict(params)
+
+            def exec(self):
+                return 0
+
+            def action(self):
+                return self.ACTION_SAVE
+
+            def params(self):
+                return self._params
+
+        monkeypatch.setattr(w, "_run_helicon_stack", _fake_stack)
+        monkeypatch.setattr(workbench_view, "_ComposeWorkbenchDialog", FakeComposeDialog)
+        done = []
+
+        w._on_compose_requested(
+            ADHOC_GROUPING_UID,
+            0,
+            on_composed=lambda ok: done.append(ok),
+        )
+
+        assert done == [True]
+
     def test_toolbar_preview_toggle_controls_silent_compose(self, tmp_path):
         w, ctx, db = self._make_view(tmp_path, [])
 
@@ -4502,6 +4843,7 @@ class TestImplicitCompose:
     def test_compose_implicit_organise_runs_after_headless_success(self, tmp_path, monkeypatch):
         selected = [str(tmp_path / "a.jpg"), str(tmp_path / "b.jpg")]
         w, ctx, db = self._make_view(tmp_path, [])
+        ctx.settings.silent_compose = True
         monkeypatch.setattr(w, "_get_active_uid", lambda: self.UID)
         monkeypatch.setattr(w._monitor, "selected_jpg_paths", lambda: selected)
         monkeypatch.setattr(w, "_assign_selected_jpgs_to_uid", lambda uid, paths: None)
@@ -4526,6 +4868,7 @@ class TestImplicitCompose:
     ):
         selected = [str(tmp_path / "a.jpg"), str(tmp_path / "b.jpg")]
         w, ctx, db = self._make_view(tmp_path, [])
+        ctx.settings.silent_compose = True
         monkeypatch.setattr(w, "_get_active_uid", lambda: self.UID)
         monkeypatch.setattr(w._monitor, "selected_jpg_paths", lambda: selected)
         monkeypatch.setattr(w, "_assign_selected_jpgs_to_uid", lambda uid, paths: None)
@@ -5234,7 +5577,7 @@ class TestBatchComposeOrganise:
         w, ctx, uid, db = self._build(tmp_path)
         self._patch_helicon_present(monkeypatch)
         w._grouping.load_grouping(uid, load_grouping(db, uid))
-        w._grouping._on_group_selected_changed(1, True)
+        w._grouping._track_group_selection_state(1, True)
         calls = []
         monkeypatch.setattr(
             w, "_compose_group_headless",
@@ -5276,7 +5619,7 @@ class TestBatchComposeOrganise:
         ])
         db.commit()
         w._grouping.load_grouping(uid, load_grouping(db, uid))
-        w._grouping._on_group_selected_changed(1, True)
+        w._grouping._track_group_selection_state(1, True)
         calls = []
         monkeypatch.setattr(
             w, "_on_organise_requested",
@@ -5432,6 +5775,7 @@ class TestBatchComposeOrganise:
             deletion_skipped_reason = ""
 
         def _fake_archive(jpg_paths, tiff_path, project_dir, delete_jpg, **kwargs):
+            assert delete_jpg is True
             assert kwargs.get("output_dir") == str(tmp_path / "results")
             result = _ArchiveResult()
             result.zip_path = str(Path(kwargs["output_dir"]) / Path(tiff_path).with_suffix(".zip").name)
@@ -5985,7 +6329,7 @@ class TestAutoGroupOrganize:
             MockChooser.MODE_PROJECT = "project"
             inst = MockChooser.return_value
             inst.exec.return_value = QDialog.DialogCode.Accepted
-            inst.mode.return_value = "folder"
+            inst.selected_source_mode.return_value = "folder"
             w._on_auto_group_organize()
 
         assert seen == [w._grouping_dialog]
@@ -6015,7 +6359,7 @@ class TestAutoGroupOrganize:
             MockChooser.MODE_PROJECT = "project"
             inst = MockChooser.return_value
             inst.exec.return_value = QDialog.DialogCode.Accepted
-            inst.mode.return_value = "folder"
+            inst.selected_source_mode.return_value = "folder"
             w._on_auto_group_organize()
 
         assert seen

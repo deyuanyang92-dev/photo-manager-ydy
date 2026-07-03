@@ -46,6 +46,11 @@ _INACTIVE_STYLE = (
 )
 
 
+def _chunks(values: list[str], size: int = 900):
+    for i in range(0, len(values), size):
+        yield values[i:i + size]
+
+
 class _ClickableLabel(QLabel):
     clicked = pyqtSignal()
 
@@ -78,6 +83,10 @@ class SpecimenSidebar(QWidget):
     new_specimen_requested = pyqtSignal()
     edit_specimen_requested = pyqtSignal(str)
     collab_manager_requested = pyqtSignal()   # "协作管理" button clicked
+    sync_selected_requested = pyqtSignal()
+    sync_project_requested = pyqtSignal()
+    sync_selected_overwrite_requested = pyqtSignal()
+    sync_project_overwrite_requested = pyqtSignal()
     print_labels_requested = pyqtSignal(str)
     delete_specimen_requested = pyqtSignal(str)
     print_rna_queue_requested = pyqtSignal()
@@ -254,6 +263,35 @@ class SpecimenSidebar(QWidget):
         self._collab_sync.setObjectName("MutedSmall")
         cs_lay.addWidget(self._collab_sync)
 
+        sync_btn_row = QHBoxLayout()
+        sync_btn_row.setContentsMargins(0, 0, 0, 0)
+        sync_btn_row.setSpacing(6)
+
+        self._collab_sync_selected_btn = QPushButton("同步选中")
+        self._collab_sync_selected_btn.setObjectName("Ghost")
+        self._collab_sync_selected_btn.setFixedHeight(26)
+        self._collab_sync_selected_btn.setToolTip("从在线队友补齐当前选中编号的照片/TIF/ZIP")
+        selected_menu = QMenu(self._collab_sync_selected_btn)
+        selected_smart = selected_menu.addAction("智能补齐")
+        selected_force = selected_menu.addAction("强制覆盖本机")
+        selected_smart.triggered.connect(lambda _=False: self.sync_selected_requested.emit())
+        selected_force.triggered.connect(lambda _=False: self.sync_selected_overwrite_requested.emit())
+        self._collab_sync_selected_btn.setMenu(selected_menu)
+        sync_btn_row.addWidget(self._collab_sync_selected_btn)
+
+        self._collab_sync_project_btn = QPushButton("同步项目")
+        self._collab_sync_project_btn.setObjectName("Ghost")
+        self._collab_sync_project_btn.setFixedHeight(26)
+        self._collab_sync_project_btn.setToolTip("从在线队友补齐整个项目缺失的照片/TIF/ZIP")
+        project_menu = QMenu(self._collab_sync_project_btn)
+        project_smart = project_menu.addAction("智能补齐")
+        project_force = project_menu.addAction("强制覆盖本机")
+        project_smart.triggered.connect(lambda _=False: self.sync_project_requested.emit())
+        project_force.triggered.connect(lambda _=False: self.sync_project_overwrite_requested.emit())
+        self._collab_sync_project_btn.setMenu(project_menu)
+        sync_btn_row.addWidget(self._collab_sync_project_btn)
+        cs_lay.addLayout(sync_btn_row)
+
         self._collab_mgr_btn = QPushButton("协作面板")
         self._collab_mgr_btn.setObjectName("Ghost")
         self._collab_mgr_btn.setFixedHeight(26)
@@ -338,6 +376,35 @@ class SpecimenSidebar(QWidget):
         except Exception:
             pass
 
+        # Merge UID claims synced from LAN peers so the left rail is the live
+        # collaboration index even before that specimen's full metadata exists
+        # locally.
+        try:
+            svc = getattr(self.ctx, "collab_service", None)
+            if svc is not None and svc.is_running():
+                existing = {r["uid"] for r in rows}
+                for task in svc.store.list_tasks():
+                    uid = normalize_uid(getattr(task, "uid", "") or "")
+                    if not uid or uid in existing:
+                        continue
+                    rows.append(
+                        {
+                            "uid": uid,
+                            "name": "",
+                            "name_cn": "局域网同步编号",
+                            "storage": "",
+                            "collection_date": "",
+                            "photo_date": "",
+                            "row_order": 999999,
+                            "is_rna": False,
+                            "needs_attention": False,
+                            "collab_only": True,
+                        }
+                    )
+                    existing.add(uid)
+        except Exception:
+            pass
+
         # Merge active status from tasks table
         active_uids: set[str] = set()
         try:
@@ -370,16 +437,20 @@ class SpecimenSidebar(QWidget):
             uid: {"total": 0, "grouped": 0, "composed": 0, "organized": 0}
             for uid in uids
         }
+        rows = []
         try:
-            placeholders = ",".join("?" * len(uids))
-            rows = db.execute(
-                f"""
-                SELECT uid, jpg_paths, composed_tiff_path, status, archive_zip
-                FROM grouping
-                WHERE uid IN ({placeholders})
-                """,
-                uids,
-            ).fetchall()
+            for chunk in _chunks(uids):
+                placeholders = ",".join("?" * len(chunk))
+                rows.extend(
+                    db.execute(
+                        f"""
+                        SELECT uid, jpg_paths, composed_tiff_path, status, archive_zip
+                        FROM grouping
+                        WHERE uid IN ({placeholders})
+                        """,
+                        chunk,
+                    ).fetchall()
+                )
         except Exception:
             return progress
 
@@ -412,58 +483,63 @@ class SpecimenSidebar(QWidget):
         4 clickable phase dots (拍摄中/已拍完/整理中/完成).  Clicking a dot marks
         that 编号's phase via :attr:`phase_mark_requested` — no activation needed.
         """
-        self._list.clear()
-        self._phase_dots.clear()
-        self._phase_state.clear()
-        query = text.strip().lower()
-        shown = 0
-        svc = getattr(self.ctx, "collab_service", None)
+        was_enabled = self._list.updatesEnabled()
+        self._list.setUpdatesEnabled(False)
+        try:
+            self._list.clear()
+            self._phase_dots.clear()
+            self._phase_state.clear()
+            query = text.strip().lower()
+            shown = 0
+            svc = getattr(self.ctx, "collab_service", None)
 
-        for entry in self._sorted_items(self._all_items):
-            uid: str = entry["uid"]
-            name: str = entry["name"]
-            name_cn: str = entry["name_cn"]
-            storage: str = entry.get("storage") or ""
-            is_rna = bool(entry.get("is_rna"))
-            progress = entry.get("progress") or {}
-            if self._filter_mode == "rna" and not is_rna:
-                continue
-            if self._filter_mode == "attention" and not entry.get("needs_attention"):
-                continue
-            if (
-                query
-                and query not in uid.lower()
-                and query not in name.lower()
-                and query not in name_cn.lower()
-                and query not in storage.lower()
-                and query not in str(entry.get("collection_date") or "").lower()
-                and query not in str(entry.get("photo_date") or "").lower()
-            ):
-                continue
+            for entry in self._sorted_items(self._all_items):
+                uid: str = entry["uid"]
+                name: str = entry["name"]
+                name_cn: str = entry["name_cn"]
+                storage: str = entry.get("storage") or ""
+                is_rna = bool(entry.get("is_rna"))
+                progress = entry.get("progress") or {}
+                if self._filter_mode == "rna" and not is_rna:
+                    continue
+                if self._filter_mode == "attention" and not entry.get("needs_attention"):
+                    continue
+                if (
+                    query
+                    and query not in uid.lower()
+                    and query not in name.lower()
+                    and query not in name_cn.lower()
+                    and query not in storage.lower()
+                    and query not in str(entry.get("collection_date") or "").lower()
+                    and query not in str(entry.get("photo_date") or "").lower()
+                ):
+                    continue
 
-            active = bool(entry.get("active"))
-            row = self._build_row_widget(
-                uid,
-                name,
-                name_cn,
-                storage,
-                svc,
-                active=active,
-                is_rna=is_rna,
-                progress=progress,
-            )
-            item = QListWidgetItem()
-            item.setData(Qt.ItemDataRole.UserRole, uid)
-            item.setToolTip(uid)
-            item.setSizeHint(QSize(0, 96 if active else 90))
-            self._list.addItem(item)
-            self._list.setItemWidget(item, row)
-            shown += 1
+                active = bool(entry.get("active"))
+                row = self._build_row_widget(
+                    uid,
+                    name,
+                    name_cn,
+                    storage,
+                    svc,
+                    active=active,
+                    is_rna=is_rna,
+                    progress=progress,
+                )
+                item = QListWidgetItem()
+                item.setData(Qt.ItemDataRole.UserRole, uid)
+                item.setToolTip(uid)
+                item.setSizeHint(QSize(0, 96 if active else 90))
+                self._list.addItem(item)
+                self._list.setItemWidget(item, row)
+                shown += 1
 
-        self._update_filter_counts(shown)
-        if self._list.count() > 0 and self._list.currentItem() is None:
-            self._list.setCurrentItem(self._list.item(0))
-        self._sync_action_buttons()
+            self._update_filter_counts(shown)
+            if self._list.count() > 0 and self._list.currentItem() is None:
+                self._list.setCurrentItem(self._list.item(0))
+            self._sync_action_buttons()
+        finally:
+            self._list.setUpdatesEnabled(was_enabled)
 
     def _sorted_items(self, items: list[dict]) -> list[dict]:
         def date_key(value) -> str:
@@ -478,7 +554,7 @@ class SpecimenSidebar(QWidget):
                 int(p.get("total") or 0),
             )
 
-        def key(entry: dict):
+        def sort_key_for_specimen_entry(entry: dict):
             uid = str(entry.get("uid") or "")
             if self._sort_key == "collection_date":
                 return (date_key(entry.get("collection_date")), uid)
@@ -494,7 +570,7 @@ class SpecimenSidebar(QWidget):
                 return (int(entry.get("row_order") or 0), uid)
             return uid
 
-        return sorted(list(items or []), key=key, reverse=self._sort_reverse)
+        return sorted(list(items or []), key=sort_key_for_specimen_entry, reverse=self._sort_reverse)
 
     def _resolve_action_uid(self) -> Optional[str]:
         """UID for activate/deactivate: current row, or the sole visible row."""
@@ -1013,7 +1089,7 @@ class SpecimenSidebar(QWidget):
         """Return a short collab status badge string for *uid*, or "" if none."""
         if svc is None or not svc.is_running():
             return ""
-        task = svc.store.get(uid)
+        task = svc.store.get_task(uid)
         if task is None:
             return ""
         sv = task.status.value if hasattr(task.status, "value") else str(task.status)
@@ -1054,6 +1130,8 @@ class SpecimenSidebar(QWidget):
             self._collab_device.setText("匿名·本机")
             self._collab_members.setText("成员: 0")
             self._collab_sync.setText("同步编号: —")
+            self._collab_sync_selected_btn.setEnabled(False)
+            self._collab_sync_project_btn.setEnabled(False)
             return
 
         addr = service.local_address()
@@ -1067,8 +1145,11 @@ class SpecimenSidebar(QWidget):
         hostname = _socket.gethostname()
         self._collab_device.setText(f"{hostname}")
 
-        task_count = len(service.store.all())
+        task_count = len(service.store.list_tasks())
         self._collab_sync.setText(f"同步编号: {task_count} 条")
+        can_file_sync = bool(service.is_running() and service.group_code and n_peers)
+        self._collab_sync_selected_btn.setEnabled(can_file_sync)
+        self._collab_sync_project_btn.setEnabled(can_file_sync)
 
         # Refresh badges in the specimen list
         self._refresh_collab_badges()

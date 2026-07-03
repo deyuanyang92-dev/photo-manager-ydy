@@ -1,7 +1,8 @@
 """archive_service.py — JPG archival with pre-delete safety checks.
 
 Safety invariants (hard rules — must never be violated):
-  1. TIFF is NEVER deleted.
+  1. Archive/organise never auto-deletes TIFF. Explicit user delete/undo lives
+     outside this service.
   2. delete_jpg=True is the product default; deletion happens only after verification.
   3. If delete_jpg=True, JPGs are deleted ONLY after ALL three checks pass:
        a. ZIP file exists and size > 32 bytes.
@@ -52,7 +53,7 @@ def _sha256_file(path: str) -> str:
     return digest.hexdigest()
 
 
-def _archive_jpg_probe(path: str) -> tuple[int, str, int]:
+def _measure_jpg_for_archive(path: str) -> tuple[int, str, int]:
     """Return size, SHA-256, and the best ZIP method for one JPG."""
     original_size = os.path.getsize(path)
     digest = hashlib.sha256()
@@ -71,7 +72,7 @@ def _archive_jpg_probe(path: str) -> tuple[int, str, int]:
     return original_size, digest.hexdigest(), method
 
 
-def _unique_name(original_name: str, used_names: set[str], suffix: str | None = None) -> str:
+def _reserve_unique_archive_name(original_name: str, used_names: set[str], suffix: str | None = None) -> str:
     base = Path(original_name)
     stem = base.stem
     ext = suffix if suffix is not None else base.suffix
@@ -118,7 +119,7 @@ def _verify_jxl_zip_complete(zip_path: str, manifest_files: list[dict]) -> Check
         shutil.rmtree(verify_dir, ignore_errors=True)
 
 
-def _archive_group_jxl(
+def _archive_group_as_jxl_zip(
     jpg_paths: list[str],
     zip_path: str,
     tiff_basename: str,
@@ -137,7 +138,7 @@ def _archive_group_jxl(
     try:
         for index, jpg_path in enumerate(jpg_paths, start=1):
             original_name = os.path.basename(jpg_path)
-            archive_name = _unique_name(original_name, used_names, suffix=".jxl")
+            archive_name = _reserve_unique_archive_name(original_name, used_names, suffix=".jxl")
             original_size = os.path.getsize(jpg_path)
             original_sha256 = _sha256_file(jpg_path)
             jxl_path = os.path.join(temp_dir, archive_name)
@@ -159,7 +160,7 @@ def _archive_group_jxl(
 
         manifest = {
             "version": 3,
-            "createdAt": _iso_now(),
+            "createdAt": _utc_now_iso(),
             "tiffBasename": tiff_basename,
             "format": "jxl-zip",
             "method": "jpeg-xl-lossless-transcode",
@@ -221,7 +222,7 @@ def _archive_group_jxl(
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
-def _check_tool(name: str) -> bool:
+def _is_archive_tool_available(name: str) -> bool:
     try:
         subprocess.run([name, "--version"], capture_output=True, timeout=10)
         return True
@@ -233,7 +234,7 @@ def has_cjxl() -> bool:
     """Return True if cjxl binary is available."""
     global _cjxl_available
     if _cjxl_available is None:
-        _cjxl_available = _check_tool("cjxl")
+        _cjxl_available = _is_archive_tool_available("cjxl")
     return _cjxl_available
 
 
@@ -244,7 +245,7 @@ def has_djxl() -> bool:
     """
     global _djxl_available
     if _djxl_available is None:
-        _djxl_available = _check_tool("djxl")
+        _djxl_available = _is_archive_tool_available("djxl")
     return _djxl_available
 
 
@@ -445,7 +446,7 @@ def archive_group(
     """Archive original JPGs, verify, maybe delete loose JPGs.
 
     Safety invariants enforced here:
-      - TIFF is NEVER deleted (not even accepted as input for deletion).
+      - Archive/organise never auto-deletes TIFF.
       - delete_jpg defaults to True, but verification failure always keeps JPGs.
       - Deletion only happens after ZIP integrity + per-file SHA-256 checks pass.
       - With cjxl/djxl, ZIP may contain internal JXL to improve compression.
@@ -456,7 +457,7 @@ def archive_group(
 
     Args:
         jpg_paths:   Absolute paths to source JPGs.
-        tiff_path:   Path to the composed TIFF (used for naming; never deleted).
+        tiff_path:   Path to the composed TIFF (used for naming; not deleted by archive).
         project_dir: Project root (ZIP placed in results/ subdir or same dir as TIFF).
         delete_jpg:  If True, delete JPGs after all safety checks pass.
         method:      Legacy compatibility argument; ignored for new plain-JPG ZIPs.
@@ -479,7 +480,7 @@ def archive_group(
 
     if has_cjxl() and has_djxl():
         try:
-            return _archive_group_jxl(
+            return _archive_group_as_jxl_zip(
                 jpg_paths,
                 zip_path,
                 tiff_basename,
@@ -512,7 +513,7 @@ def archive_group(
     for index, jpg_path in enumerate(jpg_paths, start=1):
         original_name = os.path.basename(jpg_path)
         archive_name = _unique_archive_name(original_name)
-        original_size, original_sha256, zip_method = _archive_jpg_probe(jpg_path)
+        original_size, original_sha256, zip_method = _measure_jpg_for_archive(jpg_path)
         manifest_files.append({
             "originalName": original_name,
             "archiveName": archive_name,
@@ -530,7 +531,7 @@ def archive_group(
 
     manifest = {
         "version": 2,
-        "createdAt": _iso_now(),
+        "createdAt": _utc_now_iso(),
         "tiffBasename": tiff_basename,
         "format": "jpg-zip",
         "method": "adaptive-plain-jpg-zip",
@@ -605,7 +606,7 @@ def archive_group(
     )
 
 
-def _iso_now() -> str:
+def _utc_now_iso() -> str:
     from datetime import datetime, timezone
     return datetime.now(tz=timezone.utc).isoformat()
 

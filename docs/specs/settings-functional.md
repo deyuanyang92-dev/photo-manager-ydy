@@ -142,9 +142,9 @@ UI 布局（在 Helicon tab 的 `合成参数预设` QGroupBox 内）：
 
 **QSettings key：** `archive/jxl_effort`（整数 0 或 1）
 
-### 3.2 删除 JPG（红线：默认 False）
+### 3.2 删除散落 JPG（默认 True，可配置保留）
 
-**硬规则：** `_delete_jpg_chk.setChecked(False)` 是铁律，测试必须断言。
+**硬规则：** 整理后 ZIP 消耗 JPG；`_delete_jpg_chk.setChecked(True)` 是默认流程。用户可以显式关闭此项以保留散落 JPG。整理/归档不能自动删除 TIFF；合成不满意的 TIFF 可由用户手动删除或撤销。
 
 四项前置条件（`CLAUDE.md` + web NOTES.md 均记载）：
 1. `cjxl` 可用（JPEG XL 无损压缩工具已安装）
@@ -226,7 +226,7 @@ _K_HELICON_PRESETS_JSON = "helicon/presets_json"
 
 ### 现有测试（已全绿，不得破坏）
 - 5 tabs，顺序：`["项目", "Helicon", "归档", "操作人", "关于"]`
-- delete_jpg 默认 False（6 个断言）
+- delete_jpg 默认 True（6 个断言）
 - 所有 round-trip（current_user / helicon_exe / jxl_effort / radius / smoothing / quality / incoming / results）
 - recent_projects（增/去重/移前/清空）
 - about tab 可访问

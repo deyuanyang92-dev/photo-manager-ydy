@@ -85,7 +85,7 @@ def _refresh_palette() -> None:
     _C_BORDER_DIM = g("border", _C_BORDER_DIM)
 
 
-def _css() -> str:
+def _paper_step_stylesheet() -> str:
     return f"""
 QPushButton#SizeBtn {{
     background: {_C_INPUT_BG}; border: 1px solid {_C_BORDER};
@@ -112,7 +112,7 @@ class LabelStep3Paper(QWidget):
     ) -> None:
         super().__init__(parent)
         _refresh_palette()
-        self.setStyleSheet(f"background:{_C_BG}; color:{_C_TEXT};" + _css())
+        self.setStyleSheet(f"background:{_C_BG}; color:{_C_TEXT};" + _paper_step_stylesheet())
         self._libs = libs
         self._specimens: list[dict] = []
         self._selected_indices: list[int] = []
@@ -166,7 +166,7 @@ class LabelStep3Paper(QWidget):
     def paper_type(self, bucket: str) -> str:
         return self._paper.get(bucket, "label")
 
-    def dims(self, bucket: str) -> dict:
+    def label_dimensions(self, bucket: str) -> dict:
         return resolve_dims(self._libs[bucket], self._custom_dims[bucket])
 
     # ── Build ──────────────────────────────────────────────────────────────────
@@ -264,7 +264,7 @@ class LabelStep3Paper(QWidget):
 
         # A4/A5 grid layout preview
         if cur_paper in ("a4", "a5"):
-            dims = self.dims(bucket)
+            dims = self.label_dimensions(bucket)
             paper = PAPER_SIZES[cur_paper]
             grid = calculate_grid(dims["w"], dims["h"], float(paper["w"]), float(paper["h"]))
             info = QLabel(

@@ -17,11 +17,11 @@ from typing import Optional
 from app.db.db_manager import open_project_db
 
 
-def _now() -> str:
+def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _one(conn, sql: str, params: tuple = ()):
+def _fetch_one_row(conn, sql: str, params: tuple = ()):
     return conn.execute(sql, params).fetchone()
 
 
@@ -37,8 +37,8 @@ def ensure_survey_project(
     """Ensure the survey root has a catalog row and return it as a dict."""
     root = Path(root_dir).resolve()
     conn = open_project_db(str(root), create=True)
-    row = _one(conn, "SELECT * FROM survey_project LIMIT 1")
-    ts = _now()
+    row = _fetch_one_row(conn, "SELECT * FROM survey_project LIMIT 1")
+    ts = _utc_now_iso()
     if row is None:
         project_id = str(uuid.uuid4())
         conn.execute(
@@ -60,7 +60,7 @@ def ensure_survey_project(
             ),
         )
         conn.commit()
-        row = _one(conn, "SELECT * FROM survey_project WHERE project_id=?", (project_id,))
+        row = _fetch_one_row(conn, "SELECT * FROM survey_project WHERE project_id=?", (project_id,))
     else:
         updates = {
             "name": name,
@@ -83,7 +83,7 @@ def ensure_survey_project(
                 tuple(vals),
             )
             conn.commit()
-            row = _one(conn, "SELECT * FROM survey_project WHERE project_id=?", (row["project_id"],))
+            row = _fetch_one_row(conn, "SELECT * FROM survey_project WHERE project_id=?", (row["project_id"],))
     return dict(row)
 
 
@@ -99,8 +99,8 @@ def ensure_workspace_meta(
     """Ensure a workspace has stable ``workspace_meta`` in its own DB."""
     workspace = Path(workspace_dir).resolve()
     conn = open_project_db(str(workspace), create=True)
-    row = _one(conn, "SELECT * FROM workspace_meta LIMIT 1")
-    ts = _now()
+    row = _fetch_one_row(conn, "SELECT * FROM workspace_meta LIMIT 1")
+    ts = _utc_now_iso()
     root_hint = str(Path(root_dir).resolve()) if root_dir else None
     if row is None:
         workspace_id = str(uuid.uuid4())
@@ -123,7 +123,7 @@ def ensure_workspace_meta(
             ),
         )
         conn.commit()
-        row = _one(conn, "SELECT * FROM workspace_meta WHERE workspace_id=?", (workspace_id,))
+        row = _fetch_one_row(conn, "SELECT * FROM workspace_meta WHERE workspace_id=?", (workspace_id,))
     else:
         conn.execute(
             """
@@ -148,7 +148,7 @@ def ensure_workspace_meta(
             ),
         )
         conn.commit()
-        row = _one(conn, "SELECT * FROM workspace_meta WHERE workspace_id=?", (row["workspace_id"],))
+        row = _fetch_one_row(conn, "SELECT * FROM workspace_meta WHERE workspace_id=?", (row["workspace_id"],))
     return dict(row)
 
 
@@ -189,7 +189,7 @@ def register_workspace(
         rel = os.path.relpath(workspace, root)
     except ValueError:
         rel = workspace.name
-    ts = _now()
+    ts = _utc_now_iso()
     conn = open_project_db(str(root), create=True)
     conn.execute(
         """
@@ -217,7 +217,7 @@ def register_workspace(
         ),
     )
     conn.commit()
-    row = _one(conn, "SELECT * FROM workspaces WHERE workspace_id=?", (meta["workspace_id"],))
+    row = _fetch_one_row(conn, "SELECT * FROM workspaces WHERE workspace_id=?", (meta["workspace_id"],))
     return {"project": project, "workspace": dict(row), "workspace_meta": meta}
 
 

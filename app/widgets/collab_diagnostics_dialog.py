@@ -70,7 +70,7 @@ class CollabDiagnosticsDialog(QDialog):
         recheck = QPushButton("重新检测")
         recheck.clicked.connect(self._recheck)
         scan_btn = QPushButton("搜索局域网队友")
-        scan_btn.clicked.connect(self._scan)
+        scan_btn.clicked.connect(self._scan_lan_for_collab_devices)
         close_btn = QPushButton("关闭")
         close_btn.clicked.connect(self.accept)
         footer.addWidget(recheck)
@@ -79,7 +79,7 @@ class CollabDiagnosticsDialog(QDialog):
         footer.addWidget(close_btn)
         root.addLayout(footer)
 
-        self._refresh()
+        self._refresh_diagnostics_view()
 
     # ── data ──────────────────────────────────────────────────────────────
 
@@ -91,7 +91,7 @@ class CollabDiagnosticsDialog(QDialog):
             return []
         return self._svc.run_diagnostics()
 
-    def _refresh(self) -> None:
+    def _refresh_diagnostics_view(self) -> None:
         # Clear old rows
         for w in self._row_widgets:
             w.setParent(None)
@@ -107,19 +107,19 @@ class CollabDiagnosticsDialog(QDialog):
             self._summary.setText(_HEALTH_TEXT.get(health, ""))
 
         if self._svc is None:
-            card = self._make_card(
+            card = self._make_diagnostic_card(
                 "error", "协作未启用", "未检测到协作服务。", "在「设置 → 协作」启用局域网协作。", None)
             self._list_layout.addWidget(card)
             self._row_widgets.append(card)
             return
 
         for d in diags:
-            card = self._make_card(d.level, d.title, d.detail, d.fix, d.action)
+            card = self._make_diagnostic_card(d.level, d.title, d.detail, d.fix, d.action)
             self._list_layout.addWidget(card)
             self._row_widgets.append(card)
 
-    def _make_card(self, level: str, title: str, detail: str, fix: str,
-                   action: Optional[str]) -> QWidget:
+    def _make_diagnostic_card(self, level: str, title: str, detail: str, fix: str,
+                              action: Optional[str]) -> QWidget:
         card = QFrame()
         card.setFrameShape(QFrame.Shape.StyledPanel)
         lay = QVBoxLayout(card)
@@ -177,7 +177,7 @@ class CollabDiagnosticsDialog(QDialog):
         if self._svc is not None:
             self._svc.set_group_code(code)
         self.group_adopted.emit(code)
-        self._refresh()
+        self._refresh_diagnostics_view()
 
     def _show_firewall_help(self) -> None:
         port = 5050
@@ -199,9 +199,9 @@ class CollabDiagnosticsDialog(QDialog):
                 self._svc.run_probes()
             except Exception:  # noqa: BLE001
                 pass
-        self._refresh()
+        self._refresh_diagnostics_view()
 
-    def _scan(self) -> None:
+    def _scan_lan_for_collab_devices(self) -> None:
         if self._svc is None:
             return
         try:
@@ -209,4 +209,4 @@ class CollabDiagnosticsDialog(QDialog):
         except Exception:  # noqa: BLE001
             found = []
         _info(self, "搜索完成", f"发现 {len(found)} 台设备。")
-        self._refresh()
+        self._refresh_diagnostics_view()

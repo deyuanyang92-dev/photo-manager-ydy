@@ -20,28 +20,28 @@ class OfflineDraftQueue:
     def __init__(self, settings: QSettings) -> None:
         self._settings = settings
 
-    def _load(self) -> list:
+    def _load_drafts_from_settings(self) -> list:
         raw = self._settings.value(self.SETTINGS_KEY, "[]")
         try:
             return json.loads(raw) if isinstance(raw, str) else (raw or [])
         except Exception:
             return []
 
-    def _save(self, drafts: list) -> None:
+    def _save_drafts_to_settings(self, drafts: list) -> None:
         self._settings.setValue(self.SETTINGS_KEY, json.dumps(drafts))
 
     def mark_draft(self, uid: str, status: str, specimen: dict | None = None) -> None:
-        drafts = self._load()
+        drafts = self._load_drafts_from_settings()
         for d in drafts:
             if d["uid"] == uid:
                 d.update({"status": status, "specimen": specimen, "ts": int(time.time())})
-                self._save(drafts)
+                self._save_drafts_to_settings(drafts)
                 return
         drafts.append({"uid": uid, "status": status, "specimen": specimen, "ts": int(time.time())})
-        self._save(drafts)
+        self._save_drafts_to_settings(drafts)
 
     def retry_all(self, svc: "CollabService") -> tuple[int, int]:
-        drafts = self._load()
+        drafts = self._load_drafts_from_settings()
         remaining = []
         sent = 0
         for d in drafts:
@@ -50,11 +50,11 @@ class OfflineDraftQueue:
                 sent += 1
             except Exception:
                 remaining.append(d)
-        self._save(remaining)
+        self._save_drafts_to_settings(remaining)
         return sent, len(remaining)
 
     def count(self) -> int:
-        return len(self._load())
+        return len(self._load_drafts_from_settings())
 
     def clear(self) -> None:
-        self._save([])
+        self._save_drafts_to_settings([])

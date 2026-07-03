@@ -4,8 +4,8 @@ Covers:
 - create_project: returns dict, creates dirs
 - open_project: returns dict, registers root in default_registry
 - list_projects: reads user_projects.json
-- get_incoming_jpg_dir: modern name / legacy fallback
-- get_results_dir
+- resolve_incoming_jpg_dir: modern name / legacy fallback
+- resolve_results_dir
 - ensure_project_dirs: creates incoming-jpg / results / _data
 """
 import json
@@ -180,58 +180,58 @@ class TestListProjects:
         assert list_projects(str(json_path))[0]["name"] == "B"
 
 
-# ── get_incoming_jpg_dir ───────────────────────────────────────────────────
+# ── resolve_incoming_jpg_dir ───────────────────────────────────────────────
 
-class TestGetIncomingJpgDir:
+class TestResolveIncomingJpgDir:
     def test_modern_dir_when_present(self, tmp_path):
         """Returns 'incoming-jpg' dir when it exists."""
-        from app.services.project_service import get_incoming_jpg_dir
+        from app.services.project_service import resolve_incoming_jpg_dir
         proj_dir = tmp_path / "proj"
         modern = proj_dir / "incoming-jpg"
         modern.mkdir(parents=True)
-        result = get_incoming_jpg_dir(str(proj_dir))
+        result = resolve_incoming_jpg_dir(str(proj_dir))
         assert Path(result).name == "incoming-jpg"
 
     def test_legacy_fallback_when_modern_missing(self, tmp_path):
         """Falls back to '新拍JPG' when 'incoming-jpg' does not exist but legacy does."""
-        from app.services.project_service import get_incoming_jpg_dir
+        from app.services.project_service import resolve_incoming_jpg_dir
         proj_dir = tmp_path / "proj"
         legacy = proj_dir / "新拍JPG"
         legacy.mkdir(parents=True)
-        result = get_incoming_jpg_dir(str(proj_dir))
+        result = resolve_incoming_jpg_dir(str(proj_dir))
         assert Path(result).name == "新拍JPG"
 
     def test_modern_preferred_over_legacy(self, tmp_path):
         """When both exist, modern 'incoming-jpg' is preferred."""
-        from app.services.project_service import get_incoming_jpg_dir
+        from app.services.project_service import resolve_incoming_jpg_dir
         proj_dir = tmp_path / "proj"
         (proj_dir / "incoming-jpg").mkdir(parents=True)
         (proj_dir / "新拍JPG").mkdir(parents=True)
-        result = get_incoming_jpg_dir(str(proj_dir))
+        result = resolve_incoming_jpg_dir(str(proj_dir))
         assert Path(result).name == "incoming-jpg"
 
     def test_returns_modern_path_when_neither_exists(self, tmp_path):
         """When neither dir exists, return the modern path (not yet created)."""
-        from app.services.project_service import get_incoming_jpg_dir
+        from app.services.project_service import resolve_incoming_jpg_dir
         proj_dir = tmp_path / "proj"
         proj_dir.mkdir()
-        result = get_incoming_jpg_dir(str(proj_dir))
+        result = resolve_incoming_jpg_dir(str(proj_dir))
         assert "incoming-jpg" in result or "incoming" in result.lower()
 
 
-# ── get_results_dir ────────────────────────────────────────────────────────
+# ── resolve_results_dir ────────────────────────────────────────────────────
 
-class TestGetResultsDir:
+class TestResolveResultsDir:
     def test_returns_results_subdir(self, tmp_path):
-        from app.services.project_service import get_results_dir
+        from app.services.project_service import resolve_results_dir
         proj_dir = str(tmp_path / "proj")
-        result = get_results_dir(proj_dir)
+        result = resolve_results_dir(proj_dir)
         assert Path(result).name == "results"
 
     def test_is_inside_project_dir(self, tmp_path):
-        from app.services.project_service import get_results_dir
+        from app.services.project_service import resolve_results_dir
         proj_dir = str(tmp_path / "proj")
-        result = get_results_dir(proj_dir)
+        result = resolve_results_dir(proj_dir)
         assert result.startswith(str(tmp_path))
 
 

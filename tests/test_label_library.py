@@ -132,23 +132,23 @@ class TestLabelTemplateLibraryCRUD:
 
     def test_get_returns_record_by_id(self, sample_lib):
         rec = sample_lib.upsert({"name": "A", "template": {"rows": []}})
-        fetched = sample_lib.get(rec["id"])
+        fetched = sample_lib.get_record(rec["id"])
         assert fetched is not None
         assert fetched["id"] == rec["id"]
 
     def test_get_missing_id_returns_none(self, sample_lib):
-        assert sample_lib.get("nonexistent-id") is None
+        assert sample_lib.get_record("nonexistent-id") is None
 
     def test_rename_changes_name(self, sample_lib):
         rec = sample_lib.upsert({"name": "旧名", "template": {"rows": []}})
         sample_lib.rename(rec["id"], "新名称")
-        fetched = sample_lib.get(rec["id"])
+        fetched = sample_lib.get_record(rec["id"])
         assert fetched["name"] == "新名称"
 
     def test_delete_removes_record(self, sample_lib):
         rec = sample_lib.upsert({"name": "删除我", "template": {"rows": []}})
         assert sample_lib.delete(rec["id"]) is True
-        assert sample_lib.get(rec["id"]) is None
+        assert sample_lib.get_record(rec["id"]) is None
         assert sample_lib.records() == []
 
     def test_delete_nonexistent_returns_false(self, sample_lib):
@@ -175,7 +175,7 @@ class TestLabelTemplateLibraryCRUD:
 
     def test_tissue_library_sets_flavor(self, tissue_lib):
         rec = tissue_lib.upsert({"name": "组织", "template": {"rows": []}})
-        fetched = tissue_lib.get(rec["id"])
+        fetched = tissue_lib.get_record(rec["id"])
         assert fetched["template"].get("flavor") == "tissue"
 
     def test_multiple_records_persist_order(self, sample_lib):
@@ -201,7 +201,7 @@ class TestLabelTemplateLibraryCRUD:
         ]
         rec = sample_lib.upsert({"name": "全元素", "template": {
             "rows": [], "qr": {"ecc": "Q"}, "elements": elements}})
-        got = sample_lib.get(rec["id"])
+        got = sample_lib.get_record(rec["id"])
         saved = got["template"]["elements"]
         assert [e["type"] for e in saved] == [e["type"] for e in elements]
         img = next(e for e in saved if e["type"] == "image")
@@ -217,7 +217,7 @@ class TestLabelTemplateLibraryCRUD:
         ]
         rec = sample_lib.upsert({"name": "样式键", "template": {
             "rows": [], "elements": elements}})
-        saved = sample_lib.get(rec["id"])["template"]["elements"]
+        saved = sample_lib.get_record(rec["id"])["template"]["elements"]
         assert saved[0]["opacity"] == 0.4 and saved[0]["font"] == "DejaVu Sans"
         assert saved[1]["opacity"] == 0.5 and saved[1]["dash"] == "dash"
 
@@ -230,7 +230,7 @@ class TestLabelTemplateLibraryCRUD:
             "rows": [], "monochrome": True,
             "elements": [{"type": "rect", "x": 1, "y": 1, "w": 20, "h": 10,
                           "gradient": grad, "shadow": shadow}]}})
-        tmpl = sample_lib.get(rec["id"])["template"]
+        tmpl = sample_lib.get_record(rec["id"])["template"]
         assert tmpl["monochrome"] is True
         el = tmpl["elements"][0]
         assert el["gradient"] == grad and el["shadow"] == shadow
@@ -242,7 +242,7 @@ class TestLabelTemplateLibraryCRUD:
             "rows": [], "elements": [
                 {"type": "shape", "x": 2, "y": 2, "w": 18, "h": 12,
                  "points": pts, "fill": "#cccccc"}]}})
-        el = sample_lib.get(rec["id"])["template"]["elements"][0]
+        el = sample_lib.get_record(rec["id"])["template"]["elements"][0]
         assert el["type"] == "shape" and el["points"] == pts
 
 
@@ -804,10 +804,10 @@ class TestPerTemplateBackup:
             "name": "修改后",
             "template": {"rows": [{"fields": ["storage"], "size": 9}]},
         })
-        assert sample_lib.get(rec["id"])["name"] == "修改后"
+        assert sample_lib.get_record(rec["id"])["name"] == "修改后"
         ok = sample_lib.restore_backup(rec["id"])
         assert ok is True
-        restored = sample_lib.get(rec["id"])
+        restored = sample_lib.get_record(rec["id"])
         assert restored["name"] == "恢复测试"
 
     def test_backup_called_before_delete(self, sample_lib):

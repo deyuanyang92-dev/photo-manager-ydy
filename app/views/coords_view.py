@@ -189,11 +189,11 @@ _BATCH_EXAMPLES: dict[str, str] = {
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 
-def _btn(text: str, object_name: str = "") -> QPushButton:
-    b = QPushButton(text)
+def _make_button(text: str, object_name: str = "") -> QPushButton:
+    button = QPushButton(text)
     if object_name:
-        b.setObjectName(object_name)
-    return b
+        button.setObjectName(object_name)
+    return button
 
 
 def _label(text: str, *, object_name: str = "", style: str = "") -> QLabel:

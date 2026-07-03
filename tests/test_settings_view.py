@@ -5,7 +5,8 @@ Runs offscreen (QT_QPA_PLATFORM=offscreen).
 Checks:
 - SettingsView instantiates and paints without crashing.
 - Five tabs are present with correct titles.
-- delete_jpg checkbox defaults to False (hard rule — TIFF永远保留, JPG删除默认关).
+- delete_jpg checkbox defaults to True: ZIP consumes JPG; loose JPG is removed
+  after verification unless the user explicitly keeps it.
 - Settings round-trip: write values → on_activate() reload → values persisted.
 - QSettings keys match expected namespace.
 """
@@ -30,6 +31,7 @@ from app.views.settings_view import (
     SettingsView,
     APP_VERSION,
     _K_DELETE_JPG,
+    _K_DELETE_JPG_DEFAULT_MIGRATION,
     _K_CURRENT_USER,
     _K_JXL_EFFORT,
     _K_HELICON_EXE,
@@ -192,6 +194,23 @@ class TestDeleteJpgDefault:
     def test_qsettings_delete_jpg_default_true(self, ctx: AppContext) -> None:
         raw = ctx.settings._qs.value(_K_DELETE_JPG, "true")
         assert str(raw).lower() == "true"
+        assert ctx.settings.delete_jpg_after_archive is True
+
+    def test_legacy_delete_jpg_false_migrates_to_current_default(
+        self, ctx: AppContext
+    ) -> None:
+        ctx.settings._qs.setValue(_K_DELETE_JPG, "false")
+        ctx.settings._qs.remove(_K_DELETE_JPG_DEFAULT_MIGRATION)
+        ctx.settings._migrate_delete_jpg_default()
+        assert ctx.settings.delete_jpg_after_archive is True
+
+    def test_app_settings_delete_jpg_property_round_trip(self, ctx: AppContext) -> None:
+        ctx.settings.delete_jpg_after_archive = False
+        assert ctx.settings.delete_jpg_after_archive is False
+        assert str(ctx.settings._qs.value(_K_DELETE_JPG)).lower() == "false"
+        assert str(ctx.settings._qs.value(_K_DELETE_JPG_DEFAULT_MIGRATION)).lower() == "true"
+        ctx.settings.delete_jpg_after_archive = True
+        assert ctx.settings.delete_jpg_after_archive is True
 
     def test_delete_jpg_not_set_on_fresh_load(self, view: SettingsView) -> None:
         """on_activate() with no saved value uses the product default ON."""

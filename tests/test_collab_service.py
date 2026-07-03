@@ -129,23 +129,23 @@ class TestTaskStore:
         store = TaskStore()
         store.create("U1")
         store.create("U2")
-        assert {t.uid for t in store.all()} == {"U1", "U2"}
+        assert {t.uid for t in store.list_tasks()} == {"U1", "U2"}
 
     def test_get_returns_none_for_unknown(self):
         store = TaskStore()
-        assert store.get("MISSING") is None
+        assert store.get_task("MISSING") is None
 
     def test_get_returns_task(self):
         store = TaskStore()
         store.create("Q1")
-        t = store.get("Q1")
+        t = store.get_task("Q1")
         assert t is not None and t.uid == "Q1"
 
     def test_clear(self):
         store = TaskStore()
         store.create("C1")
         store.clear()
-        assert store.all() == []
+        assert store.list_tasks() == []
 
     # ── merge_from_peer ───────────────────────────────────────────────────
 
@@ -168,7 +168,7 @@ class TestTaskStore:
                    "createdAt": _now_iso()}]
         changed = store.merge_from_peer(remote)
         assert changed == 1
-        assert store.get("R2").status == TaskStatus.DONE  # type: ignore[union-attr]
+        assert store.get_task("R2").status == TaskStatus.DONE  # type: ignore[union-attr]
 
     def test_merge_older_remote_ignored(self):
         """If remote updated_at is earlier than local, local wins."""
@@ -181,7 +181,7 @@ class TestTaskStore:
                    "createdAt": past}]
         changed = store.merge_from_peer(remote)
         assert changed == 0  # no change
-        assert store.get("R3").status == TaskStatus.SHOOTING  # type: ignore[union-attr]
+        assert store.get_task("R3").status == TaskStatus.SHOOTING  # type: ignore[union-attr]
 
     def test_merge_skips_records_without_uid(self):
         store = TaskStore()
@@ -206,7 +206,7 @@ class TestTaskStore:
             list(ex.map(_create, range(50)))
 
         assert not errors
-        assert len(store.all()) == 50
+        assert len(store.list_tasks()) == 50
 
     def test_concurrent_duplicate_409(self):
         """Multiple threads trying to create the same UID — exactly one succeeds."""
@@ -1051,13 +1051,13 @@ class TestUpdateTaskStatusUiHelper:
         svc = CollabService()
         ok, msg = svc.update_task_status("ZJ-TMW-B2-001", "shooting")
         assert ok is True
-        assert svc.store.get("ZJ-TMW-B2-001").status is TaskStatus.SHOOTING
+        assert svc.store.get_task("ZJ-TMW-B2-001").status is TaskStatus.SHOOTING
 
     def test_seed_status_allows_resumed_chain(self):
         svc = CollabService()
         ok, _ = svc.update_task_status("U1", "done", seed_status="organizing")
         assert ok is True
-        assert svc.store.get("U1").status is TaskStatus.DONE
+        assert svc.store.get_task("U1").status is TaskStatus.DONE
 
     def test_invalid_transition_returns_false_no_raise(self):
         svc = CollabService()
@@ -1065,14 +1065,14 @@ class TestUpdateTaskStatusUiHelper:
         ok, msg = svc.update_task_status("U2", "done")  # SHOOTING→DONE 非法
         assert ok is False
         assert msg
-        assert svc.store.get("U2").status is TaskStatus.SHOOTING
+        assert svc.store.get_task("U2").status is TaskStatus.SHOOTING
 
     def test_same_status_idempotent_ok(self):
         svc = CollabService()
         assert svc.update_task_status("U3", "shooting")[0] is True
         ok, _ = svc.update_task_status("U3", "shooting")
         assert ok is True
-        assert svc.store.get("U3").status is TaskStatus.SHOOTING
+        assert svc.store.get_task("U3").status is TaskStatus.SHOOTING
 
     def test_invalid_status_string_returns_false(self):
         svc = CollabService()
@@ -1094,7 +1094,7 @@ class TestUpdateTaskStatusUiHelper:
         assert svc.update_task_status("F1", "shooting")[0] is True
         ok, _ = svc.update_task_status("F1", "done", force=True)
         assert ok is True
-        assert svc.store.get("F1").status is TaskStatus.DONE
+        assert svc.store.get_task("F1").status is TaskStatus.DONE
 
     def test_force_allows_backward_transition(self):
         """force=True: 完成→整理中 回退成功(状态机本禁回退)。"""
@@ -1102,7 +1102,7 @@ class TestUpdateTaskStatusUiHelper:
         svc.update_task_status("F2", "done", seed_status="organizing")
         ok, _ = svc.update_task_status("F2", "organizing", force=True)
         assert ok is True
-        assert svc.store.get("F2").status is TaskStatus.ORGANIZING
+        assert svc.store.get_task("F2").status is TaskStatus.ORGANIZING
 
     def test_force_still_validates_status_string(self):
         """force 不放过非法枚举。"""
@@ -1116,4 +1116,4 @@ class TestUpdateTaskStatusUiHelper:
         assert svc.update_task_status("F4", "shooting")[0] is True
         ok, _ = svc.update_task_status("F4", "done")  # 无 force
         assert ok is False
-        assert svc.store.get("F4").status is TaskStatus.SHOOTING
+        assert svc.store.get_task("F4").status is TaskStatus.SHOOTING

@@ -148,7 +148,7 @@ class TestStep2Templates:
         seen = []
         w.config_changed.connect(lambda: seen.append(1))
         # choose "compact"
-        w._choose("sample", "compact")
+        w._select_template_for_bucket("sample", "compact")
         assert w._libs["sample"].selected_key() == "compact"
         assert seen
 

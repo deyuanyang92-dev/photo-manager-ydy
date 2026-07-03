@@ -33,7 +33,7 @@ def _make_image(tmp_path: Path, w=200, h=120) -> Path:
 def _calib_model():
     # 简单仿射：经度 0..100 → px 0..200；纬度 0..100 → py 120..0（纬度大在上）
     pts = [(0, 0, 0, 120), (100, 0, 200, 120), (0, 100, 0, 0), (100, 100, 200, 0)]
-    return gc.fit(pts, order=1)
+    return gc.fit_geo_to_pixel_transform(pts, order=1)
 
 
 def _widget():

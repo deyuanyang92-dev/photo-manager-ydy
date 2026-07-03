@@ -343,15 +343,15 @@ class _ComposeWorkbenchDialog(QDialog):
         foot.addStretch()
         cancel = QPushButton("取消（退回 TIFF）")
         cancel.setObjectName("Outline")
-        cancel.clicked.connect(self._cancel)
+        cancel.clicked.connect(self._reject_compose_preview)
         foot.addWidget(cancel)
         recompose = QPushButton("重合成预览")
         recompose.setObjectName("Outline")
-        recompose.clicked.connect(self._recompose)
+        recompose.clicked.connect(self._accept_recompose_preview)
         foot.addWidget(recompose)
         save = QPushButton("保存到结果")
         save.setObjectName("Primary")
-        save.clicked.connect(self._save)
+        save.clicked.connect(self._accept_save_result)
         foot.addWidget(save)
         root.addLayout(foot)
 
@@ -364,15 +364,15 @@ class _ComposeWorkbenchDialog(QDialog):
     def action(self) -> str:
         return self._action
 
-    def _save(self) -> None:
+    def _accept_save_result(self) -> None:
         self._action = self.ACTION_SAVE
         self.accept()
 
-    def _cancel(self) -> None:
+    def _reject_compose_preview(self) -> None:
         self._action = self.ACTION_CANCEL
         self.reject()
 
-    def _recompose(self) -> None:
+    def _accept_recompose_preview(self) -> None:
         self._action = self.ACTION_RECOMPOSE
         self.accept()
 
@@ -471,7 +471,7 @@ class _AutoGroupSourceDialog(QDialog):
         self._mode = self.MODE_PROJECT
         self.accept()
 
-    def mode(self) -> str:
+    def selected_source_mode(self) -> str:
         return self._mode
 
 
@@ -545,6 +545,14 @@ class WorkbenchView(BaseView):
         )
         self._sidebar.new_specimen_requested.connect(self._on_new_specimen)
         self._sidebar.collab_manager_requested.connect(self._on_open_collab_panel)
+        self._sidebar.sync_selected_requested.connect(self._on_sync_selected_uid)
+        self._sidebar.sync_project_requested.connect(self._on_sync_project_files)
+        self._sidebar.sync_selected_overwrite_requested.connect(
+            lambda: self._on_sync_selected_uid(mode="overwrite")
+        )
+        self._sidebar.sync_project_overwrite_requested.connect(
+            lambda: self._on_sync_project_files(mode="overwrite")
+        )
         self._sidebar.print_labels_requested.connect(self._on_print_labels)
         self._sidebar.delete_specimen_requested.connect(self._confirm_delete_specimen)
         self._sidebar.print_rna_queue_requested.connect(self._on_print_rna_queue)
@@ -580,6 +588,7 @@ class WorkbenchView(BaseView):
         self._monitor.unassign_requested.connect(self._on_unassign_jpg)
         self._monitor.add_jpg_requested.connect(self._on_add_jpg_files)
         self._monitor.external_jpgs_dropped.connect(self._on_external_jpgs_dropped)
+        self._monitor.clear_pending_requested.connect(self._on_clear_pending_queue)
         self._monitor.grouping_requested.connect(self._on_open_grouping)
         self._monitor.compose_implicit_requested.connect(self._on_compose_implicit)
         self._monitor.organise_selected_requested.connect(self._on_organise_selected)
@@ -618,7 +627,7 @@ class WorkbenchView(BaseView):
             self._on_tiff_naming_check_path
         )
         self._grouping.helicon_params_requested.connect(self._open_grouping_helicon_params)
-        self._grouping.import_tiff_requested.connect(self._on_import_tiff)  # #cursor
+        self._grouping.import_tiff_requested.connect(self._persist_imported_group_tiff)  # #cursor
         self._grouping.archive_zip_registered.connect(self._on_archive_zip_registered)
         self._grouping.supp_process_requested.connect(self._on_supplementary_process)
         self._grouping.supp_files_dropped.connect(self._on_supplementary_dropped)
@@ -628,6 +637,7 @@ class WorkbenchView(BaseView):
         self._monitor_scan_worker = None
         self._monitor_scan_request_id = 0
         self._monitor_scan_pending = False
+        self._photo_import_worker = None
         self._auto_known_tiffs: set[str] = set()
         self._auto_tiff_busy = False
         self._grouping.compose_all_requested.connect(
@@ -865,7 +875,7 @@ class WorkbenchView(BaseView):
         lay.setContentsMargins(10, 6, 10, 6)
         lay.setSpacing(12)
 
-        def _item(label: str) -> QLabel:
+        def add_directory_path_indicator(label: str) -> QLabel:
             l = QLabel(label)
             l.setObjectName("DirLabel")
             lay.addWidget(l)
@@ -874,9 +884,9 @@ class WorkbenchView(BaseView):
             lay.addWidget(path)
             return path
 
-        self._dir_root = _item("工作目录")
-        self._dir_incoming = _item("相机 JPG")
-        self._dir_results = _item("成果")
+        self._dir_root = add_directory_path_indicator("工作目录")
+        self._dir_incoming = add_directory_path_indicator("相机 JPG")
+        self._dir_results = add_directory_path_indicator("成果")
         lay.addStretch()
         return strip
 
@@ -997,6 +1007,12 @@ class WorkbenchView(BaseView):
             except Exception:  # noqa: BLE001
                 pass
             w.wait(3000)
+        importer = getattr(self, "_photo_import_worker", None)
+        if importer is not None and importer.isRunning():
+            importer.wait(3000)
+        sync_worker = getattr(self, "_collab_file_sync_worker", None)
+        if sync_worker is not None and sync_worker.isRunning():
+            sync_worker.wait(3000)
 
     # ── Filesystem watcher helpers ──────────────────────────────────────────
 
@@ -2166,7 +2182,9 @@ class WorkbenchView(BaseView):
         planned_sources: set[Path] = set()
         group_updates: dict[int, dict[str, str]] = {}
 
-        def _plan(src: Path, dst: Path, old_uid: str = "", new_uid: str = "") -> None:
+        def add_result_file_rename_plan(
+            src: Path, dst: Path, old_uid: str = "", new_uid: str = ""
+        ) -> None:
             if src == dst:
                 return
             if not src.is_file():
@@ -2197,7 +2215,7 @@ class WorkbenchView(BaseView):
                     seq=fallback_seq,
                 )
                 new_tiff_path = tiff_path.with_name(new_name)
-                _plan(tiff_path, new_tiff_path, old_uid_for_group, uid)
+                add_result_file_rename_plan(tiff_path, new_tiff_path, old_uid_for_group, uid)
                 updates["composed_tiff_path"] = str(new_tiff_path)
                 updates["output_name"] = new_tiff_path.stem
 
@@ -2224,7 +2242,7 @@ class WorkbenchView(BaseView):
                     )
                     old_uid_for_group = old_uid_for_group or zip_old_uid
                     new_zip_path = zip_path.with_name(new_zip_name)
-                _plan(zip_path, new_zip_path, old_uid_for_group, uid)
+                add_result_file_rename_plan(zip_path, new_zip_path, old_uid_for_group, uid)
                 updates["archive_zip"] = str(new_zip_path)
 
             if updates:
@@ -2772,8 +2790,30 @@ class WorkbenchView(BaseView):
 
     def _apply_monitor_scan_result(self, result) -> None:
         self._last_scan_result = result
-        self._monitor.load_scan(result)
+        self._monitor.load_scan(self._monitor_display_scan_result(result))
         self._maybe_auto_process_new_tiff(result)
+
+    def _monitor_display_scan_result(self, result):
+        """Keep monitor ownership display tied to the current activation state.
+
+        The scan service may recover historical attribution from grouping rows,
+        manual assignment events, or old activation windows.  When no specimen is
+        active, showing that historical UID on JPG cards looks like the current
+        sidebar selection owns those photos and also lets selected JPGs infer a
+        compose target from stale state.  Preserve the raw scan for business
+        logic, but clear the presentation field for the current monitor view.
+        """
+        if self._get_active_uid():
+            return result
+        import copy
+        display_result = copy.copy(result)
+        display_result.jpg_files = [
+            copy.copy(entry)
+            for entry in getattr(result, "jpg_files", []) or []
+        ]
+        for entry in display_result.jpg_files:
+            entry.attributed_specimen_id = None
+        return display_result
 
     def _pending_tiff_paths(self, scan_result) -> set[str]:
         return {
@@ -2796,7 +2836,7 @@ class WorkbenchView(BaseView):
     def _on_compose_preview_toggled(self, on: bool) -> None:
         try:
             self.ctx.settings.silent_compose = not bool(on)
-            self.ctx.settings.sync()
+            self.ctx.settings.flush_to_disk()
         except Exception:
             pass
         self._status_message("合成预览已开启" if on else "合成预览已关闭：将直接合成")
@@ -3055,11 +3095,11 @@ class WorkbenchView(BaseView):
         if not paths:
             return
 
-        self._import_media_paths(paths, source="添加照片")
+        self._start_import_media_paths(paths, source="添加照片")
 
     def _on_external_jpgs_dropped(self, paths: list[str]) -> None:
         """Import JPG/TIFF dropped from Explorer/Finder/file managers."""
-        self._import_media_paths(paths, source="拖入照片")
+        self._start_import_media_paths(paths, source="拖入照片")
 
     def _import_jpg_paths(self, paths: list[str], *, source: str) -> list[str]:
         """Compatibility wrapper for older JPG-only callers."""
@@ -3071,25 +3111,151 @@ class WorkbenchView(BaseView):
             self._status_message("请先打开一个项目。")
             return []
 
-        inc, res = self._resolve_capture_subdirs()
+        inc, _res = self._resolve_capture_subdirs()
         incoming_dir = os.path.join(project_dir, inc)
-        results_dir = os.path.join(project_dir, res)
         from app.services.photo_import_service import import_media_to_project
-        result = import_media_to_project(list(paths), incoming_dir, results_dir)
+        result = import_media_to_project(list(paths), incoming_dir)
+        imported = self._handle_media_import_result(
+            result,
+            source=source,
+            incoming_label=inc,
+            project_dir=project_dir,
+        )
+        self._refresh_monitor()
+        return imported
+
+    def _start_import_media_paths(self, paths: list[str], *, source: str) -> None:
+        project_dir = self.ctx.current_project_dir
+        if not project_dir:
+            self._status_message("请先打开一个项目。")
+            return
+        if not paths:
+            return
+        worker = getattr(self, "_photo_import_worker", None)
+        if worker is not None and worker.isRunning():
+            self._status_message("照片仍在导入，请稍后再添加。")
+            return
+
+        inc, _res = self._resolve_capture_subdirs()
+        incoming_dir = os.path.join(project_dir, inc)
+        from app.workers.photo_import_worker import PhotoImportWorker
+
+        worker = PhotoImportWorker(list(paths), incoming_dir, parent=self)
+        self._photo_import_worker = worker
+
+        def set_photo_import_busy_state(on: bool) -> None:
+            try:
+                self._monitor.set_import_busy(on)
+            except Exception:
+                pass
+
+        def _cleanup() -> None:
+            set_photo_import_busy_state(False)
+            if self._photo_import_worker is worker:
+                self._photo_import_worker = None
+            worker.deleteLater()
+
+        worker.started_import.connect(
+            lambda count: self._status_message(
+                f"正在导入 {count} 个文件到 {inc}，可继续操作其他区域。"
+            )
+        )
+        worker.completed.connect(
+            lambda result: self._on_photo_import_finished(
+                result, source=source, incoming_label=inc, project_dir=project_dir
+            )
+        )
+        worker.failed.connect(lambda message: self._on_photo_import_failed(source, message))
+        worker.finished.connect(_cleanup)
+        set_photo_import_busy_state(True)
+        worker.start()
+
+    def _on_photo_import_finished(
+        self,
+        result,
+        *,
+        source: str,
+        incoming_label: str,
+        project_dir: str,
+    ) -> None:
+        self._handle_media_import_result(
+            result,
+            source=source,
+            incoming_label=incoming_label,
+            project_dir=project_dir,
+        )
+        self._refresh_monitor()
+
+    def _on_photo_import_failed(self, source: str, message: str) -> None:
+        QMessageBox.warning(self, f"{source}失败", message or "导入过程出现错误。")
+        self._status_message(f"{source}失败。")
+
+    def _handle_media_import_result(
+        self,
+        result,
+        *,
+        source: str,
+        incoming_label: str,
+        project_dir: str,
+    ) -> list[str]:
+        try:
+            from app.services.photo_import_service import record_imported_media
+            record_imported_media(
+                project_dir,
+                list(getattr(result, "imported_records", []) or []),
+            )
+        except Exception:
+            pass
 
         if result.errors:
             QMessageBox.warning(self, f"{source}部分失败", "\n".join(result.errors[:5]))
-        if result.skipped_paths and not result.imported_paths:
-            self._status_message("未识别到 JPG/JPEG 或 TIFF 文件。")
-        elif result.imported_paths:
+        duplicate_count = len(getattr(result, "skipped_duplicate_paths", []) or [])
+        if result.imported_paths:
             parts = []
             if result.imported_jpg_paths:
-                parts.append(f"{len(result.imported_jpg_paths)} 张 JPG 到 {inc}")
+                parts.append(f"{len(result.imported_jpg_paths)} 张 JPG 到 {incoming_label}")
             if result.imported_tiff_paths:
-                parts.append(f"{len(result.imported_tiff_paths)} 个 TIFF 到 {res}")
-            self._status_message("已导入 " + "，".join(parts) + "。")
-        self._refresh_monitor()
+                parts.append(f"{len(result.imported_tiff_paths)} 个 TIFF 到 {incoming_label}")
+            msg = "已导入 " + "，".join(parts)
+            if duplicate_count:
+                msg += f"；已跳过 {duplicate_count} 个重复文件"
+            self._status_message(msg + "。")
+        elif duplicate_count:
+            self._status_message(f"已跳过 {duplicate_count} 个重复文件，队列未新增。")
+        elif result.skipped_paths:
+            self._status_message("未识别到 JPG/JPEG 或 TIFF 文件。")
         return result.imported_paths
+
+    def _on_clear_pending_queue(self, paths: list[str]) -> None:
+        project_dir = self.ctx.current_project_dir
+        if not project_dir:
+            self._status_message("请先打开一个项目。")
+            return
+        try:
+            from app.services.photo_import_service import clear_pending_imports
+            result = clear_pending_imports(project_dir, list(paths))
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "清空队列失败", str(exc))
+            return
+
+        try:
+            self._monitor._on_select_none()
+        except Exception:
+            pass
+        self._refresh_monitor()
+
+        if result.errors:
+            QMessageBox.warning(self, "清空队列部分失败", "\n".join(result.errors[:5]))
+
+        if result.changed_count:
+            parts = []
+            if result.returned_paths:
+                parts.append(f"退回 {len(result.returned_paths)} 个")
+            if result.stashed_paths:
+                parts.append(f"安全移出 {len(result.stashed_paths)} 个")
+            self._status_message("队列已清空：" + "，".join(parts) + "。")
+        elif result.skipped_paths:
+            self._status_message("队列未变化：没有可清空的文件。")
 
     def _on_free_compose(self) -> None:
         """Free compose: selected monitor JPGs → Helicon → incoming-jpg/.
@@ -3132,7 +3298,7 @@ class WorkbenchView(BaseView):
 
         params = self._helicon_params.get_params()
 
-        def _on_finished(tiff_path):
+        def _handle_free_compose_finished(tiff_path):
             if os.path.isfile(output_path):
                 QMessageBox.information(self, "无号合成完成",
                                         f"TIFF 已保存到 {inc}/：\n{output_name}")
@@ -3140,11 +3306,17 @@ class WorkbenchView(BaseView):
             else:
                 QMessageBox.warning(self, "无号合成失败", "Helicon 执行后未生成输出文件。")
 
-        def _on_failed(msg: str):
+        def _handle_free_compose_failed(msg: str):
             if msg != "用户取消":
                 QMessageBox.warning(self, "无号合成失败", msg)
 
-        self._run_helicon_stack(jpg_paths, output_path, params, _on_finished, _on_failed)
+        self._run_helicon_stack(
+            jpg_paths,
+            output_path,
+            params,
+            _handle_free_compose_finished,
+            _handle_free_compose_failed,
+        )
 
     def _on_retroactive_scan(self) -> None:
         """Launch retroactive organize modal.
@@ -3241,7 +3413,7 @@ class WorkbenchView(BaseView):
             return ""
 
         start_dir = self.ctx.current_project_dir or str(Path.home())
-        if chooser.mode() == _AutoGroupSourceDialog.MODE_FOLDER:
+        if chooser.selected_source_mode() == _AutoGroupSourceDialog.MODE_FOLDER:
             folder = ui.get_existing_directory(
                 parent,
                 "选择需要自动分组整理的 JPG / TIF 目录",
@@ -3593,12 +3765,12 @@ class WorkbenchView(BaseView):
 
     def _get_grouping_for_uid(self, uid: str):
         """Load grouping from DB when a project is open, else from panel memory."""
-        from app.services.capture_workflow_service import grouping_for_uid
+        from app.services.capture_workflow_service import grouping_for_clean_uid
 
         panel = self._grouping
         if getattr(panel, "_uid", None) == uid and panel._grouping is not None:
             return panel._grouping
-        return grouping_for_uid(self.ctx.get_db(), uid)
+        return grouping_for_clean_uid(self.ctx.get_db(), uid)
 
     def _save_grouping_for_uid(self, uid: str, groups: list) -> None:
         """Persist grouping to DB when available; always refresh the open panel."""
@@ -3634,7 +3806,13 @@ class WorkbenchView(BaseView):
         os.makedirs(incoming, exist_ok=True)
         return incoming, incoming
 
-    def _on_compose_requested(self, uid: str, group_index: int) -> None:
+    def _on_compose_requested(
+        self,
+        uid: str,
+        group_index: int,
+        *,
+        on_composed=None,
+    ) -> None:
         """Compose the JPGs in the specified group via Helicon Focus CLI.
 
         Steps:
@@ -3651,6 +3829,10 @@ class WorkbenchView(BaseView):
         if not uid:
             return
 
+        def _notify_composed(success: bool) -> None:
+            if callable(on_composed):
+                on_composed(success)
+
         try:
             from app.services.helicon_service import detect_helicon
 
@@ -3660,6 +3842,7 @@ class WorkbenchView(BaseView):
             )
             if group is None:
                 QMessageBox.warning(self, "合成", f"找不到组{group_index + 1}")
+                _notify_composed(False)
                 return
 
             from app.services.helicon_service import resolve_existing_image_path
@@ -3680,6 +3863,7 @@ class WorkbenchView(BaseView):
                     f"以下 JPG 在磁盘上找不到：\n{sample}{extra}\n\n"
                     "请确认照片仍在 incoming-jpg 目录；WSL 下请用 /mnt/n/... 打开项目。",
                 )
+                _notify_composed(False)
                 return
             group.jpg_paths = resolved_jpgs
 
@@ -3700,12 +3884,14 @@ class WorkbenchView(BaseView):
                         QMessageBox.StandardButton.No,
                     )
                     if reply != QMessageBox.StandardButton.Yes:
+                        _notify_composed(False)
                         return
                     group.jpg_paths = attributed_paths
                 else:
                     QMessageBox.warning(
                         self, "合成", "该组 JPG 不足 2 张，无法合成。"
                     )
+                    _notify_composed(False)
                     return
 
             # ── Pre-compose preview dialog  #cursor renderComposePreviewModal ─
@@ -3716,6 +3902,7 @@ class WorkbenchView(BaseView):
                 return  # User cancelled
             if len(selected_jpgs) < 2:
                 QMessageBox.warning(self, "合成", "选中的 JPG 不足 2 张，无法合成。")
+                _notify_composed(False)
                 return
             group.jpg_paths = selected_jpgs
 
@@ -3728,6 +3915,7 @@ class WorkbenchView(BaseView):
                     "未在常见安装目录找到 Helicon Focus，请确认已安装并设置 "
                     "HELICON_FOCUS_PATH 环境变量指向可执行文件。",
                 )
+                _notify_composed(False)
                 return
 
             # Determine output path — TIFF lands in incoming first;
@@ -3745,10 +3933,11 @@ class WorkbenchView(BaseView):
 
             params = self._helicon_params.get_params()
 
-            def _do_compose(jpg_paths, out_path, cur_params):
-                def _on_finished(tiff_path):
+            def _run_interactive_compose_with_preview(jpg_paths, out_path, cur_params):
+                def _open_compose_review_after_helicon_success(tiff_path):
                     if not os.path.isfile(out_path):
                         QMessageBox.warning(self, "合成失败", "Helicon 执行后未生成输出文件。")
+                        _notify_composed(False)
                         return
                     dlg = _ComposeWorkbenchDialog(
                         jpg_paths,
@@ -3769,7 +3958,7 @@ class WorkbenchView(BaseView):
                             return
                         self._retire_tiff(out_path)
                         group.jpg_paths = selected
-                        _do_compose(selected, out_path, new_params)
+                        _run_interactive_compose_with_preview(selected, out_path, new_params)
                         return
 
                     if action == _ComposeWorkbenchDialog.ACTION_CANCEL:
@@ -3796,23 +3985,35 @@ class WorkbenchView(BaseView):
                     self._grouping.load_grouping(uid, grouping)
                     self._refresh_results_column(uid, grouping)
                     self._on_helicon_finished(uid)
+                    if callable(on_composed):
+                        on_composed(True)
+                        return
                     QMessageBox.information(self, "合成完成", f"TIFF 已生成：{output_name}")
                     # 自动归档打开时，合成完成后自动把源 JPG 打包 ZIP+命名+移
                     # results（省掉手动点[整理]）。开关默认关。
                     self._maybe_auto_organize(uid, group.group_index)
 
-                def _on_failed(msg: str):
+                def _report_interactive_compose_failure(msg: str):
                     if msg != "用户取消":
                         QMessageBox.warning(self, "合成失败", msg)
+                    _notify_composed(False)
 
-                self._run_helicon_stack(jpg_paths, out_path, cur_params, _on_finished, _on_failed)
+                self._run_helicon_stack(
+                    jpg_paths,
+                    out_path,
+                    cur_params,
+                    _open_compose_review_after_helicon_success,
+                    _report_interactive_compose_failure,
+                )
 
-            _do_compose(group.jpg_paths, output_path, params)
+            _run_interactive_compose_with_preview(group.jpg_paths, output_path, params)
 
         except RuntimeError as exc:
             QMessageBox.warning(self, "合成失败", str(exc))
+            _notify_composed(False)
         except Exception as exc:
             QMessageBox.warning(self, "合成失败", f"意外错误：{exc}")
+            _notify_composed(False)
 
     def _helicon_output_opts(self) -> dict:
         """Read Helicon output options from settings (mirrors oracle 输出选项).
@@ -3902,21 +4103,21 @@ class WorkbenchView(BaseView):
         worker = HeliconWorker(cmd=cmd, output_path=output_path, parent=self)
         self._helicon_worker = worker  # keep reference alive
 
-        def _on_done(tiff_path):
+        def _handle_helicon_worker_finished(tiff_path):
             progress.close()
             on_finished(tiff_path)
 
-        def _on_fail(msg: str):
+        def _handle_helicon_worker_failed(msg: str):
             progress.close()
             on_failed(msg)
 
-        def _on_cancel():
+        def _cancel_running_helicon_worker():
             worker.cancel()
             on_failed("用户取消")
 
-        worker.finished.connect(_on_done)
-        worker.failed.connect(_on_fail)
-        progress.canceled.connect(_on_cancel)
+        worker.finished.connect(_handle_helicon_worker_finished)
+        worker.failed.connect(_handle_helicon_worker_failed)
+        progress.canceled.connect(_cancel_running_helicon_worker)
 
         progress.show()
         worker.start()
@@ -4070,7 +4271,7 @@ class WorkbenchView(BaseView):
             )
             params = self._helicon_params.get_params()
 
-            def _ok(tiff_path):
+            def _save_headless_compose_result(tiff_path):
                 if not os.path.isfile(output_path):
                     on_done(False)
                     return
@@ -4093,10 +4294,16 @@ class WorkbenchView(BaseView):
                 self._on_helicon_finished(uid)
                 on_done(True)
 
-            def _fail(msg: str):
+            def _mark_headless_compose_failed(msg: str):
                 on_done(False)
 
-            self._run_helicon_stack(group.jpg_paths, output_path, params, _ok, _fail)
+            self._run_helicon_stack(
+                group.jpg_paths,
+                output_path,
+                params,
+                _save_headless_compose_result,
+                _mark_headless_compose_failed,
+            )
         except Exception:
             on_done(False)
 
@@ -4648,7 +4855,8 @@ class WorkbenchView(BaseView):
                     on_complete=on_complete,
                 )
 
-            # Default workflow: verified ZIP replaces loose JPGs. TIFF is never deleted.
+            # Default workflow: verified ZIP replaces loose JPGs. Organise does
+            # not auto-delete TIFF; explicit delete/undo is a separate action.
             delete_jpg: bool = True
             try:
                 delete_jpg = bool(
@@ -5097,10 +5305,10 @@ class WorkbenchView(BaseView):
         from app.utils import ui
         ui.critical(self, "还原原片", f"还原失败: {message}")
 
-    def _on_import_tiff(self, uid: str, group_index: int) -> None:
+    def _persist_imported_group_tiff(self, uid: str, group_index: int) -> None:
         """Persist the imported TIFF association from grouping panel to DB.
 
-        Called after grouping_panel._on_import_tiff successfully updated the
+        Called after grouping_panel._import_existing_tiff_into_group successfully updated the
         in-memory grouping.  Flushes the updated grouping to DB and refreshes
         the results column.
 
@@ -5198,9 +5406,9 @@ class WorkbenchView(BaseView):
             return
 
         try:
-            from app.services.capture_workflow_service import link_result_pair_to_uid
+            from app.services.capture_workflow_service import link_result_pair_to_clean_uid
 
-            linked = link_result_pair_to_uid(db, target_uid, tiff_path, zip_path)
+            linked = link_result_pair_to_clean_uid(db, target_uid, tiff_path, zip_path)
             self._grouping.load_grouping(target_uid, linked.grouping)
             self._refresh_results_column(target_uid, linked.grouping)
             self._refresh_monitor()
@@ -5773,6 +5981,15 @@ class WorkbenchView(BaseView):
             self._status_message("没有可合成的未占用 JPG（至少 2 张）")
             return
         silent = bool(getattr(self.ctx.settings, "silent_compose", False))
+        if organise and not silent:
+            self._on_compose_requested(
+                uid,
+                idx,
+                on_composed=lambda ok: self._implicit_compose_done(
+                    ok, uid, idx, organise
+                ),
+            )
+            return
         if silent or organise:
             self._compose_group_headless(
                 uid,
@@ -5878,6 +6095,127 @@ class WorkbenchView(BaseView):
             return None
 
         return [path for cb, path in checkboxes if cb.isChecked()]
+
+    # ── Collaboration file sync ──────────────────────────────────────────────
+
+    def _collab_file_sync_peers(self) -> list:
+        svc = getattr(self.ctx, "collab_service", None)
+        if svc is None or not svc.is_running() or not svc.group_code:
+            return []
+        return [
+            peer for peer in svc.peers()
+            if getattr(peer, "group_code", "") == svc.group_code
+        ]
+
+    def _on_sync_selected_uid(self, mode: str = "smart") -> None:
+        uid = self._sidebar.current_uid() or self._current_uid
+        if not uid:
+            self._status_message("请先在左侧选择一个编号。")
+            return
+        self._start_collab_file_sync([uid], title=f"同步编号 {uid}", mode=mode)
+
+    def _on_sync_project_files(self, mode: str = "smart") -> None:
+        self._start_collab_file_sync(None, title="同步整个项目", mode=mode)
+
+    def _start_collab_file_sync(self, uids: Optional[list[str]], *, title: str,
+                                mode: str = "smart") -> None:
+        project_dir = self.ctx.current_project_dir
+        if not project_dir:
+            self._status_message("请先打开项目。")
+            return
+        svc = getattr(self.ctx, "collab_service", None)
+        if svc is None or not svc.is_running() or not svc.group_code:
+            QMessageBox.information(self, "照片同步", "请先启用局域网协作并设置协作组码。")
+            return
+        peers = self._collab_file_sync_peers()
+        if not peers:
+            QMessageBox.information(self, "照片同步", "没有同组在线设备，无法同步照片。")
+            return
+        current_worker = getattr(self, "_collab_file_sync_worker", None)
+        if current_worker is not None and current_worker.isRunning():
+            self._status_message("照片同步正在进行中。")
+            return
+        if mode == "overwrite":
+            ret = QMessageBox.warning(
+                self,
+                "强制覆盖本机文件",
+                "强制覆盖会用队友设备上的同名文件替换本机文件。\n\n"
+                "本机旧文件会先备份到 _data/sync-conflicts/，不会直接删除。\n"
+                "确定继续吗？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if ret != QMessageBox.StandardButton.Yes:
+                return
+
+        from app.workers.collab_file_sync_worker import CollabFileSyncWorker
+
+        progress = QProgressDialog("正在准备同步...", None, 0, 0, self)
+        progress.setWindowTitle(title)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setCancelButton(None)
+        progress.setValue(0)
+
+        worker = CollabFileSyncWorker(
+            project_dir=project_dir,
+            peers=peers,
+            group_code=svc.group_code,
+            uids=uids,
+            mode=mode,
+            max_workers=4,
+            parent=self,
+        )
+        self._collab_file_sync_worker = worker
+        self._collab_file_sync_progress = progress
+
+        def _on_progress(current: int, total: int, rel: str) -> None:
+            progress.setMaximum(max(1, total))
+            progress.setValue(min(current, max(1, total)))
+            progress.setLabelText(f"正在同步 {current}/{total}\n{rel}")
+
+        def _finish(summary) -> None:
+            progress.close()
+            self._collab_file_sync_worker = None
+            self._collab_file_sync_progress = None
+            try:
+                self._refresh_monitor()
+                self._sidebar.refresh()
+                if self._current_uid:
+                    self._on_show_current_results()
+            except Exception:
+                pass
+            msg = (
+                f"照片同步完成：下载 {summary.downloaded}，跳过 {summary.skipped}，"
+                f"冲突 {summary.conflicts}，失败 {summary.failed}。"
+            )
+            self._status_message(msg)
+            if summary.conflicts or summary.failed:
+                detail = ""
+                if summary.conflict_paths:
+                    detail += "冲突文件：\n" + "\n".join(summary.conflict_paths[:12])
+                    if len(summary.conflict_paths) > 12:
+                        detail += f"\n... 还有 {len(summary.conflict_paths) - 12} 个"
+                if summary.failed_paths:
+                    if detail:
+                        detail += "\n\n"
+                    detail += "失败文件：\n" + "\n".join(summary.failed_paths[:12])
+                    if len(summary.failed_paths) > 12:
+                        detail += f"\n... 还有 {len(summary.failed_paths) - 12} 个"
+                QMessageBox.warning(self, "照片同步完成但有问题", detail or msg)
+
+        def _fail(message: str) -> None:
+            progress.close()
+            self._collab_file_sync_worker = None
+            self._collab_file_sync_progress = None
+            QMessageBox.warning(self, "照片同步失败", message or "未知错误")
+
+        worker.progress.connect(_on_progress)
+        worker.finished_summary.connect(_finish)
+        worker.failed.connect(_fail)
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
+        progress.show()
 
     def _collab_operator(self) -> str | None:
         """Current operator name (for task assignee), read safely from settings."""

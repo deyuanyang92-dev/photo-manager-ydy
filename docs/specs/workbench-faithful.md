@@ -53,6 +53,6 @@
 **Metadata** card：`meta-score-ring`（完整度环）+ `meta-fields`：`鉴定人 采集人 拍摄人 站位经度 站位纬度 采集地理区 拍摄位置` + `📍 地图` 按钮。
 
 ## 实现要求
-- 用已建后端服务（monitor/grouping/organize/helicon/archive/activation/naming），功能层不改。红线不变（TIFF永不删/删JPG默认关/中文不自动填/激活互斥）。
+- 用已建后端服务（monitor/grouping/organize/helicon/archive/activation/naming），功能层不改。红线不变（整理/归档不自动删TIFF、用户可手动删除确认/散落JPG默认删但可配置保留/中文不自动填/激活互斥）。
 - 样式精确取自 `styles.css`（间距/圆角/配色/字体），QSS 还原，不靠猜。
 - **自验**：实现后开 Qt app 截图 vs 真实 web（127.0.0.1:3000）同区并排，逐控件核对"有没有/位不位/像不像"。

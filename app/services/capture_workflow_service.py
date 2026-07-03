@@ -97,17 +97,17 @@ class SupplementaryArchiveResult:
     uid: str = ""
 
 
-def _uid(value: str | None) -> str:
+def _clean_uid(value: str | None) -> str:
     return str(value or "").strip()
 
 
-def _iso_now() -> str:
+def _utc_now_iso() -> str:
     return datetime.now(tz=timezone.utc).isoformat()
 
 
 def delete_specimen(db: sqlite3.Connection, uid: str) -> DeleteSpecimenResult:
     """Delete one specimen and local references without touching disk files."""
-    target = _uid(uid)
+    target = _clean_uid(uid)
     if not target:
         return DeleteSpecimenResult(uid="", deleted=False)
 
@@ -131,12 +131,12 @@ def delete_specimen(db: sqlite3.Connection, uid: str) -> DeleteSpecimenResult:
     )
 
 
-def grouping_for_uid(
+def grouping_for_clean_uid(
     db: Optional[sqlite3.Connection],
     uid: str,
 ) -> SpecimenGrouping:
     """Load persisted grouping, or return an empty grouping without a DB."""
-    target = _uid(uid)
+    target = _clean_uid(uid)
     if db:
         return load_grouping(db, target)
     return SpecimenGrouping(uid=target, groups=[])
@@ -150,7 +150,7 @@ def persist_grouping(
     clean_phantoms: bool = False,
 ) -> None:
     """Persist grouping when a DB is available."""
-    target = _uid(uid)
+    target = _clean_uid(uid)
     if db and target:
         save_grouping(db, target, groups, clean_phantoms=clean_phantoms)
 
@@ -161,10 +161,10 @@ def flush_visible_grouping(
     grouping: Optional[SpecimenGrouping],
 ) -> bool:
     """Persist the grouping object currently visible in the editor."""
-    target = _uid(uid)
+    target = _clean_uid(uid)
     if not db or not target or grouping is None:
         return False
-    if _uid(getattr(grouping, "uid", target)) != target:
+    if _clean_uid(getattr(grouping, "uid", target)) != target:
         return False
     save_grouping(db, target, list(grouping.groups or []))
     return True
@@ -182,12 +182,12 @@ def prepare_grouping_claim(
     output-name fields that depend on the visible naming UI, then call
     :func:`persist_grouping_claim`.
     """
-    target = _uid(target_uid)
+    target = _clean_uid(target_uid)
     if not target:
         return GroupingClaimPlan(kind="none", uid="")
 
     visible_groups = without_blank_draft_groups(list(groups or []))
-    source_uid = _uid(panel_uid)
+    source_uid = _clean_uid(panel_uid)
 
     if source_uid == target:
         return GroupingClaimPlan(kind="same_uid", uid=target, groups=visible_groups)
@@ -438,7 +438,7 @@ def register_tif_only_group(
     group.status = "organized"
     group.composed_tiff_path = moved_tiff
     group.archive_zip = None
-    group.updated_at = _iso_now()
+    group.updated_at = _utc_now_iso()
     persist_grouping(db, uid, list(grouping.groups or []), clean_phantoms=False)
     return OrganizedGroupResult(
         tiff_path=moved_tiff,
@@ -495,7 +495,7 @@ def finalize_archived_group(
     group.status = "organized"
     group.composed_tiff_path = moved_tiff
     group.archive_zip = moved_zip
-    group.updated_at = _iso_now()
+    group.updated_at = _utc_now_iso()
     persist_grouping(db, uid, list(grouping.groups or []), clean_phantoms=False)
     return OrganizedGroupResult(
         tiff_path=moved_tiff,
@@ -532,14 +532,14 @@ def resolve_result_pair(tiff_path: str, zip_path: str) -> tuple[str, str]:
     return tiff, zipf
 
 
-def link_result_pair_to_uid(
+def link_result_pair_to_clean_uid(
     db: sqlite3.Connection,
     target_uid: str,
     tiff_path: str,
     zip_path: str,
 ) -> LinkedResultPair:
     """Register an existing TIFF+ZIP pair under *target_uid*."""
-    target = _uid(target_uid)
+    target = _clean_uid(target_uid)
     if not target:
         raise ValueError("目标编号不能为空")
     tiff, zipf = resolve_result_pair(tiff_path, zip_path)
@@ -572,7 +572,7 @@ def link_result_pair_to_uid(
             composed_tiff_path=tiff,
             status="organized",
             source="linked-existing-result",
-            updated_at=_iso_now(),
+            updated_at=_utc_now_iso(),
             archive_zip=zipf,
             output_name=Path(tiff).stem,
         )
@@ -636,7 +636,7 @@ def attributed_jpg_paths(
     results_subdir: str = "results",
 ) -> list[str]:
     """Return JPG paths currently attributed to one specimen UID."""
-    target = _uid(uid)
+    target = _clean_uid(uid)
     if not project_dir or not target:
         return []
 

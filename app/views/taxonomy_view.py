@@ -593,9 +593,9 @@ class _TaxonFacetPanel(QFrame):
         self._values_list.setStyleSheet(f"QListWidget {{ background: {_C_INPUT}; border: 1px solid {_C_BORDER}; border-radius: 4px; }} QListWidget::item {{ color: {_C_TEXT}; padding: 3px 6px; }}")
         layout.addWidget(self._values_list, 1)
         act_row = QHBoxLayout(); act_row.setSpacing(6)
-        btn_ok = QPushButton("确定"); btn_ok.setObjectName("Primary"); btn_ok.setFixedHeight(28); btn_ok.clicked.connect(self._on_apply); act_row.addWidget(btn_ok)
+        btn_ok = QPushButton("确定"); btn_ok.setObjectName("Primary"); btn_ok.setFixedHeight(28); btn_ok.clicked.connect(self._apply_current_column_filter); act_row.addWidget(btn_ok)
         btn_cancel = QPushButton("取消"); btn_cancel.setObjectName("Outline"); btn_cancel.setFixedHeight(28); btn_cancel.clicked.connect(self.close); act_row.addWidget(btn_cancel)
-        btn_clear = QPushButton("清除筛选"); btn_clear.setObjectName("Outline"); btn_clear.setFixedHeight(28); btn_clear.clicked.connect(self._on_clear); act_row.addWidget(btn_clear)
+        btn_clear = QPushButton("清除筛选"); btn_clear.setObjectName("Outline"); btn_clear.setFixedHeight(28); btn_clear.clicked.connect(self._clear_current_column_filter); act_row.addWidget(btn_clear)
         layout.addLayout(act_row)
 
     @staticmethod
@@ -665,12 +665,12 @@ class _TaxonFacetPanel(QFrame):
         q = self._search_text.strip()
         if q: self._draft = {"mode": "search", "search": q, "excluded": []}; self._fill_values()
 
-    def _on_apply(self) -> None:
+    def _apply_current_column_filter(self) -> None:
         draft = self._draft or {"mode": "all"}
         self.filter_applied.emit(self._col_key, None if draft.get("mode") == "all" else dict(draft))
         self.close()
 
-    def _on_clear(self) -> None: self.filter_applied.emit(self._col_key, None); self.close()
+    def _clear_current_column_filter(self) -> None: self.filter_applied.emit(self._col_key, None); self.close()
 
     def show_below(self, ref_widget: QWidget) -> None:
         self.move(ref_widget.mapToGlobal(QPoint(0, ref_widget.height() + 2))); self.show(); self.raise_(); self.activateWindow()
@@ -761,16 +761,16 @@ class _WormsMatchDialog(QDialog):
         self._row = row; self._svc = worms_svc; self._selected: Optional[dict[str, Any]] = None
         self._chain: list[dict[str, Any]] = []; self._worker: Optional[_WormsSearchWorker] = None; self._result: Optional[dict[str, Any]] = None
         self.setWindowTitle("WoRMS 匹配物种"); self.setMinimumWidth(680); self.setMinimumHeight(420)
-        self._build_ui(); self._do_search()
+        self._build_ui(); self._start_worms_match_search()
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self); layout.setContentsMargins(18, 18, 18, 14); layout.setSpacing(10)
         t = QLabel("WoRMS 匹配物种"); t.setStyleSheet(f"font-size: 16px; font-weight: 600; color: {_C_TEXT};"); layout.addWidget(t)
         o = QLabel(f"原始种名：{self._row.get('species', '')}"); o.setStyleSheet(f"color: {_C_MUTED}; font-size: 12px;"); layout.addWidget(o)
         sr = QHBoxLayout(); sr.setSpacing(8)
-        self._search_input = QLineEdit(); self._search_input.setPlaceholderText("输入科学名"); self._search_input.setText(self._row.get("species", "")); self._search_input.returnPressed.connect(self._do_search); sr.addWidget(self._search_input, 1)
+        self._search_input = QLineEdit(); self._search_input.setPlaceholderText("输入科学名"); self._search_input.setText(self._row.get("species", "")); self._search_input.returnPressed.connect(self._start_worms_match_search); sr.addWidget(self._search_input, 1)
         self._fuzzy_check = QCheckBox("模糊匹配"); self._fuzzy_check.setStyleSheet(f"color: {_C_MUTED};"); sr.addWidget(self._fuzzy_check)
-        bs = QPushButton("搜索"); bs.setObjectName("Outline"); bs.setFixedWidth(60); bs.clicked.connect(self._do_search); sr.addWidget(bs); layout.addLayout(sr)
+        bs = QPushButton("搜索"); bs.setObjectName("Outline"); bs.setFixedWidth(60); bs.clicked.connect(self._start_worms_match_search); sr.addWidget(bs); layout.addLayout(sr)
         self._error_label = QLabel(""); self._error_label.setStyleSheet(f"color: {_C_DANGER}; font-size: 11px;"); self._error_label.hide(); layout.addWidget(self._error_label)
         self._loading_label = QLabel("正在查询 WoRMS..."); self._loading_label.setStyleSheet(f"color: {_C_ACCENT}; font-size: 12px;"); self._loading_label.hide(); layout.addWidget(self._loading_label)
         body = QSplitter(Qt.Orientation.Horizontal); body.setHandleWidth(6)
@@ -784,11 +784,11 @@ class _WormsMatchDialog(QDialog):
         body.addWidget(df); body.setSizes([340, 300]); layout.addWidget(body, 1)
         ar = QHBoxLayout(); ar.setSpacing(8)
         ms = self._row.get("mappingStatus", ""); bl = "重新匹配并保存" if ms and ms != "unprocessed" else "采用并保存"
-        self._btn_save = QPushButton(bl); self._btn_save.setObjectName("Primary"); self._btn_save.setEnabled(False); self._btn_save.clicked.connect(self._on_save); ar.addWidget(self._btn_save)
-        bn = QPushButton("标记未找到"); bn.setObjectName("Outline"); bn.clicked.connect(self._on_no_match); ar.addWidget(bn)
+        self._btn_save = QPushButton(bl); self._btn_save.setObjectName("Primary"); self._btn_save.setEnabled(False); self._btn_save.clicked.connect(self._accept_selected_worms_match); ar.addWidget(self._btn_save)
+        bn = QPushButton("标记未找到"); bn.setObjectName("Outline"); bn.clicked.connect(self._accept_no_worms_match); ar.addWidget(bn)
         bc = QPushButton("取消"); bc.setObjectName("Outline"); bc.clicked.connect(self.reject); ar.addWidget(bc); ar.addStretch(); layout.addLayout(ar)
 
-    def _do_search(self) -> None:
+    def _start_worms_match_search(self) -> None:
         query = self._search_input.text().strip()
         if not query: return
         if self._worker and self._worker.isRunning(): self._worker.terminate()
@@ -826,12 +826,12 @@ class _WormsMatchDialog(QDialog):
     def _on_chain_error(self, msg: str) -> None:
         self._chain_loading_label.hide(); self._chain_label.show(); self._chain_label.setText(f"分类链加载失败：{msg}"); self._btn_save.setEnabled(bool(self._selected))
 
-    def _on_save(self) -> None:
+    def _accept_selected_worms_match(self) -> None:
         if self._selected is None: return
         aphia = self._selected.get("valid_AphiaID") or self._selected.get("AphiaID")
         self._result = {"aphia_id": int(aphia) if aphia else None, "worms_record": self._selected, "chain": self._chain}; self.accept()
 
-    def _on_no_match(self) -> None: self._result = {"no_match": True}; self.accept()
+    def _accept_no_worms_match(self) -> None: self._result = {"no_match": True}; self.accept()
 
     def get_result(self) -> Optional[dict[str, Any]]: return self._result
 
@@ -861,16 +861,16 @@ class _TaxonReviewDialog(QDialog):
                 aphia = cand.get("valid_AphiaID") or cand.get("AphiaID") or ""; name = cand.get("valid_name") or cand.get("scientificname") or ""
                 info = QLabel(f"{name} · AphiaID {aphia}"); info.setStyleSheet(f"color: {_C_TEXT}; font-size: 12px; background: transparent;"); rl.addWidget(info, 1)
                 bu = QPushButton("采用"); bu.setObjectName("Primary"); bu.setFixedWidth(56)
-                bu.clicked.connect(lambda _=False, c=cand: self._on_use(c)); rl.addWidget(bu); layout.addWidget(rf)
+                bu.clicked.connect(lambda _=False, c=cand: self._accept_review_candidate(c)); rl.addWidget(bu); layout.addWidget(rf)
         ar = QHBoxLayout(); ar.setSpacing(8)
-        bn = QPushButton("标记未找到"); bn.setObjectName("Outline"); bn.clicked.connect(self._on_no_match); ar.addWidget(bn)
+        bn = QPushButton("标记未找到"); bn.setObjectName("Outline"); bn.clicked.connect(self._accept_no_review_match); ar.addWidget(bn)
         bc = QPushButton("关闭"); bc.setObjectName("Outline"); bc.clicked.connect(self.reject); ar.addWidget(bc); ar.addStretch(); layout.addLayout(ar)
 
-    def _on_use(self, cand: dict[str, Any]) -> None:
+    def _accept_review_candidate(self, cand: dict[str, Any]) -> None:
         aphia = cand.get("valid_AphiaID") or cand.get("AphiaID")
         self._result = {"aphia_id": int(aphia) if aphia else None}; self.accept()
 
-    def _on_no_match(self) -> None: self._result = {"no_match": True}; self.accept()
+    def _accept_no_review_match(self) -> None: self._result = {"no_match": True}; self.accept()
 
     def get_result(self) -> Optional[dict[str, Any]]: return self._result
 
@@ -2326,7 +2326,7 @@ class TaxonomyView(BaseView):
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         if is_user:
-            self._svc.update(rec["recordId"], dlg.get_record())
+            self._svc.update_user_record(rec["recordId"], dlg.get_record())
         else:
             # Seed record: create user override entry (mirrors web findUserEntryForCurrent + learn)
             self._svc.learn(dlg.get_record())
@@ -2345,7 +2345,7 @@ class TaxonomyView(BaseView):
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
-        self._svc.delete(rec["recordId"])
+        self._svc.delete_user_record(rec["recordId"])
         self._load_page()
 
     # ── Export ────────────────────────────────────────────────────────────────
@@ -2516,7 +2516,7 @@ class TaxonomyView(BaseView):
             if raw in col_map:
                 field_idx[canon] = col_map[raw]
 
-        def _cell(row: Any, field: str) -> str:
+        def imported_taxonomy_cell_text(row: Any, field: str) -> str:
             i = field_idx.get(field)
             if i is None:
                 return ""
@@ -2528,7 +2528,7 @@ class TaxonomyView(BaseView):
 
         imported = skipped = 0
         for row in data_rows:
-            rec = {f: _cell(row, f) for f in (
+            rec = {f: imported_taxonomy_cell_text(row, f) for f in (
                 "class", "order", "family", "species",
                 "classCn", "orderCn", "familyCn", "speciesCn",
                 "genus", "genusCn",

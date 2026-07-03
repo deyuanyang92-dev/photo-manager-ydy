@@ -625,7 +625,7 @@ class TestTaxonFacetPanel:
         )
         results = []
         panel.filter_applied.connect(lambda k, p: results.append((k, p)))
-        panel._on_clear()
+        panel._clear_current_column_filter()
         assert len(results) == 1
         assert results[0] == ("class", None)
 
@@ -636,7 +636,7 @@ class TestTaxonFacetPanel:
         panel = _TaxonFacetPanel("class", "纲", recs, current_predicate=pred)
         results = []
         panel.filter_applied.connect(lambda k, p: results.append((k, p)))
-        panel._on_apply()
+        panel._apply_current_column_filter()
         assert len(results) == 1
         col_key, returned_pred = results[0]
         assert col_key == "class"
@@ -758,7 +758,7 @@ class TestWormsMatchDialog:
         import unittest.mock as mock
         with mock.patch.object(_WormsSearchWorker, "start"):
             dlg = _WormsMatchDialog(row, worms_svc)
-        dlg._on_no_match()
+        dlg._accept_no_worms_match()
         result = dlg.get_result()
         assert result is not None
         assert result.get("no_match") is True
@@ -790,7 +790,7 @@ class TestTaxonReviewDialog:
         from app.views.taxonomy_view import _TaxonReviewDialog
         row = {"species": "X sp", "recordId": "seed:0", "mappingCandidates": []}
         dlg = _TaxonReviewDialog(row)
-        dlg._on_no_match()
+        dlg._accept_no_review_match()
         result = dlg.get_result()
         assert result is not None
         assert result.get("no_match") is True
@@ -799,7 +799,7 @@ class TestTaxonReviewDialog:
         from app.views.taxonomy_view import _TaxonReviewDialog
         row = {"species": "X sp", "recordId": "seed:0", "mappingCandidates": []}
         dlg = _TaxonReviewDialog(row)
-        dlg._on_use({"AphiaID": 99999, "valid_AphiaID": 99999})
+        dlg._accept_review_candidate({"AphiaID": 99999, "valid_AphiaID": 99999})
         result = dlg.get_result()
         assert result is not None
         assert result.get("aphia_id") == 99999

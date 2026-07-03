@@ -150,7 +150,7 @@ def scan_tree(root: str, max_depth: int = 6, *, use_cache: bool = True) -> dict:
         if cached is not None:
             return cached
 
-    def _node(p: Path, depth: int) -> dict:
+    def build_workspace_tree_node(p: Path, depth: int) -> dict:
         children: list[dict] = []
         if depth < max_depth:
             try:
@@ -166,7 +166,7 @@ def scan_tree(root: str, max_depth: int = 6, *, use_cache: bool = True) -> dict:
                         continue
                 except OSError:
                     continue
-                children.append(_node(Path(entry.path), depth + 1))
+                children.append(build_workspace_tree_node(Path(entry.path), depth + 1))
         return {
             "name": p.name,
             "path": str(p),
@@ -174,7 +174,7 @@ def scan_tree(root: str, max_depth: int = 6, *, use_cache: bool = True) -> dict:
             "children": children,
         }
 
-    tree = _node(root_path, 0)
+    tree = build_workspace_tree_node(root_path, 0)
     if use_cache:
         _cache_put(_SCAN_TREE_CACHE, key, tree)
     return tree
@@ -234,7 +234,7 @@ def discover_workspace_candidates(
             return cached
     out: list[dict] = []
 
-    def _walk(p: Path, depth: int) -> None:
+    def collect_workspace_candidate_dirs(p: Path, depth: int) -> None:
         if depth > max_depth:
             return
         if is_workspace_candidate(str(p)):
@@ -262,11 +262,11 @@ def discover_workspace_candidates(
                 continue
             try:
                 if entry.is_dir():
-                    _walk(Path(entry.path), depth + 1)
+                    collect_workspace_candidate_dirs(Path(entry.path), depth + 1)
             except OSError:
                 continue
 
-    _walk(root_path, 0)
+    collect_workspace_candidate_dirs(root_path, 0)
     if use_cache:
         _cache_put(_CANDIDATE_CACHE, key, out)
     return out

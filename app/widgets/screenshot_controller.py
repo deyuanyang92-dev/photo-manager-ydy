@@ -61,14 +61,14 @@ class ScreenshotController(QObject):
             return
         # screen=None → overlay grabs the monitor under the cursor (works with
         # any number of windows / monitors, regardless of which has focus).
-        self._open(None, None)
+        self._open_screenshot_overlay(None, None)
 
     def capture_fullscreen(self) -> None:
         if self._delegate_to_windows():
             return
         screen = self._active_screen()
         full = QRect(QPoint(0, 0), screen.geometry().size()) if screen else None
-        self._open(full, screen)
+        self._open_screenshot_overlay(full, screen)
 
     def _delegate_to_windows(self) -> bool:
         """On WSL, launch the Windows-native snip and report it was handled."""
@@ -77,30 +77,30 @@ class ScreenshotController(QObject):
         if not is_wsl():
             return False
         if launch_windows_snip():
-            self._status("已唤起 Windows 截图工具（Snipaste / 屏幕截图）")
+            self._show_capture_status("已唤起 Windows 截图工具（Snipaste / 屏幕截图）")
             return True
         return False
 
     def capture_window(self) -> None:
         win = self._active_window()
         scr = win.screen() if win else None
-        self._open(self._screen_local_rect(win, scr), scr)
+        self._open_screenshot_overlay(self._screen_local_rect(win, scr), scr)
 
     def capture_view(self) -> None:
         widget = self._view_provider() if self._view_provider else None
         scr = widget.screen() if widget else None
-        self._open(self._screen_local_rect(widget, scr) if widget else None, scr)
+        self._open_screenshot_overlay(self._screen_local_rect(widget, scr) if widget else None, scr)
 
     # ── core ────────────────────────────────────────────────────────────────
-    def _open(self, preset: Optional[QRect], screen=None) -> None:
+    def _open_screenshot_overlay(self, preset: Optional[QRect], screen=None) -> None:
         if self._overlay is not None and self._overlay.isVisible():
             return  # one overlay at a time; ignore re-entry while shown
         overlay = ScreenshotOverlay(self._win)
-        overlay.actionCopy.connect(self._on_copy)
-        overlay.actionSave.connect(self._on_save)
-        overlay.actionDone.connect(self._on_done)
-        overlay.actionPin.connect(self._on_pin)
-        overlay.cancelled.connect(self._on_cancel)
+        overlay.actionCopy.connect(self._copy_screenshot_to_clipboard)
+        overlay.actionSave.connect(self._save_screenshot_as_file)
+        overlay.actionDone.connect(self._copy_and_auto_save_screenshot)
+        overlay.actionPin.connect(self._pin_screenshot_window)
+        overlay.cancelled.connect(self._forget_cancelled_overlay)
         self._overlay = overlay  # keep alive while shown
         overlay.start(preset, screen)
 
@@ -134,46 +134,46 @@ class ScreenshotController(QObject):
         return g.translated(-origin)
 
     # ── destinations ────────────────────────────────────────────────────────
-    def _on_copy(self, pix: QPixmap) -> None:
-        self._to_clipboard(pix)
-        self._status("截图已复制到剪贴板")
+    def _copy_screenshot_to_clipboard(self, pix: QPixmap) -> None:
+        self._copy_pixmap_to_clipboard_with_file_url(pix)
+        self._show_capture_status("截图已复制到剪贴板")
         self.captured.emit(pix)
 
-    def _on_done(self, pix: QPixmap) -> None:
-        self._to_clipboard(pix)
-        saved = self._auto_save(pix)
+    def _copy_and_auto_save_screenshot(self, pix: QPixmap) -> None:
+        self._copy_pixmap_to_clipboard_with_file_url(pix)
+        saved = self._save_screenshot_to_current_project(pix)
         if saved:
-            self._status(f"截图已存项目: {saved.name}（已复制剪贴板）")
+            self._show_capture_status(f"截图已存项目: {saved.name}（已复制剪贴板）")
         else:
-            self._status("截图已复制到剪贴板")
+            self._show_capture_status("截图已复制到剪贴板")
         self.captured.emit(pix)
 
-    def _on_save(self, pix: QPixmap) -> None:
-        self._to_clipboard(pix)
-        saved = self._auto_save(pix)
+    def _save_screenshot_as_file(self, pix: QPixmap) -> None:
+        self._copy_pixmap_to_clipboard_with_file_url(pix)
+        saved = self._save_screenshot_to_current_project(pix)
         start = str(saved) if saved else "截图.png"
         chosen = ui.get_save_file_name(self._win, "保存截图", start, "PNG 图片 (*.png)")
         if chosen:
             if not chosen.lower().endswith(".png"):
                 chosen += ".png"
             pix.save(chosen, "PNG")
-            self._status(f"截图已存: {Path(chosen).name}（已复制剪贴板）")
+            self._show_capture_status(f"截图已存: {Path(chosen).name}（已复制剪贴板）")
         elif saved:
-            self._status(f"截图已存项目: {saved.name}（已复制剪贴板）")
+            self._show_capture_status(f"截图已存项目: {saved.name}（已复制剪贴板）")
         self.captured.emit(pix)
 
-    def _on_pin(self, pix: QPixmap, global_tl: QPoint) -> None:
+    def _pin_screenshot_window(self, pix: QPixmap, global_tl: QPoint) -> None:
         win = PinWindow(pix)
         win.show_at(global_tl)
-        self._to_clipboard(pix)
-        self._status("截图已钉到桌面（已复制剪贴板）")
+        self._copy_pixmap_to_clipboard_with_file_url(pix)
+        self._show_capture_status("截图已钉到桌面（已复制剪贴板）")
         self.captured.emit(pix)
 
-    def _on_cancel(self) -> None:
+    def _forget_cancelled_overlay(self) -> None:
         self._overlay = None
 
     # ── helpers ───────────────────────────────────────────────────────────
-    def _to_clipboard(self, pix: QPixmap) -> None:
+    def _copy_pixmap_to_clipboard_with_file_url(self, pix: QPixmap) -> None:
         """Put the shot on the clipboard in three formats at once.
 
         ``setPixmap`` alone only exposes raw image data, which terminal-based
@@ -184,13 +184,13 @@ class ScreenshotController(QObject):
         """
         md = QMimeData()
         md.setImageData(pix.toImage())
-        path = self._temp_png(pix)
+        path = self._write_temp_clipboard_png(pix)
         if path is not None:
             md.setUrls([QUrl.fromLocalFile(str(path))])
             md.setText(str(path))
         QApplication.clipboard().setMimeData(md)
 
-    def _temp_png(self, pix: QPixmap) -> Optional[Path]:
+    def _write_temp_clipboard_png(self, pix: QPixmap) -> Optional[Path]:
         try:
             fd, name = tempfile.mkstemp(prefix="shot-", suffix=".png")
             os.close(fd)
@@ -201,7 +201,7 @@ class ScreenshotController(QObject):
             pass
         return None
 
-    def _auto_save(self, pix: QPixmap) -> Optional[Path]:
+    def _save_screenshot_to_current_project(self, pix: QPixmap) -> Optional[Path]:
         project_dir = getattr(self._ctx, "current_project_dir", None) if self._ctx else None
         if not project_dir:
             return None
@@ -220,6 +220,6 @@ class ScreenshotController(QObject):
             pass
         return None
 
-    def _status(self, text: str) -> None:
+    def _show_capture_status(self, text: str) -> None:
         if self._status_cb:
             self._status_cb(text)

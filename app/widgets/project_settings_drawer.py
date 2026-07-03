@@ -68,15 +68,15 @@ class _KVEditor(QWidget):
         add_btn = QPushButton("+ 添加")
         add_btn.setObjectName("Ghost")
         add_btn.setFixedHeight(26)
-        add_btn.clicked.connect(self._add_row)
+        add_btn.clicked.connect(self._add_key_value_row)
         root.addWidget(add_btn)
 
-    def load(self, data: dict[str, str]) -> None:
+    def load_entries(self, data: dict[str, str]) -> None:
         self._clear_rows()
         for k, v in data.items():
-            self._add_row(k, v)
+            self._add_key_value_row(k, v)
 
-    def get_data(self) -> dict[str, str]:
+    def entries(self) -> dict[str, str]:
         result: dict[str, str] = {}
         for k_edit, v_edit in self._rows:
             k = k_edit.text().strip()
@@ -91,7 +91,7 @@ class _KVEditor(QWidget):
                 item.widget().deleteLater()
         self._rows.clear()
 
-    def _add_row(self, key: str = "", val: str = "") -> None:
+    def _add_key_value_row(self, key: str = "", val: str = "") -> None:
         row_w = QWidget()
         h = QHBoxLayout(row_w)
         h.setContentsMargins(0, 0, 0, 0)
@@ -177,7 +177,7 @@ class ProjectSettingsDrawer(QWidget):
         close_btn = QPushButton("✕")
         close_btn.setObjectName("Ghost")
         close_btn.setFixedSize(28, 28)
-        close_btn.clicked.connect(self._on_close)
+        close_btn.clicked.connect(self._hide_drawer_and_emit_closed)
         head.addWidget(close_btn)
         root.addWidget(head_w)
 
@@ -220,7 +220,7 @@ class ProjectSettingsDrawer(QWidget):
             edit.setFixedHeight(30)
             edit.editingFinished.connect(self._save_project_meta)
             self._meta_edits[key] = edit
-            lay.addWidget(_row(label, edit))
+            lay.addWidget(_settings_form_row(label, edit))
 
         sep = _divider()
         lay.addWidget(sep)
@@ -238,15 +238,26 @@ class ProjectSettingsDrawer(QWidget):
 
         # Auto-activate toggle
         self._auto_activate_cb = QCheckBox("新建编号后自动激活")
-        self._auto_activate_cb.toggled.connect(self._on_auto_activate_changed)
+        self._auto_activate_cb.toggled.connect(self._save_auto_activate_new_specimen_setting)
         lay.addWidget(self._auto_activate_cb)
 
         self._silent_compose_cb = QCheckBox("静默合成（跳过预览确认）")
         self._silent_compose_cb.setToolTip(
             "打开后：选中 JPG 点合成会直接运行 Helicon，成果先生成在 incoming。"
         )
-        self._silent_compose_cb.toggled.connect(self._on_silent_compose_changed)
+        self._silent_compose_cb.toggled.connect(self._save_silent_compose_setting)
         lay.addWidget(self._silent_compose_cb)
+
+        self._delete_jpg_after_archive_cb = QCheckBox("整理后删除散落 JPG（默认）")
+        self._delete_jpg_after_archive_cb.setToolTip(
+            "整理会先把 JPG 原片写入 ZIP；校验通过后删除待处理区散落 JPG。"
+            "关闭后保留散落 JPG。整理不会自动删除 TIFF；不满意的 TIFF 可手动删除。"
+        )
+        self._delete_jpg_after_archive_cb.setChecked(True)
+        self._delete_jpg_after_archive_cb.toggled.connect(
+            self._save_delete_jpg_after_archive_setting
+        )
+        lay.addWidget(self._delete_jpg_after_archive_cb)
 
         lay.addWidget(_divider())
 
@@ -267,7 +278,7 @@ class ProjectSettingsDrawer(QWidget):
         detect_btn = QPushButton("检测")
         detect_btn.setObjectName("Outline")
         detect_btn.setFixedSize(52, 30)
-        detect_btn.clicked.connect(self._on_detect_helicon)
+        detect_btn.clicked.connect(self._detect_and_apply_helicon_path)
         path_row.addWidget(detect_btn)
         lay.addLayout(path_row)
 
@@ -356,12 +367,12 @@ class ProjectSettingsDrawer(QWidget):
         clear_btn = QPushButton("取消")
         clear_btn.setObjectName("Ghost")
         clear_btn.setFixedHeight(28)
-        clear_btn.clicked.connect(self._on_clear_custom_form)
+        clear_btn.clicked.connect(self._start_blank_custom_storage_form)
         add_btn_row.addWidget(clear_btn)
         self._storage_save_btn = QPushButton("添加")
         self._storage_save_btn.setObjectName("Primary")
         self._storage_save_btn.setFixedHeight(28)
-        self._storage_save_btn.clicked.connect(self._on_save_storage)
+        self._storage_save_btn.clicked.connect(self._save_custom_storage_option)
         add_btn_row.addWidget(self._storage_save_btn)
         add_btn_row.addStretch()
         lay.addLayout(add_btn_row)
@@ -404,7 +415,7 @@ class ProjectSettingsDrawer(QWidget):
                 edit.setToolTip(hint_text)
             edit.editingFinished.connect(self._save_personnel)
             self._person_edits[key] = edit
-            lbl_widget = _row(label, edit, width=100)
+            lbl_widget = _settings_form_row(label, edit, width=100)
             lay.addWidget(lbl_widget)
 
         lay.addStretch()
@@ -421,13 +432,13 @@ class ProjectSettingsDrawer(QWidget):
         self._province_edit.setFixedHeight(30)
         self._province_edit.setPlaceholderText("如 ZJ")
         self._province_edit.editingFinished.connect(self._save_code_labels)
-        lay.addWidget(_row("地区代码", self._province_edit, width=80))
+        lay.addWidget(_settings_form_row("地区代码", self._province_edit, width=80))
 
         self._site_edit = QLineEdit()
         self._site_edit.setFixedHeight(30)
         self._site_edit.setPlaceholderText("如 SMW")
         self._site_edit.editingFinished.connect(self._save_code_labels)
-        lay.addWidget(_row("样地代码", self._site_edit, width=80))
+        lay.addWidget(_settings_form_row("样地代码", self._site_edit, width=80))
 
         lay.addWidget(_divider())
 
@@ -494,17 +505,17 @@ class ProjectSettingsDrawer(QWidget):
         self._cap_lon_edit.setFixedHeight(30)
         self._cap_lon_edit.setPlaceholderText("默认经度，如 121.5")
         self._cap_lon_edit.editingFinished.connect(self._save_capture_defaults)
-        lay.addWidget(_row("默认经度", self._cap_lon_edit, width=80))
+        lay.addWidget(_settings_form_row("默认经度", self._cap_lon_edit, width=80))
         self._cap_lat_edit = QLineEdit()
         self._cap_lat_edit.setFixedHeight(30)
         self._cap_lat_edit.setPlaceholderText("默认纬度，如 29.1")
         self._cap_lat_edit.editingFinished.connect(self._save_capture_defaults)
-        lay.addWidget(_row("默认纬度", self._cap_lat_edit, width=80))
+        lay.addWidget(_settings_form_row("默认纬度", self._cap_lat_edit, width=80))
         self._cap_geo_edit = QLineEdit()
         self._cap_geo_edit.setFixedHeight(30)
         self._cap_geo_edit.setPlaceholderText("默认采集地理区，如 三门湾")
         self._cap_geo_edit.editingFinished.connect(self._save_capture_defaults)
-        lay.addWidget(_row("默认地理区", self._cap_geo_edit, width=80))
+        lay.addWidget(_settings_form_row("默认地理区", self._cap_geo_edit, width=80))
 
         lay.addWidget(_divider())
 
@@ -562,7 +573,7 @@ class ProjectSettingsDrawer(QWidget):
         self._tiff_write_mode_combo.addItem("跳过已写入照片", "skip_written")
         self._tiff_write_mode_combo.addItem("强制覆盖软件字段", "force")
         self._tiff_write_mode_combo.currentIndexChanged.connect(self._save_tiff_metadata_write)
-        lay.addWidget(_row("写入策略", self._tiff_write_mode_combo, width=72))
+        lay.addWidget(_settings_form_row("写入策略", self._tiff_write_mode_combo, width=72))
 
         lay.addWidget(_divider())
 
@@ -641,7 +652,7 @@ class ProjectSettingsDrawer(QWidget):
         self._print_tissue_cb.stateChanged.connect(self._save_print_settings)
 
         lay.addWidget(_settings_group("单张打印", [
-            _row("点击打印", self._quick_print_mode, width=72),
+            _settings_form_row("点击打印", self._quick_print_mode, width=72),
             self._print_tissue_cb,
         ]))
 
@@ -671,11 +682,11 @@ class ProjectSettingsDrawer(QWidget):
         )
 
         sample_grp = _settings_group("瓶签", [
-            _row("打印机", self._sample_printer_combo, width=64),
-            _row("模板",   self._sample_template_combo, width=64),
-            _row("",       self._sample_template_btn, width=64),
-            _row("纸张",   self._sample_paper_combo, width=64),
-            _row("排版",   self._sample_imposition_btn, width=64),
+            _settings_form_row("打印机", self._sample_printer_combo, width=64),
+            _settings_form_row("模板",   self._sample_template_combo, width=64),
+            _settings_form_row("",       self._sample_template_btn, width=64),
+            _settings_form_row("纸张",   self._sample_paper_combo, width=64),
+            _settings_form_row("排版",   self._sample_imposition_btn, width=64),
         ])
         sample_grp.setToolTip("样品瓶 / 酒精保存标签；需要设计或修改模板时，进入「标签打印」页编辑。")
         lay.addWidget(sample_grp)
@@ -713,12 +724,12 @@ class ProjectSettingsDrawer(QWidget):
         self._tissue_strategy_combo.currentIndexChanged.connect(self._save_print_settings)
 
         tissue_grp = _settings_group("RNA签", [
-            _row("打印机", self._tissue_printer_combo, width=64),
-            _row("模板",   self._tissue_template_combo, width=64),
-            _row("",       self._tissue_template_btn, width=64),
-            _row("纸张",   self._tissue_paper_combo, width=64),
-            _row("排版",   self._tissue_imposition_btn, width=64),
-            _row("策略",   self._tissue_strategy_combo, width=64),
+            _settings_form_row("打印机", self._tissue_printer_combo, width=64),
+            _settings_form_row("模板",   self._tissue_template_combo, width=64),
+            _settings_form_row("",       self._tissue_template_btn, width=64),
+            _settings_form_row("纸张",   self._tissue_paper_combo, width=64),
+            _settings_form_row("排版",   self._tissue_imposition_btn, width=64),
+            _settings_form_row("策略",   self._tissue_strategy_combo, width=64),
         ])
         tissue_grp.setToolTip(
             "瓶签与 RNA签可绑同一台或不同打印机；同台且 RNA 用 A4/A5 合版纸时，"
@@ -981,6 +992,11 @@ class ProjectSettingsDrawer(QWidget):
             self._silent_compose_cb.setChecked(val)
         except Exception:
             pass
+        try:
+            val = bool(getattr(self.ctx.settings, "delete_jpg_after_archive", True))
+            self._delete_jpg_after_archive_cb.setChecked(val)
+        except Exception:
+            pass
 
         db = self.ctx.get_db()
         if db is None:
@@ -1022,8 +1038,8 @@ class ProjectSettingsDrawer(QWidget):
         cl = load_setting(db, "code_labels", DEFAULT_CODE_LABELS)
         self._province_edit.setText(cl.get("province", ""))
         self._site_edit.setText(cl.get("site", ""))
-        self._stations_kv.load(cl.get("stations", {}))
-        self._species_kv.load(cl.get("species", {}))
+        self._stations_kv.load_entries(cl.get("stations", {}))
+        self._species_kv.load_entries(cl.get("species", {}))
         rules = load_setting(db, "naming_rules", DEFAULT_NAMING_RULES)
         required = rules.get("required", DEFAULT_NAMING_RULES["required"])
         for key, cb in self._naming_required_checks.items():
@@ -1175,8 +1191,8 @@ class ProjectSettingsDrawer(QWidget):
         data = {
             "province": self._province_edit.text().strip(),
             "site": self._site_edit.text().strip(),
-            "stations": self._stations_kv.get_data(),
-            "species": self._species_kv.get_data(),
+            "stations": self._stations_kv.entries(),
+            "species": self._species_kv.entries(),
         }
         save_setting(db, "code_labels", data)
         self._update_code_preview(db)
@@ -1381,12 +1397,12 @@ class ProjectSettingsDrawer(QWidget):
             del_btn.setObjectName("Ghost")
             del_btn.setFixedSize(24, 24)
             del_btn.clicked.connect(
-                lambda _, c=code: self._on_delete_custom_storage(c)
+                lambda _, c=code: self._delete_custom_storage_option(c)
             )
             h.addWidget(del_btn)
             self._custom_list_lay.addWidget(row_w)
 
-    def _on_save_storage(self) -> None:
+    def _save_custom_storage_option(self) -> None:
         db = self.ctx.get_db()
         if db is None:
             self._storage_save_status.setText("保存失败：当前项目数据库未打开。")
@@ -1444,10 +1460,10 @@ class ProjectSettingsDrawer(QWidget):
         self._storage_save_status.setText(f"{action}：{code}")
         self.storages_changed.emit()
 
-    def _on_add_custom_storage(self) -> None:
-        self._on_save_storage()
+    def _save_new_custom_storage_option(self) -> None:
+        self._save_custom_storage_option()
 
-    def _on_delete_custom_storage(self, code: str) -> None:
+    def _delete_custom_storage_option(self, code: str) -> None:
         db = self.ctx.get_db()
         if db is None:
             return
@@ -1462,7 +1478,7 @@ class ProjectSettingsDrawer(QWidget):
         self._rebuild_custom_list(custom, db)
         self.storages_changed.emit()
 
-    def _on_clear_custom_form(self) -> None:
+    def _start_blank_custom_storage_form(self) -> None:
         self._start_new_storage()
 
     # ── Field enable/disable ──────────────────────────────────────────────────
@@ -1501,15 +1517,16 @@ class ProjectSettingsDrawer(QWidget):
         self._tissue_strategy_combo.setEnabled(enabled)
         self._save_print_default_btn.setEnabled(True)
         self._silent_compose_cb.setEnabled(True)
+        self._delete_jpg_after_archive_cb.setEnabled(True)
         self._sync_imposition_buttons()
 
     # ── Slots ─────────────────────────────────────────────────────────────────
 
-    def _on_close(self) -> None:
+    def _hide_drawer_and_emit_closed(self) -> None:
         self.hide()
         self.closed.emit()
 
-    def _on_detect_helicon(self) -> None:
+    def _detect_and_apply_helicon_path(self) -> None:
         custom_path = self._helicon_path_edit.text().strip()
         if custom_path:
             os.environ["HELICON_FOCUS_PATH"] = custom_path
@@ -1517,16 +1534,23 @@ class ProjectSettingsDrawer(QWidget):
         if custom_path:
             self.helicon_path_changed.emit(custom_path)
 
-    def _on_auto_activate_changed(self, checked: bool) -> None:
+    def _save_auto_activate_new_specimen_setting(self, checked: bool) -> None:
         try:
             self.ctx.settings.auto_activate_on_new_specimen = checked
         except Exception:
             pass
 
-    def _on_silent_compose_changed(self, checked: bool) -> None:
+    def _save_silent_compose_setting(self, checked: bool) -> None:
         try:
             self.ctx.settings.silent_compose = checked
-            self.ctx.settings.sync()
+            self.ctx.settings.flush_to_disk()
+        except Exception:
+            pass
+
+    def _save_delete_jpg_after_archive_setting(self, checked: bool) -> None:
+        try:
+            self.ctx.settings.delete_jpg_after_archive = checked
+            self.ctx.settings.flush_to_disk()
         except Exception:
             pass
 
@@ -1553,7 +1577,7 @@ def _scrollable_tab() -> tuple[QWidget, QVBoxLayout]:
     return outer, lay
 
 
-def _row(label: str, field: QWidget, width: int = 90) -> QWidget:
+def _settings_form_row(label: str, field: QWidget, width: int = 90) -> QWidget:
     from app.widgets._form_row import form_row
     return form_row(label, field, label_width=width)
 

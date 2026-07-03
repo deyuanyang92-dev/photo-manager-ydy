@@ -37,7 +37,7 @@ def _col(key: str) -> int:
     return [k for k, _ in _GRID_COLS].index(key)
 
 
-def _set(view, row, key, text):
+def set_collection_grid_cell(view, row, key, text):
     view._grid.setItem(row, _col(key), QTableWidgetItem(text))
 
 
@@ -61,11 +61,11 @@ def test_grid_save_uses_inherited_province_site(qapp, ctx):
     view = CollectionRecordsView(ctx)
     view.on_activate()
     # fill the trailing blank row (row 0, since no records yet)
-    _set(view, 0, "station", "S01")
-    _set(view, 0, "collection_date", "20260601")
-    _set(view, 0, "habitat", "岩相")
-    _set(view, 0, "collector", "张三")
-    view._grid_save()
+    set_collection_grid_cell(view, 0, "station", "S01")
+    set_collection_grid_cell(view, 0, "collection_date", "20260601")
+    set_collection_grid_cell(view, 0, "habitat", "岩相")
+    set_collection_grid_cell(view, 0, "collector", "张三")
+    view._save_collection_records_grid()
 
     rec = crs.lookup_record(db, "GD", "雷州", "S01", "20260601")
     assert rec is not None
@@ -79,19 +79,19 @@ def test_grid_skips_rows_without_station_or_date(qapp, ctx):
                      {"province": "GD", "site": "雷州", "stations": {}, "species": {}})
     view = CollectionRecordsView(ctx)
     view.on_activate()
-    _set(view, 0, "habitat", "泥滩")  # no station/date → must be skipped
-    view._grid_save()
+    set_collection_grid_cell(view, 0, "habitat", "泥滩")  # no station/date → must be skipped
+    view._save_collection_records_grid()
     assert crs.list_records(db) == []
 
 
-def test_grid_fill_down(qapp, ctx):
+def test_fill_current_collection_record_column_down(qapp, ctx):
     view = CollectionRecordsView(ctx)
     view.on_activate()
-    view._grid_add_row(inherit=False)
-    view._grid_add_row(inherit=False)  # now ≥3 rows
-    _set(view, 0, "collection_date", "20260601")
+    view._add_collection_record_grid_row(inherit=False)
+    view._add_collection_record_grid_row(inherit=False)  # now ≥3 rows
+    set_collection_grid_cell(view, 0, "collection_date", "20260601")
     view._grid.setCurrentCell(0, _col("collection_date"))
-    view._grid_fill_down()
+    view._fill_current_collection_record_column_down()
     assert view._grid.item(1, _col("collection_date")).text() == "20260601"
     assert view._grid.item(2, _col("collection_date")).text() == "20260601"
 
@@ -99,9 +99,9 @@ def test_grid_fill_down(qapp, ctx):
 def test_grid_add_row_inherits_date_and_collector(qapp, ctx):
     view = CollectionRecordsView(ctx)
     view.on_activate()
-    _set(view, 0, "collection_date", "20260601")
-    _set(view, 0, "collector", "李四")
-    view._grid_add_row(inherit=True)
+    set_collection_grid_cell(view, 0, "collection_date", "20260601")
+    set_collection_grid_cell(view, 0, "collector", "李四")
+    view._add_collection_record_grid_row(inherit=True)
     last = view._grid.rowCount() - 1
     assert view._grid.item(last, _col("collection_date")).text() == "20260601"
     assert view._grid.item(last, _col("collector")).text() == "李四"
@@ -120,7 +120,7 @@ def test_grid_export_then_import_via_buttons(qapp, ctx, tmp_path, monkeypatch):
     import app.utils.ui as uimod
     out = tmp_path / "tpl.xlsx"
     monkeypatch.setattr(uimod, "get_save_file_name", lambda *a, **k: str(out))
-    view._grid_export_template()
+    view._export_collection_records_template()
     assert out.exists()
     assert "已导出" in view._grid_status_lbl.text()
 
@@ -141,7 +141,7 @@ def test_grid_edit_existing_record_updates_in_place(qapp, ctx):
     view.on_activate()
     # edit habitat of the existing row (row 0)
     view._grid.item(0, _col("habitat")).setText("岩相")
-    view._grid_save()
+    view._save_collection_records_grid()
     rec = crs.lookup_record(db, "FJ", "XM", "B2", "20260518")
     assert rec["habitat"] == "岩相"
     assert len(crs.list_records(db)) == 1  # updated in place, not duplicated

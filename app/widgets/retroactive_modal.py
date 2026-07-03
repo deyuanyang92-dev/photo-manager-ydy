@@ -86,7 +86,7 @@ class RetroactiveModal(QDialog):
 
         # Footer: delete-jpg toggle + buttons
         foot = QHBoxLayout()
-        self._del_cb = QCheckBox("打包后删除原 JPG（校验通过才删，TIFF 永久保留）")
+        self._del_cb = QCheckBox("打包后删除原 JPG（校验通过才删，不自动删 TIFF）")
         self._del_cb.setChecked(True)
         self._del_cb.setChecked(False)
         self._del_cb.toggled.connect(lambda v: setattr(self, "_delete_jpg", v))
@@ -97,7 +97,7 @@ class RetroactiveModal(QDialog):
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
         btns.button(QDialogButtonBox.StandardButton.Ok).setText("确认整理")
-        btns.accepted.connect(self._on_apply)
+        btns.accepted.connect(self._archive_selected_existing_groups)
         btns.rejected.connect(self.reject)
         foot.addWidget(btns)
         root.addLayout(foot)
@@ -176,7 +176,7 @@ class RetroactiveModal(QDialog):
             empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self._content_lay.addWidget(empty)
 
-    def _on_apply(self) -> None:
+    def _archive_selected_existing_groups(self) -> None:
         from app.services.archive_service import archive_group
         project_dir = self.ctx.current_project_dir or self._scan.get("scanFolder") or ""
         if not project_dir:
@@ -202,7 +202,7 @@ class RetroactiveModal(QDialog):
             f"对 {len(to_archive)} 组打包归档（JPG ZIP）？"
             + ("\n\n未打开项目：仅生成本地 ZIP，不写入项目数据库。"
                if no_project else "")
-            + ("\n⚠ 已开启删原片：打包校验通过后将删除这些 JPG（TIFF 永久保留）。"
+            + ("\n⚠ 已开启删原片：打包校验通过后将删除这些 JPG；TIFF 不会被自动删除。"
                if self._delete_jpg else ""),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,

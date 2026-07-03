@@ -144,13 +144,15 @@ def _read_xlsx(p: Path, *, has_header: bool = True) -> tuple[list[str], list[dic
 
 # ── 规范化 ─────────────────────────────────────────────────────────────────────
 
-def _cell(row: dict, col: Optional[str]) -> str:
+def _mapped_cell_text(row: dict, col: Optional[str]) -> str:
     if not col:
         return ""
     return str(row.get(col, "") or "").strip()
 
 
-def _to_wgs84(lon: float, lat: float, coord_system: str) -> tuple[float, float]:
+def _convert_lon_lat_to_wgs84(
+    lon: float, lat: float, coord_system: str
+) -> tuple[float, float]:
     cs = (coord_system or "WGS84").upper()
     if cs == "GCJ02":
         r = cu.gcj02_to_wgs84(lon, lat)
@@ -172,21 +174,21 @@ def normalize_rows(rows: list[dict], mapping: dict,
     out: list[dict] = []
     for row in rows:
         rec = {
-            "province": _cell(row, mapping.get("province")),
-            "site": _cell(row, mapping.get("site")),
-            "station": _cell(row, mapping.get("station")),
-            "station_label": _cell(row, mapping.get("station_label")),
+            "province": _mapped_cell_text(row, mapping.get("province")),
+            "site": _mapped_cell_text(row, mapping.get("site")),
+            "station": _mapped_cell_text(row, mapping.get("station")),
+            "station_label": _mapped_cell_text(row, mapping.get("station_label")),
             "collection_date": default_date or "",
             "lon": None, "lat": None,
             "ok": False, "error": "",
             "_raw": row,
         }
-        lat, lon = _parse_coords(row, mapping)
+        lat, lon = _parse_mapped_coordinates(row, mapping)
         if lat is None or lon is None:
             rec["error"] = "经纬度无法解析"
             out.append(rec)
             continue
-        lon, lat = _to_wgs84(lon, lat, coord_system)
+        lon, lat = _convert_lon_lat_to_wgs84(lon, lat, coord_system)
         if not cu.is_valid(lat, lon):
             rec["error"] = "经纬度超范围"
             out.append(rec)
@@ -202,16 +204,16 @@ def normalize_rows(rows: list[dict], mapping: dict,
     return out
 
 
-def _parse_coords(row: dict, mapping: dict):
+def _parse_mapped_coordinates(row: dict, mapping: dict):
     """返回 (lat, lon)，解析失败为 (None, None)。"""
-    combined = _cell(row, mapping.get("lonlat"))
+    combined = _mapped_cell_text(row, mapping.get("lonlat"))
     if combined:
         r = cu.parse(combined)
         if r and r.get("lat") is not None and r.get("lon") is not None:
             return r["lat"], r["lon"]
         return None, None
-    lon_s = _cell(row, mapping.get("lon"))
-    lat_s = _cell(row, mapping.get("lat"))
+    lon_s = _mapped_cell_text(row, mapping.get("lon"))
+    lat_s = _mapped_cell_text(row, mapping.get("lat"))
     if not lon_s or not lat_s:
         return None, None
     return _parse_one(lat_s, is_lat=True), _parse_one(lon_s, is_lat=False)

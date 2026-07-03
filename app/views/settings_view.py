@@ -80,6 +80,7 @@ _K_HELICON_CONCURRENCY = "helicon/concurrency"          # int 1–8
 _K_JXL_EFFORT = "archive/jxl_effort"
 _K_JXL_CONCURRENCY = "archive/jxl_concurrency"
 _K_DELETE_JPG = "archive/delete_jpg"  # default True; safety checks still mandatory
+_K_DELETE_JPG_DEFAULT_MIGRATION = "archive/delete_jpg_default_v2_applied"
 
 _K_CURRENT_USER = "user/current_user"
 
@@ -670,12 +671,13 @@ class SettingsView(BaseView):
         del_v = QVBoxLayout(del_box)
 
         prereq_label = QLabel(
-            "默认流程：JPG 原片直接打包进 ZIP，普通解压后仍是 JPG。\n"
-            "只有同时满足以下条件才会删除：\n"
+            "默认流程：整理后不保留待处理区散落 JPG；JPG 原片已在 ZIP 中，可直接解压使用。\n"
+            "只有同时满足以下条件才会删除散落 JPG：\n"
             "  1. ZIP 已生成且大小 > 32 字节\n"
             "  2. ZIP 完整性校验通过\n"
             "  3. ZIP 内每张 JPG 的名称、大小、SHA-256 与原图一致\n"
-            "任何一项失败都会保留原 JPG。TIFF 永远不会被删除。"
+            "任何一项失败都会保留原 JPG。整理/归档不会自动删除 TIFF；"
+            "合成不满意时可手动删除或撤销。"
         )
         prereq_label.setObjectName("Muted")
         prereq_label.setWordWrap(True)
@@ -685,7 +687,7 @@ class SettingsView(BaseView):
         del_v.addSpacing(12)
 
         # Product default: the ZIP replaces loose JPGs after exact recovery checks.
-        self._delete_jpg_chk = QCheckBox("校验成功后删除散落 JPG（默认开启）")
+        self._delete_jpg_chk = QCheckBox("整理后删除散落 JPG（默认，不保留）")
         self._delete_jpg_chk.setObjectName("DeleteJpgCheckbox")
         self._delete_jpg_chk.setChecked(True)
         self._delete_jpg_chk.setStyleSheet(
@@ -1446,14 +1448,14 @@ class SettingsView(BaseView):
 
     def _on_perf_mode_changed(self) -> None:
         self.ctx.settings.performance_mode = self._perf_mode_chk.isChecked()
-        self.ctx.settings.sync()
+        self.ctx.settings.flush_to_disk()
         from app.utils import ui
         ui.info(self, "性能模式", "已保存。重启软件后生效。")
 
     def _on_language_changed(self) -> None:
         lang = self._lang_combo.currentData() or "zh"
         self.ctx.settings.current_language = str(lang)
-        self.ctx.settings.sync()
+        self.ctx.settings.flush_to_disk()
         from app.config.i18n import set_language
         set_language(str(lang))
         win = self.window()
@@ -1467,7 +1469,7 @@ class SettingsView(BaseView):
         current_tab = self._tabs.currentIndex()
         key = self._theme_combo.currentData() or "classic_light"
         self.ctx.settings.current_theme = str(key)
-        self.ctx.settings.sync()
+        self.ctx.settings.flush_to_disk()
 
         from app.config.theme import apply_theme
         app = QApplication.instance()
@@ -1514,7 +1516,7 @@ class SettingsView(BaseView):
         qs.setValue(_K_INCOMING_SUBDIR, incoming)
         qs.setValue(_K_RESULTS_SUBDIR, results)
         self.ctx.settings.amap_web_key = self._amap_key_edit.text()
-        self.ctx.settings.sync()
+        self.ctx.settings.flush_to_disk()
 
     def _save_helicon(self) -> None:
         qs = self.ctx.settings._qs
@@ -1524,7 +1526,7 @@ class SettingsView(BaseView):
         qs.setValue(_K_HELICON_RADIUS, _p["radius"])
         qs.setValue(_K_HELICON_SMOOTHING, _p["smoothing"])
         qs.setValue(_K_HELICON_QUALITY, self._quality_spin.value())
-        self.ctx.settings.sync()
+        self.ctx.settings.flush_to_disk()
 
     def _save_archive(self) -> None:
         qs = self.ctx.settings._qs
@@ -1532,7 +1534,8 @@ class SettingsView(BaseView):
         qs.setValue(_K_JXL_CONCURRENCY, self._jxl_concurrency_spin.value())
         # Store as explicit "true"/"false" string for unambiguous retrieval
         qs.setValue(_K_DELETE_JPG, "true" if self._delete_jpg_chk.isChecked() else "false")
-        self.ctx.settings.sync()
+        qs.setValue(_K_DELETE_JPG_DEFAULT_MIGRATION, "true")
+        self.ctx.settings.flush_to_disk()
 
     def _save_helicon_advanced(self) -> None:
         """Persist Helicon advanced output params (mirrors web 高级参数 block)."""
@@ -1558,7 +1561,7 @@ class SettingsView(BaseView):
             _K_HELICON_SAVE_DEPTH_MAP,
             "true" if self._save_depth_map_chk.isChecked() else "false",
         )
-        self.ctx.settings.sync()
+        self.ctx.settings.flush_to_disk()
 
     def _save_workbench(self) -> None:
         """Persist workbench auto-watch toggles (mirrors saveV4Settings)."""
@@ -1582,13 +1585,13 @@ class SettingsView(BaseView):
             _K_WB_FILE_VIEW_MODE,
             fv_vals[fv_idx] if 0 <= fv_idx < len(fv_vals) else "jpg-tif",
         )
-        self.ctx.settings.sync()
+        self.ctx.settings.flush_to_disk()
 
     def _save_user(self) -> None:
         qs = self.ctx.settings._qs
         name = self._current_user_edit.text().strip()
         qs.setValue(_K_CURRENT_USER, name)
-        self.ctx.settings.sync()
+        self.ctx.settings.flush_to_disk()
 
     # ── Collaboration ─────────────────────────────────────────────────────
 
@@ -1597,7 +1600,7 @@ class SettingsView(BaseView):
         self.ctx.settings.collab_enabled = self._collab_enabled_chk.isChecked()
         code = self._collab_team_code_edit.text().strip()
         self.ctx.settings.team_code = code
-        self.ctx.settings.sync()
+        self.ctx.settings.flush_to_disk()
         svc = getattr(self.ctx, "collab_service", None)
         if svc is not None:
             try:
@@ -1616,6 +1619,7 @@ class SettingsView(BaseView):
                 svc.start(
                     project_name=self.ctx.current_project_dir or "",
                     group_code=self._collab_team_code_edit.text().strip(),
+                    project_dir=self.ctx.current_project_dir or "",
                 )
             elif not on and svc.is_running():
                 svc.stop()
@@ -1720,11 +1724,25 @@ class SettingsView(BaseView):
 
     def _on_collab_show_pairing(self) -> None:
         from app.utils.ui import info as _info
-        from app.widgets.collab_pairing import encode_pairing
+        from app.widgets.collab_pairing import encode_pairing, generate_group_code
+        from PyQt6.QtWidgets import QApplication
         svc = getattr(self.ctx, "collab_service", None)
         if svc is None:
             _info(self, "配对码", "请先启用协作。")
             return
+        if not self._collab_team_code_edit.text().strip():
+            self._collab_team_code_edit.setText(generate_group_code())
+        self._collab_enabled_chk.setChecked(True)
+        self._save_collab()
+        try:
+            if not svc.is_running():
+                svc.start(
+                    project_name=self.ctx.current_project_dir or "",
+                    group_code=self._collab_team_code_edit.text().strip(),
+                    project_dir=self.ctx.current_project_dir or "",
+                )
+        except Exception:  # noqa: BLE001
+            pass
         addr = svc.local_address()
         try:
             ip, port = addr.split(":")
@@ -1732,15 +1750,16 @@ class SettingsView(BaseView):
         except Exception:  # noqa: BLE001
             _info(self, "配对码", "暂时无法生成配对码。")
             return
+        QApplication.clipboard().setText(code)
         _info(self, "我的配对码",
-              f"把这串配对码发给队友,他们粘贴即可连接:\n\n{code}")
+              f"配对码已复制，发给队友粘贴即可连接:\n\n{code}")
 
     def _on_collab_join_pairing(self) -> None:
         from app.utils.ui import info as _info, warn as _warn
         from app.widgets.collab_pairing import decode_pairing
         svc = getattr(self.ctx, "collab_service", None)
         if svc is None:
-            _info(self, "配对码", "请先启用协作。")
+            _info(self, "配对码", "协作服务不可用。")
             return
         raw = self._collab_pairing_input.text().strip()
         try:
@@ -1750,7 +1769,17 @@ class SettingsView(BaseView):
             return
         if pi.group_code:
             self._collab_team_code_edit.setText(pi.group_code)
-            self._save_collab()
+        self._collab_enabled_chk.setChecked(True)
+        self._save_collab()
+        try:
+            if not svc.is_running():
+                svc.start(
+                    project_name=self.ctx.current_project_dir or "",
+                    group_code=self._collab_team_code_edit.text().strip(),
+                    project_dir=self.ctx.current_project_dir or "",
+                )
+        except Exception:  # noqa: BLE001
+            pass
         try:
             svc.add_manual_peer(pi.ip, pi.port)
         except Exception:  # noqa: BLE001
@@ -1839,7 +1868,7 @@ class SettingsView(BaseView):
             _K_SHORTCUT_SCREENSHOT,
             self._sc_screenshot.keySequence().toString(),
         )
-        self.ctx.settings.sync()
+        self.ctx.settings.flush_to_disk()
 
     # ── Helicon preset CRUD ───────────────────────────────────────────────────
 
@@ -1861,7 +1890,7 @@ class SettingsView(BaseView):
         import json
         qs = self.ctx.settings._qs
         qs.setValue(_K_HELICON_PRESETS_JSON, json.dumps(presets))
-        self.ctx.settings.sync()
+        self.ctx.settings.flush_to_disk()
 
     def _refresh_preset_list_widget(self) -> None:
         """Reload QListWidget from QSettings."""
@@ -2043,7 +2072,7 @@ class SettingsView(BaseView):
         paths.insert(0, path)
         paths = paths[:_RECENT_MAX]
         qs.setValue(_K_RECENT_PROJECTS, "\n".join(paths))
-        self.ctx.settings.sync()
+        self.ctx.settings.flush_to_disk()
         self._load_recent_projects()
 
     def _open_recent(self) -> None:
@@ -2057,7 +2086,7 @@ class SettingsView(BaseView):
     def _clear_recent(self) -> None:
         qs = self.ctx.settings._qs
         qs.remove(_K_RECENT_PROJECTS)
-        self.ctx.settings.sync()
+        self.ctx.settings.flush_to_disk()
         self._recent_list.clear()
 
     # ── Legacy helicon exe accessors (kept for round-trip tests) ──────────

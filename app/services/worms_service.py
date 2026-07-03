@@ -693,7 +693,7 @@ class WormsService:
         if not chain:
             return result
 
-        def _walk(node: dict) -> None:
+        def append_worms_classification_node(node: dict) -> None:
             if not node:
                 return
             result.append({
@@ -703,9 +703,9 @@ class WormsService:
             })
             child = node.get("child")
             if isinstance(child, dict):
-                _walk(child)
+                append_worms_classification_node(child)
 
-        _walk(chain)
+        append_worms_classification_node(chain)
         return result
 
     # ── Chinese-field-safe merge helper ──────────────────────────────────

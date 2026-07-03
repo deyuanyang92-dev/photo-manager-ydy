@@ -693,7 +693,7 @@ class LabelTemplateLibrary:
                 pass
         return result
 
-    def get(self, template_id: str) -> Optional[dict]:
+    def get_record(self, template_id: str) -> Optional[dict]:
         """Return a single record by id, or None.  Mirror JS getLabelTemplateRecord."""
         lib = self._read_raw()
         for r in lib["templates"]:
@@ -744,7 +744,7 @@ class LabelTemplateLibrary:
 
     def rename(self, template_id: str, new_name: str) -> Optional[dict]:
         """Rename a template record."""
-        rec = self.get(template_id)
+        rec = self.get_record(template_id)
         if not rec:
             return None
         rec["name"] = new_name
@@ -764,7 +764,7 @@ class LabelTemplateLibrary:
 
     def duplicate(self, template_id: str) -> Optional[dict]:
         """Duplicate an existing record with a new id."""
-        rec = self.get(template_id)
+        rec = self.get_record(template_id)
         if not rec:
             return None
         new_rec = copy.deepcopy(rec)
@@ -861,7 +861,7 @@ class LabelTemplateLibrary:
         Returns True if a snapshot was stored, False when template not found.
         """
         import json as _json, time as _time
-        current = self.get(template_id)
+        current = self.get_record(template_id)
         if not current:
             return False
         raw = self._qs.value(self._backup_key(template_id), "[]")
@@ -991,7 +991,7 @@ def resolve_template_key(lib: "LabelTemplateLibrary", key: Optional[str]) -> dic
     default_key = DEFAULT_TEMPLATE_KEY[bucket]
     key = str(key or "").strip() or default_key
     if _is_library_key(key):
-        rec = lib.get(_id_from_key(key))
+        rec = lib.get_record(_id_from_key(key))
         if rec and rec.get("template"):
             return normalize_template(rec["template"])
         key = default_key

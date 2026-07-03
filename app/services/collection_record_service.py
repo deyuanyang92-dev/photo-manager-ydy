@@ -130,7 +130,7 @@ def infer_zone_from_headers(headers: list[str]) -> Optional[str]:
     return None
 
 
-def _coerce(col: str, value: Any) -> Any:
+def _coerce_record_column_value(col: str, value: Any) -> Any:
     """Coerce an incoming value for *col* to its stored form."""
     if col in _REAL_COLUMNS:
         if value in (None, ""):
@@ -328,7 +328,7 @@ def upsert_record(db: sqlite3.Connection, data: dict) -> int:
     zero-field-loss. If *data* carries a truthy ``id``, that row is updated by
     id instead (lets the editor change key fields without orphaning the row).
     """
-    values = [_coerce(c, data.get(c)) for c in _COLUMNS]
+    values = [_coerce_record_column_value(c, data.get(c)) for c in _COLUMNS]
     raw_json = json.dumps(data, ensure_ascii=False)
 
     rid = data.get("id")
@@ -399,7 +399,11 @@ def set_station_coords(
     cur = db.execute(
         "UPDATE collection_records SET lon=?, lat=? "
         "WHERE province=? AND site=? AND station=?",
-        (_coerce("lon", lon), _coerce("lat", lat), province, site, station),
+        (
+            _coerce_record_column_value("lon", lon),
+            _coerce_record_column_value("lat", lat),
+            province, site, station,
+        ),
     )
     db.commit()
     return int(cur.rowcount or 0)

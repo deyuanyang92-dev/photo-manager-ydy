@@ -153,14 +153,14 @@ def _cache_signature(dirs: list[str], root: str) -> tuple:
         db_path = Path(ws) / "_data" / "project.db"
         wal_path = Path(str(db_path) + "-wal")
 
-        def _st(path: Path):
+        def _file_stat_signature(path: Path):
             try:
                 s = path.stat()
                 return (s.st_mtime_ns, s.st_size)
             except OSError:
                 return None
 
-        parts.append((ws, _st(db_path), _st(wal_path)))
+        parts.append((ws, _file_stat_signature(db_path), _file_stat_signature(wal_path)))
     return (str(Path(root).resolve()) if root else "", tuple(parts))
 
 
@@ -784,7 +784,7 @@ def _orphan_folder_findings(root: str) -> list[dict]:
     except OSError:
         return out
 
-    def _walk(node: dict) -> None:
+    def collect_orphan_folder_leaf(node: dict) -> None:
         children = node.get("children", [])
         if not children and not node.get("has_data"):
             # 叶子且非工作区（root 自身若为空叶也会被纳入；用 path != root 排除根）
@@ -796,9 +796,9 @@ def _orphan_folder_findings(root: str) -> list[dict]:
                     "detail": node["path"],
                 })
         for child in children:
-            _walk(child)
+            collect_orphan_folder_leaf(child)
 
-    _walk(tree)
+    collect_orphan_folder_leaf(tree)
     return out
 
 

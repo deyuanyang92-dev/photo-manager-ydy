@@ -208,7 +208,7 @@ class MetadataPanel(QWidget):
         self._geo_timer = QTimer(self)
         self._geo_timer.setSingleShot(True)
         self._geo_timer.setInterval(400)
-        self._geo_timer.timeout.connect(self._do_auto_reverse)
+        self._geo_timer.timeout.connect(self._auto_fill_geo_area_from_lon_lat)
         self._lon.textEdited.connect(lambda *_: self._geo_timer.start())
         self._lat.textEdited.connect(lambda *_: self._geo_timer.start())
 
@@ -260,17 +260,21 @@ class MetadataPanel(QWidget):
         self._uid = specimen.uid
         self._dirty = False
 
-        def _set(edit: QLineEdit, val) -> None:
+        def _set_line_edit_without_dirty_signal(edit: QLineEdit, val) -> None:
             edit.blockSignals(True)
             edit.setText(str(val) if val is not None else "")
             edit.blockSignals(False)
 
-        _set(self._collector, specimen.collector)
-        _set(self._photographer, specimen.photographer)
-        _set(self._identifier, specimen.identifier)
-        _set(self._geo_area, specimen.geo_area)
-        _set(self._lon, str(specimen.lon) if specimen.lon is not None else "")
-        _set(self._lat, str(specimen.lat) if specimen.lat is not None else "")
+        _set_line_edit_without_dirty_signal(self._collector, specimen.collector)
+        _set_line_edit_without_dirty_signal(self._photographer, specimen.photographer)
+        _set_line_edit_without_dirty_signal(self._identifier, specimen.identifier)
+        _set_line_edit_without_dirty_signal(self._geo_area, specimen.geo_area)
+        _set_line_edit_without_dirty_signal(
+            self._lon, str(specimen.lon) if specimen.lon is not None else ""
+        )
+        _set_line_edit_without_dirty_signal(
+            self._lat, str(specimen.lat) if specimen.lat is not None else ""
+        )
         # 加载已存标本：这些是已确认/已入库的值，不属于「自动」，受保护——后续
         # 选站位的采集记录不得覆盖（override_auto 只覆盖 _auto_fields 里的值）。
         self._auto_fields = set()
@@ -349,7 +353,7 @@ class MetadataPanel(QWidget):
         self._geo_autofilled = False
         self._on_field_edited("geo_area", value)
 
-    def _do_auto_reverse(self) -> None:
+    def _auto_fill_geo_area_from_lon_lat(self) -> None:
         """Auto reverse-geocode lon/lat → 采集地理区, inline (no dialogs).
 
         Mirrors web metaReverseGeocode() app.js:13655 / debounce app.js:10290.
@@ -408,7 +412,7 @@ class MetadataPanel(QWidget):
             self._on_field_edited("lon", f"{lon:.6f}")
             self._on_field_edited("lat", f"{lat:.6f}")
             self._geo_autofilled = True
-            self._do_auto_reverse()
+            self._auto_fill_geo_area_from_lon_lat()
 
         dlg.picked.connect(_picked)
         dlg.exec()
@@ -434,7 +438,7 @@ class MetadataPanel(QWidget):
         self._on_field_edited("lon", f"{lon:.6f}")
         self._on_field_edited("lat", f"{lat:.6f}")
         self._geo_autofilled = True
-        self._do_auto_reverse()
+        self._auto_fill_geo_area_from_lon_lat()
 
     def _on_gps_error(self, _msg: str) -> None:
         self._gps_btn.setText("❌")

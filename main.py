@@ -423,7 +423,7 @@ from app.config.settings import AppSettings
 from app.config.theme import apply_default_font, apply_theme, load_fonts, set_typography
 from app.main_window import MainWindow
 from app.utils import diagnostics
-from app.views.registry import ALL_VIEWS
+from app.views.registry import ALL_VIEW_SPECS
 
 
 def _acquire_single_instance_lock() -> bool:
@@ -549,7 +549,11 @@ def main() -> int:
         svc.set_group_code(group_code)
         if ctx.settings.collab_enabled and group_code:
             project_name = ctx.settings.last_project_dir or ""
-            svc.start(project_name=project_name, group_code=group_code)
+            svc.start(
+                project_name=project_name,
+                group_code=group_code,
+                project_dir=ctx.settings.last_project_dir or "",
+            )
     except Exception:  # noqa: BLE001
         pass  # fastapi/uvicorn not installed or network unavailable
 
@@ -581,8 +585,8 @@ def main() -> int:
         except (ValueError, OSError):  # not main thread / unsupported
             pass
 
-    # Register all 14 module views
-    for view_cls in ALL_VIEWS:
+    # Register navigation metadata only; individual pages import on first open.
+    for view_cls in ALL_VIEW_SPECS:
         win.register_view(view_cls)
 
     # 启动自动恢复上次项目——免得每次重启都回到 "(未选)" 空项目,用户得重选。

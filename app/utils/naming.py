@@ -1046,7 +1046,7 @@ def _naming_component_variants(comp_list: list[str]) -> list[list[str]]:
     variants: list[list[str]] = []
     seen: set[tuple[str, ...]] = set()
 
-    def add(comp: list[str]) -> None:
+    def add_unique_component_variant(comp: list[str]) -> None:
         key = tuple(comp)
         if comp and key not in seen:
             seen.add(key)
@@ -1056,10 +1056,10 @@ def _naming_component_variants(comp_list: list[str]) -> list[list[str]]:
     no_storage = [key for key in comp_list if key != "storage"]
     no_both = [key for key in comp_list if key not in ("station", "storage")]
 
-    add(no_station)
-    add(comp_list)
-    add(no_storage)
-    add(no_both)
+    add_unique_component_variant(no_station)
+    add_unique_component_variant(comp_list)
+    add_unique_component_variant(no_storage)
+    add_unique_component_variant(no_both)
     return variants
 
 

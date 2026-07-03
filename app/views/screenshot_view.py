@@ -103,7 +103,7 @@ class ScreenshotView(BaseView):
         list_panel.addWidget(recent_title)
         self._recent_list = QListWidget()
         self._recent_list.setObjectName("RecentScreenshots")
-        self._recent_list.currentItemChanged.connect(self._on_recent_changed)
+        self._recent_list.currentItemChanged.connect(self._show_selected_recent_screenshot)
         self._recent_list.itemDoubleClicked.connect(self._open_recent_item)
         list_panel.addWidget(self._recent_list, stretch=1)
         right_lay.addLayout(list_panel, stretch=1)
@@ -126,11 +126,11 @@ class ScreenshotView(BaseView):
         body.addWidget(right, stretch=1)
 
         self._bound_ctrl = None
-        self._refresh()
+        self._refresh_screenshot_page_state()
 
     def on_activate(self) -> None:
         self._bind_controller()
-        self._refresh()
+        self._refresh_screenshot_page_state()
 
     def _capture_button(self, text: str, glyph: str, mode: str) -> QPushButton:
         btn = QPushButton(text)
@@ -151,10 +151,10 @@ class ScreenshotView(BaseView):
             return
         if self._bound_ctrl is not None:
             try:
-                self._bound_ctrl.captured.disconnect(self._on_captured)
+                self._bound_ctrl.captured.disconnect(self._refresh_recent_screenshots_after_capture)
             except TypeError:
                 pass
-        ctrl.captured.connect(self._on_captured)
+        ctrl.captured.connect(self._refresh_recent_screenshots_after_capture)
         self._bound_ctrl = ctrl
 
     def _capture(self, mode: str) -> None:
@@ -168,13 +168,13 @@ class ScreenshotView(BaseView):
             "view": ctrl.capture_view,
         }[mode]()
 
-    def _on_captured(self, _pixmap: QPixmap) -> None:
+    def _refresh_recent_screenshots_after_capture(self, _pixmap: QPixmap) -> None:
         self._refresh_recent()
 
     def _project_dir(self) -> str:
         return getattr(self.ctx, "current_project_dir", "") or ""
 
-    def _refresh(self) -> None:
+    def _refresh_screenshot_page_state(self) -> None:
         seq = "Alt+A"
         win = self.window()
         getter = getattr(win, "screenshot_shortcut_seq", None)
@@ -209,7 +209,7 @@ class ScreenshotView(BaseView):
             self._preview.setText("无")
             self._preview.setPixmap(QPixmap())
 
-    def _on_recent_changed(self, current: QListWidgetItem | None, _previous) -> None:
+    def _show_selected_recent_screenshot(self, current: QListWidgetItem | None, _previous) -> None:
         if current is None:
             return
         path = Path(current.data(Qt.ItemDataRole.UserRole))

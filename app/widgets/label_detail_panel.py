@@ -262,7 +262,7 @@ class LabelDetailPanel(QWidget):
         default_key = _DEFAULT_TEMPLATE[bucket]
         key = lib.selected_key() or default_key
         if is_library_key(key):
-            rec = lib.get(id_from_key(key))
+            rec = lib.get_record(id_from_key(key))
             if rec and rec.get("template"):
                 return normalize_template(rec["template"])
             key = default_key
@@ -372,7 +372,7 @@ class LabelDetailPanel(QWidget):
             cur = lib.selected_key()
             if is_library_key(cur):
                 rid = id_from_key(cur)
-                name = (lib.get(rid) or {}).get("name") or "自定义"
+                name = (lib.get_record(rid) or {}).get("name") or "自定义"
                 rec = lib.upsert({"id": rid, "name": name, "template": new_tmpl})
             else:
                 base = tmpl.get("name") or "自定义"

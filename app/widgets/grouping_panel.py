@@ -822,7 +822,7 @@ class _CrossGroupList(QListWidget):
     """QListWidget that supports cross-group JPG drag-drop.
 
     When a drop arrives from a *different* list, the dragged item is removed
-    from the source list and the parent GroupingPanel._on_groups_changed() is
+    from the source list and the parent GroupingPanel._persist_grouping_after_editor_change() is
     called to persist the change.
 
     Within the same list, items reorder normally (InternalMove behaviour is
@@ -874,7 +874,7 @@ class _CrossGroupList(QListWidget):
         if src is self:
             # Same-list reorder — delegate to Qt's default implementation.
             super().dropEvent(event)
-            self._panel._on_groups_changed()
+            self._panel._persist_grouping_after_editor_change()
             return
 
         if not isinstance(src, _CrossGroupList):
@@ -1713,7 +1713,7 @@ class GroupingPanel(QWidget):
         icons.set_button_icon(compose_btn, "mdi6.layers-triple-outline",
                               color=icons.TONE_ON_ACCENT, size=14)
         compose_btn.setToolTip("对所有待合成组调用 Helicon Focus")
-        compose_btn.clicked.connect(self._on_compose_all)
+        compose_btn.clicked.connect(self._request_compose_all_groups)
         main_actions.addWidget(compose_btn)
 
         org_btn = QPushButton("整理")
@@ -1722,7 +1722,7 @@ class GroupingPanel(QWidget):
         icons.set_button_icon(org_btn, "mdi6.folder-zip-outline",
                               color=icons.TONE_ACCENT, size=14)
         org_btn.setToolTip("整理所有已合成组（归档 JPG）")
-        org_btn.clicked.connect(self._on_organise_all)
+        org_btn.clicked.connect(self._request_organise_all_groups)
         main_actions.addWidget(org_btn)
 
         compose_org_btn = QPushButton("合成+整理")
@@ -1731,7 +1731,7 @@ class GroupingPanel(QWidget):
         icons.set_button_icon(compose_org_btn, "mdi6.archive-check-outline",
                               color=icons.TONE_ON_ACCENT, size=14)
         compose_org_btn.setToolTip("合成后立即整理归档（一条龙）")
-        compose_org_btn.clicked.connect(self._on_compose_and_organise_all)
+        compose_org_btn.clicked.connect(self._request_compose_and_organise_all_groups)
         main_actions.addWidget(compose_org_btn)
 
         self._auto_group_btn = QPushButton("自动分组整理")
@@ -1866,7 +1866,7 @@ class GroupingPanel(QWidget):
         self._group_toggle_btn.setFixedHeight(26)
         self._group_toggle_btn.setCheckable(True)
         self._group_toggle_btn.setChecked(True)
-        self._group_toggle_btn.clicked.connect(self._on_group_toggle)
+        self._group_toggle_btn.clicked.connect(self._set_group_editor_expanded)
         group_toggle_row.addWidget(self._group_toggle_btn)
         self._supp_btn = _SuppDropButton("拖入所选 JPG + TIFF 补处理")
         self._supp_btn.setObjectName("Ghost")
@@ -2158,7 +2158,7 @@ class GroupingPanel(QWidget):
             self.add_jpgs_to_group(group_index, jpg_paths)
         elif tiff_ok and tiff_path:
             self._rebuild()
-            self._on_groups_changed()
+            self._persist_grouping_after_editor_change()
 
         if tiff_ok and tiff_path and self._uid:
             self.import_tiff_requested.emit(self._uid, group_index)
@@ -2282,9 +2282,9 @@ class GroupingPanel(QWidget):
             elif g.group_index == dst_group_index:
                 if jpg_path not in g.jpg_paths:
                     g.jpg_paths.append(jpg_path)
-        self._on_groups_changed()
+        self._persist_grouping_after_editor_change()
 
-    def _on_groups_changed(self) -> None:
+    def _persist_grouping_after_editor_change(self) -> None:
         """Persist the current in-memory grouping to DB and emit grouping_changed."""
         if not self._grouping or not self._uid:
             return
@@ -2389,21 +2389,21 @@ class GroupingPanel(QWidget):
                     selected=g.group_index in self._selected_group_indexes,
                     display_number=display_numbers[id(g)],
                 )
-                row.compose_clicked.connect(self._on_compose)
-                row.organise_clicked.connect(self._on_organise)
-                row.label_changed.connect(self._on_label_changed)
-                row.add_selected_to_group.connect(self._on_add_selected_to_group)
-                row.jpg_remove_requested.connect(self._on_jpg_remove)
-                row.clear_group_requested.connect(self._on_clear_group)      # #cursor
-                row.delete_group_requested.connect(self._on_delete_group)    # #cursor
-                row.import_tiff_requested.connect(self._on_import_tiff)      # #cursor
+                row.compose_clicked.connect(self._request_compose_group)
+                row.organise_clicked.connect(self._request_organise_group)
+                row.label_changed.connect(self._rename_group_label)
+                row.add_selected_to_group.connect(self._request_add_current_selection_to_group)
+                row.jpg_remove_requested.connect(self._remove_jpg_from_draft_group)
+                row.clear_group_requested.connect(self._clear_draft_group)      # #cursor
+                row.delete_group_requested.connect(self._delete_draft_group)    # #cursor
+                row.import_tiff_requested.connect(self._import_existing_tiff_into_group)      # #cursor
                 row.add_photos_requested.connect(self._on_add_photos_from_picker)
-                row.output_name_changed.connect(self._on_output_name_changed)
-                row.selected_changed.connect(self._on_group_selected_changed)
+                row.output_name_changed.connect(self._rename_group_output_stem)
+                row.selected_changed.connect(self._track_group_selection_state)
                 row.tiff_naming_check_requested.connect(
                     self.tiff_naming_check_path_requested.emit
                 )
-                row.tiff_delete_requested.connect(self._on_tiff_delete_requested)
+                row.tiff_delete_requested.connect(self._request_delete_group_tiff)
                 strip_lay.addWidget(row)
             hscroll.setWidget(strip)
             self._content_lay.addWidget(hscroll)
@@ -2423,15 +2423,15 @@ class GroupingPanel(QWidget):
                     selected=g.group_index in self._selected_group_indexes,
                     display_number=display_numbers[id(g)],
                 )
-                row2.organise_clicked.connect(self._on_organise)
-                row2.link_jpg_clicked.connect(self._on_link_jpg_for_composed)
-                row2.undo_clicked.connect(self._on_undo)
-                row2.selected_changed.connect(self._on_group_selected_changed)
-                row2.register_zip_clicked.connect(self._on_register_zip)
+                row2.organise_clicked.connect(self._request_organise_group)
+                row2.link_jpg_clicked.connect(self._link_original_jpgs_to_composed_group)
+                row2.undo_clicked.connect(self._request_undo_group_compose)
+                row2.selected_changed.connect(self._track_group_selection_state)
+                row2.register_zip_clicked.connect(self._register_existing_archive_zip)
                 row2.tiff_naming_check_requested.connect(
                     self.tiff_naming_check_path_requested.emit
                 )
-                row2.tiff_delete_requested.connect(self._on_tiff_delete_requested)
+                row2.tiff_delete_requested.connect(self._request_delete_group_tiff)
                 self._content_lay.addWidget(row2)
 
         if not groups:
@@ -2475,25 +2475,25 @@ class GroupingPanel(QWidget):
 
     # ── Slots ─────────────────────────────────────────────────────────────────
 
-    def _on_group_toggle(self, checked: bool) -> None:
+    def _set_group_editor_expanded(self, checked: bool) -> None:
         """Show/hide the group editor body; update toggle button label."""
         self._group_body.setVisible(checked)
         self._group_toggle_btn.setText("▾ 分组工具" if checked else "▸ 分组工具")
 
-    def _on_compose_all(self) -> None:
+    def _request_compose_all_groups(self) -> None:
         """[⚡合成] 批量:发单信号,由 workbench 驱动顺序队列(异步合成需串行,
         不能在面板里紧循环 emit——会同时启动多个 HeliconWorker 互相覆盖)。"""
         if not self._uid:
             return
         self.compose_all_requested.emit(self._uid)
 
-    def _on_organise_all(self) -> None:
+    def _request_organise_all_groups(self) -> None:
         """[🗜整理] 批量:发单信号,workbench 逐组同步整理已合成组。"""
         if not self._uid:
             return
         self.organise_all_requested.emit(self._uid)
 
-    def _on_compose_and_organise_all(self) -> None:
+    def _request_compose_and_organise_all_groups(self) -> None:
         """[合成+整理] 批量:发单信号,workbench 顺序队列——每组合成完成(异步回调)
         后再同步整理该组,然后下一组。旧紧循环 emit 在合成完成前就读 composed →
         刚合成的组整理空跑,故移除。"""
@@ -2501,22 +2501,22 @@ class GroupingPanel(QWidget):
             return
         self.compose_and_organise_all_requested.emit(self._uid)
 
-    def _on_compose(self, group_index: int) -> None:
+    def _request_compose_group(self, group_index: int) -> None:
         if self._uid:
             self.compose_requested.emit(self._uid, group_index)
 
-    def _on_organise(self, group_index: int) -> None:
+    def _request_organise_group(self, group_index: int) -> None:
         if self._uid:
             self.organise_requested.emit(self._uid, group_index)
 
-    def _on_undo(self, group_index: int) -> None:
+    def _request_undo_group_compose(self, group_index: int) -> None:
         if self._uid:
             self.undo_compose_requested.emit(self._uid, group_index)
 
-    def _on_tiff_delete_requested(self, group_index: int) -> None:
-        self._on_undo(group_index)
+    def _request_delete_group_tiff(self, group_index: int) -> None:
+        self._request_undo_group_compose(group_index)
 
-    def _on_label_changed(self, group_index: int, new_label: str) -> None:
+    def _rename_group_label(self, group_index: int, new_label: str) -> None:
         if not self._grouping:
             return
         for g in self._grouping.groups:
@@ -2525,7 +2525,7 @@ class GroupingPanel(QWidget):
                 break
         self.grouping_changed.emit()
 
-    def _on_output_name_changed(self, group_index: int, name: str) -> None:
+    def _rename_group_output_stem(self, group_index: int, name: str) -> None:
         """用户编辑某组「输出 TIF」命名 → 写入 group.output_name（空=回到自动派生）。"""
         if not self._grouping:
             return
@@ -2535,21 +2535,21 @@ class GroupingPanel(QWidget):
                 break
         self.grouping_changed.emit()
 
-    def _on_group_selected_changed(self, group_index: int, checked: bool) -> None:
+    def _track_group_selection_state(self, group_index: int, checked: bool) -> None:
         if checked:
             self._selected_group_indexes.add(group_index)
         else:
             self._selected_group_indexes.discard(group_index)
 
-    def _on_add_selected_to_group(self, group_index: int) -> None:
+    def _request_add_current_selection_to_group(self, group_index: int) -> None:
         """Request workbench view to resolve monitor selection and add to group."""
         self.add_selection_to_group_requested.emit(group_index)
 
-    def _on_jpg_remove(self, group_index: int, jpg_path: str) -> None:
+    def _remove_jpg_from_draft_group(self, group_index: int, jpg_path: str) -> None:
         """Handle right-click remove from _DraftGroupRow."""
         self.remove_jpg_from_group(group_index, jpg_path)
 
-    def _on_link_jpg_for_composed(self, group_index: int) -> None:
+    def _link_original_jpgs_to_composed_group(self, group_index: int) -> None:
         """Link original JPGs to an existing TIFF-only composed row."""
         if not self._grouping:
             return
@@ -2569,11 +2569,11 @@ class GroupingPanel(QWidget):
             return
         self.add_jpgs_to_group(group_index, jpgs)
 
-    def _on_clear_group(self, group_index: int) -> None:  # #cursor
+    def _clear_draft_group(self, group_index: int) -> None:  # #cursor
         """Handle clear-group button from _DraftGroupRow."""
         self.clear_group(group_index)
 
-    def _on_delete_group(self, group_index: int) -> None:  # #cursor
+    def _delete_draft_group(self, group_index: int) -> None:  # #cursor
         """Handle delete-group button from _DraftGroupRow."""
         self.delete_group(group_index)
 
@@ -2663,8 +2663,8 @@ class GroupingPanel(QWidget):
             pd = Path(project_dir)
             candidates: list[Path] = []
             try:
-                from app.services.project_service import get_incoming_jpg_dir
-                candidates.append(Path(get_incoming_jpg_dir(str(pd))))
+                from app.services.project_service import resolve_incoming_jpg_dir
+                candidates.append(Path(resolve_incoming_jpg_dir(str(pd))))
             except Exception:
                 pass
             s = getattr(self.ctx, "settings", None)
@@ -3017,7 +3017,7 @@ class GroupingPanel(QWidget):
         self.grouping_changed.emit()
         self.archive_zip_registered.emit(self._uid, group_index)
 
-    def _on_import_tiff(self, group_index: int) -> None:  # #cursor groupingImportTiff
+    def _import_existing_tiff_into_group(self, group_index: int) -> None:  # #cursor groupingImportTiff
         """Open TIFF-import dialog and update the group composedTiffPath."""
         if not self._uid or not self._grouping:
             return
@@ -3075,7 +3075,7 @@ class GroupingPanel(QWidget):
         if self._uid:
             self.import_tiff_requested.emit(self._uid, group_index)
 
-    def _on_register_zip(self, group_index: int) -> None:
+    def _register_existing_archive_zip(self, group_index: int) -> None:
         """Associate an existing ZIP archive with a composed group."""
         if not self._uid or not self._grouping:
             return
@@ -3636,7 +3636,7 @@ class _TiffImportDialog(QDialog):
         browse_btn = QPushButton("浏览…")
         browse_btn.setObjectName("Ghost")
         browse_btn.setFixedHeight(28)
-        browse_btn.clicked.connect(self._on_browse)
+        browse_btn.clicked.connect(self._browse_for_tiff_file)
         browse_row.addWidget(browse_btn)
         browse_row.addStretch()
         root.addLayout(browse_row)
@@ -3644,7 +3644,7 @@ class _TiffImportDialog(QDialog):
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
-        buttons.accepted.connect(self._on_accept)
+        buttons.accepted.connect(self._accept_selected_tiff)
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
 
@@ -3653,7 +3653,7 @@ class _TiffImportDialog(QDialog):
         if path:
             self._path_edit.setText(path)
 
-    def _on_browse(self) -> None:
+    def _browse_for_tiff_file(self) -> None:
         from app.utils.ui import get_open_file_name
         path = get_open_file_name(
             self, "选择 TIF 文件", filter="TIFF 文件 (*.tif *.tiff *.TIF *.TIFF)"
@@ -3661,7 +3661,7 @@ class _TiffImportDialog(QDialog):
         if path:
             self._path_edit.setText(path)
 
-    def _on_accept(self) -> None:
+    def _accept_selected_tiff(self) -> None:
         # Prefer path_edit; fall back to list selection
         path = self._path_edit.text().strip()
         if not path:

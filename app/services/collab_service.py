@@ -17,6 +17,8 @@ Architecture (confirmed by user 2026-06-02, oracle: collab.md § Desktop GUI):
     POST /api/collab/tasks/update-status
     GET  /api/collab/specimens      → list[SpecimenRecord]
     POST /api/collab/specimens/push → accept push from peer
+    GET  /api/collab/files/manifest → media manifest scoped to UID(s)
+    GET  /api/collab/files/download → project-relative media download
 
 Conflict (409) policy:
     Creating a UID that already exists on *any* online peer returns HTTP 409.
@@ -27,9 +29,10 @@ Manual IP fallback:
     Call CollabService.add_manual_peer(ip, port) to hard-add a peer endpoint.
 
 Scope:
-    L1 sync only: specimenTasks (UID + status + assignee).
+    L1: specimenTasks (UID + status + assignee).
     L2: specimen JSON pushed on create/update.
-    L3 (file transfer): out of scope.
+    L3: basic media manifest + LAN file download; higher-level conflict UI is
+        handled by app.services.collab_file_sync and the workbench.
 
 NOTE: mDNS discovery and the HTTP sync require real network / two machines.
 Tests that exercise these are marked with ``@pytest.mark.needs_network`` and
@@ -50,6 +53,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 from PyQt6.QtCore import QObject, QThread, QTimer, pyqtSignal
@@ -200,11 +204,11 @@ class TaskStore:
 
     # ── Queries ───────────────────────────────────────────────────────────
 
-    def all(self) -> list[TaskRecord]:
+    def list_tasks(self) -> list[TaskRecord]:
         with self._lock:
             return list(self._tasks.values())
 
-    def get(self, uid: str) -> Optional[TaskRecord]:
+    def get_task(self, uid: str) -> Optional[TaskRecord]:
         with self._lock:
             return self._tasks.get(uid)
 
@@ -290,7 +294,9 @@ class TaskStore:
 # ── FastAPI application ───────────────────────────────────────────────────────
 
 def _build_fastapi_app(store: TaskStore, node_info_fn: Callable[[], dict],
-                       activity_log: Optional[ActivityLog] = None) -> Any:
+                       activity_log: Optional[ActivityLog] = None,
+                       file_manifest_fn: Optional[Callable[[Optional[list[str]]], dict]] = None,
+                       file_path_fn: Optional[Callable[[str], Path]] = None) -> Any:
     """Build and return the FastAPI app.  Imported lazily to avoid startup cost.
 
     The fastapi names are bound into module globals (``global`` below) so that
@@ -299,10 +305,10 @@ def _build_fastapi_app(store: TaskStore, node_info_fn: Callable[[], dict],
     A purely function-local import leaves them unresolvable and FastAPI then
     mis-reads ``request`` as a query parameter → every POST 422s.
     """
-    global FastAPI, HTTPException, Request, JSONResponse
+    global FastAPI, HTTPException, Request, JSONResponse, FileResponse
     try:
         from fastapi import FastAPI, HTTPException, Request
-        from fastapi.responses import JSONResponse
+        from fastapi.responses import FileResponse, JSONResponse
     except ImportError as exc:
         raise ImportError("fastapi is required for CollabService") from exc
 
@@ -318,7 +324,7 @@ def _build_fastapi_app(store: TaskStore, node_info_fn: Callable[[], dict],
 
     @app.get("/api/collab/tasks")
     async def list_tasks() -> list:
-        return [t.to_dict() for t in store.all()]
+        return [t.to_dict() for t in store.list_tasks()]
 
     @app.post("/api/collab/tasks/create")
     async def create_task(request: Request) -> JSONResponse:
@@ -414,6 +420,36 @@ def _build_fastapi_app(store: TaskStore, node_info_fn: Callable[[], dict],
                      uid, kind, count)
         return {"ok": True, "uid": uid, "kind": kind, "count": count}
 
+    @app.get("/api/collab/files/manifest")
+    async def file_manifest(groupCode: str = "", uids: str = "") -> dict:
+        """Return project media manifest for selected UIDs or the whole project."""
+        local_group = node_info_fn().get("groupCode", "")
+        if not local_group or groupCode != local_group:
+            raise HTTPException(status_code=403, detail="collaboration group mismatch")
+        if file_manifest_fn is None:
+            return {"files": []}
+        uid_list = [u.strip() for u in str(uids or "").split(",") if u.strip()]
+        try:
+            return file_manifest_fn(uid_list or None)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @app.get("/api/collab/files/download")
+    async def download_file(path: str = "", groupCode: str = "") -> Any:
+        """Download one project-relative media file."""
+        local_group = node_info_fn().get("groupCode", "")
+        if not local_group or groupCode != local_group:
+            raise HTTPException(status_code=403, detail="collaboration group mismatch")
+        if file_path_fn is None:
+            raise HTTPException(status_code=404, detail="file sync unavailable")
+        try:
+            resolved = file_path_fn(path)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        if not resolved.is_file():
+            raise HTTPException(status_code=404, detail="file not found")
+        return FileResponse(str(resolved), filename=resolved.name)
+
     @app.post("/api/collab/specimens/push")
     async def receive_specimen_push(request: Request) -> dict:
         """Accept specimen record pushed from a peer (L2 sync).
@@ -484,12 +520,16 @@ class CollabServerThread(QThread):
 
     def __init__(self, store: TaskStore, node_info_fn: Callable[[], dict],
                  preferred_port: int = 5050,
-                 activity_log: Optional[ActivityLog] = None) -> None:
+                 activity_log: Optional[ActivityLog] = None,
+                 file_manifest_fn: Optional[Callable[[Optional[list[str]]], dict]] = None,
+                 file_path_fn: Optional[Callable[[str], Path]] = None) -> None:
         super().__init__()
         self._store = store
         self._node_info_fn = node_info_fn
         self._preferred_port = preferred_port
         self._activity_log = activity_log
+        self._file_manifest_fn = file_manifest_fn
+        self._file_path_fn = file_path_fn
         self._actual_port: Optional[int] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._server: Optional[Any] = None  # uvicorn.Server, set in run()
@@ -521,7 +561,13 @@ class CollabServerThread(QThread):
             return
 
         self._actual_port = port
-        app = _build_fastapi_app(self._store, self._node_info_fn, self._activity_log)
+        app = _build_fastapi_app(
+            self._store,
+            self._node_info_fn,
+            self._activity_log,
+            file_manifest_fn=self._file_manifest_fn,
+            file_path_fn=self._file_path_fn,
+        )
 
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
@@ -795,6 +841,7 @@ class CollabService(QObject):
         self._hostname = socket.gethostname()
         self._port: Optional[int] = None
         self._project_name: str = ""
+        self._project_dir: str = ""
         self._group_code: str = ""
         self._running: bool = False
         self._diagnostics: list[Diagnostic] = []
@@ -817,7 +864,7 @@ class CollabService(QObject):
     # ── Lifecycle ─────────────────────────────────────────────────────────
 
     def start(self, project_name: str = "", preferred_port: int = 5050,
-              group_code: str = "") -> None:
+              group_code: str = "", project_dir: str = "") -> None:
         """Start server, mDNS, and sync timer.  Safe to call from main thread.
 
         Idempotent: a second call while already running is a no-op.
@@ -825,6 +872,8 @@ class CollabService(QObject):
         if self._running:
             return
         self._project_name = project_name
+        if project_dir:
+            self._project_dir = project_dir
         if group_code:
             self._group_code = group_code.strip()
         self._running = True
@@ -834,6 +883,8 @@ class CollabService(QObject):
             node_info_fn=self._node_info,
             preferred_port=preferred_port,
             activity_log=self.activity_log,
+            file_manifest_fn=self._file_manifest_payload,
+            file_path_fn=self._resolve_file_path,
         )
         self._server_thread.started_on_port.connect(self._on_server_started)
         self._server_thread.server_error.connect(
@@ -908,6 +959,12 @@ class CollabService(QObject):
     def set_group_code(self, code: str) -> None:
         """Set the collaboration-group code at runtime (e.g. from settings)."""
         self._group_code = (code or "").strip()
+
+    def set_project_dir(self, project_dir: str | None) -> None:
+        """Update the project directory used by file-sync endpoints."""
+        self._project_dir = str(project_dir or "")
+        if project_dir:
+            self._project_name = str(project_dir)
 
     def _group_matches(self, peer: PeerInfo) -> bool:
         """A peer syncs with us only when both sides share a non-empty code."""
@@ -1439,6 +1496,32 @@ class CollabService(QObject):
             "port":        self._port,
         }
 
+    def _file_manifest_payload(self, uids: Optional[list[str]] = None) -> dict:
+        """Build the current project's media manifest for LAN peers."""
+        if not self._project_dir:
+            return {"files": []}
+        from app.db.db_manager import open_project_db_private
+        from app.services.collab_file_sync import manifest_payload
+
+        db = open_project_db_private(self._project_dir)
+        try:
+            return manifest_payload(
+                self._project_dir,
+                db=db,
+                uids=uids,
+                device_id=self._hostname,
+            )
+        finally:
+            db.close()
+
+    def _resolve_file_path(self, relative_path: str) -> Path:
+        """Resolve a project-relative media file for the download endpoint."""
+        if not self._project_dir:
+            raise FileNotFoundError("project directory is not set")
+        from app.services.collab_file_sync import resolve_project_relative
+
+        return resolve_project_relative(self._project_dir, relative_path)
+
     def local_address(self) -> str:
         """Return "ip:port" string for display in the debug drawer."""
         ip = _get_local_ip()
@@ -1477,7 +1560,7 @@ class CollabService(QObject):
         strict transition machine for programmatic/auto callers, so an
         out-of-order jump returns (False, msg) instead of being applied.
         """
-        if self.store.get(uid) is None:
+        if self.store.get_task(uid) is None:
             self.store.merge_from_peer([{
                 "uid": uid,
                 "status": seed_status or "created",
@@ -1487,7 +1570,7 @@ class CollabService(QObject):
             to_status = TaskStatus(status)
         except ValueError:
             return (False, f"未知状态: {status}")
-        task = self.store.get(uid)
+        task = self.store.get_task(uid)
         if task is not None and task.status is to_status:
             return (True, "ok")  # idempotent re-set, oracle allows it
         try:
@@ -1550,4 +1633,3 @@ class CollabService(QObject):
             self.tasks_changed.emit()
         except ValueError as exc:
             logger.warning("resolve_conflict failed uid=%s: %s", uid, exc)
-

@@ -115,7 +115,7 @@ def export_template(
 
         zrecs = [r for r in records if _record_in_zone(r, z)]
         for rec in zrecs:
-            ws.append([_cell(rec.get(k)) for k, _zh in cols])
+            ws.append([_export_cell_text(rec.get(k)) for k, _zh in cols])
         # 空行预填 地区/样地（离线录入免重敲）
         for _ in range(max(0, blank_rows)):
             ws.append([
@@ -132,7 +132,7 @@ def export_template(
     return total
 
 
-def _cell(val) -> str:
+def _export_cell_text(val) -> str:
     return "" if val in (None,) else str(val)
 
 

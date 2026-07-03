@@ -530,11 +530,11 @@ class LabelScene(QGraphicsScene):
         self._qr_item: Optional[QGraphicsPixmapItem] = None
         self._text_items: list[QGraphicsTextItem] = []
         self._safety_rect: Optional[QGraphicsRectItem] = None
-        self._build()
+        self._build_label_preview_scene()
 
     # ── Build ──────────────────────────────────────────────────────────────
 
-    def _build(self) -> None:
+    def _build_label_preview_scene(self) -> None:
         """(Re)populate the scene from current template + label_data."""
         self.clear()
         self._qr_item = None
@@ -647,7 +647,7 @@ class LabelScene(QGraphicsScene):
             self._dims = dims
         if label_data is not None:
             self._label_data = label_data
-        self._build()
+        self._build_label_preview_scene()
 
     def set_qr_pos_mm(self, x_mm: float, y_mm: float) -> None:
         """Move QR item to (x_mm, y_mm) — wraps with undo command."""

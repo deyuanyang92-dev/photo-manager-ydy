@@ -18,7 +18,7 @@
 8. 无号合成 — `_on_free_compose`
 
 **整理/归档段**
-9. 整理 + 归档（4 前置 / TIFF 永不删）— `archive_group`
+9. 整理 + 归档（4 前置 / 不自动删 TIFF）— `archive_group`
 10. 撤销合成 — `_on_undo_compose`
 11. 还原归档 — `_on_restore_archive`
 12. 补处理 / 补充归档 — `_on_retroactive_scan` / `supplementary_service`
@@ -126,12 +126,12 @@
   - `workbench_view._maybe_auto_organize`，合成成功后调用。
   - 测试 `TestAutoOrganizeAfterCompose`（开/关 2 例）。
 
-## TIFF 手动删除 ✔（用户推翻「TIFF 永不删」红线）
+## TIFF 手动删除 ✔
 
 - 旧：TIFF 卡右键无删除项（写死 `monitor_panel.py if kind=="jpg"`）+ `_delete_paths` 选中 TIFF
   即警告中止 → 删不掉。
 - 新：TIFF 卡加「删除此文件」；`_delete_paths` 对 TIFF 单独弹确认框（无损母片不可恢复）后删。
-  **仅手动 + 确认**；归档/整理等自动流程仍绝不删 TIFF（`test_archive_service.test_tiff_never_deleted`
+  **仅手动 + 确认**；归档/整理等自动流程不能顺手删 TIFF（`test_archive_service.test_archive_group_does_not_auto_delete_tiff`
   保留）。CLAUDE.md 红线 #1 已改措辞。测试 `TestTiffDelete`（菜单/确认删/取消保留 3 例）。
 
 ## 场景8：无号合成 ✔（已核对 + 已修写死）
@@ -151,7 +151,7 @@
 
 ## 场景9：整理 + 归档（红线区）✅ 核对通过，无需改
 
-- cjxl `--distance 0 -e`（无损 bit-exact）+ delete_jpg 默认 False + 4 道闸（cjxl 可用 / ZIP>32B /
+- cjxl `--distance 0 -e`（无损 bit-exact）+ delete_jpg 默认 True（用户可关闭保留散落 JPG）+ 4 道闸（cjxl 可用 / ZIP>32B /
   清单完整 / djxl 真能解回）+ TIFF 从不作删除对象 —— 严谨忠实 oracle archive.js。我加的"自动
   整理"复用同一套闸，安全。
 

@@ -128,7 +128,7 @@ def migrate_legacy_metadata(project_dir: str | Path) -> list[str]:
     return moved
 
 
-def get_incoming_jpg_dir(project_dir: str) -> str:
+def resolve_incoming_jpg_dir(project_dir: str) -> str:
     """Return the path to the incoming-JPG directory.
 
     Prefers modern 'incoming-jpg' subdir; falls back to legacy '新拍JPG'
@@ -148,7 +148,7 @@ def get_incoming_jpg_dir(project_dir: str) -> str:
     return str(modern)
 
 
-def get_results_dir(project_dir: str) -> str:
+def resolve_results_dir(project_dir: str) -> str:
     """Return the path to the results directory.
 
     Oracle: project-paths.js::resolveResultsDir
@@ -528,7 +528,7 @@ _SUMMARY_CACHE: dict[str, tuple] = {}
 
 
 def _summary_signature(db_path: Path, results_root: Path, incoming_path: Path) -> tuple:
-    def _st(p: Path):
+    def _file_stat_signature(p: Path):
         # db/wal files: mtime + size. WAL grows on every insert, so an inserted
         # specimen always shifts this even before checkpoint.
         try:
@@ -537,7 +537,7 @@ def _summary_signature(db_path: Path, results_root: Path, incoming_path: Path) -
         except OSError:
             return None
 
-    def _dir(p: Path):
+    def _directory_signature(p: Path):
         # Scanned dirs: mtime + entry COUNT. Count is read via os.scandir (one
         # readdir, NO per-entry stat) and is what makes the cache correct —
         # directory mtime resolution can be too coarse to catch a file added in
@@ -554,9 +554,9 @@ def _summary_signature(db_path: Path, results_root: Path, incoming_path: Path) -
 
     wal = db_path.with_name(db_path.name + "-wal")
     return (
-        _st(db_path), _st(wal),
-        _dir(results_root), _dir(results_root / "freeform"),
-        _dir(incoming_path),
+        _file_stat_signature(db_path), _file_stat_signature(wal),
+        _directory_signature(results_root), _directory_signature(results_root / "freeform"),
+        _directory_signature(incoming_path),
     )
 
 
@@ -581,7 +581,7 @@ def get_project_summary(project_dir: str) -> dict:
     root = Path(project_dir).resolve()
     db_path = root / DATA_SUBDIR / "project.db"
     results_root = root / RESULTS_DIR
-    incoming_path = Path(get_incoming_jpg_dir(project_dir))
+    incoming_path = Path(resolve_incoming_jpg_dir(project_dir))
 
     sig = _summary_signature(db_path, results_root, incoming_path)
     cached = _SUMMARY_CACHE.get(str(root))
@@ -688,7 +688,7 @@ def get_project_results(project_dir: str) -> dict:
         _re.IGNORECASE,
     )
 
-    def _parse(name: str):
+    def parse_result_tiff_name(name: str):
         """Return (uid, seq) or (None, None)."""
         m = _TIFF_7.match(name)
         if m:
@@ -705,7 +705,7 @@ def get_project_results(project_dir: str) -> dict:
             return uid, None
         return None, None
 
-    def _collect(directory: Path) -> list:
+    def collect_result_tiff_items(directory: Path) -> list:
         if not directory.is_dir():
             return []
         items = []
@@ -718,7 +718,7 @@ def get_project_results(project_dir: str) -> dict:
                         continue
                 except OSError:
                     continue
-                uid, seq = _parse(entry.name)
+                uid, seq = parse_result_tiff_name(entry.name)
                 mtime = None
                 try:
                     mtime = entry.stat().st_mtime
@@ -737,7 +737,7 @@ def get_project_results(project_dir: str) -> dict:
             pass
         return items
 
-    all_items = _collect(results_root) + _collect(freeform_dir)
+    all_items = collect_result_tiff_items(results_root) + collect_result_tiff_items(freeform_dir)
 
     # Group by UID
     group_map: dict = {}

@@ -115,7 +115,7 @@ class CollabManagerDialog(QDialog):
 
         self._setup_ui()
         self._connect_signals()
-        self._refresh()
+        self._refresh_collab_manager_view()
 
     # ── UI ────────────────────────────────────────────────────────────────────
 
@@ -260,7 +260,7 @@ class CollabManagerDialog(QDialog):
         task_hdr.addStretch()
         sync_btn = QPushButton("刷新")
         sync_btn.setFixedWidth(52)
-        sync_btn.clicked.connect(self._refresh)
+        sync_btn.clicked.connect(self._refresh_collab_manager_view)
         task_hdr.addWidget(sync_btn)
         right_lay.addLayout(task_hdr)
 
@@ -327,20 +327,20 @@ class CollabManagerDialog(QDialog):
     def _connect_signals(self) -> None:
         if self._svc is None:
             return
-        self._svc.peers_changed.connect(self._refresh_devices)
-        self._svc.tasks_changed.connect(self._refresh_tasks)
+        self._svc.peers_changed.connect(self._refresh_peer_table)
+        self._svc.tasks_changed.connect(self._refresh_task_table)
         self._svc.conflict_detected.connect(self._on_conflict)
         self._svc.server_ready.connect(self._on_server_ready)
 
     # ── Refresh ───────────────────────────────────────────────────────────────
 
-    def _refresh(self) -> None:
-        self._refresh_share_addr()
-        self._refresh_devices()
-        self._refresh_tasks()
-        self._refresh_summary()
+    def _refresh_collab_manager_view(self) -> None:
+        self._refresh_local_share_address()
+        self._refresh_peer_table()
+        self._refresh_task_table()
+        self._refresh_collab_summary()
 
-    def _refresh_share_addr(self) -> None:
+    def _refresh_local_share_address(self) -> None:
         if self._svc is None:
             self._share_addr.setText("局域网地址: — (服务未启动)")
             return
@@ -348,7 +348,7 @@ class CollabManagerDialog(QDialog):
         self._share_addr.setText(f"局域网地址: {addr}")
 
     @pyqtSlot()
-    def _refresh_devices(self) -> None:
+    def _refresh_peer_table(self) -> None:
         if self._svc is None:
             return
         peers = self._svc.peers()
@@ -367,11 +367,11 @@ class CollabManagerDialog(QDialog):
             self._device_table.setItem(row, 2, _ro_item(lat))
 
     @pyqtSlot()
-    def _refresh_tasks(self) -> None:
+    def _refresh_task_table(self) -> None:
         if self._svc is None:
             return
         tasks = sorted(
-            self._svc.store.all(), key=lambda t: t.updated_at, reverse=True
+            self._svc.store.list_tasks(), key=lambda t: t.updated_at, reverse=True
         )
         self._task_table.setRowCount(len(tasks))
         for row, task in enumerate(tasks):
@@ -399,10 +399,10 @@ class CollabManagerDialog(QDialog):
             self._task_table.setItem(0, 0, item)
             self._task_table.setSpan(0, 0, 1, 5)
 
-    def _refresh_summary(self) -> None:
+    def _refresh_collab_summary(self) -> None:
         if self._svc is None:
             return
-        n_tasks = len(self._svc.store.all())
+        n_tasks = len(self._svc.store.list_tasks())
         n_peers = len(self._svc.peers())
         online_txt = f"在线 {n_peers} 台" if n_peers else "离线/单机"
         self._summary_label.setText(
@@ -468,7 +468,7 @@ class CollabManagerDialog(QDialog):
 
     @pyqtSlot(int)
     def _on_server_ready(self, port: int) -> None:
-        self._refresh_share_addr()
+        self._refresh_local_share_address()
         if self._svc:
             self._dbg_addr.setText(f"本机地址：{self._svc.local_address()}")
 
@@ -511,7 +511,7 @@ class CollabManagerDialog(QDialog):
             self._svc.store.update_status(uid, TaskStatus(new_status))
             # Broadcast to online peers via simple update call
             self._broadcast_status_update(uid, new_status)
-            self._refresh_tasks()
+            self._refresh_task_table()
         except ValueError as exc:
             self._show_banner(f"状态更新失败：{exc}")
 
@@ -544,7 +544,7 @@ class CollabManagerDialog(QDialog):
     def _on_assign(self, uid: str) -> None:
         if self._svc is None:
             return
-        task = self._svc.store.get(uid)
+        task = self._svc.store.get_task(uid)
         current = task.assignee if task else ""
         name, ok = QInputDialog.getText(
             self, "分配编号", f"分配 {uid} 给谁拍摄？",
@@ -558,11 +558,11 @@ class CollabManagerDialog(QDialog):
             task = self._svc.store.update_status(uid, TaskStatus.ASSIGNED, assignee=name)
         except ValueError:
             # Already assigned or in non-assignable state — just patch assignee
-            t = self._svc.store.get(uid)
+            t = self._svc.store.get_task(uid)
             if t:
                 t.assignee = name
         self._broadcast_status_update(uid, "assigned")
-        self._refresh_tasks()
+        self._refresh_task_table()
 
     def _on_void(self, uid: str) -> None:
         if self._svc is None:
@@ -578,7 +578,7 @@ class CollabManagerDialog(QDialog):
         try:
             # Release = delete locally + broadcast to peers → UID reclaimable.
             self._svc.release_task(uid)
-            self._refresh_tasks()
+            self._refresh_task_table()
         except Exception as exc:  # noqa: BLE001
             self._show_banner(f"作废失败：{exc}")
 
@@ -605,7 +605,7 @@ class CollabManagerDialog(QDialog):
             from app.services.collab_service import TaskStatus
             self._svc.store.update_status(uid, TaskStatus(chosen))
             self._broadcast_status_update(uid, chosen)
-            self._refresh_tasks()
+            self._refresh_task_table()
         except ValueError as exc:
             self._show_banner(f"冲突处理失败：{exc}")
 

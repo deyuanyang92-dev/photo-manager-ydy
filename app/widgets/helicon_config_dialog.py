@@ -85,7 +85,7 @@ class HeliconConfigDialog(QDialog):
     # ── settings access ────────────────────────────────────────────────────────
 
     @property
-    def _qs(self):
+    def _helicon_settings_store(self):
         return self.ctx.settings._qs
 
     # ── UI ──────────────────────────────────────────────────────────────────────
@@ -200,21 +200,21 @@ class HeliconConfigDialog(QDialog):
         self._output_format_combo = QComboBox()
         self._output_format_combo.addItems(["TIF", "JPG"])
         self._output_format_combo.currentIndexChanged.connect(self._refresh_cli_preview)
-        body.addLayout(self._row("输出格式", self._output_format_combo))
+        body.addLayout(self._form_row("输出格式", self._output_format_combo))
 
         self._tiff_compression_combo = QComboBox()
         self._tiff_compression_combo.addItems(["无 (u)", "LZW", "ZIP"])
         self._tiff_compression_combo.currentIndexChanged.connect(self._refresh_cli_preview)
-        body.addLayout(self._row("TIFF 压缩", self._tiff_compression_combo))
+        body.addLayout(self._form_row("TIFF 压缩", self._tiff_compression_combo))
 
         self._run_mode_combo = QComboBox()
         self._run_mode_combo.addItems(["静默 (silent)", "进度条 (progress)", "GUI 窗口 (gui)"])
         self._run_mode_combo.currentIndexChanged.connect(self._refresh_cli_preview)
-        body.addLayout(self._row("运行模式", self._run_mode_combo))
+        body.addLayout(self._form_row("运行模式", self._run_mode_combo))
 
         self._concurrency_spin = QSpinBox()
         self._concurrency_spin.setRange(1, 8)
-        body.addLayout(self._row("批量并发", self._concurrency_spin))
+        body.addLayout(self._form_row("批量并发", self._concurrency_spin))
 
         self._save_depth_map_chk = QCheckBox("保存深度图 (-dmap)")
         self._save_depth_map_chk.stateChanged.connect(self._refresh_cli_preview)
@@ -260,7 +260,7 @@ class HeliconConfigDialog(QDialog):
         lay.addWidget(self._save_btn)
         return bar
 
-    def _row(self, label: str, widget: QWidget) -> QHBoxLayout:
+    def _form_row(self, label: str, widget: QWidget) -> QHBoxLayout:
         row = QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(8)
@@ -274,7 +274,7 @@ class HeliconConfigDialog(QDialog):
     # ── load / persist ──────────────────────────────────────────────────────────
 
     def _load_from_settings(self) -> None:
-        qs = self._qs
+        qs = self._helicon_settings_store
         self._path_edit.setText(str(qs.value(_K_HELICON_EXE, "") or ""))
         self._params.set_params({
             "method": int(qs.value(_K_HELICON_METHOD, _DEFAULT_METHOD)),
@@ -294,7 +294,7 @@ class HeliconConfigDialog(QDialog):
         self._save_depth_map_chk.setChecked(_as_bool(qs.value(_K_HELICON_SAVE_DEPTH_MAP, "false")))
 
     def _on_save_defaults(self) -> None:
-        qs = self._qs
+        qs = self._helicon_settings_store
         p = self._params.get_params()
         qs.setValue(_K_HELICON_METHOD, int(p["method"]))
         qs.setValue(_K_HELICON_RADIUS, float(p["radius"]))
@@ -309,7 +309,7 @@ class HeliconConfigDialog(QDialog):
         qs.setValue(_K_HELICON_SAVE_DEPTH_MAP,
                     "true" if self._save_depth_map_chk.isChecked() else "false")
         try:
-            self.ctx.settings.sync()
+            self.ctx.settings.flush_to_disk()
         except Exception:
             pass
         self._flash_button(self._save_btn, "已保存 ✓")
@@ -333,9 +333,9 @@ class HeliconConfigDialog(QDialog):
 
     def _on_save_path(self) -> None:
         custom = self._path_edit.text().strip()
-        self._qs.setValue(_K_HELICON_EXE, custom)
+        self._helicon_settings_store.setValue(_K_HELICON_EXE, custom)
         try:
-            self.ctx.settings.sync()
+            self.ctx.settings.flush_to_disk()
         except Exception:
             pass
         # Feed detection + compose: same pattern as project_settings_drawer.
@@ -346,10 +346,10 @@ class HeliconConfigDialog(QDialog):
 
     def _on_clear_path(self) -> None:
         self._path_edit.clear()
-        self._qs.setValue(_K_HELICON_EXE, "")
+        self._helicon_settings_store.setValue(_K_HELICON_EXE, "")
         os.environ.pop("HELICON_FOCUS_PATH", None)
         try:
-            self.ctx.settings.sync()
+            self.ctx.settings.flush_to_disk()
         except Exception:
             pass
         self._detect_and_refresh()
@@ -409,7 +409,7 @@ class HeliconConfigDialog(QDialog):
         out_ext = "tif"
         if fmt_jpg:
             out_ext = "jpg"
-            quality = int(self._qs.value(_K_HELICON_QUALITY, 95))
+            quality = int(self._helicon_settings_store.value(_K_HELICON_QUALITY, 95))
         else:
             tiff_comp = _TIFF_VALS[self._tiff_compression_combo.currentIndex()]
         args = build_helicon_args(

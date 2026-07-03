@@ -154,7 +154,7 @@ creates/edits the unassigned task; selected or draft UIDs do not own it. See
 | Gate: ≥2 JPGs in group | `_check_organize_gate` | ✓ |
 | Gate: TIFF must be composed | `group.composedTiffPath` check | ✓ |
 | JPG→JXL→ZIP with manifest | `archive_service.archive_group` | ✓ |
-| delete_jpg default=False | Hard rule | ✓ |
+| delete_jpg default=True | ZIP consumes JPG; delete loose JPG after verification unless user opts to keep | ✓ |
 | Four safety checks before delete | manifest+jxl_recoverable | ✓ |
 | Update grouping with archive_zip | `group.archive_zip = result.zip_path` | ✓ |
 | Sequence numbering | `next_result_sequence + build_result_basename` | ✓ |
@@ -176,7 +176,7 @@ This is not optional UX. It prevents the wrong blocker: "请先激活编号" mus
 
 Automatic UID naming must advance after existing TIFs/ZIPs. If `UID-1-YYYYMMDD.tif` already exists, the next selected-JPG result for that UID is `UID-2-YYYYMMDD.tif`.
 
-After compose+organise succeeds, archived source JPGs may remain on disk according to deletion safety settings, but they must be hidden from the pending-photo queue once the group has a real ZIP.
+After compose+organise succeeds, the ZIP consumes source JPGs. The default is to delete loose JPGs after verification; users may explicitly keep them. In either mode, consumed JPGs must be hidden from the pending-photo queue once the group has a real ZIP.
 
 ### 5.6 Undo compose
 | Feature | Web | v3 status |

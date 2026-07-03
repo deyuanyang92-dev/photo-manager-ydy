@@ -81,7 +81,7 @@
 | `groupingStackRun` | ✓ | 由 `_on_compose_requested` 调 `helicon_service.stack_single_subprocess` 实现 |
 | `groupingOrganizeOnly` | ✓ | `GroupingPanel._on_organise_all` + `WorkbenchView._on_organise_requested` |
 | `groupingStackAndOrganize` | ✓ | `GroupingPanel._on_compose_and_organise_all` |
-| `groupingUndoCompose` | ✓ | `WorkbenchView._on_undo_compose` → `_retire_tiff`（移到 `_retired-tiff/`，TIFF 永不删） |
+| `groupingUndoCompose` | ✓ | `WorkbenchView._on_undo_compose` → `_retire_tiff`（撤销合成会把 TIFF 移到 `_retired-tiff/`） |
 | `groupingImportTiff` | ✓ | `GroupingPanel._on_import_tiff_btn` → `_TiffImportDialog`：列 results/incoming-jpg TIFF + 粘贴路径 + 浏览；更新 composedTiffPath + status="composed" |
 | `renderTiffImportModal` | ✓ | `_TiffImportDialog`：等价实现，含候选文件列表 + 路径输入 + 浏览按钮 |
 | `groupingArchiveSingle` | ✓ | `WorkbenchView._on_organise_requested` 处理单组 |
@@ -220,8 +220,8 @@
 | 6. 存量整理 | ✓ | `_on_retroactive_scan` + `RetroactiveModal` + `archive_service.archive_group` |
 | 7. 项目设置抽屉 | ✓ | `ProjectSettingsDrawer`：Helicon 路径 + auto-activate + 子目录（只读）|
 | 8. 合成+整理批量 | ✓ | `_on_compose_and_organise_all`（先 compose all → 再 organise composed） |
-| 9. Undo 合成 | ✓ | `_on_undo_compose` + `_retire_tiff`（移 _retired-tiff/，TIFF 永不删） |
-| 10. delete_jpg 默认关 | ✓ | `_on_organise_requested` 读 `ctx.settings.delete_jpg_after_archive`，默认 False |
+| 9. Undo 合成 | ✓ | `_on_undo_compose` + `_retire_tiff`（用户明确撤销时移走 TIFF） |
+| 10. delete_jpg 默认开 | ✓ | `_on_organise_requested` 读 `ctx.settings.delete_jpg_after_archive`，默认 True；用户可关闭以保留散落 JPG |
 
 ---
 
@@ -229,8 +229,8 @@
 
 | 规则 | Qt 实现 |
 |------|---------|
-| TIFF 永远保留 | `MonitorPanel._on_delete_clicked`：TIFF 路径触发 warning + return；`_on_undo_compose`：移到 `_retired-tiff/` 不删 |
-| JPG 删除默认关 | `archive_service.archive_group(delete_jpg=False 默认)` + `_on_organise_requested` 从 settings 读（默认 False） |
+| TIFF 自动删除边界 | 整理/归档不自动删 TIFF；`MonitorPanel._delete_paths` 允许用户确认后手动删除 TIFF；`_on_undo_compose` 允许用户明确撤销合成 |
+| JPG 删除默认开 | `archive_service.archive_group(delete_jpg=True 默认)` + `_on_organise_requested` 从 settings 读（默认 True）；ZIP 校验失败则保留 |
 | 中文不自动填 | `_on_naming_save`：只保存用户填入的原始文本，无自动推断 |
 | 激活互斥 | `activation_service._set_all_inactive`：激活前把其他全清除 |
 | 一个删除 + 警告 | `MonitorPanel._on_delete_clicked`：TIFF 则 warning，JPG 则 question confirm |

@@ -308,13 +308,13 @@ def export_csv(
 # Never merges WoRMS data into an original column, so a `*Cn` (Chinese-name)
 # column simply passes through as one of the original columns (red line).
 
-def _ms(v) -> str:
+def _match_cell_text(v) -> str:
     """Match-string: None → '', everything else str()."""
     return "" if v is None else str(v)
 
 
 def _m_best(result: dict, field: str) -> str:
-    return _ms((result.get("best") or {}).get(field))
+    return _match_cell_text((result.get("best") or {}).get(field))
 
 
 _RANK_FIELDS = ("kingdom", "phylum", "class", "order", "family", "genus")
@@ -326,16 +326,16 @@ def _m_rank(result: dict, rank_key: str) -> str:
     if chain:
         for node in chain:
             if str(node.get("rank", "")).lower() == rank_key:
-                return _ms(node.get("scientificname"))
-    return _ms((result.get("best") or {}).get(rank_key))
+                return _match_cell_text(node.get("scientificname"))
+    return _match_cell_text((result.get("best") or {}).get(rank_key))
 
 
 def _m_classification(result: dict) -> str:
     chain = result.get("chain")
     if chain:
-        return " > ".join(_ms(n.get("scientificname")) for n in chain if n.get("scientificname"))
+        return " > ".join(_match_cell_text(n.get("scientificname")) for n in chain if n.get("scientificname"))
     best = result.get("best") or {}
-    return " > ".join(_ms(best.get(r)) for r in _RANK_FIELDS if best.get(r))
+    return " > ".join(_match_cell_text(best.get(r)) for r in _RANK_FIELDS if best.get(r))
 
 
 _ENV_FLAGS = (("isMarine", "海洋"), ("isBrackish", "半咸水"),
@@ -365,9 +365,9 @@ def _m_resolution(result: dict) -> str:
 MATCH_APPEND_COLUMNS: list[tuple[str, str, str, callable]] = [
     ("aphia_id",           "AphiaID",      "AphiaID",          lambda r: _m_best(r, "AphiaID")),
     ("matched_name",       "匹配名",        "ScientificName",   lambda r: _m_best(r, "scientificname")),
-    ("accepted_name",      "接受名",        "Accepted name",    lambda r: _ms((r.get("best") or {}).get("valid_name")
+    ("accepted_name",      "接受名",        "Accepted name",    lambda r: _match_cell_text((r.get("best") or {}).get("valid_name")
                                                                             or (r.get("best") or {}).get("scientificname"))),
-    ("accepted_aphia_id",  "接受AphiaID",   "Accepted AphiaID", lambda r: _ms((r.get("best") or {}).get("valid_AphiaID")
+    ("accepted_aphia_id",  "接受AphiaID",   "Accepted AphiaID", lambda r: _match_cell_text((r.get("best") or {}).get("valid_AphiaID")
                                                                             or (r.get("best") or {}).get("AphiaID"))),
     ("authority",          "命名人",        "Authority",        lambda r: _m_best(r, "authority")),
     ("accepted_authority", "接受名命名人",   "Accepted Authority", lambda r: _m_best(r, "valid_authority")),

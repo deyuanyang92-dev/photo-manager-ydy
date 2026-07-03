@@ -83,7 +83,7 @@ class TaxonCandidate:
 
 # ── Helper ────────────────────────────────────────────────────────────────────
 
-def _nfkc(s: str) -> str:
+def _normalize_taxon_match_text(s: str) -> str:
     """NFKC-normalise and lower-case for matching (mirrors app.js matchTaxon)."""
     return unicodedata.normalize("NFKC", s).lower()
 
@@ -200,23 +200,31 @@ class TaxonomyService:
             for e in merged
         )
 
-        def _match_val(e: dict, field: str, cn_field: str, val: str) -> bool:
+        def taxon_record_matches_ancestor(
+            e: dict, field: str, cn_field: str, val: str
+        ) -> bool:
             return e.get(field) == val or (bool(e.get(cn_field)) and e[cn_field] == val)
 
         seen: set[str] = set()
         out: list[TaxonCandidate] = []
 
-        def _scan(records: list[dict], source: str) -> None:
+        def append_matching_taxon_candidates(records: list[dict], source: str) -> None:
             for e in records:
                 # Ancestor constraints (mirrors app.js taxonomyCandidates filter logic)
                 if sp_key != "taxonGroup" and known_class:
-                    if not _match_val(e, "class", "classCn", context.get("taxonGroup", "")):
+                    if not taxon_record_matches_ancestor(
+                        e, "class", "classCn", context.get("taxonGroup", "")
+                    ):
                         continue
                 if sp_key in ("family", "genus", "scientificName") and known_order:
-                    if not _match_val(e, "order", "orderCn", context.get("order", "")):
+                    if not taxon_record_matches_ancestor(
+                        e, "order", "orderCn", context.get("order", "")
+                    ):
                         continue
                 if sp_key in ("genus", "scientificName") and known_family:
-                    if not _match_val(e, "family", "familyCn", context.get("family", "")):
+                    if not taxon_record_matches_ancestor(
+                        e, "family", "familyCn", context.get("family", "")
+                    ):
                         continue
                 if sp_key == "scientificName" and ctx_genus:
                     e_genus = e.get("genus") or (e.get("species", "").split()[0] if e.get("species") else "")
@@ -230,8 +238,8 @@ class TaxonomyService:
                 cn = e.get(cn_key, "")
                 out.append(TaxonCandidate(value=v, cn=cn, source=source, full=e))
 
-        _scan(self._user, "user")
-        _scan(self._seed, "seed")
+        append_matching_taxon_candidates(self._user, "user")
+        append_matching_taxon_candidates(self._seed, "seed")
 
         return out
 
@@ -287,14 +295,14 @@ class TaxonomyService:
           - score = earliest indexOf in value or cn
           - return top *max_results* hits
         """
-        q = _nfkc(query).strip()
+        q = _normalize_taxon_match_text(query).strip()
         if not q:
             return list(cands[:max_results])
 
         hits: list[tuple[int, TaxonCandidate]] = []
         for c in cands:
-            v = _nfkc(c.value)
-            cn = _nfkc(c.cn)
+            v = _normalize_taxon_match_text(c.value)
+            cn = _normalize_taxon_match_text(c.cn)
             pos_v = v.find(q)
             pos_cn = cn.find(q)
             if pos_v < 0 and pos_cn < 0:
@@ -383,7 +391,7 @@ class TaxonomyService:
         self._save_user()
         return dict(entry)
 
-    def update(self, record_id: str, updates: dict[str, Any]) -> Optional[dict[str, Any]]:
+    def update_user_record(self, record_id: str, updates: dict[str, Any]) -> Optional[dict[str, Any]]:
         """Update an existing user record by recordId.
 
         Saves a history snapshot before writing (mirrors server.js:934-943).
@@ -442,7 +450,7 @@ class TaxonomyService:
         self._save_user()
         return dict(entry)
 
-    def delete(self, record_id: str) -> bool:
+    def delete_user_record(self, record_id: str) -> bool:
         """Delete a user record by recordId.
 
         Seed records cannot be deleted.

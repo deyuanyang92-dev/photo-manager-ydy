@@ -101,13 +101,13 @@ class _TileCache:
         self._store: collections.OrderedDict = collections.OrderedDict()
         self._max = max_size
 
-    def get(self, key: tuple) -> Optional[QPixmap]:
+    def get_tile(self, key: tuple) -> Optional[QPixmap]:
         if key not in self._store:
             return None
         self._store.move_to_end(key)
         return self._store[key]
 
-    def put(self, key: tuple, pixmap: QPixmap) -> None:
+    def store_tile(self, key: tuple, pixmap: QPixmap) -> None:
         if key in self._store:
             self._store.move_to_end(key)
         else:
@@ -527,7 +527,7 @@ class TileMapWidget(QWidget):
                 key = (z, tx_w, ty_i)
                 px = round((tx_i - cx) * _TILE_SIZE + w / 2)
                 py = round((ty_i - cy) * _TILE_SIZE + h / 2)
-                pixmap = self._cache.get(key)
+                pixmap = self._cache.get_tile(key)
                 if pixmap is not None:
                     painter.drawPixmap(px, py, pixmap)
                     any_drawn = True
@@ -699,7 +699,7 @@ class TileMapWidget(QWidget):
     def _request_tile(self, z: int, x: int, y: int) -> None:
         key = (z, x, y)
         if key in self._pending or key in self._failed_keys \
-                or self._cache.get(key) is not None:
+                or self._cache.get_tile(key) is not None:
             return
         self._apply_osm_proxy()
         url = QUrl(self._tile_url.format(z=z, x=x, y=y))
@@ -720,7 +720,7 @@ class TileMapWidget(QWidget):
             data = reply.readAll()
             px = QPixmap()
             if px.loadFromData(data):
-                self._cache.put(key, px)
+                self._cache.store_tile(key, px)
                 self._failed_keys.clear()   # 网络恢复，允许重试旧失败区域
                 self.update()
         else:

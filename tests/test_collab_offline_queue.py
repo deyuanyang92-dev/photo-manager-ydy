@@ -42,7 +42,7 @@ class TestMarkAndCount:
         queue.mark_draft("uid-1", "shooting")
         queue.mark_draft("uid-1", "shot_done")
         assert queue.count() == 1
-        drafts = queue._load()
+        drafts = queue._load_drafts_from_settings()
         assert drafts[0]["status"] == "shot_done"
 
     def test_mark_multiple_uids(self, queue):
@@ -84,7 +84,7 @@ class TestRetry:
         assert sent == 1
         assert remaining == 1
         assert queue.count() == 1
-        assert queue._load()[0]["uid"] == "uid-1"
+        assert queue._load_drafts_from_settings()[0]["uid"] == "uid-1"
 
 
 class TestClear:

@@ -113,7 +113,7 @@ class TestFreeFormElements:
         d = _dlg(qt_app)
         d._add_element("rect")
         assert len(d._tmpl["elements"]) == 1
-        d._do_undo()
+        d._undo_template_edit()
         assert d._tmpl.get("elements", []) == []
 
 
@@ -158,7 +158,7 @@ class TestAlignDistribute:
         d = _dlg(qt_app)
         i = self._rect(d, x=3, y=4, w=10, h=6)
         d._align_elements("right", indices=[i])
-        d._do_undo()
+        d._undo_template_edit()
         assert d._tmpl["elements"][i]["x"] == 3
 
     def test_distribute_horizontal_evens_gaps(self, qt_app):
@@ -258,7 +258,7 @@ class TestMultiSelect:
         d._select("element", -1, a)
         d._copy_selection()
         d._paste_clipboard()
-        d._do_undo()
+        d._undo_template_edit()
         assert len(d._tmpl["elements"]) == 1
 
 
@@ -270,7 +270,7 @@ class TestInlineEditing:
         d.resize(940, 640)
         d._add_element("text")
         d._tmpl["elements"][0]["text"] = "原文"
-        d._refresh()
+        d._refresh_designer_state()
         d._begin_inline_edit(0)
         assert d._inline_editor is not None
         assert d._inline_editor.text() == "原文"
@@ -279,7 +279,7 @@ class TestInlineEditing:
         d = _dlg(qt_app)
         d.resize(940, 640)
         d._add_element("text")
-        d._refresh()
+        d._refresh_designer_state()
         d._begin_inline_edit(0)
         d._inline_editor.setText("新文字")
         d._commit_inline_edit()
@@ -291,11 +291,11 @@ class TestInlineEditing:
         d.resize(940, 640)
         d._add_element("text")
         d._tmpl["elements"][0]["text"] = "before"
-        d._refresh()
+        d._refresh_designer_state()
         d._begin_inline_edit(0)
         d._inline_editor.setText("after")
         d._commit_inline_edit()
-        d._do_undo()
+        d._undo_template_edit()
         assert d._tmpl["elements"][0]["text"] == "before"
 
     def test_double_click_text_element_starts_inline_edit(self, qt_app):
@@ -305,7 +305,7 @@ class TestInlineEditing:
         d.resize(940, 640)
         d._add_element("text")
         d._tmpl["elements"][0].update({"x": 6, "y": 6, "w": 20, "h": 8})
-        d._refresh()
+        d._refresh_designer_state()
         canvas = d._canvas
         box = next(b for b in canvas._boxes
                    if b.get("kind") == "element" and b.get("index") == 0)
@@ -446,7 +446,7 @@ class TestCanvasGroupWiring:
         d._tmpl["elements"][0].update({"x": 5, "y": 5, "w": 14, "h": 8})
         d._add_element("rect")
         d._tmpl["elements"][1].update({"x": 5, "y": 18, "w": 14, "h": 8})
-        d._refresh()
+        d._refresh_designer_state()
         self._ctrl_click(d._canvas, 0)
         self._ctrl_click(d._canvas, 1)
         assert d._multi == {0, 1}
@@ -661,9 +661,9 @@ class TestUndoRedo:
         n = len(d._tmpl["rows"])
         d._add_row_with_field("latin")
         assert len(d._tmpl["rows"]) == n + 1
-        d._do_undo()
+        d._undo_template_edit()
         assert len(d._tmpl["rows"]) == n
-        d._do_redo()
+        d._redo_template_edit()
         assert len(d._tmpl["rows"]) == n + 1
 
 
@@ -672,13 +672,13 @@ class TestCanvasHitTesting:
         d = _dlg(qt_app)
         c = d._canvas
         c.resize(600, 400)
-        c._render()
+        c._render_label_canvas()
         field_boxes = [b for b in c._boxes if b["kind"] == "field"]
         assert field_boxes  # renderer emitted field hit-boxes
         b = field_boxes[0]
         center = QPoint(int(c._origin.x() + b["x"] + b["w"] / 2),
                         int(c._origin.y() + b["y"] + b["h"] / 2))
-        hit = c._hit(center)
+        hit = c._hit_test_canvas_box(center)
         assert hit is not None and hit["kind"] == "field"
 
 
@@ -691,7 +691,7 @@ class TestCanvasElementInteraction:
         d._select("element", -1, 0)
         c = d._canvas
         c.resize(600, 400)
-        c._render()
+        c._render_label_canvas()
         box = c._selected_box()
         assert box is not None and box["etype"] == "rect"
         se = QPoint(int(c._origin.x() + box["x"] + box["w"]),
@@ -732,7 +732,7 @@ class TestCanvasElementInteraction:
         d._select("element", -1, 0)
         c = d._canvas
         c.resize(600, 400)
-        c._render()
+        c._render_label_canvas()
         box = c._selected_box()
         # press at element center, then move +40px right / +24px down
         cx = c._origin.x() + box["x"] + box["w"] / 2
@@ -764,7 +764,7 @@ class TestCanvasElementInteraction:
         d._apply_preset(STARTER_PRESETS["logo"])
         assert d._tmpl["elements"]  # logo preset has free-form elements
         assert any(e["type"] == "barcode" for e in d._tmpl["elements"])
-        d._do_undo()  # preset apply is a single undo step
+        d._undo_template_edit()  # preset apply is a single undo step
         assert d._tmpl["rows"]  # back to the original row-based TMPL
 
 
@@ -815,7 +815,7 @@ class TestGrouping:
         d._add_element("rect")
         d._multi = {0, 1}
         d._group_selection()
-        d._do_undo()
+        d._undo_template_edit()
         assert all(e.get("group") in (None,) for e in d._tmpl["elements"])
 
     def test_ungroup_clears_id(self, qt_app):
@@ -860,11 +860,11 @@ class TestHiddenLocked:
         d._apply_edit({"op": "element_locked", "index": 0, "value": True})
         c = d._canvas
         c.resize(600, 400)
-        c._render()
+        c._render_label_canvas()
         # a click in the locked element's box must not hit it
         pt = QPoint(int(c._origin.x() + 10 * c._ppm),
                     int(c._origin.y() + 10 * c._ppm))
-        assert c._hit(pt) is None
+        assert c._hit_test_canvas_box(pt) is None
 
 
 class TestRotationHandle:
@@ -876,7 +876,7 @@ class TestRotationHandle:
         d._select("element", -1, 0)
         c = d._canvas
         c.resize(600, 400)
-        c._render()
+        c._render_label_canvas()
         box = c._selected_box()
         rot_pt = QPoint(int(c._origin.x() + box["x"] + box["w"] / 2),
                         int(c._origin.y() + box["y"] - 18))
@@ -888,8 +888,8 @@ class TestRotationHandle:
         d._select("element", -1, 0)
         c = d._canvas
         c.resize(600, 400)
-        c._render()
-        assert "rot" not in c._handle_rects(c._selected_box())
+        c._render_label_canvas()
+        assert "rot" not in c._selection_handle_rects_for_box(c._selected_box())
 
     def test_rotation_drag_updates_angle(self, qt_app):
         from PyQt6.QtGui import QMouseEvent
@@ -901,7 +901,7 @@ class TestRotationHandle:
         d._select("element", -1, 0)
         c = d._canvas
         c.resize(600, 400)
-        c._render()
+        c._render_label_canvas()
         box = c._selected_box()
         cx = c._origin.x() + box["x"] + box["w"] / 2
         cy = c._origin.y() + box["y"] + box["h"] / 2
@@ -985,7 +985,7 @@ class TestFormatPainter:
         d._add_element("rect")
         d._apply_edit({"op": "element_apply_style", "index": 0,
                        "style_dict": {"fill": "#00ff00"}})
-        d._do_undo()
+        d._undo_template_edit()
         assert d._tmpl["elements"][0].get("fill") in (None,)
 
 
@@ -1007,7 +1007,7 @@ class TestBatchEdit:
         d._add_element("rect")
         d._multi = {0, 1}
         d._apply_element_edit_multi("element_color", {"value": "#abcdef"})
-        d._do_undo()   # one undo reverts both
+        d._undo_template_edit()   # one undo reverts both
         assert all(e.get("color", "#000000") != "#abcdef"
                    for e in d._tmpl["elements"])
 
@@ -1022,10 +1022,10 @@ class TestZoomPan:
         d._add_element("rect")
         c = d._canvas
         c.resize(600, 400)
-        c._render()
+        c._render_label_canvas()
         base_ppm = c._ppm
         c.set_zoom(2.0)
-        c._render()
+        c._render_label_canvas()
         assert abs(c._ppm - base_ppm * 2.0) < 1e-6
 
     def test_zoom_clamped(self, qt_app):
@@ -1044,13 +1044,13 @@ class TestZoomPan:
         c = d._canvas
         c.resize(700, 500)
         c.set_zoom(1.5)
-        c._render()
+        c._render_label_canvas()
         box = c._selected_box() or [b for b in c._boxes
                                     if b.get("kind") == "element"][0]
         # center of the element in device px must hit it
         pt = QPoint(int(c._origin.x() + box["x"] + box["w"] / 2),
                     int(c._origin.y() + box["y"] + box["h"] / 2))
-        hit = c._hit(pt)
+        hit = c._hit_test_canvas_box(pt)
         assert hit is not None and hit.get("etype") == "rect"
 
 

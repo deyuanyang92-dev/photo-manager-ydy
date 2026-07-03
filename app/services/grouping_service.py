@@ -545,7 +545,7 @@ def save_grouping(
     """
     def _save_once() -> None:
         _ensure_grouping_table(db)
-        now = _iso_now()
+        now = _utc_now_iso()
 
         with db:
             # Delete existing groups for this uid then re-insert
@@ -675,7 +675,7 @@ def add_explicit_unassign(db: sqlite3.Connection, path: str) -> None:
     resolved = str(Path(path).resolve())
     db.execute(
         "INSERT OR IGNORE INTO explicit_unassigns (path, created_at) VALUES (?, ?)",
-        (resolved, _iso_now()),
+        (resolved, _utc_now_iso()),
     )
     db.commit()
 
@@ -695,6 +695,6 @@ def get_explicit_unassigns(db: sqlite3.Connection) -> set:
     return {row[0] for row in rows}
 
 
-def _iso_now() -> str:
+def _utc_now_iso() -> str:
     from datetime import datetime, timezone
     return datetime.now(tz=timezone.utc).isoformat()

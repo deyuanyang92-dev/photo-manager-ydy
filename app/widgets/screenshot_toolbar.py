@@ -68,7 +68,7 @@ class ScreenshotToolbar(QFrame):
             self._tool_group.addButton(b)
             lay.addWidget(b)
 
-        lay.addWidget(_sep())
+        lay.addWidget(_toolbar_separator())
 
         for hexc in _SWATCHES:
             sw = QPushButton()
@@ -88,7 +88,7 @@ class ScreenshotToolbar(QFrame):
         self._width.valueChanged.connect(self.widthChanged)
         lay.addWidget(self._width)
 
-        lay.addWidget(_sep())
+        lay.addWidget(_toolbar_separator())
 
         self._add_action(lay, "mdi6.undo", "撤销", self.undoRequested)
         self._add_action(lay, "mdi6.content-copy", "复制到剪贴板", self.copyRequested)
@@ -127,7 +127,7 @@ class ScreenshotToolbar(QFrame):
             self.toolChanged.emit(tool)
 
 
-def _sep() -> QFrame:
+def _toolbar_separator() -> QFrame:
     s = QFrame()
     s.setFrameShape(QFrame.Shape.VLine)
     s.setStyleSheet("color:#3a3a3a;")

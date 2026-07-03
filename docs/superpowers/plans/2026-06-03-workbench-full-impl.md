@@ -20,7 +20,7 @@
 - Create: `tests/test_workbench_wiring.py`
 
 **Constraint reminder (hard rules that must never be violated):**
-- TIFF永远保留 — `archive_group` only deletes JPG, never TIFF.
+- 整理/归档不自动删除 TIFF — `archive_group` only deletes JPG; bad TIFFs are removed only by explicit user delete/undo.
 - `delete_jpg` defaults to `False`.
 - Chinese fields (`taxon_group_cn`, `order_cn`, etc.) are NEVER auto-filled.
 - Activation is mutually exclusive: at most one specimen active at a time.
@@ -178,7 +178,7 @@ In `app/widgets/monitor_panel.py`, locate `_on_delete_clicked()`. It currently s
             QMessageBox.warning(
                 self, "无法删除 TIFF",
                 f"选中包含 {len(tiff_paths)} 个 TIFF 成片。\n"
-                "TIFF 永远保留，只有 JPG 原片可以删除。\n"
+                "整理/归档不会自动删除 TIFF；TIFF 只能由用户明确删除。\n"
                 "请取消选择 TIFF 后再操作。"
             )
             return
@@ -1413,7 +1413,7 @@ class RetroactiveModal(QDialog):
 
         # Footer: delete-jpg toggle + buttons
         foot = QHBoxLayout()
-        self._del_cb = QCheckBox("打包后删除原 JPG（校验通过才删，TIFF 永久保留）")
+        self._del_cb = QCheckBox("打包后删除原 JPG（校验通过才删，不自动删 TIFF）")
         self._del_cb.setChecked(False)
         self._del_cb.toggled.connect(lambda v: setattr(self, "_delete_jpg", v))
         foot.addWidget(self._del_cb)
@@ -1502,7 +1502,7 @@ class RetroactiveModal(QDialog):
         confirm = QMessageBox.question(
             self, "确认整理",
             f"对 {len(to_archive)} 组打包归档（JXL+ZIP）？"
-            + ("\n⚠ 已开启删原片：打包校验通过后将删除这些 JPG（TIFF 永久保留）。"
+            + ("\n⚠ 已开启删原片：打包校验通过后将删除这些 JPG；TIFF 不会被自动删除。"
                if self._delete_jpg else ""),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,

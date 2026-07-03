@@ -1,7 +1,7 @@
 """test_calibration_dialog.py — 控制点校准对话框冒烟.
 
 用户点击底图上已知经纬网交点 + 输入经纬度 → 累积控制点 → 拟合 → 显示 RMS → 保存 sidecar。
-本测试直接调逻辑方法（add_control_point / refit / save），不模拟鼠标点击。
+本测试直接调逻辑方法（add_control_point / refit / save_calibration），不模拟鼠标点击。
 
 Run:
     QT_QPA_PLATFORM=offscreen python3 -m pytest tests/test_calibration_dialog.py -v
@@ -66,7 +66,7 @@ class TestCalibration:
             px, py = _affine(lon, lat)
             d.add_control_point(lon, lat, px, py)
         d.refit()
-        d.save()
+        d.save_calibration()
         loaded = br.load_calibration(img)
         assert loaded is not None
         assert loaded["model"]["order"] == 1

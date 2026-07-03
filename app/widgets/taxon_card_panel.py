@@ -106,7 +106,7 @@ class TaxonCardPanel(QWidget):
         self._search_timer = QTimer(self)
         self._search_timer.setSingleShot(True)
         self._search_timer.setInterval(80)
-        self._search_timer.timeout.connect(self._do_search)
+        self._search_timer.timeout.connect(self._search_taxon_suggestions_for_active_field)
 
         self._setup_ui()
 
@@ -271,20 +271,20 @@ class TaxonCardPanel(QWidget):
         return out
 
     def load_specimen(self, sp: "Specimen") -> None:
-        def _set(edit, val):
+        def _set_taxon_line_edit_without_signals(edit, val):
             edit.blockSignals(True)
             edit.setText(str(val) if val else "")
             edit.blockSignals(False)
-        _set(self._latin["taxon_group"], sp.taxon_group)
-        _set(self._latin["order_name"], sp.order_name)
-        _set(self._latin["family"], sp.family)
-        _set(self._latin["genus"], sp.genus)
-        _set(self._latin["scientific_name"], sp.scientific_name)
-        _set(self._cn["taxon_group_cn"], sp.taxon_group_cn)
-        _set(self._cn["order_cn"], sp.order_cn)
-        _set(self._cn["family_cn"], sp.family_cn)
-        _set(self._cn["genus_cn"], sp.genus_cn)
-        _set(self._cn["scientific_name_cn"], sp.scientific_name_cn)
+        _set_taxon_line_edit_without_signals(self._latin["taxon_group"], sp.taxon_group)
+        _set_taxon_line_edit_without_signals(self._latin["order_name"], sp.order_name)
+        _set_taxon_line_edit_without_signals(self._latin["family"], sp.family)
+        _set_taxon_line_edit_without_signals(self._latin["genus"], sp.genus)
+        _set_taxon_line_edit_without_signals(self._latin["scientific_name"], sp.scientific_name)
+        _set_taxon_line_edit_without_signals(self._cn["taxon_group_cn"], sp.taxon_group_cn)
+        _set_taxon_line_edit_without_signals(self._cn["order_cn"], sp.order_cn)
+        _set_taxon_line_edit_without_signals(self._cn["family_cn"], sp.family_cn)
+        _set_taxon_line_edit_without_signals(self._cn["genus_cn"], sp.genus_cn)
+        _set_taxon_line_edit_without_signals(self._cn["scientific_name_cn"], sp.scientific_name_cn)
         self._notes.blockSignals(True)
         self._notes.setPlainText(sp.notes or "")
         self._notes.blockSignals(False)
@@ -325,7 +325,7 @@ class TaxonCardPanel(QWidget):
         self._search_timer.stop()
         self._search_timer.start()
 
-    def _do_search(self) -> None:
+    def _search_taxon_suggestions_for_active_field(self) -> None:
         if self._svc is None or self._active_db is None:
             return
         lv = next((l for l in _LEVELS if l[1] == self._active_db), None)
@@ -371,14 +371,17 @@ class TaxonCardPanel(QWidget):
         if not text:
             self._refresh_validation()
             return
-        from app.services.taxonomy_service import _nfkc
-        q = _nfkc(text).lower()
+        from app.services.taxonomy_service import _normalize_taxon_match_text
+        q = _normalize_taxon_match_text(text).lower()
         cands = self._svc.search(sp_key, text, context=self._current_context())
-        exact = next((c for c in cands if _nfkc(c.value).lower() == q
-                      or (c.cn and _nfkc(c.cn).lower() == q)), None)
+        exact = next((c for c in cands if _normalize_taxon_match_text(c.value).lower() == q
+                      or (c.cn and _normalize_taxon_match_text(c.cn).lower() == q)), None)
         if exact is None:
             for c in self._svc.search(sp_key, text, context={}):
-                if _nfkc(c.value).lower() == q or (c.cn and _nfkc(c.cn).lower() == q):
+                if (
+                    _normalize_taxon_match_text(c.value).lower() == q
+                    or (c.cn and _normalize_taxon_match_text(c.cn).lower() == q)
+                ):
                     exact = TaxonCandidate(c.value, c.cn, "cross", c.full)
                     break
         if exact is not None:
@@ -494,7 +497,7 @@ class TaxonCardPanel(QWidget):
         initial = (self._latin["scientific_name"].text().strip()
                    or self._latin["taxon_group"].text().strip())
 
-        def _fill(rec: dict) -> None:
+        def apply_worms_record_to_taxon_fields(rec: dict) -> None:
             fill_fn = getattr(self.ctx, "worms_fill_specimen", None)
             if callable(fill_fn):
                 try:
@@ -515,5 +518,8 @@ class TaxonCardPanel(QWidget):
                 self.taxon_changed.emit("scientific_name", rec["scientificname"])
             self._refresh_validation()
 
-        dlg = WormsQuickFillDialog(svc, _fill, initial_query=initial, parent=self)
+        dlg = WormsQuickFillDialog(
+            svc, apply_worms_record_to_taxon_fields,
+            initial_query=initial, parent=self,
+        )
         dlg.exec()

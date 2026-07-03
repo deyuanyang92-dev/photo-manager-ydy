@@ -41,6 +41,18 @@ def _post(app, path: str, payload: dict):
     return asyncio.run(request())
 
 
+def _get(app, path: str, params: dict | None = None):
+    import asyncio
+    import httpx
+
+    async def request():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.get(path, params=params or {})
+
+    return asyncio.run(request())
+
+
 # ── FastAPI create endpoint: reject cross-group ──────────────────────────────
 
 class TestCreateEndpointGroupGuard:
@@ -98,6 +110,45 @@ class TestReleaseEndpointGroupGuard:
         r = _post(app, "/api/collab/tasks/release", {"uid": "U1", "groupCode": "G2"})
         assert r.status_code == 403
         assert store.exists("U1")  # untouched
+
+
+# ── File manifest/download endpoint group guard ─────────────────────────────
+
+class TestFileEndpointGroupGuard:
+    def test_manifest_requires_same_group(self):
+        seen = []
+        app = _build_fastapi_app(
+            TaskStore(),
+            lambda: {"groupCode": "G1"},
+            file_manifest_fn=lambda uids=None: seen.append(uids) or {"files": []},
+        )
+
+        ok = _get(app, "/api/collab/files/manifest", {"groupCode": "G1", "uids": "U1,U2"})
+        bad = _get(app, "/api/collab/files/manifest", {"groupCode": "G2"})
+
+        assert ok.status_code == 200
+        assert bad.status_code == 403
+        assert seen == [["U1", "U2"]]
+
+    def test_download_requires_same_group_before_resolving_path(self):
+        seen = []
+
+        def _missing_path(_rel):
+            seen.append(_rel)
+            raise FileNotFoundError("missing")
+
+        app = _build_fastapi_app(
+            TaskStore(),
+            lambda: {"groupCode": "G1"},
+            file_path_fn=_missing_path,
+        )
+
+        ok = _get(app, "/api/collab/files/download", {"groupCode": "G1", "path": "incoming-jpg/a.jpg"})
+        bad = _get(app, "/api/collab/files/download", {"groupCode": "G2", "path": "incoming-jpg/a.jpg"})
+
+        assert ok.status_code == 404
+        assert bad.status_code == 403
+        assert seen == ["incoming-jpg/a.jpg"]
 
 
 # ── /api/node/reachback (one-way firewall detection) ─────────────────────────

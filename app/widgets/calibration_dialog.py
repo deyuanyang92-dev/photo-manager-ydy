@@ -5,7 +5,7 @@
 保存为图片旁 sidecar（basemap_registry）。
 
 交互：点图 → 像素坐标进入「待添加」→ 填经纬度 → 添加 → 重复 ≥3(仿射)/≥6(二次)。
-逻辑方法 add_control_point / refit / save 与 UI 解耦，便于单测。
+逻辑方法 add_control_point / refit / save_calibration 与 UI 解耦，便于单测。
 """
 from __future__ import annotations
 
@@ -61,7 +61,7 @@ class CalibrationDialog(QDialog):
         # 左：图（可点击）
         self._fig = Figure(constrained_layout=True)
         self._canvas = FigureCanvasQTAgg(self._fig)
-        self._canvas.mpl_connect("button_press_event", self._on_canvas_click)
+        self._canvas.mpl_connect("button_press_event", self._capture_pending_control_point_from_canvas_click)
         root.addWidget(self._canvas, 3)
 
         # 右：控制面板
@@ -97,14 +97,14 @@ class CalibrationDialog(QDialog):
         v.addLayout(row)
 
         self._btn_add = QPushButton("添加控制点")
-        self._btn_add.clicked.connect(self._on_add_clicked)
+        self._btn_add.clicked.connect(self._add_pending_control_point_from_form)
         v.addWidget(self._btn_add)
 
         self._list = QListWidget()
         v.addWidget(self._list, 1)
 
         self._btn_del = QPushButton("删除选中点")
-        self._btn_del.clicked.connect(self._on_delete_selected)
+        self._btn_del.clicked.connect(self._delete_selected_control_point)
         v.addWidget(self._btn_del)
 
         order_row = QHBoxLayout()
@@ -125,7 +125,7 @@ class CalibrationDialog(QDialog):
         cancel.clicked.connect(self.reject)
         self._btn_save = QPushButton("保存校准")
         self._btn_save.setDefault(True)
-        self._btn_save.clicked.connect(self.save)
+        self._btn_save.clicked.connect(self.save_calibration)
         btns.addWidget(cancel)
         btns.addWidget(self._btn_save)
         v.addLayout(btns)
@@ -165,12 +165,12 @@ class CalibrationDialog(QDialog):
             self._update_rms()
             return
         try:
-            self.model = gc.fit(self._control_points, order=order)
+            self.model = gc.fit_geo_to_pixel_transform(self._control_points, order=order)
         except ValueError:
             self.model = None
         self._update_rms()
 
-    def save(self) -> None:
+    def save_calibration(self) -> None:
         if self.model is None:
             self.refit()
         if self.model is None:
@@ -184,7 +184,7 @@ class CalibrationDialog(QDialog):
 
     # ── UI 事件 ───────────────────────────────────────────────────────────────
 
-    def _on_canvas_click(self, event) -> None:
+    def _capture_pending_control_point_from_canvas_click(self, event) -> None:
         if event.inaxes is None or event.xdata is None:
             return
         self._pending_px = float(event.xdata)
@@ -192,7 +192,7 @@ class CalibrationDialog(QDialog):
         self._pending_lbl.setText(f"待添加像素：({self._pending_px:.0f}, {self._pending_py:.0f})")
         self._redraw_markers()
 
-    def _on_add_clicked(self) -> None:
+    def _add_pending_control_point_from_form(self) -> None:
         if self._pending_px is None:
             ui.warn(self, "校准", "请先点击底图选取一个像素位置。")
             return
@@ -202,7 +202,7 @@ class CalibrationDialog(QDialog):
         self._pending_lbl.setText("待添加像素：—")
         self.refit()
 
-    def _on_delete_selected(self) -> None:
+    def _delete_selected_control_point(self) -> None:
         row = self._list.currentRow()
         if 0 <= row < len(self._control_points):
             del self._control_points[row]

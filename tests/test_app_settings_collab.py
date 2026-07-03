@@ -41,13 +41,13 @@ class TestCollabEnabled:
 
     def test_set_true_persists(self, settings: AppSettings) -> None:
         settings.collab_enabled = True
-        settings.sync()
+        settings.flush_to_disk()
         assert AppSettings().collab_enabled is True
 
     def test_set_false_persists(self, settings: AppSettings) -> None:
         settings.collab_enabled = True
         settings.collab_enabled = False
-        settings.sync()
+        settings.flush_to_disk()
         assert AppSettings().collab_enabled is False
 
 
@@ -58,7 +58,7 @@ class TestTeamCode:
 
     def test_set_persists(self, settings: AppSettings) -> None:
         settings.team_code = "SMW-2026"
-        settings.sync()
+        settings.flush_to_disk()
         assert AppSettings().team_code == "SMW-2026"
 
     def test_whitespace_trimmed(self, settings: AppSettings) -> None:
@@ -68,5 +68,5 @@ class TestTeamCode:
     def test_clear_to_empty(self, settings: AppSettings) -> None:
         settings.team_code = "X"
         settings.team_code = ""
-        settings.sync()
+        settings.flush_to_disk()
         assert AppSettings().team_code == ""

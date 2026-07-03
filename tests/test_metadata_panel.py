@@ -192,7 +192,7 @@ class TestGeocode:
         ctx = _make_ctx()
         panel = MetadataPanel(ctx)
         qtbot.addWidget(panel)
-        with mock.patch.object(panel, "_do_auto_reverse") as mock_rev:
+        with mock.patch.object(panel, "_auto_fill_geo_area_from_lon_lat") as mock_rev:
             panel._on_gps_result(26.345678, 119.123456)
             assert panel._lon.text() == "119.123456"
             assert panel._lat.text() == "26.345678"
@@ -262,5 +262,5 @@ class TestGeocode:
         panel._geo_area.setText("手填地名")
         panel._geo_autofilled = False
         with mock.patch.object(panel, "_geocode_worker", create=True):
-            panel._do_auto_reverse()
+            panel._auto_fill_geo_area_from_lon_lat()
         assert panel._geo_area.text() == "手填地名"

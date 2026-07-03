@@ -5,7 +5,7 @@ import sys
 import os
 
 import pytest
-from PyQt6.QtCore import QPoint
+from PyQt6.QtCore import QPoint, Qt
 from PyQt6.QtWidgets import QMenu
 
 pytestmark = pytest.mark.skipif(
@@ -135,6 +135,95 @@ def test_lightbox_wheel_zoom_helper_changes_zoom(qtbot, tmp_path):
     assert dlg._zoom_value.text().endswith("%")
 
 
+def test_lightbox_uses_shared_preview_decoder(qtbot, tmp_path, monkeypatch):
+    """Preview uses the shared image decoder instead of a separate TIFF path."""
+    from PyQt6.QtGui import QPixmap
+    import app.widgets.results_column as rc_mod
+
+    tif = tmp_path / "fallback-needed.tif"
+    tif.write_bytes(b"not a qt-readable tif")
+    calls = []
+
+    def fake_decode(path):
+        calls.append(path)
+        pixmap = QPixmap(120, 80)
+        pixmap.fill(Qt.GlobalColor.white)
+        return pixmap
+
+    monkeypatch.setattr(rc_mod, "_decode_preview_pixmap", fake_decode)
+
+    dlg = rc_mod._TiffLightboxDialog([tif], initial_index=0)
+    qtbot.addWidget(dlg)
+
+    assert calls == [str(tif)]
+    assert dlg._image_label.pixmap() is not None
+    assert "无法预览" not in dlg._image_label.text()
+
+
+def test_lightbox_preview_keeps_native_resolution(qtbot, tmp_path):
+    """Large TIFF previews must not be capped to the thumbnail decode size."""
+    from PIL import Image
+    from app.widgets.results_column import _TiffLightboxDialog
+
+    tif = tmp_path / "native-resolution.tif"
+    Image.new("RGB", (3600, 1200), "white").save(tif)
+
+    dlg = _TiffLightboxDialog([tif], initial_index=0)
+    qtbot.addWidget(dlg)
+
+    assert dlg._base_pixmap.width() == 3600
+    assert dlg._base_pixmap.height() == 1200
+
+
+def test_lightbox_scales_preview_for_screen_pixel_ratio(qtbot, tmp_path, monkeypatch):
+    """100% preview maps source pixels to screen pixels on high-DPI displays."""
+    from PIL import Image
+    from app.widgets.results_column import _TiffLightboxDialog
+
+    tif = tmp_path / "hidpi.tif"
+    Image.new("RGB", (2000, 1200), "white").save(tif)
+
+    dlg = _TiffLightboxDialog([tif], initial_index=0)
+    qtbot.addWidget(dlg)
+    monkeypatch.setattr(dlg, "_preview_device_pixel_ratio", lambda: 2.0)
+
+    dlg._actual_size()
+
+    pixmap = dlg._image_label.pixmap()
+    assert pixmap is not None
+    assert pixmap.width() == 2000
+    assert pixmap.height() == 1200
+    assert dlg._image_label.width() == 1000
+    assert dlg._image_label.height() == 600
+
+
+def test_lightbox_sharpens_downscaled_preview_by_default(qtbot, tmp_path, monkeypatch):
+    """Downscaled previews get display-only sharpening unless the toggle is off."""
+    from PIL import Image
+    from app.widgets.results_column import _TiffLightboxDialog
+
+    tif = tmp_path / "sharp-preview.tif"
+    Image.new("RGB", (1000, 500), "white").save(tif)
+
+    dlg = _TiffLightboxDialog([tif], initial_index=0)
+    qtbot.addWidget(dlg)
+    calls = []
+
+    def fake_sharpen(pixmap):
+        calls.append((pixmap.width(), pixmap.height()))
+        return pixmap
+
+    monkeypatch.setattr(dlg, "_sharpen_preview_pixmap", fake_sharpen)
+
+    dlg._set_zoom_percent(50)
+    assert calls == [(500, 250)]
+
+    dlg._sharpen_btn.setChecked(False)
+    calls.clear()
+    dlg._set_zoom_percent(40)
+    assert calls == []
+
+
 def test_lightbox_windows_shortcuts(qtbot, tmp_path):
     """Common Windows-style shortcuts navigate and control zoom."""
     from PIL import Image
@@ -162,7 +251,7 @@ def test_lightbox_windows_shortcuts(qtbot, tmp_path):
     assert dlg._zoom_value.text() == "100%"
     qtbot.keyClick(dlg, Qt.Key.Key_0, modifier=Qt.KeyboardModifier.ControlModifier)
     assert dlg._fit_to_window is True
-    assert dlg._zoom_value.text() == "适合窗口"
+    assert dlg._zoom_value.text().startswith("适合窗口")
 
 
 def test_tiff_card_double_click_opens_lightbox(qtbot, tmp_path, monkeypatch):
@@ -229,6 +318,50 @@ def test_tiff_and_zip_render_as_two_list_rows(qtbot):
     assert len(rows) == 1
     assert len(rows[0].findChildren(_TiffCard)) == 1
     assert len(rows[0].findChildren(_ArchiveCard)) == 1
+
+
+def test_result_files_are_flat_rows_with_context_menu_actions(qtbot):
+    from PyQt6.QtWidgets import QPushButton
+
+    from app.widgets.results_column import ResultsColumn, _ArchiveCard, _TiffCard
+
+    col = ResultsColumn()
+    qtbot.addWidget(col)
+    col.load_uid(
+        "UID",
+        [{"path": "/fake/a.tif", "name": "a.tif", "seq": 1}],
+        [{"path": "/fake/a.zip", "name": "a.zip", "size": 99, "seq": 1}],
+    )
+
+    tiff_card = next(c for c in col._cards if isinstance(c, _TiffCard))
+    zip_card = next(c for c in col._cards if isinstance(c, _ArchiveCard))
+    assert tiff_card.objectName() == "ResultFile"
+    assert zip_card.objectName() == "ResultFile"
+    assert not tiff_card.findChildren(QPushButton)
+    assert not zip_card.findChildren(QPushButton)
+
+
+def test_result_row_uses_compact_sequence_badge(qtbot):
+    from PyQt6.QtWidgets import QLabel
+
+    from app.widgets.results_column import ResultsColumn, _ResultRow
+
+    col = ResultsColumn()
+    qtbot.addWidget(col)
+    col.load_uid(
+        "UID",
+        [{"path": "/fake/a.tif", "name": "a.tif", "seq": 3}],
+        [{"path": "/fake/a.zip", "name": "a.zip", "size": 99, "seq": 3}],
+    )
+
+    row = col.findChild(_ResultRow)
+    badges = [
+        lbl for lbl in row.findChildren(QLabel)
+        if lbl.objectName() == "ResultSeqBadge"
+    ]
+    assert len(badges) == 1
+    assert badges[0].text() == "3"
+    assert badges[0].toolTip() == "成果 3"
 
 
 def test_load_many_groups_results_by_specimen_uid(qtbot):
@@ -376,14 +509,33 @@ def test_tiff_card_uses_real_thumbnail_when_decodable(qtbot, tmp_path):
     col.load_uid("UID", [{"path": str(tif), "name": tif.name}], [])
 
     card = col.findChildren(_TiffCard)[0]
+    qtbot.waitUntil(lambda: card._icon.property("hasThumbnail") is True, timeout=1000)
     assert card._icon.property("hasThumbnail") is True
     pixmap = card._icon.pixmap()
     assert pixmap is not None
     assert not pixmap.isNull()
 
 
+def test_results_column_defers_tiff_thumbnail_decode(qtbot, monkeypatch):
+    from app.widgets.results_column import ResultsColumn
+
+    calls = []
+    monkeypatch.setattr(
+        "app.widgets.results_column._decode_thumb",
+        lambda path, max_size: calls.append(path) or None,
+    )
+
+    col = ResultsColumn()
+    qtbot.addWidget(col)
+    col.load_uid("UID", [{"path": "/fake/deferred.tif", "name": "deferred.tif"}], [])
+
+    assert calls == []
+    qtbot.waitUntil(lambda: calls == ["/fake/deferred.tif"], timeout=1000)
+
+
 def test_results_column_has_windows_folder_actions(qtbot, tmp_path):
     """The results header exposes Windows-Explorer-style folder and sort actions."""
+    from PyQt6.QtCore import Qt
     from app.widgets.results_column import ResultsColumn
 
     tif = tmp_path / "b.tif"
@@ -399,11 +551,99 @@ def test_results_column_has_windows_folder_actions(qtbot, tmp_path):
         [{"path": str(zipf), "name": "a.zip", "size": 3, "seq": 1}],
     )
 
-    assert col._open_folder_btn.text() == "打开文件夹"
-    assert col._sort_btn.text() == "排序方式"
-    assert col._tile_btn.text() == "两列"
-    assert col._tile_btn.isChecked()
+    assert col._current_mode_btn.text() == "当前"
+    assert col._all_mode_btn.text() == "全部"
+    assert col._paired_selection_btn.text() == "联选"
+    assert col._paired_selection_btn.isCheckable()
+    assert not col._paired_selection_btn.isChecked()
+    assert col._options_btn.text() == ""
+    assert not hasattr(col, "_link_selected_btn")
+    assert col._paired_columns_enabled is True
+    assert col._paired_selection_enabled is False
+    assert col._body.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+    assert col._body.verticalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOn
     assert col._results_dir == str(tmp_path)
+
+
+def test_results_body_context_menu_holds_secondary_actions(qtbot, tmp_path, monkeypatch):
+    from app.widgets.results_column import ResultsColumn
+
+    tif = tmp_path / "b.tif"
+    zipf = tmp_path / "a.zip"
+    tif.write_bytes(b"tif")
+    zipf.write_bytes(b"zip")
+
+    col = ResultsColumn()
+    qtbot.addWidget(col)
+    col.load_uid(
+        "UID",
+        [{"path": str(tif), "name": "b.tif", "seq": 1}],
+        [{"path": str(zipf), "name": "a.zip", "size": 3, "seq": 1}],
+    )
+
+    captured = {}
+
+    def fake_exec(menu, *_args, **_kwargs):
+        captured["top"] = [a.text() for a in menu.actions()]
+        captured["submenus"] = {
+            a.text(): [sa.text() for sa in a.menu().actions()]
+            for a in menu.actions()
+            if a.menu() is not None
+        }
+        return None
+
+    monkeypatch.setattr(QMenu, "exec", fake_exec)
+    col._show_body_menu(QPoint(0, 0))
+
+    assert "打开 results 文件夹" in captured["top"]
+    assert "显示方式" in captured["top"]
+    assert "显示名称" in captured["top"]
+    assert "排序" in captured["top"]
+    assert "缩略图大小" in captured["top"]
+    assert "双栏对照" in captured["top"]
+    assert "联选 TIF/ZIP" in captured["top"]
+    assert captured["submenus"]["显示方式"] == ["列表", "大缩略图"]
+    assert captured["submenus"]["显示名称"] == ["完整文件名", "唯一编号"]
+    assert captured["submenus"]["排序"] == ["顺序", "名称", "类型", "大小", "修改时间"]
+    assert captured["submenus"]["缩略图大小"] == ["小", "中", "大", "最大"]
+
+
+def test_results_large_thumbnail_view_keeps_list_view_as_default(qtbot):
+    from PyQt6.QtWidgets import QLabel, QVBoxLayout
+
+    from app.widgets.results_column import ResultsColumn, _ArchiveCard, _TiffCard
+
+    col = ResultsColumn()
+    qtbot.addWidget(col)
+    col.load_uid(
+        "UID",
+        [{"path": "/fake/a.tif", "name": "a.tif", "seq": 1}],
+        [{"path": "/fake/a.zip", "name": "a.zip", "size": 99, "seq": 1}],
+    )
+
+    default_tiff = next(c for c in col._cards if isinstance(c, _TiffCard))
+    assert col._result_view_mode == "list"
+    assert default_tiff.property("resultViewMode") == "list"
+
+    col._set_result_view_mode("large_thumbnail")
+    col.show()
+    qtbot.wait(100)
+
+    tiff_card = next(c for c in col._cards if isinstance(c, _TiffCard))
+    zip_card = next(c for c in col._cards if isinstance(c, _ArchiveCard))
+    name_label = next(
+        lbl for lbl in tiff_card.findChildren(QLabel)
+        if lbl.objectName() == "Mono"
+    )
+    assert col._result_view_mode == "large_thumbnail"
+    assert tiff_card.property("resultViewMode") == "large_thumbnail"
+    assert zip_card.property("resultViewMode") == "large_thumbnail"
+    assert isinstance(tiff_card.layout(), QVBoxLayout)
+    assert tiff_card._icon.width() >= 128
+    assert tiff_card.minimumHeight() <= tiff_card._icon.height() + 64
+    assert tiff_card._select_badge.geometry().bottom() >= tiff_card._icon.geometry().top()
+    assert name_label.wordWrap()
+    assert "大缩略图" in col._options_btn.toolTip()
 
 
 def test_results_filename_mode_can_show_unique_id(qtbot):
@@ -453,9 +693,11 @@ def test_results_sort_by_name_reorders_cards(qtbot):
     assert [c._info["name"] for c in cards] == ["a.tif", "b.tif"]
 
 
-def test_results_tile_view_aligns_tiff_left_zip_right(qtbot):
-    """Tile mode keeps matching TIFF and ZIP in one aligned two-column row."""
-    from app.widgets.results_column import ResultsColumn, _ArchiveCard, _ResultRow, _TiffCard
+def test_results_paired_columns_align_tiff_left_zip_right(qtbot):
+    """Paired columns keep matching TIFF and ZIP in one aligned two-column row."""
+    from app.widgets.results_column import (
+        ResultsColumn, _ArchiveCard, _ResultPairIndicator, _ResultRow, _TiffCard,
+    )
 
     col = ResultsColumn()
     qtbot.addWidget(col)
@@ -466,12 +708,62 @@ def test_results_tile_view_aligns_tiff_left_zip_right(qtbot):
     )
 
     row = col.findChildren(_ResultRow)[0]
-    assert col._tile_view is True
+    assert col._paired_columns_enabled is True
     assert isinstance(row._rows[0], _TiffCard)
     assert isinstance(row._rows[1], _ArchiveCard)
+    assert len(row.findChildren(_ResultPairIndicator)) == 1
 
 
-def test_results_column_link_result_signal_uses_paired_paths(qtbot):
+def test_results_paired_columns_fall_back_when_narrow(qtbot):
+    from app.widgets.results_column import (
+        ResultsColumn, _ResultPairIndicator, _ResultRow,
+    )
+
+    col = ResultsColumn()
+    qtbot.addWidget(col)
+    col.resize(560, 480)
+    col.show()
+    qtbot.wait(100)
+
+    col.load_uid(
+        "UID",
+        [{"path": "/fake/a.tif", "name": "a.tif", "seq": 1}],
+        [{"path": "/fake/a.zip", "name": "a.zip", "size": 10, "seq": 1}],
+    )
+
+    row = col.findChildren(_ResultRow)[0]
+    assert col._paired_columns_enabled is True
+    assert col._rendered_paired_columns is False
+    assert row.property("pairedColumns") == "false"
+    assert len(row.findChildren(_ResultPairIndicator)) == 0
+    assert "宽度不足" in col._options_btn.toolTip()
+
+
+def test_results_paired_columns_remain_visible_at_workbench_width(qtbot):
+    from app.widgets.results_column import (
+        ResultsColumn, _ResultPairIndicator, _ResultRow,
+    )
+
+    col = ResultsColumn()
+    qtbot.addWidget(col)
+    col.resize(760, 480)
+    col.show()
+    qtbot.wait(100)
+
+    col.load_uid(
+        "UID",
+        [{"path": "/fake/a.tif", "name": "a.tif", "seq": 1}],
+        [{"path": "/fake/a.zip", "name": "a.zip", "size": 10, "seq": 1}],
+    )
+
+    row = col.findChildren(_ResultRow)[0]
+    assert col._paired_columns_enabled is True
+    assert col._rendered_paired_columns is True
+    assert row.property("pairedColumns") == "true"
+    assert len(row.findChildren(_ResultPairIndicator)) == 1
+
+
+def test_results_column_link_result_signal_uses_tiff_zip_paths(qtbot):
     from app.widgets.results_column import ResultsColumn
 
     col = ResultsColumn()
@@ -521,7 +813,7 @@ def test_tiff_card_context_menu_checks_and_deletes_tiff(qtbot, tmp_path, monkeyp
     assert delete.args == [str(tif)]
 
 
-def test_results_column_selection_highlights_and_enables_link_button(qtbot):
+def test_results_column_selection_highlights_only_clicked_file_by_default(qtbot):
     from app.widgets.results_column import ResultsColumn, _ArchiveCard, _TiffCard
 
     col = ResultsColumn()
@@ -539,17 +831,20 @@ def test_results_column_selection_highlights_and_enables_link_button(qtbot):
     col._toggle_result_selection(tiff, tiff_card)
 
     assert tiff_card.property("resultSelected") == "true"
-    assert not col._link_selected_btn.isEnabled()
+    assert zip_card.property("resultSelected") == "false"
+    assert col.selected_result_paths() == [tiff]
 
     col._toggle_result_selection(zipf, zip_card)
 
     assert zip_card.property("resultSelected") == "true"
-    assert col._link_selected_btn.isEnabled()
     assert len(col.selected_result_paths()) == 2
 
 
-def test_results_column_link_selected_emits_pair(qtbot):
-    from app.widgets.results_column import ResultsColumn
+def test_clicking_result_card_selects_only_that_file(qtbot):
+    from PyQt6.QtCore import Qt
+    from app.widgets.results_column import (
+        ResultsColumn, _ArchiveCard, _ResultPairIndicator, _TiffCard,
+    )
 
     col = ResultsColumn()
     qtbot.addWidget(col)
@@ -560,36 +855,100 @@ def test_results_column_link_selected_emits_pair(qtbot):
         [{"path": tiff, "name": "a.tif", "seq": 1}],
         [{"path": zipf, "name": "a.zip", "size": 10, "seq": 1}],
     )
-    col._toggle_result_selection(tiff)
-    col._toggle_result_selection(zipf)
+    tiff_card = next(c for c in col._cards if isinstance(c, _TiffCard))
+    zip_card = next(c for c in col._cards if isinstance(c, _ArchiveCard))
+    pair_indicator = col.findChild(_ResultPairIndicator)
 
+    qtbot.mouseClick(tiff_card, Qt.MouseButton.LeftButton)
+
+    assert tiff_card.property("resultSelected") == "true"
+    assert zip_card.property("resultSelected") == "false"
+    assert pair_indicator.property("selected") == "false"
+    assert col.selected_result_paths() == [tiff]
+
+
+def test_paired_selection_mode_clicks_visible_pair(qtbot):
+    from PyQt6.QtCore import Qt
+    from app.widgets.results_column import (
+        ResultsColumn, _ArchiveCard, _ResultPairIndicator, _TiffCard,
+    )
+
+    col = ResultsColumn()
+    qtbot.addWidget(col)
+    tiff = "/fake/a.tif"
+    zipf = "/fake/a.zip"
+    col.load_uid(
+        "UID",
+        [{"path": tiff, "name": "a.tif", "seq": 1}],
+        [{"path": zipf, "name": "a.zip", "size": 10, "seq": 1}],
+    )
+    tiff_card = next(c for c in col._cards if isinstance(c, _TiffCard))
+    zip_card = next(c for c in col._cards if isinstance(c, _ArchiveCard))
+    pair_indicator = col.findChild(_ResultPairIndicator)
+
+    col._paired_selection_btn.click()
+    qtbot.mouseClick(tiff_card, Qt.MouseButton.LeftButton)
+
+    assert col._paired_selection_enabled is True
+    assert col._paired_selection_btn.isChecked()
+    assert tiff_card.property("resultSelected") == "true"
+    assert zip_card.property("resultSelected") == "true"
+    assert pair_indicator.property("selected") == "true"
+    assert col.selected_result_paths() == sorted([tiff, zipf])
+
+
+def test_tiff_card_context_menu_links_visible_zip(qtbot, monkeypatch):
+    from app.widgets.results_column import ResultsColumn, _TiffCard
+
+    col = ResultsColumn()
+    qtbot.addWidget(col)
+    tiff = "/fake/a.tif"
+    zipf = "/fake/a.zip"
+    col.load_uid(
+        "UID",
+        [{"path": tiff, "name": "a.tif", "seq": 1}],
+        [{"path": zipf, "name": "a.zip", "size": 10, "seq": 1}],
+    )
+    card = next(c for c in col._cards if isinstance(c, _TiffCard))
+
+    def trigger_link(menu, *_args, **_kwargs):
+        action = next(a for a in menu.actions() if a.text() == "关联到右侧编号")
+        assert action.isEnabled()
+        action.trigger()
+        return None
+
+    monkeypatch.setattr(QMenu, "exec", trigger_link)
     with qtbot.waitSignal(col.link_result_requested, timeout=1000) as blocker:
-        col._link_selected_btn.click()
+        card._show_menu(QPoint(0, 0))
 
     assert blocker.args == [tiff, zipf]
 
 
-def test_results_column_single_selected_tiff_can_link_sibling_zip(qtbot, tmp_path):
-    from app.widgets.results_column import ResultsColumn
+def test_archive_card_context_menu_links_visible_tiff(qtbot, monkeypatch):
+    from app.widgets.results_column import ResultsColumn, _ArchiveCard
 
     col = ResultsColumn()
     qtbot.addWidget(col)
-    tiff = tmp_path / "a.tif"
-    zipf = tmp_path / "a.zip"
-    tiff.write_bytes(b"tif")
-    zipf.write_bytes(b"zip")
+    tiff = "/fake/a.tif"
+    zipf = "/fake/a.zip"
     col.load_uid(
         "UID",
-        [{"path": str(tiff), "name": "a.tif", "seq": 1}],
-        [],
+        [{"path": tiff, "name": "a.tif", "seq": 1}],
+        [{"path": zipf, "name": "a.zip", "size": 10, "seq": 1}],
     )
-    col._toggle_result_selection(str(tiff))
+    card = next(c for c in col._cards if isinstance(c, _ArchiveCard))
 
-    assert col._link_selected_btn.isEnabled()
+    def trigger_link(menu, *_args, **_kwargs):
+        action = next(a for a in menu.actions() if a.text() == "关联到右侧编号")
+        assert action.isEnabled()
+        action.trigger()
+        return None
+
+    monkeypatch.setattr(QMenu, "exec", trigger_link)
     with qtbot.waitSignal(col.link_result_requested, timeout=1000) as blocker:
-        col._link_selected_btn.click()
+        card._show_menu(QPoint(0, 0))
 
-    assert blocker.args == [str(tiff.resolve()), str(zipf.resolve())]
+    assert blocker.args == [tiff, zipf]
 
 
 def test_results_cards_show_registry_status(qtbot):

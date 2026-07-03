@@ -104,46 +104,46 @@ class TestTileCache:
     def test_miss_returns_none(self):
         _TileCache = _import_cache()
         c = _TileCache(max_size=10)
-        assert c.get((0, 0, 0)) is None
+        assert c.get_tile((0, 0, 0)) is None
 
     def test_put_and_hit(self):
         from PyQt6.QtGui import QPixmap
         _TileCache = _import_cache()
         c = _TileCache(max_size=10)
         px = QPixmap(1, 1)
-        c.put((0, 0, 0), px)
-        assert c.get((0, 0, 0)) is px
+        c.store_tile((0, 0, 0), px)
+        assert c.get_tile((0, 0, 0)) is px
 
     def test_evicts_lru_at_max_plus_one(self):
         from PyQt6.QtGui import QPixmap
         _TileCache = _import_cache()
         c = _TileCache(max_size=3)
         for i in range(4):
-            c.put((0, i, 0), QPixmap(1, 1))
-        assert c.get((0, 0, 0)) is None   # first inserted, should be evicted
+            c.store_tile((0, i, 0), QPixmap(1, 1))
+        assert c.get_tile((0, 0, 0)) is None   # first inserted, should be evicted
 
     def test_access_refreshes_lru(self):
         from PyQt6.QtGui import QPixmap
         _TileCache = _import_cache()
         c = _TileCache(max_size=3)
         for i in range(3):
-            c.put((0, i, 0), QPixmap(1, 1))
-        _ = c.get((0, 0, 0))             # refresh key 0
-        c.put((0, 3, 0), QPixmap(1, 1))  # evicts key 1 (LRU now)
-        assert c.get((0, 0, 0)) is not None
-        assert c.get((0, 1, 0)) is None
+            c.store_tile((0, i, 0), QPixmap(1, 1))
+        _ = c.get_tile((0, 0, 0))             # refresh key 0
+        c.store_tile((0, 3, 0), QPixmap(1, 1))  # evicts key 1 (LRU now)
+        assert c.get_tile((0, 0, 0)) is not None
+        assert c.get_tile((0, 1, 0)) is None
 
     def test_overwrite_moves_to_end(self):
         from PyQt6.QtGui import QPixmap
         _TileCache = _import_cache()
         c = _TileCache(max_size=2)
         px1, px2 = QPixmap(1, 1), QPixmap(2, 2)
-        c.put((0, 0, 0), px1)
-        c.put((0, 1, 0), px1)
-        c.put((0, 0, 0), px2)   # overwrite key 0 → moves to end
-        c.put((0, 2, 0), px1)   # evicts key 1
-        assert c.get((0, 0, 0)) is px2
-        assert c.get((0, 1, 0)) is None
+        c.store_tile((0, 0, 0), px1)
+        c.store_tile((0, 1, 0), px1)
+        c.store_tile((0, 0, 0), px2)   # overwrite key 0 → moves to end
+        c.store_tile((0, 2, 0), px1)   # evicts key 1
+        assert c.get_tile((0, 0, 0)) is px2
+        assert c.get_tile((0, 1, 0)) is None
 
 
 # ── TileMapWidget ────────────────────────────────────────────────────────────
@@ -726,7 +726,7 @@ class TestTileFetchHardening:
         w._pending[key] = reply
         w._on_tile_received(key, reply)
         assert w._failed_keys == set()
-        assert w._cache.get(key) is not None
+        assert w._cache.get_tile(key) is not None
 
 
 # ── OSM proxy auto-detection integration ────────────────────────────────────

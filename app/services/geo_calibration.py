@@ -42,7 +42,7 @@ def _design_matrix(lons, lats, order: int) -> np.ndarray:
     return np.column_stack(cols)
 
 
-def fit(control_points: Sequence[tuple], order: int = 1) -> dict:
+def fit_geo_to_pixel_transform(control_points: Sequence[tuple], order: int = 1) -> dict:
     """拟合 经纬度→像素 变换。
 
     control_points: 序列 of (lon, lat, px, py)。
@@ -77,7 +77,7 @@ def fit(control_points: Sequence[tuple], order: int = 1) -> dict:
     return {"order": int(order), "cx": cx.tolist(), "cy": cy.tolist(), "rms_px": rms}
 
 
-def project(model: dict, lon: float, lat: float) -> tuple[float, float]:
+def project_lonlat_to_pixel(model: dict, lon: float, lat: float) -> tuple[float, float]:
     """把单个经纬度映射到底图像素 (px, py)。"""
     order = int(model["order"])
     row = np.array(_design_row(lon, lat, order), dtype=float)
@@ -86,7 +86,7 @@ def project(model: dict, lon: float, lat: float) -> tuple[float, float]:
     return px, py
 
 
-def project_many(model: dict, lons, lats) -> tuple[np.ndarray, np.ndarray]:
+def project_lonlat_to_pixels(model: dict, lons, lats) -> tuple[np.ndarray, np.ndarray]:
     """向量化映射；返回 (px_array, py_array)。"""
     order = int(model["order"])
     A = _design_matrix(lons, lats, order)

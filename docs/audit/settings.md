@@ -14,7 +14,7 @@ Source: `prototype-photo-gui/app.js` (12 config functions) vs `app/views/setting
 | `saveHeliconConfigPath()` (app.js:2721) | ✓ | `_on_save_click()`, `_on_clear_click()`, `_save_helicon()` |
 | `fetchHeliconStatus()` (app.js:2687) | ✓ | `_detect_helicon()` → `helicon_service.detect_helicon()` |
 | Helicon preset CRUD (`/api/helicon/presets` GET/POST/DELETE, server.js:1911–1928) | ✓ | `_save_current_as_preset()`, `_apply_selected_preset()`, `_delete_selected_preset()`, `_load_presets()` |
-| JXL effort / delete-JPG (`renderSettingsSection` 归档部分) | ✓ | `_build_tab_archive()` — delete_jpg default=False 断言已实现 |
+| JXL effort / delete-JPG (`renderSettingsSection` 归档部分) | ✓ | `_build_tab_archive()` — delete_jpg default=True，用户可关闭保留散落 JPG |
 | 操作人设置 (app.js:~9418 project drawer / v4Settings) | ✓ | `_build_tab_user()` — currentUser 字段 |
 | 子目录名 + 最近项目 (projectPathConfig app.js:1707) | ✓ | `_build_tab_project()` — incoming/results subdirs + recent list CRUD |
 | About 页 (版本/环境/配置文件路径) | ✓ | `_build_tab_about()` |

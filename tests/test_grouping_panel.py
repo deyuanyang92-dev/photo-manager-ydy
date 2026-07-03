@@ -499,11 +499,11 @@ def test_draft_group_row_listwidget_default_drop_action(qtbot):
 
 
 # ---------------------------------------------------------------------------
-# GroupingPanel._on_groups_changed — reads list widgets, calls save_grouping
+# GroupingPanel._persist_grouping_after_editor_change — reads list widgets, calls save_grouping
 # ---------------------------------------------------------------------------
 
-def test_on_groups_changed_calls_save_grouping(qtbot):
-    """After a cross-group move, _on_groups_changed must persist to DB."""
+def test_persist_grouping_after_editor_change_calls_save_grouping(qtbot):
+    """After a cross-group move, the editor-change hook must persist to DB."""
     from app.widgets.grouping_panel import GroupingPanel
     from app.services.grouping_service import Group, SpecimenGrouping
 
@@ -521,7 +521,7 @@ def test_on_groups_changed_calls_save_grouping(qtbot):
     panel.load_grouping("test-uid", grouping)
 
     with patch("app.widgets.grouping_panel.grouping_service.save_grouping") as mock_save:
-        panel._on_groups_changed()
+        panel._persist_grouping_after_editor_change()
         assert mock_save.called
         args = mock_save.call_args
         # save_grouping(db, uid, groups, clean_phantoms=False)
@@ -624,11 +624,11 @@ def test_output_name_edit_updates_group(qtbot):
     qtbot.addWidget(panel)
     panel.load_grouping("test-uid", _make_grouping([{"index": 0, "jpgs": ["/p/a.jpg", "/p/b.jpg"]}]))
 
-    panel._on_output_name_changed(0, "我的输出名")
+    panel._rename_group_output_stem(0, "我的输出名")
     g = panel._grouping.groups[0]
     assert g.output_name == "我的输出名"
 
-    panel._on_output_name_changed(0, "   ")          # 空白 → None(自动)
+    panel._rename_group_output_stem(0, "   ")          # 空白 → None(自动)
     assert panel._grouping.groups[0].output_name is None
 
 
@@ -687,9 +687,9 @@ def test_group_row_checkbox_updates_selection(qtbot):
         {"index": 0, "jpgs": ["/p/a.jpg"]},
     ]))
 
-    panel._on_group_selected_changed(0, True)
+    panel._track_group_selection_state(0, True)
     assert panel.selected_group_indexes() == [0]
-    panel._on_group_selected_changed(0, False)
+    panel._track_group_selection_state(0, False)
     assert panel.selected_group_indexes() == []
 
 
@@ -841,7 +841,7 @@ def test_register_existing_zip_updates_composed_group(qtbot, tmp_path, monkeypat
     monkeypatch.setattr(ui, "get_open_file_name", lambda *a, **k: str(zip_path))
 
     with qtbot.waitSignal(panel.archive_zip_registered, timeout=1000):
-        panel._on_register_zip(0)
+        panel._register_existing_archive_zip(0)
 
     group = panel._grouping.groups[0]
     assert group.archive_zip == str(zip_path)
@@ -901,7 +901,7 @@ def test_link_jpg_for_composed_row_adds_nearby_jpgs(qtbot, tmp_path, monkeypatch
         lambda *_a, **_k: [str(jpg)],
     )
 
-    panel._on_link_jpg_for_composed(0)
+    panel._link_original_jpgs_to_composed_group(0)
 
     assert panel._grouping.groups[0].jpg_paths == [str(jpg)]
 

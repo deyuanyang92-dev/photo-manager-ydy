@@ -797,8 +797,8 @@ class TestWormsQuickFillDialogOffscreen:
         assert dlg._results == []
         assert dlg._loading is False
 
-    def test_do_fill_calls_callback_and_accepts(self, qt_app, tmp_path):
-        """_do_fill invokes fill_callback and closes dialog (accepted)."""
+    def test_fill_active_specimen_from_quick_result_calls_callback_and_accepts(self, qt_app, tmp_path):
+        """Quick-fill selection invokes fill_callback and closes dialog (accepted)."""
         from app.views.worms_view import WormsQuickFillDialog
 
         svc = _make_service(str(tmp_path))
@@ -806,7 +806,7 @@ class TestWormsQuickFillDialogOffscreen:
         dlg = WormsQuickFillDialog(svc, lambda r: filled.append(r), initial_query="")
         fake_rec = {"AphiaID": 1, "scientificname": "Foo bar", "rank": "Species",
                     "status": "accepted", "class": "Actinopterygii"}
-        dlg._do_fill(fake_rec)
+        dlg._fill_active_specimen_from_quick_result(fake_rec)
         assert filled == [fake_rec]
 
     def test_initial_query_sets_search_text(self, qt_app, tmp_path):

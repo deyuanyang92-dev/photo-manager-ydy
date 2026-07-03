@@ -204,7 +204,7 @@ class NamingPanel(QWidget):
         form.setContentsMargins(0, 0, 0, 0)
         form.setSpacing(9)
 
-        def _mk(placeholder: str, *, auto: bool = False) -> QLineEdit:
+        def _make_compact_line_edit(placeholder: str, *, auto: bool = False) -> QLineEdit:
             edit = QLineEdit()
             edit.setPlaceholderText(placeholder)
             edit.setFixedHeight(34)
@@ -262,12 +262,12 @@ class NamingPanel(QWidget):
             return frame, grid
 
         # Auto-derived naming segments (web .auto class)
-        self._province = _mk("如 FJ", auto=True)
+        self._province = _make_compact_line_edit("如 FJ", auto=True)
         self._province.setMinimumWidth(60)
-        self._site = _mk("如 YGLZ", auto=True)
+        self._site = _make_compact_line_edit("如 YGLZ", auto=True)
         self._site.setMinimumWidth(60)
-        self._station = _mk("如 B2", auto=True)
-        self._species_id = _mk("如 DLC001")
+        self._station = _make_compact_line_edit("如 B2", auto=True)
+        self._species_id = _make_compact_line_edit("如 DLC001")
         self._species_id.setMaximumWidth(150)
 
         self._geo_group, geo_grid = _section("采集位置", show_title=False)
@@ -374,11 +374,11 @@ class NamingPanel(QWidget):
         self._date_group, date_grid = _section("日期", show_title=False)
         date_grid.setColumnStretch(0, 1)
         date_grid.setColumnStretch(1, 1)
-        self._collection_date = _mk("采集 YYYYMMDD")
+        self._collection_date = _make_compact_line_edit("采集 YYYYMMDD")
         date_grid.addWidget(_field("采集日期", self._collection_date, required=True,
                                    key="collection_date",
                                    help_text="采集 YYYYMMDD；只填采集或只填拍摄时视为同一天"), 0, 0)
-        self._photo_date = _mk("拍摄 YYYYMMDD")
+        self._photo_date = _make_compact_line_edit("拍摄 YYYYMMDD")
         date_grid.addWidget(_field("拍摄日期", self._photo_date, required=True,
                                    key="photo_date",
                                    help_text="拍摄 YYYYMMDD；只填其一则采集与拍摄同天"), 0, 1)
@@ -754,7 +754,7 @@ class NamingPanel(QWidget):
         settings.setValue(
             _UID_DISPLAY_SETTINGS_KEY, ",".join(sorted(self._display_fields))
         )
-        settings.sync()
+        settings.flush_to_disk()
         self._refresh_display_summary()
 
     def _load_display_fields(self) -> set[str]:
@@ -1005,7 +1005,7 @@ class NamingPanel(QWidget):
         from PyQt6.QtCore import QSettings
         settings = QSettings()
         settings.setValue(f"naming_panel/section_visible/{key}", visible)
-        settings.sync()
+        settings.flush_to_disk()
 
     def _load_section_vis(self, key: str, default: bool = True) -> bool:
         if key in self._section_visibility_cache:

@@ -358,7 +358,7 @@ class LabelsView(BaseView):
     def _spec_thumb(self, idx: int, bucket: str) -> QPixmap:
         sp = self._specimens[idx]
         tmpl = resolve_template(self._libs[bucket])
-        dims = self._step3.dims(bucket)
+        dims = self._step3.label_dimensions(bucket)
         return render_label_preview(
             tmpl, dims, specimen_to_label_data(sp), 138, 96, dpr=2.0
         )
@@ -995,7 +995,7 @@ QPushButton#PrintBtn:disabled {{
         is_custom = self._size_combo.currentData() == "custom"
         self._size_custom_row.setVisible(is_custom)
         if is_custom:
-            d = self._step3.dims(bucket)
+            d = self._step3.label_dimensions(bucket)
             for spin, axis in ((self._w_spin, "w"), (self._h_spin, "h")):
                 b = spin.blockSignals(True)
                 spin.setValue(int(d.get(axis, 0) or 0))
@@ -1037,7 +1037,7 @@ QPushButton#PrintBtn:disabled {{
         self._job_summary.setText(
             f"瓶签 {sample_labels} 张 · RNA签 {tissue_labels} 张\n"
             f"当前：{'瓶签' if self._active_bucket == 'sample' else 'RNA签'} · "
-            f"{self._step3.dims(self._active_bucket).get('w')}×{self._step3.dims(self._active_bucket).get('h')} mm"
+            f"{self._step3.label_dimensions(self._active_bucket).get('w')}×{self._step3.label_dimensions(self._active_bucket).get('h')} mm"
         )
         self._print_total_badge.setText(f"共 {total} 张")
         self._btn_tissue_bucket.setEnabled(tissue_n > 0)
@@ -1068,7 +1068,7 @@ QPushButton#PrintBtn:disabled {{
             # so output is blank — the demo is preview-only visualization.)
             data = specimen_to_label_data(_DEMO_SPECIMEN)
         tmpl = job.get("template") or resolve_template(self._libs[self._active_bucket])
-        dims = job.get("dims") or self._step3.dims(self._active_bucket)
+        dims = job.get("dims") or self._step3.label_dimensions(self._active_bucket)
         pm = render_label_preview(
             tmpl, dims, data or {},
             max(260, self._label_preview.width() - 32),
@@ -1159,7 +1159,7 @@ QPushButton#PrintBtn:disabled {{
             state["zoom"] = max(1.0, min(5.0, z))
             _redraw()
 
-        def _step(delta: int) -> None:
+        def change_sheet_preview_page(delta: int) -> None:
             self._sheet_page = max(0, self._sheet_page + delta)
             self._refresh_print_studio()   # keep inline thumbnail in sync + clamp page
             _redraw()
@@ -1175,8 +1175,8 @@ QPushButton#PrintBtn:disabled {{
         btn_out.clicked.connect(lambda: _set_zoom(state["zoom"] * 0.8))
         btn_in.clicked.connect(lambda: _set_zoom(state["zoom"] * 1.25))
         btn_fit.clicked.connect(lambda: _set_zoom(1.0))
-        btn_prev.clicked.connect(lambda: _step(-1))
-        btn_next.clicked.connect(lambda: _step(1))
+        btn_prev.clicked.connect(lambda: change_sheet_preview_page(-1))
+        btn_next.clicked.connect(lambda: change_sheet_preview_page(1))
         btn_close.clicked.connect(dlg.accept)
 
         win_w = min(int(fit_h * 0.74) + 110, (avail.width() - 40) if avail else 900)
@@ -1281,14 +1281,14 @@ QPushButton#PrintBtn:disabled {{
         v.setContentsMargins(0, 0, 0, 0); v.setSpacing(4)
         v.addWidget(QLabel("拼版"))
 
-        def _spin(lo, hi, val, suffix=" mm", step=0.5):
+        def make_imposition_spinbox(lo, hi, val, suffix=" mm", step=0.5):
             s = QDoubleSpinBox(); s.setRange(lo, hi); s.setSingleStep(step)
             s.setSuffix(suffix); s.setValue(val)
             return s
 
         r1 = QHBoxLayout(); r1.setSpacing(6)
-        self._imp_margin = _spin(0.0, 30.0, 8.0)
-        self._imp_gap = _spin(0.0, 30.0, 2.0)
+        self._imp_margin = make_imposition_spinbox(0.0, 30.0, 8.0)
+        self._imp_gap = make_imposition_spinbox(0.0, 30.0, 2.0)
         self._imp_margin.valueChanged.connect(
             lambda val: self._on_imposition_changed("marginMm", val))
         self._imp_gap.valueChanged.connect(
@@ -1568,7 +1568,7 @@ QPushButton#PrintBtn:disabled {{
 
     def _grid_for(self, bucket: str) -> dict:
         """Imposition grid (cols/rows/perPage) for *bucket* on its A4/A5 paper."""
-        dims = self._step3.dims(bucket)
+        dims = self._step3.label_dimensions(bucket)
         paper_type = self._step3.paper_type(bucket)
         opts = self._grid_opts(bucket)
         page_w, page_h = effective_page_mm(
@@ -1583,7 +1583,7 @@ QPushButton#PrintBtn:disabled {{
         # batch-wide field-level print on/off (整批统一) — applies to preview & print
         tmpl = apply_field_visibility(
             tmpl, self._hidden_fields, self._blank_style, self._FIELD_NAMES)
-        dims = self._step3.dims(bucket)
+        dims = self._step3.label_dimensions(bucket)
         paper_type = self._step3.paper_type(bucket)
         paper = PAPER_SIZES.get(paper_type) if paper_type in ("a4", "a5") else None
         job = LabelService.build_print_job(

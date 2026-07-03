@@ -114,7 +114,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.ctx = ctx
         self._views: dict[str, BaseView] = {}        # view_id → instance
-        self._view_classes: list[type] = []           # registration order
+        self._view_classes: list[object] = []         # class/spec registration order
         self._nav_buttons: list[QPushButton] = []      # registration order
         self._nav_menu_actions: dict[str, QAction] = {}
         self._nav_pin_actions: dict[str, QAction] = {}
@@ -361,7 +361,22 @@ class MainWindow(QMainWindow):
 
     # ── View registry ─────────────────────────────────────────────────────
 
-    def register_view(self, view_cls: type) -> None:
+    @staticmethod
+    def _view_ref_id(view_ref: object) -> str:
+        return str(getattr(view_ref, "view_id", ""))
+
+    @staticmethod
+    def _view_ref_title(view_ref: object) -> str:
+        return str(getattr(view_ref, "nav_title", ""))
+
+    @staticmethod
+    def _resolve_view_ref(view_ref: object) -> type:
+        view_cls = view_ref if isinstance(view_ref, type) else view_ref.resolve()
+        if not issubclass(view_cls, BaseView):
+            raise TypeError("view_ref must resolve to a BaseView subclass")
+        return view_cls
+
+    def register_view(self, view_cls: object) -> None:
         """Register a BaseView subclass as a top-nav segment + stack page.
 
         The segment button is appended to the top bar in registration order;
@@ -376,33 +391,40 @@ class MainWindow(QMainWindow):
         view_cls:
             A subclass of BaseView with view_id / nav_title / nav_icon.
         """
-        assert issubclass(view_cls, BaseView), "view_cls must subclass BaseView"
+        if isinstance(view_cls, type):
+            assert issubclass(view_cls, BaseView), "view_cls must subclass BaseView"
+        else:
+            assert callable(getattr(view_cls, "resolve", None)), "view_cls must be a BaseView subclass or lazy view spec"
+        view_id = self._view_ref_id(view_cls)
+        nav_title = self._view_ref_title(view_cls)
         idx = len(self._view_classes)
         self._view_classes.append(view_cls)
 
         # Top-nav segment button — vector glyph + title, accent when active.
-        btn = QPushButton(tr(view_cls.nav_title))
+        btn = QPushButton(tr(nav_title))
         btn.setObjectName("NavSegment")
         btn.setCheckable(True)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn.setToolTip(tr(view_cls.nav_title))
-        glyph = _NAV_GLYPHS.get(view_cls.view_id, "mdi6.circle-outline")
+        btn.setToolTip(tr(nav_title))
+        glyph = _NAV_GLYPHS.get(view_id, "mdi6.circle-outline")
         btn.setIcon(
             icons.icon(glyph, color=icons.TONE_MUTED,
                        color_active=icons.TONE_ACCENT_HOVER)
         )
         btn.setIconSize(QSize(16, 16))
-        btn.setProperty("view_id", view_cls.view_id)
+        btn.setProperty("view_id", view_id)
         btn.clicked.connect(lambda _=False, i=idx: self._activate_index(i))
         self._nav_group.addButton(btn, idx)
         self._nav_buttons.append(btn)
         self._nav_row.addWidget(btn)
         self._add_view_to_nav_menu(view_cls, idx)
-        btn.setVisible(self._is_nav_pinned(view_cls.view_id))
+        btn.setVisible(self._is_nav_pinned(view_id))
         # View is NOT built here — see _ensure_view (lazy, first-activation).
 
-    def _add_view_to_nav_menu(self, view_cls: type, idx: int) -> None:
-        group_key = _NAV_GROUP_FOR_VIEW.get(view_cls.view_id, "tools")
+    def _add_view_to_nav_menu(self, view_cls: object, idx: int) -> None:
+        view_id = self._view_ref_id(view_cls)
+        nav_title = self._view_ref_title(view_cls)
+        group_key = _NAV_GROUP_FOR_VIEW.get(view_id, "tools")
         menu = self._nav_group_menus.get(group_key)
         if menu is None:
             group = _NAV_GROUPS[group_key]
@@ -412,17 +434,17 @@ class MainWindow(QMainWindow):
             menu.setIcon(icons.icon(group["icon"], color=icons.TONE_MUTED))
             self._nav_group_menus[group_key] = menu
 
-        glyph = _NAV_GLYPHS.get(view_cls.view_id, "mdi6.circle-outline")
+        glyph = _NAV_GLYPHS.get(view_id, "mdi6.circle-outline")
         action = QAction(
             icons.icon(glyph, color=icons.TONE_MUTED, color_active=icons.TONE_ACCENT_HOVER),
-            tr(view_cls.nav_title),
+            tr(nav_title),
             self,
         )
         action.setCheckable(True)
-        action.setToolTip(tr(view_cls.nav_title))
+        action.setToolTip(tr(nav_title))
         action.triggered.connect(lambda _=False, i=idx: self._activate_index(i))
         menu.addAction(action)
-        self._nav_menu_actions[view_cls.view_id] = action
+        self._nav_menu_actions[view_id] = action
         self._keep_screenshot_last_in_tools()
 
         self._rebuild_nav_pin_menu()
@@ -477,12 +499,13 @@ class MainWindow(QMainWindow):
         self._nav_pin_menu.clear()
         self._nav_pin_actions.clear()
         for i, cls in enumerate(self._view_classes):
-            action = QAction(tr(cls.nav_title), self)
+            view_id = self._view_ref_id(cls)
+            action = QAction(tr(self._view_ref_title(cls)), self)
             action.setCheckable(True)
-            action.setChecked(self._is_nav_pinned(cls.view_id))
+            action.setChecked(self._is_nav_pinned(view_id))
             action.toggled.connect(lambda checked, idx=i: self._set_nav_pinned(idx, checked))
             self._nav_pin_menu.addAction(action)
-            self._nav_pin_actions[cls.view_id] = action
+            self._nav_pin_actions[view_id] = action
 
     def _nav_pins_setting(self) -> set[str]:
         raw = self.ctx.settings._qs.value("ui/topbar_pinned_views", "", type=str) or ""
@@ -493,7 +516,7 @@ class MainWindow(QMainWindow):
         return {part for part in raw.split(",") if part}
 
     def _save_nav_pins(self, pins: set[str]) -> None:
-        ordered = [cls.view_id for cls in self._view_classes if cls.view_id in pins]
+        ordered = [self._view_ref_id(cls) for cls in self._view_classes if self._view_ref_id(cls) in pins]
         self.ctx.settings._qs.setValue("ui/topbar_pinned_views", ",".join(ordered) or "__none__")
 
     def _is_nav_pinned(self, view_id: str) -> bool:
@@ -502,7 +525,7 @@ class MainWindow(QMainWindow):
     def _set_nav_pinned(self, idx: int, checked: bool) -> None:
         if idx < 0 or idx >= len(self._view_classes):
             return
-        view_id = self._view_classes[idx].view_id
+        view_id = self._view_ref_id(self._view_classes[idx])
         pins = self._nav_pins_setting()
         if checked:
             pins.add(view_id)
@@ -514,7 +537,7 @@ class MainWindow(QMainWindow):
         if action is not None and action.isChecked() != checked:
             action.setChecked(checked)
 
-    def _ensure_view(self, view_cls: type) -> BaseView:
+    def _ensure_view(self, view_cls: object) -> BaseView:
         """Build *view_cls* on first request, then cache + add to the stack.
 
         Idempotent: repeat calls return the cached instance. This is the single
@@ -522,10 +545,12 @@ class MainWindow(QMainWindow):
         ~1.3 s "build all views" cost across first visits instead of paying it
         up front at launch.
         """
-        view = self._views.get(view_cls.view_id)
+        view_id = self._view_ref_id(view_cls)
+        view = self._views.get(view_id)
         if view is None:
-            view = view_cls(self.ctx)
-            self._views[view_cls.view_id] = view
+            resolved_cls = self._resolve_view_ref(view_cls)
+            view = resolved_cls(self.ctx)
+            self._views[view_id] = view
             self._stack.addWidget(view)
         return view
 
@@ -563,15 +588,16 @@ class MainWindow(QMainWindow):
 
         for i, cls in enumerate(self._view_classes):
             if i < len(self._nav_buttons):
-                self._nav_buttons[i].setText(tr(cls.nav_title))
-                self._nav_buttons[i].setToolTip(tr(cls.nav_title))
-            menu_action = self._nav_menu_actions.get(cls.view_id)
+                self._nav_buttons[i].setText(tr(self._view_ref_title(cls)))
+                self._nav_buttons[i].setToolTip(tr(self._view_ref_title(cls)))
+            view_id = self._view_ref_id(cls)
+            menu_action = self._nav_menu_actions.get(view_id)
             if menu_action is not None:
-                menu_action.setText(tr(cls.nav_title))
-                menu_action.setToolTip(tr(cls.nav_title))
-            pin_action = self._nav_pin_actions.get(cls.view_id)
+                menu_action.setText(tr(self._view_ref_title(cls)))
+                menu_action.setToolTip(tr(self._view_ref_title(cls)))
+            pin_action = self._nav_pin_actions.get(view_id)
             if pin_action is not None:
-                pin_action.setText(tr(cls.nav_title))
+                pin_action.setText(tr(self._view_ref_title(cls)))
 
         if getattr(self, "_shot_menu", None) is not None:
             self._shot_menu.setTitle(tr("截图"))
@@ -685,7 +711,7 @@ class MainWindow(QMainWindow):
     def navigate_to(self, view_id: str) -> None:
         """Programmatically switch to the view with the given view_id."""
         for i, cls in enumerate(self._view_classes):
-            if cls.view_id == view_id:
+            if self._view_ref_id(cls) == view_id:
                 self._activate_index(i)
                 return
         self.statusBar().showMessage(tr("未找到页面: {}").format(view_id), 4000)
@@ -697,7 +723,7 @@ class MainWindow(QMainWindow):
         if not btn.isChecked():
             btn.setChecked(True)
         for i, cls in enumerate(self._view_classes):
-            action = self._nav_menu_actions.get(cls.view_id)
+            action = self._nav_menu_actions.get(self._view_ref_id(cls))
             if action is not None:
                 action.setChecked(i == idx)
         self._recolor_nav_icons(idx)
@@ -709,7 +735,7 @@ class MainWindow(QMainWindow):
                 view.on_activate()
         self.ctx.settings.last_nav_index = idx
         self.refresh_context_bar()
-        self.statusBar().showMessage(tr("已打开: {}").format(tr(view_cls.nav_title)), 1800)
+        self.statusBar().showMessage(tr("已打开: {}").format(tr(self._view_ref_title(view_cls))), 1800)
 
     # ── Context bar ────────────────────────────────────────────────────────
 
@@ -878,7 +904,7 @@ class MainWindow(QMainWindow):
             _K_SCREENSHOT_TOOL_ENABLED,
             "true" if enabled else "false",
         )
-        self.ctx.settings.sync()
+        self.ctx.settings.flush_to_disk()
         self._apply_screenshot_tool_enabled()
 
     def _apply_screenshot_tool_enabled(self) -> None:
@@ -982,7 +1008,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent) -> None:
         self.ctx.settings.save_geometry(self.saveGeometry())
         self.ctx.settings.save_window_state(self.saveState())
-        self.ctx.settings.sync()
+        self.ctx.settings.flush_to_disk()
         # Silent metadata safety net: snapshot the current project's tiny
         # project.db + the recent-projects list to the local user-data dir
         # (per-project model keeps the only live copy on possibly-removable

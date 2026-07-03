@@ -64,7 +64,7 @@ class ActivityFeedWidget(QWidget):
         self._debounce = QTimer(self)
         self._debounce.setInterval(50)
         self._debounce.setSingleShot(True)
-        self._debounce.timeout.connect(self._render)
+        self._debounce.timeout.connect(self._render_activity_entries)
 
     # ── Public API ─────────────────────────────────────────────────────────
 
@@ -87,7 +87,7 @@ class ActivityFeedWidget(QWidget):
 
     # ── Internal ───────────────────────────────────────────────────────────
 
-    def _render(self) -> None:
+    def _render_activity_entries(self) -> None:
         """Rebuild the QListWidget from ``self._entries``."""
         self._list.setUpdatesEnabled(False)
         self._list.clear()

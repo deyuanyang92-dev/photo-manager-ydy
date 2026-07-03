@@ -147,16 +147,16 @@ def _field_name(key: str) -> str:
     return FIELD_LABELS.get(key, key)
 
 
-def _btn(text: str, checkable: bool = False) -> QPushButton:
-    b = QPushButton(text)
-    b.setCheckable(checkable)
-    b.setStyleSheet(
+def _make_designer_button(text: str, checkable: bool = False) -> QPushButton:
+    button = QPushButton(text)
+    button.setCheckable(checkable)
+    button.setStyleSheet(
         "QPushButton { background:#0f2127; border:1px solid rgba(145,182,181,0.22);"
         " border-radius:4px; color:#cfe0db; padding:3px 9px; font-size:12px; }"
         "QPushButton:checked { background:rgba(41,185,171,0.20); border-color:#29b9ab; color:#29b9ab; }"
         "QPushButton:hover { border-color:#29b9ab; }"
     )
-    return b
+    return button
 
 
 # ── Canvas ─────────────────────────────────────────────────────────────────────
@@ -222,7 +222,7 @@ class _DesignCanvas(QWidget):
         self._tmpl = tmpl
         self._dims = dims
         self._data = data
-        self._render()
+        self._render_label_canvas()
 
     def set_selection(self, kind: str, row: int, field: int) -> None:
         self._sel_kind, self._sel_row, self._sel_field = kind, row, field
@@ -232,7 +232,7 @@ class _DesignCanvas(QWidget):
         self._multi = set(indices or ())
         self.update()
 
-    def _render(self) -> None:
+    def _render_label_canvas(self) -> None:
         w_mm = max(1.0, float(self._dims.get("w", 60)))
         h_mm = max(1.0, float(self._dims.get("h", 40)))
         pad = 18
@@ -259,7 +259,7 @@ class _DesignCanvas(QWidget):
 
     def set_zoom(self, z: float) -> None:
         self._zoom = min(8.0, max(0.2, float(z)))
-        self._render()
+        self._render_label_canvas()
 
     def zoom_by(self, factor: float) -> None:
         self.set_zoom(self._zoom * factor)
@@ -267,7 +267,7 @@ class _DesignCanvas(QWidget):
     def reset_zoom(self) -> None:
         self._zoom = 1.0
         self._pan = QPoint(0, 0)
-        self._render()
+        self._render_label_canvas()
 
     def wheelEvent(self, e) -> None:  # noqa: N802
         if e.modifiers() & Qt.KeyboardModifier.ControlModifier:
@@ -278,7 +278,7 @@ class _DesignCanvas(QWidget):
 
     def resizeEvent(self, e) -> None:  # noqa: N802
         super().resizeEvent(e)
-        self._render()
+        self._render_label_canvas()
 
     def paintEvent(self, e) -> None:  # noqa: N802
         p = QPainter(self)
@@ -325,7 +325,7 @@ class _DesignCanvas(QWidget):
             if self._sel_kind == "element":
                 p.setBrush(QColor("#29b9ab"))
                 p.setPen(QPen(QColor("#0c1e26"), 1))
-                for r in self._handle_rects(box).values():
+                for r in self._selection_handle_rects_for_box(box).values():
                     p.drawRect(r)
 
         # group (multi) selection highlight — dashed amber on every member
@@ -422,20 +422,20 @@ class _DesignCanvas(QWidget):
             return ("element", -1, int(b.get("index", -1)))
         return (b["kind"], int(b.get("row", -1)), int(b.get("field", -1)))
 
-    def _hit(self, pt: QPoint) -> Optional[dict]:
+    def _hit_test_canvas_box(self, pt: QPoint) -> Optional[dict]:
         rx = pt.x() - self._origin.x()
         ry = pt.y() - self._origin.y()
         # last-drawn wins (elements appended last → topmost) → iterate reversed
-        for b in reversed(self._boxes):
-            if b["x"] <= rx <= b["x"] + b["w"] and b["y"] <= ry <= b["y"] + b["h"]:
-                if b.get("kind") == "element":
-                    el = self._element(int(b.get("index", -1)))
+        for box in reversed(self._boxes):
+            if box["x"] <= rx <= box["x"] + box["w"] and box["y"] <= ry <= box["y"] + box["h"]:
+                if box.get("kind") == "element":
+                    el = self._element(int(box.get("index", -1)))
                     if el is not None and el.get("locked"):
                         continue  # locked layer is click-through in the designer
-                return b
+                return box
         return None
 
-    def _handle_rects(self, box: dict) -> dict:
+    def _selection_handle_rects_for_box(self, box: dict) -> dict:
         from PyQt6.QtCore import QRect
         ox, oy = self._origin.x(), self._origin.y()
         x, y, w, h = box["x"], box["y"], box["w"], box["h"]
@@ -463,7 +463,7 @@ class _DesignCanvas(QWidget):
         box = self._selected_box()
         if box is None:
             return None
-        for name, r in self._handle_rects(box).items():
+        for name, r in self._selection_handle_rects_for_box(box).items():
             if r.contains(pt):
                 return name
         return None
@@ -499,7 +499,7 @@ class _DesignCanvas(QWidget):
                 self._dragging = False
                 return
         ctrl = bool(e.modifiers() & Qt.KeyboardModifier.ControlModifier)
-        b = self._hit(e.pos())
+        b = self._hit_test_canvas_box(e.pos())
         if b is not None and b.get("kind") == "element" and ctrl:
             # Ctrl-click an element → toggle it in the group selection
             self.multi_toggle.emit(int(b.get("index", -1)))
@@ -519,7 +519,7 @@ class _DesignCanvas(QWidget):
         self.update()
 
     def mouseDoubleClickEvent(self, e) -> None:  # noqa: N802
-        b = self._hit(e.pos())
+        b = self._hit_test_canvas_box(e.pos())
         if b is not None and b.get("kind") == "element":
             self.edit_requested.emit(int(b.get("index", -1)))
             return
@@ -553,7 +553,7 @@ class _DesignCanvas(QWidget):
             # Pan only shifts the canvas origin — the label pixmap is unchanged,
             # so skip the expensive render_label_onto() rebuild and just move the
             # cached pixmap. (_origin is computed as centre + _pan, so shifting it
-            # by the same delta keeps it consistent with _render().)
+            # by the same delta keeps it consistent with _render_label_canvas().)
             self._origin += delta
             self.update()
             return
@@ -578,13 +578,13 @@ class _DesignCanvas(QWidget):
         if not self._dragging:
             return
         if self._rotating:
-            self._do_rotate(e)
+            self._rotate_selected_element_to_pointer(e)
         elif self._resize_handle is not None:
-            self._do_resize(dx / self._ppm, dy / self._ppm)
+            self._resize_selected_element_from_drag_delta(dx / self._ppm, dy / self._ppm)
         else:
             self.dragged.emit(dx / self._ppm, dy / self._ppm)
 
-    def _do_rotate(self, e) -> None:
+    def _rotate_selected_element_to_pointer(self, e) -> None:
         box = self._selected_box()
         if box is None:
             return
@@ -596,7 +596,7 @@ class _DesignCanvas(QWidget):
         ang = round(ang % 360.0, 1)
         self.element_rotated.emit(int(box.get("index", -1)), ang)
 
-    def _do_resize(self, dx_mm: float, dy_mm: float) -> None:
+    def _resize_selected_element_from_drag_delta(self, dx_mm: float, dy_mm: float) -> None:
         if self._resize_base is None:
             return
         bx, by, bw, bh = self._resize_base
@@ -693,7 +693,7 @@ class _DesignCanvas(QWidget):
             (vx if axis == "v" else hy).append(float(gmm))
 
         # try snapping left/center/right of the moving box to any vx
-        def _best(edges, candidates):
+        def nearest_snap_target(edges, candidates):
             best = None
             for off, ev in edges:  # off = edge offset from x; ev = edge value
                 for cv in candidates:
@@ -702,7 +702,7 @@ class _DesignCanvas(QWidget):
                         best = (d, cv - off, cv)  # new origin, guide line
             return best
 
-        bx = _best([(0.0, x), (w / 2, x + w / 2), (w, x + w)], vx)
+        bx = nearest_snap_target([(0.0, x), (w / 2, x + w / 2), (w, x + w)], vx)
         if bx is not None:
             x = round(bx[1], 2)
             guides.append(("v", bx[2]))
@@ -710,7 +710,7 @@ class _DesignCanvas(QWidget):
             gx = round(x / self._grid_mm) * self._grid_mm
             if abs(gx - x) <= thr:
                 x = gx
-        by = _best([(0.0, y), (h / 2, y + h / 2), (h, y + h)], hy)
+        by = nearest_snap_target([(0.0, y), (h / 2, y + h / 2), (h, y + h)], hy)
         if by is not None:
             y = round(by[1], 2)
             guides.append(("h", by[2]))
@@ -798,7 +798,7 @@ class _PropertyPanel(QWidget):
         self._tmpl: dict = {}
         self.show_for("none", -1, -1, {})
 
-    def _clear(self) -> None:
+    def _clear_property_controls(self) -> None:
         while self._root.count():
             item = self._root.takeAt(0)
             w = item.widget()
@@ -810,24 +810,24 @@ class _PropertyPanel(QWidget):
         lbl.setStyleSheet("color:#eef3ef; font-size:13px; font-weight:bold;")
         self._root.addWidget(lbl)
 
-    def _row(self, *widgets) -> None:
-        h = QHBoxLayout()
-        h.setSpacing(6)
-        for w in widgets:
-            if isinstance(w, str):
-                lbl = QLabel(w)
+    def _add_property_row(self, *widgets) -> None:
+        row_layout = QHBoxLayout()
+        row_layout.setSpacing(6)
+        for widget in widgets:
+            if isinstance(widget, str):
+                lbl = QLabel(widget)
                 lbl.setStyleSheet("color:#87a2a1; font-size:12px;")
-                h.addWidget(lbl)
+                row_layout.addWidget(lbl)
             else:
-                h.addWidget(w)
-        h.addStretch()
+                row_layout.addWidget(widget)
+        row_layout.addStretch()
         wrap = QWidget()
-        wrap.setLayout(h)
+        wrap.setLayout(row_layout)
         self._root.addWidget(wrap)
 
     def show_for(self, kind: str, row: int, field: int, tmpl: dict) -> None:
         self._tmpl = tmpl
-        self._clear()
+        self._clear_property_controls()
         if kind == "field":
             self._build_field(row, field)
         elif kind == "qr":
@@ -850,7 +850,9 @@ class _PropertyPanel(QWidget):
                  "barcode": "条码"}
         self._title(f"元素 · {names.get(et, et)}")
 
-        def _spin(val, lo=-500.0, hi=500.0, step=0.5, suffix=" mm"):
+        def make_element_property_spinbox(
+            val, lo=-500.0, hi=500.0, step=0.5, suffix=" mm"
+        ):
             s = QDoubleSpinBox()
             s.setRange(lo, hi)
             s.setSingleStep(step)
@@ -859,20 +861,24 @@ class _PropertyPanel(QWidget):
             return s
 
         if et == "line":
-            x1 = _spin(el.get("x1")); y1 = _spin(el.get("y1"))
-            x2 = _spin(el.get("x2")); y2 = _spin(el.get("y2"))
+            x1 = make_element_property_spinbox(el.get("x1"))
+            y1 = make_element_property_spinbox(el.get("y1"))
+            x2 = make_element_property_spinbox(el.get("x2"))
+            y2 = make_element_property_spinbox(el.get("y2"))
             for s, k in ((x1, "x1"), (y1, "y1"), (x2, "x2"), (y2, "y2")):
                 s.valueChanged.connect(lambda v, kk=k: self.edit.emit(
                     {"op": "element_line", "index": index, kk: v}))
-            self._row("起点", x1, y1)
-            self._row("终点", x2, y2)
-            wd = _spin(el.get("width"), 0.0, 20.0, 0.1)
+            self._add_property_row("起点", x1, y1)
+            self._add_property_row("终点", x2, y2)
+            wd = make_element_property_spinbox(el.get("width"), 0.0, 20.0, 0.1)
             wd.valueChanged.connect(lambda v: self.edit.emit(
                 {"op": "element_line", "index": index, "width": v}))
-            self._row("粗细", wd)
+            self._add_property_row("粗细", wd)
         else:
-            xs = _spin(el.get("x")); ys = _spin(el.get("y"))
-            ws = _spin(el.get("w"), 0.5, 500.0); hs = _spin(el.get("h"), 0.5, 500.0)
+            xs = make_element_property_spinbox(el.get("x"))
+            ys = make_element_property_spinbox(el.get("y"))
+            ws = make_element_property_spinbox(el.get("w"), 0.5, 500.0)
+            hs = make_element_property_spinbox(el.get("h"), 0.5, 500.0)
             xs.valueChanged.connect(lambda v: self.edit.emit(
                 {"op": "element_move", "index": index, "x": v, "y": el.get("y", 0)}))
             ys.valueChanged.connect(lambda v: self.edit.emit(
@@ -883,8 +889,8 @@ class _PropertyPanel(QWidget):
             hs.valueChanged.connect(lambda v: self.edit.emit(
                 {"op": "element_resize", "index": index, "x": el.get("x", 0),
                  "y": el.get("y", 0), "w": el.get("w", 0), "h": v}))
-            self._row("位置", xs, ys)
-            self._row("大小", ws, hs)
+            self._add_property_row("位置", xs, ys)
+            self._add_property_row("大小", ws, hs)
 
         # rotation (not meaningful for line)
         if et != "line":
@@ -892,13 +898,13 @@ class _PropertyPanel(QWidget):
             rot.setValue(int(float(el.get("rotation") or 0)))
             rot.valueChanged.connect(lambda v: self.edit.emit(
                 {"op": "element_rotation", "index": index, "value": v}))
-            self._row("旋转", rot)
+            self._add_property_row("旋转", rot)
 
         if et == "text":
             txt = QLineEdit(el.get("text") or "")
             txt.textChanged.connect(lambda t: self.edit.emit(
                 {"op": "element_text", "index": index, "value": t}))
-            self._row("内容", txt)
+            self._add_property_row("内容", txt)
             self._text_style_rows(index, el)
         elif et == "field":
             combo = QComboBox()
@@ -908,70 +914,70 @@ class _PropertyPanel(QWidget):
             combo.setCurrentIndex(ci if ci >= 0 else 0)
             combo.currentIndexChanged.connect(lambda _i: self.edit.emit(
                 {"op": "element_key", "index": index, "value": combo.currentData()}))
-            self._row("字段", combo)
+            self._add_property_row("字段", combo)
             self._text_style_rows(index, el)
         elif et in ("rect", "ellipse", "shape"):
             stroke = QPushButton(); stroke.setFixedSize(60, 22)
             self._update_color_btn(stroke, el.get("stroke") or "#000000")
             stroke.clicked.connect(lambda _=False, b=stroke: self._pick_element_color(
                 index, "element_stroke", b))
-            self._row("描边", stroke)
-            sw = _spin(el.get("strokeWidth"), 0.0, 20.0, 0.1)
+            self._add_property_row("描边", stroke)
+            sw = make_element_property_spinbox(el.get("strokeWidth"), 0.0, 20.0, 0.1)
             sw.valueChanged.connect(lambda v: self.edit.emit(
                 {"op": "element_strokeWidth", "index": index, "value": v}))
-            self._row("线宽", sw)
+            self._add_property_row("线宽", sw)
             fill = QPushButton(); fill.setFixedSize(60, 22)
             self._update_color_btn(fill, el.get("fill") or "#ffffff")
             fill.clicked.connect(lambda _=False, b=fill: self._pick_element_color(
                 index, "element_fill", b))
-            nofill = _btn("无填充")
+            nofill = _make_designer_button("无填充")
             nofill.clicked.connect(lambda: self.edit.emit(
                 {"op": "element_fill", "index": index, "value": None}))
-            self._row("填充", fill, nofill)
+            self._add_property_row("填充", fill, nofill)
             if et == "rect":
-                cr = _spin(el.get("cornerRadius"), 0.0, 30.0, 0.5)
+                cr = make_element_property_spinbox(el.get("cornerRadius"), 0.0, 30.0, 0.5)
                 cr.valueChanged.connect(lambda v: self.edit.emit(
                     {"op": "element_cornerRadius", "index": index, "value": v}))
-                self._row("圆角", cr)
+                self._add_property_row("圆角", cr)
         elif et == "image":
-            pick = _btn("选择图片…")
+            pick = _make_designer_button("选择图片…")
             pick.clicked.connect(lambda: self._pick_element_image(index))
-            self._row("图片", pick)
-            ka = _btn("保持比例", True)
+            self._add_property_row("图片", pick)
+            ka = _make_designer_button("保持比例", True)
             ka.setChecked(el.get("keepAspect") is not False)
             ka.toggled.connect(lambda on: self.edit.emit(
                 {"op": "element_keepAspect", "index": index, "value": on}))
-            self._row(ka)
+            self._add_property_row(ka)
         elif et == "barcode":
             content = QLineEdit(el.get("content") or "")
             content.setPlaceholderText("字段key或字面值，如 uniqueId")
             content.textChanged.connect(lambda t: self.edit.emit(
                 {"op": "element_content", "index": index, "value": t}))
-            self._row("内容", content)
-            st = _btn("显示文本", True); st.setChecked(el.get("showText") is not False)
+            self._add_property_row("内容", content)
+            st = _make_designer_button("显示文本", True); st.setChecked(el.get("showText") is not False)
             st.toggled.connect(lambda on: self.edit.emit(
                 {"op": "element_showText", "index": index, "value": on}))
-            self._row(st)
+            self._add_property_row(st)
 
         # universal appearance (opacity / dash / font / wrap / arrows)
         self._appearance_rows(index, el)
 
         # z-order + delete/duplicate
-        zup, zdn = _btn("上移一层"), _btn("下移一层")
+        zup, zdn = _make_designer_button("上移一层"), _make_designer_button("下移一层")
         zup.clicked.connect(lambda: self.edit.emit({"op": "element_z", "index": index, "value": 1}))
         zdn.clicked.connect(lambda: self.edit.emit({"op": "element_z", "index": index, "value": -1}))
-        self._row(zup, zdn)
-        hid = _btn("隐藏", True); hid.setChecked(bool(el.get("hidden")))
+        self._add_property_row(zup, zdn)
+        hid = _make_designer_button("隐藏", True); hid.setChecked(bool(el.get("hidden")))
         hid.toggled.connect(lambda on: self.edit.emit(
             {"op": "element_hidden", "index": index, "value": on}))
-        lck = _btn("锁定", True); lck.setChecked(bool(el.get("locked")))
+        lck = _make_designer_button("锁定", True); lck.setChecked(bool(el.get("locked")))
         lck.toggled.connect(lambda on: self.edit.emit(
             {"op": "element_locked", "index": index, "value": on}))
-        self._row(hid, lck)
-        dup, dele = _btn("复制元素"), _btn("删除元素")
+        self._add_property_row(hid, lck)
+        dup, dele = _make_designer_button("复制元素"), _make_designer_button("删除元素")
         dup.clicked.connect(lambda: self.edit.emit({"op": "element_dup", "index": index}))
         dele.clicked.connect(lambda: self.edit.emit({"op": "element_del", "index": index}))
-        self._row(dup, dele)
+        self._add_property_row(dup, dele)
 
     _DASH_OPTIONS = (("实线", "solid"), ("虚线", "dash"), ("点线", "dot"),
                      ("点划线", "dashdot"))
@@ -984,7 +990,7 @@ class _PropertyPanel(QWidget):
         op.setValue(int(round(float(el.get("opacity", 1.0) or 1.0) * 100)))
         op.valueChanged.connect(lambda v: self.edit.emit(
             {"op": "element_opacity", "index": index, "value": v / 100.0}))
-        self._row("不透明", op)
+        self._add_property_row("不透明", op)
         # dash (stroked shapes)
         if et in ("line", "rect", "ellipse", "shape"):
             dash = QComboBox()
@@ -994,16 +1000,16 @@ class _PropertyPanel(QWidget):
             dash.setCurrentIndex(di if di >= 0 else 0)
             dash.currentIndexChanged.connect(lambda _i: self.edit.emit(
                 {"op": "element_dash", "index": index, "value": dash.currentData()}))
-            self._row("线型", dash)
+            self._add_property_row("线型", dash)
         # arrowheads (line)
         if et == "line":
-            a0 = _btn("起点箭头", True); a0.setChecked(bool(el.get("arrowStart")))
-            a1 = _btn("终点箭头", True); a1.setChecked(bool(el.get("arrowEnd")))
+            a0 = _make_designer_button("起点箭头", True); a0.setChecked(bool(el.get("arrowStart")))
+            a1 = _make_designer_button("终点箭头", True); a1.setChecked(bool(el.get("arrowEnd")))
             a0.toggled.connect(lambda on: self.edit.emit(
                 {"op": "element_arrowStart", "index": index, "value": on}))
             a1.toggled.connect(lambda on: self.edit.emit(
                 {"op": "element_arrowEnd", "index": index, "value": on}))
-            self._row(a0, a1)
+            self._add_property_row(a0, a1)
         # font family + wrap (text/field)
         if et in ("text", "field"):
             font = QComboBox()
@@ -1018,19 +1024,19 @@ class _PropertyPanel(QWidget):
             font.setCurrentIndex(fi if fi >= 0 else 0)
             font.currentIndexChanged.connect(lambda _i: self.edit.emit(
                 {"op": "element_font", "index": index, "value": font.currentData()}))
-            self._row("字体", font)
-            wrap = _btn("自动换行", True); wrap.setChecked(bool(el.get("wrap")))
+            self._add_property_row("字体", font)
+            wrap = _make_designer_button("自动换行", True); wrap.setChecked(bool(el.get("wrap")))
             wrap.toggled.connect(lambda on: self.edit.emit(
                 {"op": "element_wrap", "index": index, "value": on}))
-            self._row(wrap)
+            self._add_property_row(wrap)
         # gradient + shadow (filled shapes)
         if et in ("rect", "ellipse", "shape"):
-            grad_on = _btn("渐变填充", True); grad_on.setChecked(bool(el.get("gradient")))
+            grad_on = _make_designer_button("渐变填充", True); grad_on.setChecked(bool(el.get("gradient")))
             grad_on.toggled.connect(
                 lambda on, i=index: self._toggle_gradient(i, on))
-            sh_on = _btn("投影", True); sh_on.setChecked(bool(el.get("shadow")))
+            sh_on = _make_designer_button("投影", True); sh_on.setChecked(bool(el.get("shadow")))
             sh_on.toggled.connect(lambda on, i=index: self._toggle_shadow(i, on))
-            self._row(grad_on, sh_on)
+            self._add_property_row(grad_on, sh_on)
 
     def _toggle_gradient(self, index: int, on: bool) -> None:
         if on:
@@ -1052,22 +1058,22 @@ class _PropertyPanel(QWidget):
         size.setValue(int(el.get("size") or 9))
         size.valueChanged.connect(lambda v: self.edit.emit(
             {"op": "element_size", "index": index, "value": v}))
-        b = _btn("B", True); b.setChecked("bold" in (el.get("style") or ""))
-        i = _btn("I", True); i.setChecked("italic" in (el.get("style") or ""))
+        b = _make_designer_button("B", True); b.setChecked("bold" in (el.get("style") or ""))
+        i = _make_designer_button("I", True); i.setChecked("italic" in (el.get("style") or ""))
         b.toggled.connect(lambda on: self.edit.emit({"op": "element_bold", "index": index, "value": on}))
         i.toggled.connect(lambda on: self.edit.emit({"op": "element_italic", "index": index, "value": on}))
-        self._row("字号", size, b, i)
-        al, ac, ar = _btn("左", True), _btn("中", True), _btn("右", True)
+        self._add_property_row("字号", size, b, i)
+        al, ac, ar = _make_designer_button("左", True), _make_designer_button("中", True), _make_designer_button("右", True)
         {"left": al, "center": ac, "right": ar}.get(el.get("align") or "left", al).setChecked(True)
         al.clicked.connect(lambda: self.edit.emit({"op": "element_align", "index": index, "value": "left"}))
         ac.clicked.connect(lambda: self.edit.emit({"op": "element_align", "index": index, "value": "center"}))
         ar.clicked.connect(lambda: self.edit.emit({"op": "element_align", "index": index, "value": "right"}))
-        self._row("对齐", al, ac, ar)
+        self._add_property_row("对齐", al, ac, ar)
         color_btn = QPushButton(); color_btn.setFixedSize(60, 22)
         self._update_color_btn(color_btn, el.get("color") or "#000000")
         color_btn.clicked.connect(lambda _=False, b=color_btn: self._pick_element_color(
             index, "element_color", b))
-        self._row("颜色", color_btn)
+        self._add_property_row("颜色", color_btn)
 
     def _pick_element_color(self, index: int, op: str, btn: QPushButton) -> None:
         c = QColorDialog.getColor(QColor(btn.text() or "#000000"), btn.window())
@@ -1109,30 +1115,30 @@ class _PropertyPanel(QWidget):
         combo.currentIndexChanged.connect(
             lambda _i: self.edit.emit({"op": "field_key", "row": row_idx, "field": field_idx,
                                        "value": combo.currentData()}))
-        self._row("字段", combo)
+        self._add_property_row("字段", combo)
 
         size = QSpinBox()
         size.setRange(4, 40)
         size.setValue(int(fld.get("size") or row.get("size") or 9))
         size.valueChanged.connect(
             lambda v: self.edit.emit({"op": "field_size", "row": row_idx, "field": field_idx, "value": v}))
-        b = _btn("B", True); b.setChecked("bold" in (fld.get("style") or ""))
-        i = _btn("I", True); i.setChecked("italic" in (fld.get("style") or ""))
+        b = _make_designer_button("B", True); b.setChecked("bold" in (fld.get("style") or ""))
+        i = _make_designer_button("I", True); i.setChecked("italic" in (fld.get("style") or ""))
         b.toggled.connect(lambda on: self.edit.emit({"op": "field_bold", "row": row_idx, "field": field_idx, "value": on}))
         i.toggled.connect(lambda on: self.edit.emit({"op": "field_italic", "row": row_idx, "field": field_idx, "value": on}))
-        self._row("字号", size, b, i)
+        self._add_property_row("字号", size, b, i)
 
-        al, ac, ar = _btn("左", True), _btn("中", True), _btn("右", True)
+        al, ac, ar = _make_designer_button("左", True), _make_designer_button("中", True), _make_designer_button("右", True)
         cur = row.get("align") or "left"
         {"left": al, "center": ac, "right": ar}[cur].setChecked(True)
         al.clicked.connect(lambda: self.edit.emit({"op": "row_align", "row": row_idx, "value": "left"}))
         ac.clicked.connect(lambda: self.edit.emit({"op": "row_align", "row": row_idx, "value": "center"}))
         ar.clicked.connect(lambda: self.edit.emit({"op": "row_align", "row": row_idx, "value": "right"}))
-        self._row("对齐", al, ac, ar)
+        self._add_property_row("对齐", al, ac, ar)
 
-        wrap = _btn("换行", True); wrap.setChecked(row.get("wrap") is not False)
+        wrap = _make_designer_button("换行", True); wrap.setChecked(row.get("wrap") is not False)
         wrap.toggled.connect(lambda on: self.edit.emit({"op": "row_wrap", "row": row_idx, "value": on}))
-        self._row(wrap)
+        self._add_property_row(wrap)
 
         prefix = QLineEdit(row.get("prefix") or "")
         prefix.setPlaceholderText("前缀")
@@ -1140,8 +1146,8 @@ class _PropertyPanel(QWidget):
         sep = QLineEdit(row.get("sep") if row.get("sep") is not None else " ")
         sep.setPlaceholderText("分隔")
         sep.textChanged.connect(lambda t: self.edit.emit({"op": "row_sep", "row": row_idx, "value": t}))
-        self._row("前缀", prefix)
-        self._row("分隔", sep)
+        self._add_property_row("前缀", prefix)
+        self._add_property_row("分隔", sep)
 
         # per-row line-height override (0 / 继承 = inherit template + global)
         lh = QDoubleSpinBox(); lh.setRange(0.0, 3.0); lh.setSingleStep(0.1)
@@ -1150,18 +1156,18 @@ class _PropertyPanel(QWidget):
         lh.valueChanged.connect(lambda v: self.edit.emit(
             {"op": "row_lineHeight", "row": row_idx,
              "value": None if v <= 0.0 else v}))
-        self._row("行高", lh)
+        self._add_property_row("行高", lh)
 
         # nudge
-        left, up, down, right = _btn("←"), _btn("↑"), _btn("↓"), _btn("→")
-        reset = _btn("归零")
+        left, up, down, right = _make_designer_button("←"), _make_designer_button("↑"), _make_designer_button("↓"), _make_designer_button("→")
+        reset = _make_designer_button("归零")
         S = 0.5
         left.clicked.connect(lambda: self.edit.emit({"op": "field_nudge", "row": row_idx, "field": field_idx, "dx": -S, "dy": 0}))
         right.clicked.connect(lambda: self.edit.emit({"op": "field_nudge", "row": row_idx, "field": field_idx, "dx": S, "dy": 0}))
         up.clicked.connect(lambda: self.edit.emit({"op": "field_nudge", "row": row_idx, "field": field_idx, "dx": 0, "dy": -S}))
         down.clicked.connect(lambda: self.edit.emit({"op": "field_nudge", "row": row_idx, "field": field_idx, "dx": 0, "dy": S}))
         reset.clicked.connect(lambda: self.edit.emit({"op": "field_reset", "row": row_idx, "field": field_idx}))
-        self._row("微移", left, up, down, right, reset)
+        self._add_property_row("微移", left, up, down, right, reset)
 
         color_btn = QPushButton()
         color_btn.setFixedSize(60, 22)
@@ -1169,22 +1175,22 @@ class _PropertyPanel(QWidget):
         self._update_color_btn(color_btn, fld.get("color") or "#000000")
         color_btn.clicked.connect(
             lambda _=False, btn=color_btn: self._pick_field_color(row_idx, field_idx, btn))
-        self._row("字色", color_btn)
+        self._add_property_row("字色", color_btn)
 
-        addf = _btn("+加字段")
-        delf = _btn("×删字段")
+        addf = _make_designer_button("+加字段")
+        delf = _make_designer_button("×删字段")
         addf.clicked.connect(lambda: self.edit.emit({"op": "field_add", "row": row_idx}))
         delf.clicked.connect(lambda: self.edit.emit({"op": "field_del", "row": row_idx, "field": field_idx}))
-        self._row(addf, delf)
+        self._add_property_row(addf, delf)
 
-        dup, dele = _btn("复制本行"), _btn("删除本行")
-        mvu, mvd = _btn("上移↑"), _btn("下移↓")
+        dup, dele = _make_designer_button("复制本行"), _make_designer_button("删除本行")
+        mvu, mvd = _make_designer_button("上移↑"), _make_designer_button("下移↓")
         dup.clicked.connect(lambda: self.edit.emit({"op": "row_dup", "row": row_idx}))
         dele.clicked.connect(lambda: self.edit.emit({"op": "row_del", "row": row_idx}))
         mvu.clicked.connect(lambda: self.edit.emit({"op": "row_move", "row": row_idx, "value": -1}))
         mvd.clicked.connect(lambda: self.edit.emit({"op": "row_move", "row": row_idx, "value": 1}))
-        self._row(dup, dele)
-        self._row(mvu, mvd)
+        self._add_property_row(dup, dele)
+        self._add_property_row(mvu, mvd)
 
     # ----- QR -----
     def _build_qr(self) -> None:
@@ -1195,7 +1201,7 @@ class _PropertyPanel(QWidget):
         cur = qr.get("position") or "right"
         h = QHBoxLayout(); h.setSpacing(4)
         for key, name in positions:
-            b = _btn(name, True); b.setChecked(key == cur)
+            b = _make_designer_button(name, True); b.setChecked(key == cur)
             b.clicked.connect(lambda _=False, k=key: self.edit.emit({"op": "qr_position", "value": k}))
             h.addWidget(b)
         h.addStretch()
@@ -1205,7 +1211,7 @@ class _PropertyPanel(QWidget):
         size.setRange(20, 70)
         size.setValue(int(round(float(qr.get("sizePct") or 0.4) * 100)))
         size.valueChanged.connect(lambda v: self.edit.emit({"op": "qr_size", "value": v / 100.0}))
-        self._row("大小", size)
+        self._add_property_row("大小", size)
 
         content = QComboBox()
         for key, name in FIELD_LABELS.items():
@@ -1214,13 +1220,13 @@ class _PropertyPanel(QWidget):
         content.setCurrentIndex(ci if ci >= 0 else 0)
         content.currentIndexChanged.connect(
             lambda _i: self.edit.emit({"op": "qr_content", "value": content.currentData()}))
-        self._row("内容", content)
+        self._add_property_row("内容", content)
 
         cure = qr.get("ecc") or "Q"
         h2 = QHBoxLayout(); h2.setSpacing(4)
         lbl = QLabel("容错"); lbl.setStyleSheet("color:#87a2a1; font-size:12px;"); h2.addWidget(lbl)
         for lv in ("L", "M", "Q", "H"):
-            b = _btn(lv, True); b.setChecked(lv == cure)
+            b = _make_designer_button(lv, True); b.setChecked(lv == cure)
             b.clicked.connect(lambda _=False, v=lv: self.edit.emit({"op": "qr_ecc", "value": v}))
             h2.addWidget(b)
         h2.addStretch()
@@ -1237,7 +1243,7 @@ class _PropertyPanel(QWidget):
         lh.setRange(80, 250)
         lh.setValue(int(round(float(self._tmpl.get("lineHeight") or 1.3) * 100)))
         lh.valueChanged.connect(lambda v: self.edit.emit({"op": "line_height", "value": v / 100.0}))
-        self._row("全局行高", lh)
+        self._add_property_row("全局行高", lh)
 
         # Shape selector
         _SHAPE_KEYS = ["rect", "circle", "roundrect"]
@@ -1249,7 +1255,7 @@ class _PropertyPanel(QWidget):
         shape_combo.setCurrentIndex(_SHAPE_KEYS.index(cur_shape) if cur_shape in _SHAPE_KEYS else 0)
         shape_combo.currentIndexChanged.connect(
             lambda i: self.edit.emit({"op": "tmpl_shape", "value": _SHAPE_KEYS[i]}))
-        self._row("形状", shape_combo)
+        self._add_property_row("形状", shape_combo)
 
         # Background color
         bg_btn = QPushButton()
@@ -1258,7 +1264,7 @@ class _PropertyPanel(QWidget):
         self._update_color_btn(bg_btn, self._tmpl.get("bgColor") or "#ffffff")
         bg_btn.clicked.connect(
             lambda _=False, btn=bg_btn: self._pick_tmpl_color("bgColor", btn))
-        self._row("背景色", bg_btn)
+        self._add_property_row("背景色", bg_btn)
 
         # Corner radius (visible for rect/roundrect)
         corner_spin = QDoubleSpinBox()
@@ -1268,7 +1274,7 @@ class _PropertyPanel(QWidget):
         corner_spin.setValue(float(self._tmpl.get("cornerRadius") or 0.0))
         corner_spin.valueChanged.connect(
             lambda v: self.edit.emit({"op": "tmpl_cornerRadius", "value": round(v, 2)}))
-        self._row("圆角", corner_spin)
+        self._add_property_row("圆角", corner_spin)
 
         # Label dimensions (mm) — designer-editable; persisted as a custom size
         dims = getattr(self, "_dims", None) or {"w": 60, "h": 40}
@@ -1282,15 +1288,15 @@ class _PropertyPanel(QWidget):
             {"op": "dims", "w": v, "h": h_spin.value()}))
         h_spin.valueChanged.connect(lambda v: self.edit.emit(
             {"op": "dims", "w": w_spin.value(), "h": v}))
-        self._row("标签宽", w_spin)
-        self._row("标签高", h_spin)
+        self._add_property_row("标签宽", w_spin)
+        self._add_property_row("标签高", h_spin)
 
         # monochrome collapse (B&W laser): gradients→first stop, no shadow/opacity
-        mono = _btn("单色折叠(黑白打印)", True)
+        mono = _make_designer_button("单色折叠(黑白打印)", True)
         mono.setChecked(bool(self._tmpl.get("monochrome")))
         mono.toggled.connect(lambda on: self.edit.emit(
             {"op": "tmpl_monochrome", "value": on}))
-        self._row(mono)
+        self._add_property_row(mono)
 
         dims_lbl = QLabel("点击画布上的文字/图形/QR 进行编辑；顶部「+元素」可加文字/图形/图片/条码。"
                           "选中元素后拖角缩放、拖动自动吸附对齐。")
@@ -1351,21 +1357,23 @@ class _FloatingToolbar(QWidget):
         lay = QHBoxLayout(self)
         lay.setContentsMargins(4, 2, 4, 2); lay.setSpacing(3)
 
-        def mk(txt, tip, slot, w=26):
-            b = _btn(txt); b.setToolTip(tip); b.setFixedWidth(w)
-            b.clicked.connect(slot)
-            lay.addWidget(b)
-            return b
-        mk("A−", "缩小字号", lambda: self.size_delta.emit(-1))
-        mk("A＋", "放大字号", lambda: self.size_delta.emit(1))
-        mk("B", "加粗", self.bold_toggled.emit)
-        mk("I", "斜体", self.italic_toggled.emit)
-        mk("⇤", "左对齐", lambda: self.align_set.emit("left"))
-        mk("⇆", "居中", lambda: self.align_set.emit("center"))
-        mk("⇥", "右对齐", lambda: self.align_set.emit("right"))
-        mk("🎨", "颜色", self.color_pick.emit)
-        mk("↑", "上移一层", lambda: self.z_delta.emit(1))
-        mk("↓", "下移一层", lambda: self.z_delta.emit(-1))
+        def _add_format_toolbar_button(text, tooltip, slot, width=26):
+            button = _make_designer_button(text)
+            button.setToolTip(tooltip)
+            button.setFixedWidth(width)
+            button.clicked.connect(slot)
+            lay.addWidget(button)
+            return button
+        _add_format_toolbar_button("A−", "缩小字号", lambda: self.size_delta.emit(-1))
+        _add_format_toolbar_button("A＋", "放大字号", lambda: self.size_delta.emit(1))
+        _add_format_toolbar_button("B", "加粗", self.bold_toggled.emit)
+        _add_format_toolbar_button("I", "斜体", self.italic_toggled.emit)
+        _add_format_toolbar_button("⇤", "左对齐", lambda: self.align_set.emit("left"))
+        _add_format_toolbar_button("⇆", "居中", lambda: self.align_set.emit("center"))
+        _add_format_toolbar_button("⇥", "右对齐", lambda: self.align_set.emit("right"))
+        _add_format_toolbar_button("🎨", "颜色", self.color_pick.emit)
+        _add_format_toolbar_button("↑", "上移一层", lambda: self.z_delta.emit(1))
+        _add_format_toolbar_button("↓", "下移一层", lambda: self.z_delta.emit(-1))
         self.hide()
 
     def target_index(self) -> int:
@@ -1508,7 +1516,7 @@ class LabelDesignerDialog(QDialog):
         self._selected_key: Optional[str] = None  # chosen library key on accept
         self._fmt_pending: Optional[dict] = None   # captured style for format painter
         self._setup_ui()
-        self._refresh()
+        self._refresh_designer_state()
 
     # ── Format painter (Phase 6) ──────────────────────────────────────────────
     def _on_format_painter_toggled(self, on: bool) -> None:
@@ -1526,17 +1534,17 @@ class LabelDesignerDialog(QDialog):
 
         # Toolbar
         bar = QHBoxLayout(); bar.setSpacing(6)
-        add_field = _btn("+加字段 ▾")
+        add_field = _make_designer_button("+加字段 ▾")
         fmenu = QMenu(add_field)
         for key, name in FIELD_LABELS.items():
             fmenu.addAction(name, lambda _=False, k=key: self._add_row_with_field(k))
         add_field.setMenu(fmenu)
-        add_row = _btn("+加行")
+        add_row = _make_designer_button("+加行")
         add_row.clicked.connect(lambda: self._add_row_with_field("headerId"))
-        qr_btn = _btn("QR 设置")
+        qr_btn = _make_designer_button("QR 设置")
         qr_btn.clicked.connect(lambda: self._select("qr", -1, -1))
 
-        add_el = _btn("+元素 ▾")
+        add_el = _make_designer_button("+元素 ▾")
         emenu = QMenu(add_el)
         for etype, name in ELEMENT_TYPE_LABELS.items():
             if etype == "shape":
@@ -1550,7 +1558,7 @@ class LabelDesignerDialog(QDialog):
                     name, lambda _=False, t=etype: self._add_element(t))
         add_el.setMenu(emenu)
 
-        presets_btn = _btn("模板库 ▾")
+        presets_btn = _make_designer_button("模板库 ▾")
         pmenu = QMenu(presets_btn)
         from app.services.label_presets import STARTER_PRESETS
         for pid, preset in STARTER_PRESETS.items():
@@ -1560,7 +1568,7 @@ class LabelDesignerDialog(QDialog):
 
         # Less-used canvas controls live in one menu so the primary toolbar
         # remains usable on 1366px-wide screens.
-        view_btn = _btn("视图 ▾")
+        view_btn = _make_designer_button("视图 ▾")
         view_menu = QMenu(view_btn)
         self._guide_action = view_menu.addAction("显示安全区与辅助线")
         self._guide_action.setCheckable(True)
@@ -1572,15 +1580,15 @@ class LabelDesignerDialog(QDialog):
         view_menu.addAction("适应窗口", lambda: self._canvas.reset_zoom())
         view_btn.setMenu(view_menu)
 
-        self._fmt_btn = _btn("格式刷", True)
+        self._fmt_btn = _make_designer_button("格式刷", True)
         self._fmt_btn.setToolTip("先选好样板元素点此，再点目标元素套用其样式")
         self._fmt_btn.toggled.connect(self._on_format_painter_toggled)
 
-        self._undo_btn = _btn("↶ 撤销")
-        self._redo_btn = _btn("↷ 重做")
-        self._undo_btn.clicked.connect(self._do_undo)
-        self._redo_btn.clicked.connect(self._do_redo)
-        saveas = _btn("另存为 ▾")
+        self._undo_btn = _make_designer_button("↶ 撤销")
+        self._redo_btn = _make_designer_button("↷ 重做")
+        self._undo_btn.clicked.connect(self._undo_template_edit)
+        self._redo_btn.clicked.connect(self._redo_template_edit)
+        saveas = _make_designer_button("另存为 ▾")
         smenu = QMenu(saveas)
         smenu.addAction("另存为新模板…", self._save_as_new)
         if self._lib is not None:
@@ -1604,29 +1612,29 @@ class LabelDesignerDialog(QDialog):
             ("left", "⇤", "左对齐"), ("hcenter", "⇆", "水平居中"), ("right", "⇥", "右对齐"),
             ("top", "⤒", "顶对齐"), ("vcenter", "⇕", "垂直居中"), ("bottom", "⤓", "底对齐"),
         ):
-            b = _btn(txt); b.setToolTip(tip); b.setFixedWidth(34)
+            b = _make_designer_button(txt); b.setToolTip(tip); b.setFixedWidth(34)
             b.clicked.connect(lambda _=False, m=mode: self._align_elements(m))
             abar.addWidget(b)
         abar.addSpacing(10)
         abar.addWidget(QLabel("分布"))
         for axis, txt, tip in (("h", "↔", "水平等距分布"), ("v", "↕", "垂直等距分布")):
-            b = _btn(txt); b.setToolTip(tip); b.setFixedWidth(34)
+            b = _make_designer_button(txt); b.setToolTip(tip); b.setFixedWidth(34)
             b.clicked.connect(lambda _=False, a=axis: self._distribute_elements(a))
             abar.addWidget(b)
         abar.addSpacing(10)
-        copy_b = _btn("复制"); copy_b.setToolTip("复制所选元素 (Ctrl+C)")
+        copy_b = _make_designer_button("复制"); copy_b.setToolTip("复制所选元素 (Ctrl+C)")
         copy_b.clicked.connect(self._copy_selection)
-        paste_b = _btn("粘贴"); paste_b.setToolTip("粘贴元素 (Ctrl+V)")
+        paste_b = _make_designer_button("粘贴"); paste_b.setToolTip("粘贴元素 (Ctrl+V)")
         paste_b.clicked.connect(self._paste_clipboard)
-        self._delete_btn = _btn("删除所选")
+        self._delete_btn = _make_designer_button("删除所选")
         self._delete_btn.setToolTip("删除当前选中的字段或元素 (Del)")
         self._delete_btn.clicked.connect(self._delete_selection)
         for w in (self._fmt_btn, copy_b, paste_b, self._delete_btn):
             abar.addWidget(w)
         abar.addSpacing(10)
-        grp_b = _btn("组合"); grp_b.setToolTip("把多选元素组合 (Ctrl+G)")
+        grp_b = _make_designer_button("组合"); grp_b.setToolTip("把多选元素组合 (Ctrl+G)")
         grp_b.clicked.connect(self._group_selection)
-        ungrp_b = _btn("取消组合"); ungrp_b.setToolTip("解散所选组 (Ctrl+Shift+G)")
+        ungrp_b = _make_designer_button("取消组合"); ungrp_b.setToolTip("解散所选组 (Ctrl+Shift+G)")
         ungrp_b.clicked.connect(self._ungroup_selection)
         abar.addWidget(grp_b); abar.addWidget(ungrp_b)
         abar.addStretch()
@@ -1724,31 +1732,31 @@ class LabelDesignerDialog(QDialog):
         self._sel = ("none", -1, -1)
 
     # ── State / undo ────────────────────────────────────────────────────────
-    def _push_undo(self) -> None:
+    def _save_template_snapshot_for_undo(self) -> None:
         self._undo.append(copy.deepcopy(self._tmpl))
         self._redo.clear()
         self._undo_btn.setEnabled(True)
         self._redo_btn.setEnabled(False)
 
-    def _do_undo(self) -> None:
+    def _undo_template_edit(self) -> None:
         if not self._undo:
             return
         self._redo.append(copy.deepcopy(self._tmpl))
         self._tmpl = self._undo.pop()
         self._undo_btn.setEnabled(bool(self._undo))
         self._redo_btn.setEnabled(True)
-        self._refresh()
+        self._refresh_designer_state()
 
-    def _do_redo(self) -> None:
+    def _redo_template_edit(self) -> None:
         if not self._redo:
             return
         self._undo.append(copy.deepcopy(self._tmpl))
         self._tmpl = self._redo.pop()
         self._redo_btn.setEnabled(bool(self._redo))
         self._undo_btn.setEnabled(True)
-        self._refresh()
+        self._refresh_designer_state()
 
-    def _refresh(self) -> None:
+    def _refresh_designer_state(self) -> None:
         self._tmpl = normalize_template(self._tmpl)
         self._refresh_canvas()
         self._refresh_inspectors()
@@ -1933,10 +1941,10 @@ class LabelDesignerDialog(QDialog):
         text = editor.text()
         editor.deleteLater()
         if el is not None and el.get("type") == "text" and text != el.get("text"):
-            self._push_undo()
+            self._save_template_snapshot_for_undo()
             el["text"] = text
             self._sel = ("element", -1, idx)
-            self._refresh()
+            self._refresh_designer_state()
 
     def _copy_selection(self) -> None:
         """Copy the selected elements (deep) into the designer clipboard."""
@@ -1948,7 +1956,7 @@ class LabelDesignerDialog(QDialog):
         """Paste clipboard elements offset by +2mm; select them as the group."""
         if not self._clipboard:
             return
-        self._push_undo()
+        self._save_template_snapshot_for_undo()
         els = self._elements()
         new_idx = set()
         for src in self._clipboard:
@@ -1963,7 +1971,7 @@ class LabelDesignerDialog(QDialog):
             new_idx.add(len(els) - 1)
         self._multi = new_idx
         self._sel = ("element", -1, min(new_idx))
-        self._refresh()
+        self._refresh_designer_state()
 
     def _delete_selection(self) -> None:
         """Delete the current field or selected free-form element(s)."""
@@ -1976,12 +1984,12 @@ class LabelDesignerDialog(QDialog):
         idx = set(self._selected_element_indices())
         if not idx:
             return
-        self._push_undo()
+        self._save_template_snapshot_for_undo()
         els = self._elements()
         self._tmpl["elements"] = [el for i, el in enumerate(els) if i not in idx]
         self._multi = set()
         self._sel = ("none", -1, -1)
-        self._refresh()
+        self._refresh_designer_state()
 
     def _sync_delete_action(self) -> None:
         """Make the global delete command explicit about its current target."""
@@ -2001,10 +2009,10 @@ class LabelDesignerDialog(QDialog):
 
     # ── Presets / guides ──────────────────────────────────────────────────────
     def _apply_preset(self, preset: dict) -> None:
-        self._push_undo()
+        self._save_template_snapshot_for_undo()
         self._tmpl = normalize_template(copy.deepcopy(preset))
         self._sel = ("none", -1, -1)
-        self._refresh()
+        self._refresh_designer_state()
 
     def _toggle_guide_overlay(self, on: bool) -> None:
         self._canvas.set_guide_overlay(on)
@@ -2015,7 +2023,7 @@ class LabelDesignerDialog(QDialog):
 
     # ── Drag / nudge ──────────────────────────────────────────────────────────
     def _on_drag_start(self) -> None:
-        self._push_undo()
+        self._save_template_snapshot_for_undo()
         kind, row, field = self._sel
         if kind == "field":
             f = self._tmpl["rows"][row]["fields"][field]
@@ -2105,7 +2113,7 @@ class LabelDesignerDialog(QDialog):
         kind, row, field = self._sel
         if kind not in ("field", "qr", "element"):
             return
-        self._push_undo()
+        self._save_template_snapshot_for_undo()
         if kind == "field":
             f = self._tmpl["rows"][row]["fields"][field]
             f["offsetX"] = round(float(f.get("offsetX") or 0) + dx_mm, 2)
@@ -2117,15 +2125,15 @@ class LabelDesignerDialog(QDialog):
             el["x"] = round(float(el.get("x") or 0) + dx_mm, 2)
             el["y"] = round(float(el.get("y") or 0) + dy_mm, 2)
         else:
-            self._on_drag_start()  # captures baseline + pushes undo again (harmless)
+            self._on_drag_start()  # captures baseline + saves another undo snapshot (harmless)
             self._on_dragged(dx_mm, dy_mm)
             return
-        self._refresh()
+        self._refresh_designer_state()
 
     # ── Edits from property panel ─────────────────────────────────────────────
     def _apply_edit(self, ch: dict) -> None:
         op = ch.get("op")
-        self._push_undo()
+        self._save_template_snapshot_for_undo()
         rows = self._tmpl["rows"]
         r = ch.get("row", -1)
         fi = ch.get("field", -1)
@@ -2249,7 +2257,7 @@ class LabelDesignerDialog(QDialog):
         # value edits (the common case — slider drag, spinbox step, typed text)
         # only refresh the canvas + layers so the widget being edited survives.
         if op in _STRUCTURAL_OPS:
-            self._refresh()
+            self._refresh_designer_state()
         else:
             self._refresh_live()
 
@@ -2391,12 +2399,12 @@ class LabelDesignerDialog(QDialog):
                if 0 <= i < len(self._elements())]
         if len(idx) < 2:
             return
-        self._push_undo()
+        self._save_template_snapshot_for_undo()
         els = self._elements()
         gid = uuid.uuid4().hex[:8]
         for j in idx:
             els[j]["group"] = gid
-        self._refresh()
+        self._refresh_designer_state()
 
     def _ungroup_selection(self) -> None:
         """Clear the group id from the selection's whole group(s)."""
@@ -2406,11 +2414,11 @@ class LabelDesignerDialog(QDialog):
         gids.discard(None)
         if not gids:
             return
-        self._push_undo()
+        self._save_template_snapshot_for_undo()
         for e in els:
             if e.get("group") in gids:
                 e["group"] = None
-        self._refresh()
+        self._refresh_designer_state()
 
     def _group_peers(self, index: int) -> set:
         """All element indices sharing *index*'s group (incl. itself)."""
@@ -2436,23 +2444,23 @@ class LabelDesignerDialog(QDialog):
                if 0 <= i < len(self._elements())]
         if not idx:
             return
-        self._push_undo()
+        self._save_template_snapshot_for_undo()
         for j in idx:
             c = dict(ch)
             c["index"] = j
             self._apply_element_edit(op, c)
-        self._refresh()
+        self._refresh_designer_state()
 
     def _reorder_element(self, src: int, dst: int) -> None:
         """Move element *src* to list position *dst* (z-order drag-reorder)."""
         els = self._elements()
         if not (0 <= src < len(els)) or not (0 <= dst < len(els)) or src == dst:
             return
-        self._push_undo()
+        self._save_template_snapshot_for_undo()
         el = els.pop(src)
         els.insert(dst, el)
         self._sel = ("element", -1, dst)
-        self._refresh()
+        self._refresh_designer_state()
 
     def _align_elements(self, mode: str, indices: Optional[list] = None) -> None:
         """Align elements. Reference is the selection's bounding box when ≥2 are
@@ -2472,7 +2480,7 @@ class LabelDesignerDialog(QDialog):
             ref_x, ref_y = 0.0, 0.0
             ref_r = float(self._dims.get("w", 60))
             ref_b = float(self._dims.get("h", 40))
-        self._push_undo()
+        self._save_template_snapshot_for_undo()
         for i in idx:
             el = els[i]
             x, y, w, h = self._el_bbox(el)
@@ -2489,7 +2497,7 @@ class LabelDesignerDialog(QDialog):
             elif mode == "vcenter":
                 y = ref_y + (ref_b - ref_y - h) / 2.0
             self._el_move_to(el, x, y)
-        self._refresh()
+        self._refresh_designer_state()
 
     def _distribute_elements(self, axis: str, indices: Optional[list] = None) -> None:
         """Even the gaps between ≥3 elements along *axis* ('h' or 'v').
@@ -2510,7 +2518,7 @@ class LabelDesignerDialog(QDialog):
         end = boxes[order[-1]][a] + boxes[order[-1]][s]
         total_size = sum(boxes[i][s] for i in order)
         gap = (end - start - total_size) / (len(order) - 1)
-        self._push_undo()
+        self._save_template_snapshot_for_undo()
         cursor = start
         for i in order:
             b = boxes[i]
@@ -2519,26 +2527,26 @@ class LabelDesignerDialog(QDialog):
             else:
                 self._el_move_to(els[i], b[0], cursor)
             cursor += b[s] + gap
-        self._refresh()
+        self._refresh_designer_state()
 
     def _add_element(self, etype: str, points: list | None = None) -> None:
-        self._push_undo()
+        self._save_template_snapshot_for_undo()
         els = self._elements()
         el = _default_element(etype, self._dims)
         if etype == "shape" and points:
             el["points"] = copy.deepcopy(points)
         els.append(el)
         self._sel = ("element", -1, len(els) - 1)
-        self._refresh()
+        self._refresh_designer_state()
 
     def _add_row_with_field(self, key: str) -> None:
-        self._push_undo()
+        self._save_template_snapshot_for_undo()
         self._tmpl["rows"].append({
             "fields": [{"key": key, "style": "", "size": None, "offsetX": 0, "offsetY": 0}],
             "size": 9, "style": "", "align": "left", "wrap": True,
         })
         self._sel = ("field", len(self._tmpl["rows"]) - 1, 0)
-        self._refresh()
+        self._refresh_designer_state()
 
     # ── Template library management ────────────────────────────────────────────
     def _save_as_new(self) -> None:

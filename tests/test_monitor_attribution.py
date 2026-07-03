@@ -324,6 +324,13 @@ class TestScanProject:
         names = {f.name for f in result.tiff_files}
         assert "result001.tif" in names
 
+    def test_scan_returns_incoming_tiff_files(self):
+        self._make_tiff("pending_result.tif", subdir="incoming-jpg")
+        result = scan_project(self.tmpdir, self.db)
+        found = next((f for f in result.tiff_files if f.name == "pending_result.tif"), None)
+        assert found is not None
+        assert found.detail.startswith("incoming-jpg/")
+
     def test_nonexistent_dir_raises(self):
         import pytest
         with pytest.raises(FileNotFoundError):

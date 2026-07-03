@@ -169,7 +169,7 @@ class CollabSpecimenCard(QWidget):
     def load_specimen(self, uid: str) -> None:
         """Update the card for the given specimen UID."""
         self._uid = uid
-        self._refresh()
+        self._refresh_collab_task_state()
 
     def clear(self) -> None:
         """Reset to empty state."""
@@ -184,13 +184,13 @@ class CollabSpecimenCard(QWidget):
 
     # ── Refresh ────────────────────────────────────────────────────────────
 
-    def _refresh(self) -> None:
+    def _refresh_collab_task_state(self) -> None:
         svc = getattr(self.ctx, "collab_service", None)
         if svc is None or not svc.is_running() or not self._uid:
             self._show_no_collab()
             return
 
-        task = svc.store.get(self._uid)
+        task = svc.store.get_task(self._uid)
         if task is None:
             self._show_unclaimed()
             return
@@ -250,14 +250,14 @@ class CollabSpecimenCard(QWidget):
             self._status_label.setText(f"🔴 认领失败: {msg}")
             self._status_label.setStyleSheet("color: #cf222e;")
         else:
-            self._refresh()
+            self._refresh_collab_task_state()
 
     def _on_release(self) -> None:
         svc = getattr(self.ctx, "collab_service", None)
         if svc is None or not self._uid:
             return
         svc.release_task(self._uid)
-        self._refresh()
+        self._refresh_collab_task_state()
 
     def _on_transition(self, new_status: str) -> None:
         svc = getattr(self.ctx, "collab_service", None)
@@ -273,4 +273,4 @@ class CollabSpecimenCard(QWidget):
             svc.specimen_status_changed.emit(self._uid)
         except ValueError:
             pass
-        self._refresh()
+        self._refresh_collab_task_state()

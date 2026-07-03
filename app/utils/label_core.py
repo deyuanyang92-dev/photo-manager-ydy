@@ -654,7 +654,7 @@ def plan_label_pages(
     w_mm = float(dims.get("w", 60))
     h_mm = float(dims.get("h", 40))
 
-    def _data(item):
+    def label_payload_for_job_item(item):
         return item.get("data") if isinstance(item, dict) and "data" in item else item
 
     if paper_type in ("a4", "a5"):
@@ -672,7 +672,7 @@ def plan_label_pages(
                 "page": eff // per_page,
                 "x_mm": x_mm,
                 "y_mm": y_mm,
-                "data": _data(item),
+                "data": label_payload_for_job_item(item),
             }
             if scale != 1.0:
                 placement["scale"] = scale
@@ -680,7 +680,7 @@ def plan_label_pages(
         return out
 
     return [
-        {"page": i, "x_mm": 0.0, "y_mm": 0.0, "data": _data(item)}
+        {"page": i, "x_mm": 0.0, "y_mm": 0.0, "data": label_payload_for_job_item(item)}
         for i, item in enumerate(items)
     ]
 

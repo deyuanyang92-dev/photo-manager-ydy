@@ -57,31 +57,31 @@ def resolve_existing_image_path(p: str) -> Optional[str]:
     candidates: list[str] = []
     seen: set[str] = set()
 
-    def _add(c: str) -> None:
-        c = str(c or "").strip()
-        if not c or c in seen:
+    def _append_unique_candidate_path(candidate_path: str) -> None:
+        candidate_path = str(candidate_path or "").strip()
+        if not candidate_path or candidate_path in seen:
             return
-        seen.add(c)
-        candidates.append(c)
+        seen.add(candidate_path)
+        candidates.append(candidate_path)
 
-    _add(raw)
+    _append_unique_candidate_path(raw)
     try:
-        _add(normalize_path(raw))
+        _append_unique_candidate_path(normalize_path(raw))
     except Exception:
         pass
     if is_wsl_runtime():
         if re.match(r"^[A-Za-z]:[/\\]", raw):
             wsl = windows_to_wsl(raw)
             if wsl:
-                _add(wsl)
+                _append_unique_candidate_path(wsl)
                 try:
-                    _add(normalize_path(wsl))
+                    _append_unique_candidate_path(normalize_path(wsl))
                 except Exception:
                     pass
         else:
             win = wsl_to_windows(raw)
             if win:
-                _add(win)
+                _append_unique_candidate_path(win)
 
     for c in candidates:
         if os.path.isfile(c):
@@ -174,10 +174,10 @@ def build_helicon_args(
     Returns a list[str] suitable for subprocess / QProcess.
     """
     # WSL path translation — Oracle: helicon.js:248-251
-    def _win(p: str) -> str:
-        if is_wsl_runtime() and p:
-            return wsl_to_windows(p) or p
-        return p
+    def _path_for_windows_helicon(path: str) -> str:
+        if is_wsl_runtime() and path:
+            return wsl_to_windows(path) or path
+        return path
 
     args: list[str] = []
 
@@ -187,17 +187,17 @@ def build_helicon_args(
 
     # Input: list file (-i) or folder
     if input_list_path:
-        args.extend(["-i", _win(input_list_path)])
+        args.extend(["-i", _path_for_windows_helicon(input_list_path)])
     elif jpg_paths:
         # Folder input — never pass a single .jpg file (Helicon treats it as a path
         # and fails with "No source files found"). Prefer -i list file instead.
-        folder = os.path.dirname(_win(jpg_paths[0]) or jpg_paths[0])
+        folder = os.path.dirname(_path_for_windows_helicon(jpg_paths[0]) or jpg_paths[0])
         if folder:
             args.append(folder)
 
     # Output: -save:<out>  (Oracle: helicon.js:139)
     if output:
-        args.append("-save:" + _win(output))
+        args.append("-save:" + _path_for_windows_helicon(output))
 
     # Method: -mp:<value>  (Oracle: helicon.js:142-144)
     if method is not None and method != "":
@@ -245,7 +245,7 @@ def build_helicon_args(
 
     # Extra output options (Oracle: helicon.js:163-168)
     if dust_map:
-        args.append("-dustmap:" + _win(dust_map))
+        args.append("-dustmap:" + _path_for_windows_helicon(dust_map))
     if save_project:
         args.append("-project:")
     if save_3d:

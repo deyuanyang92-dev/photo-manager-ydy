@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 
-def _now() -> str:
+def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
@@ -24,7 +24,7 @@ def ensure_device(
 ) -> dict:
     """Ensure a collaborator device row exists."""
     did = device_id or str(uuid.uuid4())
-    ts = _now()
+    ts = _utc_now_iso()
     db.execute(
         """
         INSERT INTO devices (
@@ -54,7 +54,7 @@ def ensure_sequence(
     if not pfx:
         raise ValueError("prefix is required")
     sid = str(uuid.uuid4())
-    ts = _now()
+    ts = _utc_now_iso()
     db.execute(
         """
         INSERT INTO uid_sequences (
@@ -95,7 +95,7 @@ def reserve_block(
     seq = ensure_sequence(
         db, prefix, project_code=project_code, scope=scope, padding=padding
     )
-    ts = _now()
+    ts = _utc_now_iso()
     with db:
         row = db.execute(
             "SELECT * FROM uid_sequences WHERE sequence_id=?",
@@ -161,7 +161,7 @@ def consume_next(
         if n > int(res["end_number"]):
             db.execute(
                 "UPDATE uid_reservations SET status='exhausted', updated_at=? WHERE reservation_id=?",
-                (_now(), reservation_id),
+                (_utc_now_iso(), reservation_id),
             )
             raise ValueError("reservation exhausted")
         next_n = n + 1
@@ -172,7 +172,7 @@ def consume_next(
                SET next_unused_number=?, status=?, updated_at=?
              WHERE reservation_id=?
             """,
-            (next_n, status, _now(), reservation_id),
+            (next_n, status, _utc_now_iso(), reservation_id),
         )
     return format_species_id(res["prefix"], n, res["padding"])
 

@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from app.services.monitor_service import (
+    AttributionCtx,
     FileEntry,
     ScanResult,
     scan_project,
@@ -160,5 +161,24 @@ class TestScanRegistersPhotoAssets:
             assert photo["first_seen_at"] == result.jpg_files[0].first_seen_at
             assert file_row["relative_path"] == "incoming-jpg/asset.jpg"
             assert file_row["exists_on_disk"] == 1
+        finally:
+            db_manager.close_all()
+
+    def test_scan_project_does_not_duplicate_same_photo_assignment(self, tmp_path):
+        from app.db import db_manager
+        try:
+            project = tmp_path / "proj"
+            incoming = project / "incoming-jpg"
+            incoming.mkdir(parents=True)
+            jpg = incoming / "assigned.jpg"
+            jpg.write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 100)
+            db = db_manager.open_project_db(str(project), create=True)
+
+            attr = AttributionCtx(assign_to_uid={str(jpg.resolve()): "UID-1"})
+            scan_project(str(project), db, attr=attr)
+            scan_project(str(project), db, attr=attr)
+
+            assert db.execute("SELECT COUNT(*) FROM photo_files").fetchone()[0] == 1
+            assert db.execute("SELECT COUNT(*) FROM photo_assignments").fetchone()[0] == 1
         finally:
             db_manager.close_all()

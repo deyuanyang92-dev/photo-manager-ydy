@@ -322,7 +322,7 @@ class CollabView(BaseView):
     def _refresh_tasks(self) -> None:
         if self._service is None:
             return
-        tasks = self._service.store.all()
+        tasks = self._service.store.list_tasks()
         # Sort by updated_at descending
         tasks.sort(key=lambda t: t.updated_at, reverse=True)
         self._task_table.setRowCount(len(tasks))
