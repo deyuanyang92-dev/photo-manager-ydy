@@ -1243,6 +1243,12 @@ class SettingsView(BaseView):
         ver_label.setObjectName("Accent")
         form.addRow("版本", ver_label)
 
+        update_btn = QPushButton("检查更新")
+        update_btn.setObjectName("Secondary")
+        update_btn.setToolTip("检查 GitHub 最新版本，Windows 打包版可自动更新")
+        update_btn.clicked.connect(self._request_update_check)
+        form.addRow("软件更新", update_btn)
+
         platform_label = QLabel(
             f"{platform.system()} {platform.release()} / Python {platform.python_version()}"
         )
@@ -1294,6 +1300,11 @@ class SettingsView(BaseView):
 
         tab.body.addStretch()
         self._tabs.addTab(tab, tr("关于"))
+
+    def _request_update_check(self) -> None:
+        handler = getattr(self.window(), "_on_upgrade_requested", None)
+        if callable(handler):
+            handler()
 
     # ── Load / save helpers ───────────────────────────────────────────────
 

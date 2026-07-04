@@ -71,8 +71,13 @@ _K_SCREENSHOT_DEFAULT_MIGRATED = "ui/screenshot_tool_default_migrated"
 class _UpdateWorker(QObject):
     progress = pyqtSignal(int, str)
     ready = pyqtSignal(object)
+    no_update = pyqtSignal(object)
     failed = pyqtSignal(str)
     finished = pyqtSignal()
+
+    def __init__(self, current_version: str) -> None:
+        super().__init__()
+        self._current_version = current_version
 
     def run(self) -> None:
         try:
@@ -80,6 +85,11 @@ class _UpdateWorker(QObject):
 
             self.progress.emit(4, "正在检查 GitHub 最新版本...")
             release = update_service.fetch_latest_release()
+            if not update_service.is_newer_version(
+                release.tag_name, self._current_version
+            ):
+                self.no_update.emit(release)
+                return
             self.progress.emit(10, f"发现 {release.tag_name}，正在下载...")
 
             def _on_download(done: int, total: int) -> None:
@@ -670,11 +680,12 @@ class MainWindow(QMainWindow):
         progress.show()
 
         thread = QThread(self)
-        worker = _UpdateWorker()
+        worker = _UpdateWorker(APP_VERSION)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.progress.connect(lambda value, text: self._set_update_progress(progress, value, text))
         worker.ready.connect(lambda prepared: self._apply_prepared_update(prepared, progress))
+        worker.no_update.connect(lambda release: self._show_no_update(progress, release))
         worker.failed.connect(lambda message: self._show_update_failed(progress, message))
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
@@ -693,6 +704,17 @@ class MainWindow(QMainWindow):
             self,
             tr("软件更新失败"),
             tr("未能完成自动更新：\n{}").format(message),
+        )
+
+    def _show_no_update(self, dialog: QProgressDialog, release) -> None:
+        dialog.close()
+        QMessageBox.information(
+            self,
+            tr("软件更新"),
+            tr("当前已是最新版本。\n\n当前版本：{}\nGitHub 最新：{}").format(
+                APP_VERSION,
+                getattr(release, "tag_name", "") or APP_VERSION,
+            ),
         )
 
     def _apply_prepared_update(self, prepared, dialog: QProgressDialog) -> None:
