@@ -2697,6 +2697,19 @@ class WorkbenchView(BaseView):
                     self._status_message(f"RNAlater 标签已加入合版队列：当前 {rna_queue.pending_count(db)} 张")
                 return True
 
+            if quick_mode == "dialog":
+                # The workbench print button should be one-click once the
+                # project settings already resolve to concrete printers. Keep
+                # the dialog only for incomplete routes.
+                routes_ready = True
+                for job in direct_jobs:
+                    target = tissue_printer if job.get("bucket") == "tissue" else sample_printer
+                    if not target:
+                        routes_ready = False
+                        break
+                if routes_ready:
+                    quick_mode = "direct"
+
             printed = 0
             printers_used: list[str] = []
             printed_details: list[str] = []
@@ -5976,7 +5989,68 @@ class WorkbenchView(BaseView):
                 "请选中至少 1 张 JPG 原片和 1 个 TIFF 成片。",
             )
             return
-        self._organise_jpgs_with_tiff(jpg_paths, tiff_paths[0], silent=True)
+        self._organise_jpgs_with_tiff(
+            jpg_paths,
+            tiff_paths[0],
+            silent=True,
+            confirm_tiff_uid_mismatch=True,
+        )
+
+    @staticmethod
+    def _tiff_name_looks_mismatched_with_uid(tiff_path: str, uid: str) -> bool:
+        """Return True when a TIFF filename appears to carry another specimen ID.
+
+        Generic external names such as ``HeliconFocus.tif`` are intentionally
+        ignored; the warning is for names with several UID-like tokens that
+        barely overlap the active specimen.
+        """
+        if not tiff_path or not uid:
+            return False
+        stem = Path(tiff_path).stem.upper()
+        uid_text = str(uid or "").upper()
+        compact_stem = re.sub(r"[^A-Z0-9]+", "", stem)
+        compact_uid = re.sub(r"[^A-Z0-9]+", "", uid_text)
+        if not compact_stem or not compact_uid:
+            return False
+        if compact_uid in compact_stem or compact_stem in compact_uid:
+            return False
+
+        stem_tokens = [
+            token for token in re.split(r"[^A-Z0-9]+", stem)
+            if len(token) >= 2
+        ]
+        uid_tokens = {
+            token for token in re.split(r"[^A-Z0-9]+", uid_text)
+            if len(token) >= 2
+        }
+        if len(stem_tokens) < 3 or not uid_tokens:
+            return False
+
+        has_date_like = any(token.isdigit() and 6 <= len(token) <= 8 for token in stem_tokens)
+        has_code_like = sum(bool(re.search(r"[A-Z]", token)) for token in stem_tokens) >= 2
+        if not (has_date_like or has_code_like):
+            return False
+
+        overlap = sum(1 for token in set(stem_tokens) if token in uid_tokens)
+        return overlap <= 1
+
+    def _confirm_tiff_uid_mismatch(self, tiff_path: str, active_uid: str) -> bool:
+        if not self._tiff_name_looks_mismatched_with_uid(tiff_path, active_uid):
+            return True
+        reply = QMessageBox.question(
+            self,
+            "确认 TIFF 归属",
+            (
+                "选中的 TIFF 文件名和当前激活编号差异很大。\n\n"
+                f"当前激活编号：{active_uid}\n"
+                f"TIFF 文件：{Path(tiff_path).name}\n\n"
+                "如果继续，软件会按当前激活编号整理并重命名这个 TIFF。"
+                "请确认这不是选错编号或选错文件。"
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return reply == QMessageBox.StandardButton.Yes
 
     def _organise_jpgs_with_tiff(
         self,
@@ -5984,6 +6058,7 @@ class WorkbenchView(BaseView):
         tiff_path: str,
         *,
         silent: bool,
+        confirm_tiff_uid_mismatch: bool = False,
         on_complete=None,
     ) -> bool:
         """把已有 JPG + TIFF 登记成已合成组，然后走统一整理/归档入口。"""
@@ -5997,6 +6072,12 @@ class WorkbenchView(BaseView):
         incoming_subdir = "incoming-jpg"
         results_subdir = "results"
         if active_uid:
+            if confirm_tiff_uid_mismatch and not self._confirm_tiff_uid_mismatch(
+                tiff_path,
+                active_uid,
+            ):
+                self._status_message("已取消整理：TIFF 文件名与当前激活编号不一致")
+                return False
             try:
                 incoming_subdir, results_subdir = self._resolve_capture_subdirs()
             except Exception as exc:

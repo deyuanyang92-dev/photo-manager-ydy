@@ -29,7 +29,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QApplication, QWidget
+from PyQt6.QtWidgets import QApplication, QMessageBox, QWidget
 
 # One shared QApplication instance for all tests in this module
 _APP = None
@@ -2287,6 +2287,37 @@ class TestWorkbenchQuickPrint:
             "include_tissue": False,
         })
         assert w._quick_print_labels(uid) is False
+        db.close()
+
+    def test_quick_print_dialog_mode_prints_direct_when_printer_is_configured(
+        self, tmp_path, monkeypatch
+    ):
+        from PyQt6.QtPrintSupport import QPrinterInfo
+        from app.services.project_settings_service import save_setting
+        import app.utils.label_print as lp
+
+        monkeypatch.setattr(QPrinterInfo, "defaultPrinterName",
+                            staticmethod(lambda: "FakePrinter"))
+        monkeypatch.setattr(lp, "build_printer", lambda job, **kw: MagicMock())
+        monkeypatch.setattr(lp, "paint_jobs", lambda printer, jobs, **kw: True)
+
+        import app.widgets.print_dialog as print_dialog
+        monkeypatch.setattr(
+            print_dialog,
+            "PrintJobDialog",
+            lambda *a, **k: pytest.fail("configured quick print should not prompt"),
+        )
+
+        w, ctx, uid, db = self._wb(tmp_path, "D95E")
+        save_setting(db, "print_settings", {
+            "quick_print": True,
+            "quick_print_mode": "dialog",
+            "sample_printer": "",
+            "sample_paper_type": "label",
+            "include_tissue": False,
+        })
+
+        assert w._quick_print_labels(uid) is True
         db.close()
 
     def test_quick_print_no_default_printer_returns_false(self, tmp_path, monkeypatch):
@@ -5751,6 +5782,59 @@ class TestImplicitCompose:
         assert grouping.groups[0].composed_tiff_path == str(expected)
         assert calls[0][0] == self.UID
         assert calls[0][2]["allow_single_jpg"] is True
+
+    def test_selected_organise_warns_when_tiff_name_mismatches_active_uid(
+        self, tmp_path, monkeypatch
+    ):
+        w, ctx, db = self._make_view(tmp_path, [])
+        jpg = tmp_path / "a.jpg"; jpg.write_bytes(b"\xff\xd8\xff")
+        tiff = tmp_path / "GZQ-SNW-XTC003-1-R-20260619-3.tif"; tiff.write_bytes(b"II*\x00")
+        monkeypatch.setattr(w, "_get_active_uid", lambda: self.UID)
+        monkeypatch.setattr(w._monitor, "selected_jpg_paths", lambda: [str(jpg)])
+        monkeypatch.setattr(w._monitor, "selected_tiff_paths", lambda: [str(tiff)])
+        calls = []
+        monkeypatch.setattr(
+            w,
+            "_on_organise_requested",
+            lambda uid, idx, **kw: calls.append((uid, idx, kw)),
+        )
+        questions = []
+        monkeypatch.setattr(
+            QMessageBox,
+            "question",
+            lambda *args, **kwargs: questions.append(args) or QMessageBox.StandardButton.No,
+        )
+
+        w._on_organise_selected()
+
+        assert questions
+        assert calls == []
+        assert tiff.is_file()
+
+    def test_selected_organise_does_not_warn_for_generic_external_tiff(
+        self, tmp_path, monkeypatch
+    ):
+        w, ctx, db = self._make_view(tmp_path, [])
+        jpg = tmp_path / "a.jpg"; jpg.write_bytes(b"\xff\xd8\xff")
+        tiff = tmp_path / "HeliconFocus.tif"; tiff.write_bytes(b"II*\x00")
+        monkeypatch.setattr(w, "_get_active_uid", lambda: self.UID)
+        monkeypatch.setattr(w._monitor, "selected_jpg_paths", lambda: [str(jpg)])
+        monkeypatch.setattr(w._monitor, "selected_tiff_paths", lambda: [str(tiff)])
+        calls = []
+        monkeypatch.setattr(
+            w,
+            "_on_organise_requested",
+            lambda uid, idx, **kw: calls.append((uid, idx, kw)),
+        )
+        monkeypatch.setattr(
+            QMessageBox,
+            "question",
+            lambda *args, **kwargs: pytest.fail("generic TIFF name should not warn"),
+        )
+
+        w._on_organise_selected()
+
+        assert calls and calls[0][0] == self.UID
 
     def test_auto_compress_toggle_seeds_existing_tiffs(self, tmp_path):
         from app.services.monitor_service import FileEntry, ScanResult
