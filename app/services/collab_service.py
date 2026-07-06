@@ -157,7 +157,8 @@ class PeerInfo:
     hostname: str = ""
     project_name: str = ""
     project_id: str = ""
-    group_code: str = ""          # collaboration-group code; only matching peers sync
+    group_code: str = ""          # session code; only matching peers sync
+    session_name: str = ""        # human-readable session label, e.g. "张三的会话"
     last_seen: float = field(default_factory=time.time)
     latency_ms: Optional[float] = None
     clock_skew_ms: Optional[float] = None   # local_time - peer serverTime (ms)
@@ -262,8 +263,14 @@ class TaskStore:
             task.updated_at = _now_iso()
             return task
 
-    def merge_from_peer(self, remote_tasks: list[dict]) -> int:
-        """Merge peer task list; newer updated_at wins.  Returns changed count."""
+    def merge_from_peer(self, remote_tasks: list[dict],
+                        overwrites_out: list | None = None) -> int:
+        """Merge peer task list; newer updated_at wins.  Returns changed count.
+
+        If *overwrites_out* is supplied, dicts describing each case where a
+        local task's status was silently replaced by a remote value are
+        appended: ``{"uid": ..., "old_status": ..., "new_status": ...}``.
+        """
         changed = 0
         with self._lock:
             for rd in remote_tasks:
@@ -273,6 +280,16 @@ class TaskStore:
                 remote = TaskRecord.from_dict(rd)
                 local = self._tasks.get(uid)
                 if local is None or remote.updated_at > local.updated_at:
+                    if (
+                        overwrites_out is not None
+                        and local is not None
+                        and local.status != remote.status
+                    ):
+                        overwrites_out.append({
+                            "uid": uid,
+                            "old_status": local.status.value,
+                            "new_status": remote.status.value,
+                        })
                     self._tasks[uid] = remote
                     changed += 1
         return changed
@@ -297,7 +314,11 @@ class TaskStore:
 def _build_fastapi_app(store: TaskStore, node_info_fn: Callable[[], dict],
                        activity_log: Optional[ActivityLog] = None,
                        file_manifest_fn: Optional[Callable[[Optional[list[str]]], dict]] = None,
-                       file_path_fn: Optional[Callable[[str], Path]] = None) -> Any:
+                       file_path_fn: Optional[Callable[[str], Path]] = None,
+                       pairing_request_fn: Optional[Callable[[str, str, str], None]] = None,
+                       pairing_accept_fn: Optional[Callable[[str, str], None]] = None,
+                       specimen_provider_fn: Optional[Callable[[Optional[str]], list]] = None,
+                       specimen_writer_fn: Optional[Callable[[list], int]] = None) -> Any:
     """Build and return the FastAPI app.  Imported lazily to avoid startup cost.
 
     The fastapi names are bound into module globals (``global`` below) so that
@@ -402,6 +423,37 @@ def _build_fastapi_app(store: TaskStore, node_info_fn: Callable[[], dict],
         store.delete(uid)
         return {"ok": True, "uid": uid}
 
+    # ── Pairing (zero-config peer connection) ────────────────────────────────
+
+    @app.post("/api/collab/pairing/request")
+    async def pairing_request(request: Request) -> dict:
+        """Incoming pairing request from another device.
+
+        Body: {fromIp, fromHostname, groupCode}
+        The receiving app shows a confirmation dialog; if accepted the devices
+        adopt a shared group code and begin syncing.
+        """
+        body = await request.json()
+        from_ip = body.get("fromIp", "")
+        from_hostname = body.get("fromHostname", "未知设备")
+        their_code = body.get("groupCode", "")
+        if pairing_request_fn is not None:
+            pairing_request_fn(from_ip, from_hostname, their_code)
+        return {"ok": True, "status": "pending"}
+
+    @app.post("/api/collab/pairing/accept")
+    async def pairing_accept(request: Request) -> dict:
+        """Notification that the remote device has accepted our pairing request."""
+        body = await request.json()
+        from_ip = body.get("fromIp", "")
+        from_hostname = body.get("fromHostname", "未知设备")
+        adopted_code = body.get("groupCode", "")
+        if adopted_code:
+            node_info_fn()  # ensure state is current
+        if pairing_accept_fn is not None:
+            pairing_accept_fn(from_ip, from_hostname)
+        return {"ok": True, "groupCode": adopted_code}
+
     @app.post("/api/collab/photo-index")
     async def receive_photo_index(request: Request) -> dict:
         """Receive photo-index report from a peer after helicon/archive completion.
@@ -459,23 +511,26 @@ def _build_fastapi_app(store: TaskStore, node_info_fn: Callable[[], dict],
 
     @app.post("/api/collab/specimens/push")
     async def receive_specimen_push(request: Request) -> dict:
-        """Accept specimen record pushed from a peer (L2 sync).
-
-        For now we just acknowledge — the view can subscribe to the
-        CollabService.specimen_received signal for richer handling.
-        """
+        """Accept specimen records pushed from a peer; writes to local DB."""
         body = await request.json()
         local_group = node_info_fn().get("groupCode", "")
         if not local_group or body.get("groupCode", "") != local_group:
             raise HTTPException(status_code=403, detail="collaboration group mismatch")
-        uid = body.get("uid", "")
-        logger.debug("collab: specimen push received uid=%s", uid)
-        return {"ok": True, "uid": uid}
+        specimens = body.get("specimens", [])
+        if not isinstance(specimens, list):
+            raise HTTPException(status_code=400, detail="specimens must be a list")
+        written = 0
+        if specimen_writer_fn is not None and specimens:
+            written = specimen_writer_fn(specimens)
+        logger.debug("collab: received %d specimen(s) from peer", written)
+        return {"ok": True, "written": written}
 
     @app.get("/api/collab/specimens")
     async def list_specimens() -> list:
-        """Return local specimen records.  Stubbed — override via app context."""
-        return []
+        """Return local specimen records for peer sync."""
+        if specimen_provider_fn is None:
+            return []
+        return specimen_provider_fn(None)
 
     @app.get("/api/collab/activity")
     async def get_activity() -> list:
@@ -529,7 +584,11 @@ class CollabServerThread(QThread):
                  preferred_port: int = 5050,
                  activity_log: Optional[ActivityLog] = None,
                  file_manifest_fn: Optional[Callable[[Optional[list[str]]], dict]] = None,
-                 file_path_fn: Optional[Callable[[str], Path]] = None) -> None:
+                 file_path_fn: Optional[Callable[[str], Path]] = None,
+                 pairing_request_fn: Optional[Callable[[str, str, str], None]] = None,
+                 pairing_accept_fn: Optional[Callable[[str, str], None]] = None,
+                 specimen_provider_fn: Optional[Callable[[Optional[str]], list]] = None,
+                 specimen_writer_fn: Optional[Callable[[list], int]] = None) -> None:
         super().__init__()
         self._store = store
         self._node_info_fn = node_info_fn
@@ -537,6 +596,10 @@ class CollabServerThread(QThread):
         self._activity_log = activity_log
         self._file_manifest_fn = file_manifest_fn
         self._file_path_fn = file_path_fn
+        self._pairing_request_fn = pairing_request_fn
+        self._pairing_accept_fn = pairing_accept_fn
+        self._specimen_provider_fn = specimen_provider_fn
+        self._specimen_writer_fn = specimen_writer_fn
         self._actual_port: Optional[int] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._server: Optional[Any] = None  # uvicorn.Server, set in run()
@@ -574,6 +637,10 @@ class CollabServerThread(QThread):
             self._activity_log,
             file_manifest_fn=self._file_manifest_fn,
             file_path_fn=self._file_path_fn,
+            pairing_request_fn=self._pairing_request_fn,
+            pairing_accept_fn=self._pairing_accept_fn,
+            specimen_provider_fn=self._specimen_provider_fn,
+            specimen_writer_fn=self._specimen_writer_fn,
         )
 
         self._loop = asyncio.new_event_loop()
@@ -832,12 +899,17 @@ class CollabService(QObject):
     peers_changed    = pyqtSignal()
     tasks_changed    = pyqtSignal()
     conflict_detected = pyqtSignal(str)        # uid
+    data_overwritten  = pyqtSignal(list)       # list[dict{uid,old_status,new_status}]
     sync_error       = pyqtSignal(str)
     server_ready     = pyqtSignal(int)         # port
     offline_drafts_changed = pyqtSignal()      # draft queue added/cleared
     diagnostics_changed = pyqtSignal()         # self-diagnostics list updated
     activity_logged  = pyqtSignal()            # new activity entry appended
     specimen_status_changed = pyqtSignal(str)  # uid whose collab status changed
+    pairing_requested = pyqtSignal(str, str, str)  # ip, hostname, their_group_code
+    pairing_accepted  = pyqtSignal(str, str)       # ip, hostname
+    specimens_updated = pyqtSignal()               # local DB got new/updated specimens
+    project_bind_suggested = pyqtSignal(str, str, str)  # peer_hostname, project_name, sync_code
 
     def __init__(self, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
@@ -851,6 +923,7 @@ class CollabService(QObject):
         self._project_id: str = ""
         self._project_dir: str = ""
         self._group_code: str = ""
+        self._session_name: str = ""   # human-readable session label
         self._running: bool = False
         self._diagnostics: list[Diagnostic] = []
         self._discovery_error: str = ""
@@ -859,15 +932,24 @@ class CollabService(QObject):
         self._offline_drafts: list[OfflineDraft] = []
         self._offline_drafts_lock = threading.Lock()
 
+        # Same-name project bind suggestions already shown (peer project_ids);
+        # prevents re-nagging after the user declines.  Reset on project switch.
+        self._bind_prompted: set[str] = set()
+
         self._server_thread: Optional[CollabServerThread] = None
         self._discovery_thread: Optional[CollabDiscoveryThread] = None
+        self._subnet_scanner: Optional[QThread] = None
         self._sync_timer = QTimer(self)
-        self._sync_timer.setInterval(5000)
+        self._sync_timer.setInterval(5000)     # 5 s pull-sync (backup for failed pushes)
         self._sync_timer.timeout.connect(self._sync_all_peers)
         # Retry timer — attempt to flush offline drafts when peers are present
         self._retry_timer = QTimer(self)
         self._retry_timer.setInterval(15000)   # 15 s retry cadence
         self._retry_timer.timeout.connect(self._maybe_retry_offline_drafts)
+        # Periodic subnet scan — catches devices missed by mDNS (esp. Windows)
+        self._subnet_scan_timer = QTimer(self)
+        self._subnet_scan_timer.setInterval(60000)  # every 60 s
+        self._subnet_scan_timer.timeout.connect(self._periodic_subnet_scan)
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
 
@@ -883,6 +965,17 @@ class CollabService(QObject):
         if project_dir:
             self._project_dir = project_dir
             self._project_id = self._ensure_project_id(project_dir)
+            # Restore any drafts that survived a previous app restart
+            persisted = self._load_drafts_from_disk()
+            if persisted:
+                with self._offline_drafts_lock:
+                    existing = {d.uid for d in self._offline_drafts}
+                    self._offline_drafts.extend(
+                        d for d in persisted if d.uid not in existing
+                    )
+                logger.info("collab: restored %d offline draft(s) from disk", len(persisted))
+        # Team code: explicit param wins; otherwise keep whatever was set
+        # (persisted team code is passed in by callers from settings).
         if group_code:
             self._group_code = group_code.strip()
         self._running = True
@@ -894,6 +987,10 @@ class CollabService(QObject):
             activity_log=self.activity_log,
             file_manifest_fn=self._file_manifest_payload,
             file_path_fn=self._resolve_file_path,
+            pairing_request_fn=self._on_pairing_request_received,
+            pairing_accept_fn=self._on_pairing_accept_received,
+            specimen_provider_fn=self._get_local_specimens,
+            specimen_writer_fn=self._write_specimens_to_local_db,
         )
         self._server_thread.started_on_port.connect(self._on_server_started)
         self._server_thread.server_error.connect(
@@ -924,6 +1021,9 @@ class CollabService(QObject):
         self._discovery_thread.start()
         self._sync_timer.start()
         self._retry_timer.start()
+        # First subnet scan 5 s after start (mDNS may not have seen all peers yet)
+        QTimer.singleShot(5000, self._periodic_subnet_scan)
+        self._subnet_scan_timer.start()
         self.run_diagnostics()
 
     def stop(self) -> None:
@@ -931,6 +1031,8 @@ class CollabService(QObject):
         self._running = False
         self._sync_timer.stop()
         self._retry_timer.stop()
+        self._subnet_scan_timer.stop()
+        self._stop_subnet_scanner()
         if self._discovery_thread:
             self._discovery_thread.stop()
             self._discovery_thread = None
@@ -961,6 +1063,30 @@ class CollabService(QObject):
             self._project_id,
             project_name=Path(str(self._project_name or "")).name,
         )
+
+    def discover_team_projects(self) -> list[dict]:
+        """List distinct projects currently open by same-team peers.
+
+        Each entry: ``{"name": str, "code": str, "peer_count": int}`` where
+        *code* is a ready-to-apply project sync code (see
+        ``apply_project_sync_code``).  Used by "新建项目" to offer "加入团队
+        现有项目" instead of guessing by name.
+        """
+        from app.services.project_identity_service import project_sync_code
+
+        with self._peers_lock:
+            peers = [p for p in self._peers.values() if self._group_matches(p)]
+        by_id: dict[str, dict] = {}
+        for p in peers:
+            if not p.project_id:
+                continue
+            entry = by_id.setdefault(p.project_id, {
+                "name": Path(str(p.project_name or "")).name or p.project_id,
+                "code": project_sync_code(p.project_id, project_name=Path(str(p.project_name or "")).name),
+                "peer_count": 0,
+            })
+            entry["peer_count"] += 1
+        return sorted(by_id.values(), key=lambda e: e["name"])
 
     def apply_project_sync_code(self, code: str) -> str:
         """Adopt a project sync code after the UI has asked for confirmation."""
@@ -1016,15 +1142,79 @@ class CollabService(QObject):
         return self._group_code
 
     def set_group_code(self, code: str) -> None:
-        """Set the collaboration-group code at runtime (e.g. from settings)."""
+        """Override the auto-derived group code (advanced / cross-project pairing)."""
         self._group_code = (code or "").strip()
 
+    # ── Session management (zero-config team collaboration) ───────────────
+
+    @property
+    def session_name(self) -> str:
+        return self._session_name
+
+    @staticmethod
+    def _generate_session_code() -> str:
+        """6-char uppercase alphanumeric session code (e.g. 'A3B7C2')."""
+        import random
+        import string
+        chars = string.ascii_uppercase + string.digits
+        return "".join(random.choices(chars, k=6))
+
+    def create_session(self, name: str = "") -> str:
+        """Create a new collaboration session; returns the session code.
+
+        Generates a short unique code, sets it as the group code, and
+        broadcasts this node as the session host.  Other devices on the
+        subnet can then see and join this session.
+        """
+        code = self._generate_session_code()
+        self._group_code = code
+        self._session_name = name or f"{self._hostname}的会话"
+        self._log_activity("session", detail=f"新建协作会话：{self._session_name}（{code}）")
+        self.peers_changed.emit()
+        return code
+
+    def join_session(self, session_code: str, session_name: str = "") -> None:
+        """Join an existing session by adopting its code as the group code.
+
+        Immediately pulls all specimen records from peers so this device has
+        the full current dataset before starting its own work.
+        """
+        code = (session_code or "").strip().upper()
+        if not code:
+            return
+        self._group_code = code
+        self._session_name = session_name or f"加入了 {code}"
+        self._log_activity("session", detail=f"加入协作会话：{code}")
+        self.peers_changed.emit()
+        # Pull task records immediately
+        QTimer.singleShot(100, self._sync_all_peers)
+        # Pull specimen records (full dataset from all peers in this session)
+        QTimer.singleShot(300, self.pull_all_specimens_from_session)
+
+    def leave_session(self) -> None:
+        """Leave the current team (clears team code, stops syncing)."""
+        self._group_code = ""
+        self._session_name = ""
+        self._log_activity("session", detail="已退出协作团队")
+        self.peers_changed.emit()
+
     def set_project_dir(self, project_dir: str | None) -> None:
-        """Update the project directory used by file-sync endpoints."""
+        """Update the project directory used by file-sync endpoints.
+
+        The team code is independent of the project: switching projects keeps
+        the team connection alive; data sync simply follows whichever peers
+        have the same project open (see _data_sync_allowed).
+        """
         self._project_dir = str(project_dir or "")
+        self._bind_prompted.clear()
         if project_dir:
             self._project_name = str(project_dir)
             self._project_id = self._ensure_project_id(project_dir)
+            # Project switched: immediately sync with teammates now on the
+            # same project (team connection itself is unaffected).
+            if self._running and self._group_code:
+                QTimer.singleShot(500, self._sync_all_peers)
+                QTimer.singleShot(1000, self.pull_all_specimens_from_session)
         else:
             self._project_id = ""
 
@@ -1046,8 +1236,89 @@ class CollabService(QObject):
             return ""
 
     def _group_matches(self, peer: PeerInfo) -> bool:
-        """A peer syncs with us only when both sides share a non-empty code."""
+        """Team membership: both sides share a non-empty team code."""
         return bool(self._group_code) and peer.group_code == self._group_code
+
+    @staticmethod
+    def _normalize_project_label(name: str) -> str:
+        """Normalise a project name/path for cross-device comparison.
+
+        Takes the directory basename, strips whitespace (incl. internal),
+        and casefolds — so "三门湾 调查" and "三门湾调查" match, and full
+        paths on different disks (D:\\x\\三门湾 vs E:\\y\\三门湾) match too.
+        """
+        raw = str(name or "").strip().replace("\\", "/").rstrip("/")
+        if not raw:
+            return ""
+        base = raw.rsplit("/", 1)[-1]
+        return "".join(base.split()).casefold()
+
+    def _project_matches(self, peer: PeerInfo) -> bool:
+        """Decide whether *peer* is working on "the same" project as us.
+
+        Authoritative check: project_id (a UUID stamped into each project's
+        DB by ``project_identity_service``).  Two devices whose local folders
+        were explicitly bound to the same ID via a project sync code always
+        match/never match deterministically — no string-matching fragility.
+
+        Fallback: normalised project *name* comparison, used only when either
+        side has not yet been bound to an explicit ID (fresh/legacy project).
+        This keeps zero-config sync working for the common case (both people
+        just create identically-named folders) while still allowing the
+        exact-ID path for teams that care about correctness.
+        """
+        if self._project_id and peer.project_id:
+            return self._project_id == peer.project_id
+
+        mine = self._normalize_project_label(self._project_name)
+        theirs = self._normalize_project_label(peer.project_name)
+        if not mine or not theirs:
+            return True
+        return mine == theirs
+
+    def _data_sync_allowed(self, peer: PeerInfo) -> bool:
+        """Data (tasks + specimens) flows only within the same team AND the
+        same project.  Team members on other projects stay visible but their
+        data never mixes into ours."""
+        return self._group_matches(peer) and self._project_matches(peer)
+
+    def _check_project_bind_suggestions(self, peers: list[PeerInfo]) -> None:
+        """Detect teammates whose project has the same NAME but a different ID.
+
+        Happens when two people independently create identically-named local
+        folders instead of using the "加入团队现有项目" flow.  We suggest
+        binding (once per peer project) via ``project_bind_suggested``; the UI
+        asks the user to confirm, then calls ``apply_project_sync_code``.
+
+        Tie-break: only the side with the LARGER project_id prompts (and would
+        adopt the smaller ID) so both machines never adopt each other's ID
+        simultaneously and end up swapped-but-still-different.
+        """
+        if not self._project_id or not self._project_name:
+            return
+        mine_label = self._normalize_project_label(self._project_name)
+        if not mine_label:
+            return
+        from app.services.project_identity_service import project_sync_code
+
+        for p in peers:
+            if not self._group_matches(p):
+                continue
+            if not p.project_id or p.project_id == self._project_id:
+                continue
+            if p.project_id in self._bind_prompted:
+                continue
+            if self._normalize_project_label(p.project_name) != mine_label:
+                continue
+            if self._project_id <= p.project_id:
+                continue  # the other side prompts; we keep our ID
+            self._bind_prompted.add(p.project_id)
+            display = Path(str(p.project_name or "")).name or mine_label
+            try:
+                code = project_sync_code(p.project_id, project_name=display)
+            except ValueError:
+                continue
+            self.project_bind_suggested.emit(p.hostname or p.ip, display, code)
 
     # ── Self-diagnostics ──────────────────────────────────────────────────
 
@@ -1154,9 +1425,116 @@ class CollabService(QObject):
     # ── Network probes (run off the main thread) ──────────────────────────
 
     def _on_discovery_error(self, msg: str) -> None:
-        """Record an mDNS discovery failure and refresh diagnostics."""
+        """Record an mDNS discovery failure and fall back to subnet scan."""
         self._discovery_error = msg
         self.run_diagnostics()
+        # mDNS is unavailable (Windows Firewall / VLAN) — scan the local subnet
+        QTimer.singleShot(500, self.scan_subnet_peers)
+
+    def _periodic_subnet_scan(self) -> None:
+        """Periodic scan to catch devices missed by mDNS (runs every 60 s).
+
+        Only scans if there are no known peers or mDNS has reported errors,
+        to avoid unnecessary network traffic when everything is working fine.
+        """
+        if not self._running:
+            return
+        with self._peers_lock:
+            peer_count = len(self._peers)
+        if peer_count == 0 or self._discovery_error:
+            self.scan_subnet_peers()
+
+    # ── Subnet scan fallback ───────────────────────────────────────────────
+
+    def scan_subnet_peers(self, on_done: Optional[Callable[[int], None]] = None) -> None:
+        """Scan the local /24 subnet for collab nodes (mDNS fallback).
+
+        Probes every host in the subnet concurrently (1 s timeout, 30 workers).
+        Safe to call multiple times — kills any in-progress scanner first.
+        """
+        self._stop_subnet_scanner()
+
+        port = self._port or 5050
+        local_ip = _get_local_ip()
+
+        class _SubnetScanner(QThread):
+            peer_found = pyqtSignal(str, int, str)  # ip, port, hostname
+            scan_done  = pyqtSignal(int)             # found count
+
+            def __init__(self, ip: str, p: int) -> None:
+                super().__init__()
+                self._local_ip = ip
+                self._port = p
+
+            def run(self) -> None:
+                import concurrent.futures
+                parts = self._local_ip.split(".")
+                if len(parts) != 4:
+                    self.scan_done.emit(0)
+                    return
+                prefix = ".".join(parts[:3])
+                candidates = [
+                    f"{prefix}.{i}" for i in range(1, 255)
+                    if f"{prefix}.{i}" != self._local_ip
+                ]
+                found = 0
+
+                def probe(ip: str) -> Optional[tuple[str, str]]:
+                    if self.isInterruptionRequested():
+                        return None
+                    try:
+                        import httpx
+                        r = httpx.get(
+                            f"http://{ip}:{self._port}/api/node/health",
+                            timeout=1.0,
+                        )
+                        if r.status_code == 200:
+                            # Try to get hostname from /info
+                            try:
+                                info = httpx.get(
+                                    f"http://{ip}:{self._port}/api/node/info",
+                                    timeout=1.0,
+                                ).json()
+                                hostname = info.get("hostname", ip)
+                            except Exception:
+                                hostname = ip
+                            return ip, hostname
+                    except Exception:
+                        pass
+                    return None
+
+                with concurrent.futures.ThreadPoolExecutor(max_workers=30) as pool:
+                    for result in pool.map(probe, candidates):
+                        if result is not None:
+                            ip_addr, hn = result
+                            self.peer_found.emit(ip_addr, self._port, hn)
+                            found += 1
+                self.scan_done.emit(found)
+
+        scanner = _SubnetScanner(local_ip, port)
+        scanner.peer_found.connect(self._on_peer_found)
+        if on_done is not None:
+            scanner.scan_done.connect(on_done)
+        scanner.finished.connect(lambda: self._clear_subnet_scanner(scanner))
+        scanner.finished.connect(scanner.deleteLater)
+        scanner.start()
+        self._subnet_scanner = scanner
+
+    def _stop_subnet_scanner(self) -> None:
+        scanner = self._subnet_scanner
+        if scanner is None:
+            return
+        try:
+            scanner.requestInterruption()
+            scanner.wait(2000)
+        except Exception:
+            pass
+        if self._subnet_scanner is scanner:
+            self._subnet_scanner = None
+
+    def _clear_subnet_scanner(self, scanner: QThread) -> None:
+        if self._subnet_scanner is scanner:
+            self._subnet_scanner = None
 
     def _probe_peer(self, peer: PeerInfo) -> None:
         """Measure reachability, clock skew and reachback for one peer."""
@@ -1173,6 +1551,8 @@ class CollabService(QObject):
                 peer.project_id = data.get("projectId", peer.project_id)
                 if not peer.group_code:
                     peer.group_code = data.get("groupCode", "")
+                if data.get("sessionName"):
+                    peer.session_name = data["sessionName"]
                 try:
                     rb = httpx.post(
                         f"{peer.base_url}/api/node/reachback",
@@ -1236,6 +1616,7 @@ class CollabService(QObject):
                     ip=host, port=port,
                     hostname=data.get("hostname", ""),
                     group_code=data.get("groupCode", ""),
+                    session_name=data.get("sessionName", ""),
                     project_name=data.get("projectName", ""),
                     project_id=data.get("projectId", ""),
                     manual=True,
@@ -1337,17 +1718,51 @@ class CollabService(QObject):
             return
 
         changed_total = 0
+        all_overwrites: list[dict] = []
         for peer in peers_snapshot:
-            changed_total += self._sync_peer(peer)
+            n, overwrites = self._sync_peer_with_overwrites(peer)
+            changed_total += n
+            all_overwrites.extend(overwrites)
 
         if changed_total:
             self.tasks_changed.emit()
             self._log_activity("status_changed", detail=f"同步更新了 {changed_total} 条任务")
 
+        if all_overwrites:
+            self.data_overwritten.emit(all_overwrites)
+            for o in all_overwrites:
+                self._log_activity(
+                    "sync_overwrite", o["uid"],
+                    detail=(
+                        f"同步时本机状态被覆盖：{o['old_status']} → {o['new_status']}"
+                    ),
+                    severity="warn",
+                )
+
+        # Specimen metadata sync: every 6th task-sync cycle (~30 s)
+        self._spec_sync_counter = getattr(self, "_spec_sync_counter", 0) + 1
+        if self._spec_sync_counter >= 6:
+            self._spec_sync_counter = 0
+            for peer in peers_snapshot:
+                self._sync_specimens_from_peer(peer)
+
+        # Same-name / different-ID projects: suggest binding (confirm in UI)
+        self._check_project_bind_suggestions(peers_snapshot)
+
     def _sync_peer(self, peer: PeerInfo) -> int:
-        """Pull /api/collab/tasks from one peer and merge.  Returns changed count."""
-        if not self._group_matches(peer):
-            return 0  # different (or no) collaboration group → never sync
+        """Pull one peer and return the number of changed local tasks."""
+        changed, _overwrites = self._sync_peer_with_overwrites(peer)
+        return changed
+
+    def _sync_peer_with_overwrites(self, peer: PeerInfo) -> tuple[int, list[dict]]:
+        """Pull /api/collab/tasks from one peer and merge.
+
+        Returns ``(changed_count, overwrites)`` where *overwrites* is a list of
+        dicts ``{uid, old_status, new_status}`` for tasks whose local status was
+        silently replaced by a newer remote value.
+        """
+        if not self._data_sync_allowed(peer):
+            return 0, []
         try:
             import httpx
             t0 = time.monotonic()
@@ -1356,10 +1771,12 @@ class CollabService(QObject):
             peer.last_seen = time.time()
             if resp.status_code == 200:
                 remote_tasks: list[dict] = resp.json()
-                return self.store.merge_from_peer(remote_tasks)
+                overwrites: list[dict] = []
+                changed = self.store.merge_from_peer(remote_tasks, overwrites_out=overwrites)
+                return changed, overwrites
         except Exception as exc:  # noqa: BLE001
             logger.debug("collab: sync failed for %s: %s", peer.base_url, exc)
-        return 0
+        return 0, []
 
     # ── Task creation (with remote 409 check) ─────────────────────────────
 
@@ -1407,9 +1824,10 @@ class CollabService(QObject):
         # 3. Broadcast to peers; roll back local + remote claims on conflict.
         peers_snapshot: list[PeerInfo]
         with self._peers_lock:
-            peers_snapshot = [p for p in self._peers.values() if self._group_matches(p)]
+            peers_snapshot = [p for p in self._peers.values() if self._data_sync_allowed(p)]
 
         claimed_peers: list[PeerInfo] = []
+        unreachable_peers: list[PeerInfo] = []
         for peer in peers_snapshot:
             ok, conflict_msg, created = self._remote_create(peer, uid, assignee, device_id)
             if not ok:
@@ -1419,6 +1837,18 @@ class CollabService(QObject):
                 return False, conflict_msg
             if created:
                 claimed_peers.append(peer)
+            else:
+                # Network failure (not a 409) — peer unreachable, task not broadcast
+                unreachable_peers.append(peer)
+
+        # If any peer was unreachable, queue for retry so it gets the task later.
+        # This prevents split-brain if B comes online after A created the UID.
+        if unreachable_peers:
+            self.mark_offline_draft(uid, assignee=assignee, device_id=device_id)
+            logger.debug(
+                "collab: %d peer(s) unreachable during create of %s — queued offline draft",
+                len(unreachable_peers), uid,
+            )
 
         self.tasks_changed.emit()
         self._log_activity("claimed", uid, detail=f"认领了编号 {uid}")
@@ -1497,15 +1927,47 @@ class CollabService(QObject):
             self._offline_drafts = list(drafts)
         self.offline_drafts_changed.emit()
 
+    # ── Offline draft persistence helpers ─────────────────────────────────
+
+    def _drafts_path(self) -> Optional[Path]:
+        """JSON file for persisting offline drafts across restarts."""
+        if not self._project_dir:
+            return None
+        return Path(self._project_dir) / "_data" / "collab_drafts.json"
+
+    def _load_drafts_from_disk(self) -> list[OfflineDraft]:
+        path = self._drafts_path()
+        if path is None or not path.exists():
+            return []
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return [OfflineDraft.from_dict(d) for d in data if isinstance(d, dict)]
+        except Exception:
+            return []
+
+    def _save_drafts_to_disk(self) -> None:
+        path = self._drafts_path()
+        if path is None:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps(
+                    [d.to_dict() for d in self._offline_drafts],
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            logger.debug("collab: could not save offline drafts: %s", exc)
+
     def mark_offline_draft(self, uid: str,
                            assignee: Optional[str] = None,
                            device_id: Optional[str] = None) -> OfflineDraft:
         """Queue *uid* as an offline draft (mirrors collabMarkOfflineDraft).
 
-        Called when ``create_task`` detects a network failure (at least one
-        peer unreachable — not a 409 conflict).  The draft is stored in-memory
-        and retried when ``retry_offline_drafts`` is called.
-
+        Persists to disk so drafts survive app restarts.
         Deduplicates by uid: calling again for the same uid is a no-op.
         """
         with self._offline_drafts_lock:
@@ -1514,6 +1976,7 @@ class CollabService(QObject):
             draft = OfflineDraft(uid=uid, assignee=assignee, device_id=device_id)
             self._offline_drafts.append(draft)
         logger.debug("collab: offline draft queued uid=%s", uid)
+        self._save_drafts_to_disk()
         self.offline_drafts_changed.emit()
         return draft
 
@@ -1538,11 +2001,7 @@ class CollabService(QObject):
 
         promoted: list[str] = []
         for draft in pending:
-            ok, msg = self.create_task(
-                uid=draft.uid,
-                assignee=draft.assignee,
-                device_id=draft.device_id,
-            )
+            ok, msg = self._retry_offline_draft(draft)
             if ok:
                 promoted.append(draft.uid)
                 logger.info("collab: offline draft promoted uid=%s", draft.uid)
@@ -1555,9 +2014,40 @@ class CollabService(QObject):
                 self._offline_drafts = [
                     d for d in self._offline_drafts if d.uid not in promoted
                 ]
+            self._save_drafts_to_disk()
             self.offline_drafts_changed.emit()
 
         return len(promoted)
+
+    def _retry_offline_draft(self, draft: OfflineDraft) -> tuple[bool, str]:
+        """Push an already-created local draft to currently reachable peers."""
+        with self._peers_lock:
+            peers_snapshot = [p for p in self._peers.values() if self._data_sync_allowed(p)]
+        if not peers_snapshot:
+            return False, "no peers online"
+
+        all_delivered = True
+        for peer in peers_snapshot:
+            ok, conflict_msg, created = self._remote_create(
+                peer,
+                draft.uid,
+                draft.assignee,
+                draft.device_id,
+            )
+            if not ok:
+                self.conflict_detected.emit(draft.uid)
+                self._log_activity(
+                    "conflict",
+                    draft.uid,
+                    detail=f"离线草稿补推时远程设备已存在编号 {draft.uid}",
+                    severity="error",
+                )
+                return False, conflict_msg
+            if not created:
+                all_delivered = False
+        if not all_delivered:
+            return False, "some peers still unreachable"
+        return True, "ok"
 
     def _maybe_retry_offline_drafts(self) -> None:
         """Timer slot: silently attempt to flush offline drafts."""
@@ -1565,6 +2055,250 @@ class CollabService(QObject):
             self.retry_offline_drafts()
         except Exception:  # noqa: BLE001
             pass
+
+    # ── Specimen data sync (L2: metadata replication) ────────────────────
+
+    #: Columns synced between peers (excludes large/derived columns)
+    _SPEC_SYNC_COLS = (
+        "uid", "province", "site", "station", "id", "storage",
+        "collectionDate", "photoDate", "collector", "photographer",
+        "identifier", "geoArea", "taxonGroup", "orderName", "family",
+        "genus", "scientificName", "scientificNameCn", "notes",
+        "photoNotes", "lon", "lat", "habitat", "raw_json",
+    )
+
+    def _get_local_specimens(self, uid: Optional[str] = None) -> list[dict]:
+        """Read specimen records from local project DB (used by FastAPI endpoint)."""
+        if not self._project_dir:
+            return []
+        try:
+            from app.db.db_manager import open_project_db_private
+            db = open_project_db_private(self._project_dir)
+            cols = ", ".join(self._SPEC_SYNC_COLS)
+            try:
+                if uid:
+                    rows = db.execute(
+                        f"SELECT {cols} FROM specimens WHERE uid=?", (uid,)
+                    ).fetchall()
+                else:
+                    rows = db.execute(
+                        f"SELECT {cols} FROM specimens"
+                    ).fetchall()
+                return [dict(zip(self._SPEC_SYNC_COLS, row)) for row in rows]
+            finally:
+                db.close()
+        except Exception as exc:
+            logger.debug("collab: _get_local_specimens error: %s", exc)
+            return []
+
+    def _write_specimens_to_local_db(self, specimens: list[dict]) -> int:
+        """Upsert incoming specimen records into local project DB.
+
+        Uses INSERT OR REPLACE so incoming records overwrite local ones with
+        the same UID.  In normal field use each person works on distinct UIDs,
+        so conflicts are rare.
+        """
+        if not self._project_dir or not specimens:
+            return 0
+        try:
+            from app.db.db_manager import open_project_db_private
+            db = open_project_db_private(self._project_dir)
+            written = 0
+            try:
+                for spec in specimens:
+                    uid = spec.get("uid")
+                    if not uid:
+                        continue
+                    cols = [c for c in self._SPEC_SYNC_COLS if c in spec]
+                    if "uid" not in cols:
+                        continue
+                    placeholders = ", ".join(f":{c}" for c in cols)
+                    col_str = ", ".join(cols)
+                    db.execute(
+                        f"INSERT OR REPLACE INTO specimens ({col_str}) "
+                        f"VALUES ({placeholders})",
+                        {c: spec.get(c) for c in cols},
+                    )
+                    written += 1
+                db.commit()
+            finally:
+                db.close()
+            if written:
+                self.specimens_updated.emit()
+            return written
+        except Exception as exc:
+            logger.debug("collab: _write_specimens error: %s", exc)
+            return 0
+
+    def push_specimen(self, uid: str) -> None:
+        """Push one specimen record from local DB to all session peers.
+
+        Call this after saving a specimen so other devices see the update
+        immediately (< 1 s) without waiting for the 5 s pull sync.
+        """
+        with self._peers_lock:
+            peers = [p for p in self._peers.values() if self._data_sync_allowed(p)]
+        if not peers:
+            return
+        specs = self._get_local_specimens(uid)
+        if not specs:
+            return
+
+        def _send() -> None:
+            try:
+                import httpx
+            except ImportError:
+                return
+            payload = {"specimens": specs, "groupCode": self._group_code}
+            for peer in peers:
+                try:
+                    httpx.post(
+                        f"{peer.base_url}/api/collab/specimens/push",
+                        json=payload,
+                        timeout=4.0,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+
+        import threading
+        threading.Thread(target=_send, daemon=True, name="collab-spec-push").start()
+
+    def _sync_specimens_from_peer(self, peer: PeerInfo) -> int:
+        """Pull all specimens from one peer and merge into local DB.
+
+        Returns the number of records written (0 on error or no change).
+        """
+        if not self._data_sync_allowed(peer):
+            return 0
+        try:
+            import httpx
+            resp = httpx.get(f"{peer.base_url}/api/collab/specimens", timeout=8.0)
+            if resp.status_code == 200:
+                specimens = resp.json()
+                if isinstance(specimens, list) and specimens:
+                    return self._write_specimens_to_local_db(specimens)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("collab: specimen pull from %s failed: %s", peer.base_url, exc)
+        return 0
+
+    def pull_all_specimens_from_session(self) -> int:
+        """Pull all specimens from same-team same-project peers (used on join)."""
+        with self._peers_lock:
+            peers = [p for p in self._peers.values() if self._data_sync_allowed(p)]
+        total = 0
+        for peer in peers:
+            total += self._sync_specimens_from_peer(peer)
+        if total:
+            self._log_activity(
+                "specimen_sync",
+                detail=f"从会话中同步了 {total} 条标本记录",
+            )
+        return total
+
+    # ── Zero-config pairing ───────────────────────────────────────────────
+
+    def request_pairing(self, peer_ip: str, peer_port: int) -> bool:
+        """Send a pairing request to a specific device (fire-and-forget).
+
+        Returns True if the HTTP POST reached the peer.  The actual acceptance
+        is asynchronous — listen for ``pairing_accepted`` signal.
+        """
+        try:
+            import httpx
+            resp = httpx.post(
+                f"http://{peer_ip}:{peer_port}/api/collab/pairing/request",
+                json={
+                    "fromIp":       _get_local_ip(),
+                    "fromHostname": self._hostname,
+                    "groupCode":    self._group_code,
+                },
+                timeout=4.0,
+            )
+            return resp.status_code == 200
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("collab: pairing request failed: %s", exc)
+            return False
+
+    def accept_pairing(self, peer_ip: str, peer_port: int,
+                       their_group_code: str) -> None:
+        """Accept an incoming pairing request.
+
+        Adopts the peer's group code if we don't already have one, then notifies
+        the peer so both sides can start syncing immediately.
+        """
+        if their_group_code and not self._group_code:
+            self._group_code = their_group_code
+            logger.info("collab: adopted group code %s from peer %s", their_group_code, peer_ip)
+
+        # Notify the peer that we accepted
+        try:
+            import httpx
+            httpx.post(
+                f"http://{peer_ip}:{peer_port}/api/collab/pairing/accept",
+                json={
+                    "fromIp":       _get_local_ip(),
+                    "fromHostname": self._hostname,
+                    "groupCode":    self._group_code,
+                },
+                timeout=4.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("collab: pairing accept notification failed: %s", exc)
+
+        self.pairing_accepted.emit(peer_ip, peer_ip)
+        self._log_activity("pairing", detail=f"已与 {peer_ip} 配对，开始协作同步")
+        self.peers_changed.emit()
+
+    def _on_pairing_request_received(self, from_ip: str, from_hostname: str,
+                                     their_code: str) -> None:
+        """Called from the FastAPI thread when a pairing request arrives."""
+        # Emit signal to the main thread — the UI shows a confirmation dialog
+        self.pairing_requested.emit(from_ip, from_hostname, their_code)
+
+    def _on_pairing_accept_received(self, from_ip: str, from_hostname: str) -> None:
+        """Called when the peer we invited has accepted."""
+        self.pairing_accepted.emit(from_ip, from_hostname)
+        self._log_activity("pairing", detail=f"{from_hostname} 已接受协作邀请")
+        self.peers_changed.emit()
+
+    # ── Status broadcast (push to peers immediately) ──────────────────────
+
+    def broadcast_status_update(self, uid: str, status: str,
+                                assignee: Optional[str] = None) -> None:
+        """Push a task status change to all online peers (fire-and-forget).
+
+        Runs in a background thread so the UI is never blocked.
+        Falls back gracefully when httpx is not installed.
+        """
+        with self._peers_lock:
+            peers = [p for p in self._peers.values() if self._data_sync_allowed(p)]
+        if not peers:
+            return
+        payload = {
+            "uid":        uid,
+            "status":     status,
+            "assignee":   assignee,
+            "deviceId":   self._hostname,
+            "groupCode":  self._group_code,
+        }
+
+        def _send() -> None:
+            try:
+                import httpx
+            except ImportError:
+                return
+            for peer in peers:
+                try:
+                    httpx.post(
+                        f"{peer.base_url}/api/collab/tasks/update-status",
+                        json=payload,
+                        timeout=3.0,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+
+        import threading
+        threading.Thread(target=_send, daemon=True, name="collab-push").start()
 
     # ── Photo-index reporting ─────────────────────────────────────────────
     # Mirrors: collabPostPhotoIndex(uid, kind)
@@ -1623,6 +2357,7 @@ class CollabService(QObject):
             "projectName": self._project_name,
             "projectId":   self._project_id,
             "groupCode":   self._group_code,
+            "sessionName": self._session_name,
             "serverTime":  time.time(),
             "lanIp":       _get_local_ip(),
             "port":        self._port,
@@ -1727,7 +2462,7 @@ class CollabService(QObject):
         self.store.delete(uid)
 
         with self._peers_lock:
-            peers_snapshot = [p for p in self._peers.values() if self._group_matches(p)]
+            peers_snapshot = [p for p in self._peers.values() if self._data_sync_allowed(p)]
 
         if peers_snapshot:
             try:

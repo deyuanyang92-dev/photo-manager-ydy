@@ -33,6 +33,8 @@ from typing import Optional
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
+    QButtonGroup,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -40,6 +42,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QRadioButton,
     QVBoxLayout,
     QWidget,
 )
@@ -79,6 +82,14 @@ def _strip_non_digits(s: str) -> str:
     return re.sub(r"\D", "", s)
 
 
+def _thin_divider() -> QWidget:
+    from PyQt6.QtWidgets import QFrame
+    line = QFrame()
+    line.setFrameShape(QFrame.Shape.HLine)
+    line.setObjectName("Divider")
+    return line
+
+
 # ── Dialog ────────────────────────────────────────────────────────────────────
 
 class ProjectDialog(QDialog):
@@ -101,6 +112,7 @@ class ProjectDialog(QDialog):
         existing_projects: Optional[list[dict]] = None,
         parent: Optional[QWidget] = None,
         light: bool = False,
+        team_projects: Optional[list[dict]] = None,
     ) -> None:
         super().__init__(parent)
         self._mode = mode
@@ -109,6 +121,12 @@ class ProjectDialog(QDialog):
         self._light = light and mode == "new"
         self._existing = existing_projects or []
         self._project: Optional[dict] = None  # populated on accept
+        # team_projects: [{"name": str, "code": str, "peer_count": int}, ...] —
+        # projects currently open by same-team collaboration peers. Lets the
+        # user bind to an EXACT existing project identity instead of hoping a
+        # freshly-typed name happens to match (see collab_service.discover_team_projects).
+        self._team_projects = team_projects or []
+        self._join_project_code = ""
 
         if mode != "new":
             self.setWindowTitle("打开文件夹")
@@ -155,6 +173,47 @@ class ProjectDialog(QDialog):
         intro_lbl.setObjectName("Muted")
         intro_lbl.setStyleSheet("font-size: 13px;")
         root.addWidget(intro_lbl)
+
+        # ── 团队现有项目：新建 vs 加入 ───────────────────────────────────────
+        # Only offered in "new" mode when we know of at least one project
+        # that teammates (same team code) currently have open.
+        if self._mode == "new" and self._team_projects:
+            join_lbl = QLabel("检测到团队正在协作的项目：")
+            join_lbl.setObjectName("Section")
+            root.addWidget(join_lbl)
+
+            mode_row = QHBoxLayout()
+            self._create_new_rb = QRadioButton("创建全新项目")
+            self._join_team_rb = QRadioButton("加入团队现有项目")
+            self._project_mode_group = QButtonGroup(self)
+            self._project_mode_group.addButton(self._create_new_rb)
+            self._project_mode_group.addButton(self._join_team_rb)
+            self._create_new_rb.setChecked(True)
+            mode_row.addWidget(self._create_new_rb)
+            mode_row.addWidget(self._join_team_rb)
+            mode_row.addStretch()
+            root.addLayout(mode_row)
+
+            self._team_project_combo = QComboBox()
+            for tp in self._team_projects:
+                label = f"{tp['name']}（{tp.get('peer_count', 1)} 人在协作）"
+                self._team_project_combo.addItem(label, tp.get("code", ""))
+            self._team_project_combo.setEnabled(False)
+            self._join_team_rb.toggled.connect(self._team_project_combo.setEnabled)
+            root.addWidget(self._team_project_combo)
+
+            join_hint = QLabel(
+                "选择「加入」后，你新建的本地文件夹会绑定到同一个项目身份——"
+                "文件夹名称、路径可以不同，但标本记录会与团队实时同步。"
+            )
+            join_hint.setObjectName("MutedSmall")
+            join_hint.setWordWrap(True)
+            root.addWidget(join_hint)
+            root.addWidget(_thin_divider())
+        else:
+            self._create_new_rb = None
+            self._join_team_rb = None
+            self._team_project_combo = None
 
         # Form
         form = QFormLayout()
@@ -330,6 +389,11 @@ class ProjectDialog(QDialog):
                 "resultsSubdir": RESULTS_DIR,
             })
 
+        if self._join_team_rb is not None and self._join_team_rb.isChecked():
+            self._join_project_code = str(self._team_project_combo.currentData() or "")
+        else:
+            self._join_project_code = ""
+
         self._project = proj
         self.accept()
 
@@ -338,3 +402,8 @@ class ProjectDialog(QDialog):
     def result_project(self) -> Optional[dict]:
         """Return the constructed project dict, or None if not accepted."""
         return self._project
+
+    def result_join_project_code(self) -> str:
+        """Non-empty when the user chose to bind this new folder to an
+        existing team project instead of creating an independent identity."""
+        return self._join_project_code

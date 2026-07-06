@@ -2320,6 +2320,80 @@ class TestWorkbenchQuickPrint:
         assert w._quick_print_labels(uid) is True
         db.close()
 
+    def test_quick_print_dialog_mode_routes_niimbot_selection(
+        self, tmp_path, monkeypatch
+    ):
+        from PyQt6.QtPrintSupport import QPrinterInfo
+        from app.services import niimbot_print_service as niimbot
+        from app.services.project_settings_service import save_setting
+        import app.utils.label_print as lp
+        import app.utils.windows_print as windows_print
+
+        captured = {}
+
+        class Dialog:
+            def __init__(self, jobs, parent=None):
+                captured["dialog_jobs"] = jobs
+
+            def exec(self):
+                from PyQt6.QtWidgets import QDialog
+                return QDialog.DialogCode.Accepted
+
+            def selected_printer(self):
+                return niimbot.printer_id("COM5")
+
+        monkeypatch.setattr(QPrinterInfo, "defaultPrinterName",
+                            staticmethod(lambda: ""))
+        monkeypatch.setattr(QPrinterInfo, "availablePrinters",
+                            staticmethod(lambda: []))
+        monkeypatch.setattr(windows_print, "is_available", lambda: True)
+        monkeypatch.setattr(windows_print, "windows_default_printer_name", lambda: "")
+        monkeypatch.setattr(windows_print, "windows_printer_names", lambda: [])
+        monkeypatch.setattr(
+            windows_print,
+            "print_jobs_with_windows_dialog",
+            lambda *a, **k: pytest.fail("Windows bridge should not handle NIIMBOT"),
+        )
+        monkeypatch.setattr(
+            niimbot,
+            "available_printers",
+            lambda: [niimbot.NiimbotPrinter(
+                id=niimbot.printer_id("COM5"),
+                name="NIIMBOT B203 USB (COM5)",
+                port="COM5",
+            )],
+        )
+        monkeypatch.setattr(
+            niimbot,
+            "available_printer_ids",
+            lambda: {niimbot.printer_id("COM5")},
+        )
+
+        def fake_niimbot_print(jobs, **kw):
+            captured["niimbot_jobs"] = jobs
+            captured["niimbot_kw"] = kw
+            return "NIIMBOT B203 USB (COM5)"
+
+        monkeypatch.setattr(niimbot, "print_jobs_to_niimbot", fake_niimbot_print)
+        monkeypatch.setattr(lp, "build_printer", lambda *a, **k: pytest.fail("Qt printer should not run"))
+        monkeypatch.setattr(lp, "paint_jobs", lambda *a, **k: pytest.fail("Qt paint should not run"))
+
+        import app.widgets.print_dialog as print_dialog
+        monkeypatch.setattr(print_dialog, "PrintJobDialog", Dialog)
+
+        w, ctx, uid, db = self._wb(tmp_path, "D95E")
+        save_setting(db, "print_settings", {
+            "quick_print": True,
+            "quick_print_mode": "dialog",
+            "sample_printer": "",
+            "sample_paper_type": "label",
+            "include_tissue": False,
+        })
+
+        assert w._quick_print_labels(uid) is True
+        assert captured["niimbot_kw"]["printer_name"] == "NIIMBOT:B203:COM5"
+        db.close()
+
     def test_quick_print_no_default_printer_returns_false(self, tmp_path, monkeypatch):
         from PyQt6.QtPrintSupport import QPrinterInfo
         monkeypatch.setattr(QPrinterInfo, "defaultPrinterName",
@@ -3715,6 +3789,16 @@ class TestRightRailWebFaithful:
         assert hasattr(t, "_notes")
         t._notes.setPlainText("野外备注")
         assert t.field_values().get("notes") == "野外备注"
+
+    def test_right_rail_has_visible_vertical_scrollbar_boundary(self):
+        from app.views.workbench_view import WorkbenchView
+        w = WorkbenchView(_make_ctx())
+
+        assert w._right_scroll.objectName() == "RightRailScroll"
+        assert (
+            w._right_scroll.verticalScrollBarPolicy()
+            == Qt.ScrollBarPolicy.ScrollBarAlwaysOn
+        )
 
     def test_rail_autosave_persists_across_three_cards(self, tmp_path):
         from app.views.workbench_view import WorkbenchView

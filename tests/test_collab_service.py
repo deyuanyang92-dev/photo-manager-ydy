@@ -173,6 +173,26 @@ class TestTaskStore:
         assert changed == 1
         assert store.get_task("R2").status == TaskStatus.DONE  # type: ignore[union-attr]
 
+    def test_merge_records_status_overwrite_when_requested(self):
+        store = TaskStore()
+        store.create("R2B")
+        from datetime import datetime, timezone, timedelta
+        future = (datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat()
+        overwrites = []
+
+        changed = store.merge_from_peer(
+            [{"uid": "R2B", "status": "done", "updatedAt": future,
+              "createdAt": _now_iso()}],
+            overwrites_out=overwrites,
+        )
+
+        assert changed == 1
+        assert overwrites == [{
+            "uid": "R2B",
+            "old_status": "created",
+            "new_status": "done",
+        }]
+
     def test_merge_older_remote_ignored(self):
         """If remote updated_at is earlier than local, local wins."""
         store = TaskStore()
@@ -401,6 +421,148 @@ class TestCollabServiceOffline:
         svc = self._make_service()
         addr = svc.local_address()
         assert ":" in addr
+
+    # ── project_id exact-match beats fuzzy name matching ───────────────────
+
+    def test_project_matches_by_id_even_when_names_differ(self):
+        """Explicit project_id binding must win over name comparison."""
+        svc = self._make_service()
+        svc._project_id = "a" * 32
+        svc._project_name = "本地叫法A"
+        peer = PeerInfo(
+            ip="10.0.0.2", port=5050,
+            project_id="a" * 32, project_name="队友叫法B",
+        )
+        assert svc._project_matches(peer) is True
+
+    def test_project_id_mismatch_blocks_even_when_names_match(self):
+        """Two independently-created same-named projects must NOT sync once
+        either side has an explicit (different) project_id."""
+        svc = self._make_service()
+        svc._project_id = "a" * 32
+        svc._project_name = "三门湾调查"
+        peer = PeerInfo(
+            ip="10.0.0.2", port=5050,
+            project_id="b" * 32, project_name="三门湾调查",
+        )
+        assert svc._project_matches(peer) is False
+
+    def test_project_matches_falls_back_to_name_without_ids(self):
+        """Legacy/no-id peers still get the zero-config name-based match."""
+        svc = self._make_service()
+        svc._project_id = ""
+        svc._project_name = "三门湾 调查"
+        peer = PeerInfo(ip="10.0.0.2", port=5050, project_id="", project_name="三门湾调查")
+        assert svc._project_matches(peer) is True
+
+    def test_discover_team_projects_dedupes_by_project_id(self):
+        svc = self._make_service()
+        svc.set_group_code("TEAM1")
+        svc._peers["10.0.0.2:5050"] = PeerInfo(
+            ip="10.0.0.2", port=5050, group_code="TEAM1",
+            project_id="a" * 32, project_name="三门湾调查",
+        )
+        svc._peers["10.0.0.3:5050"] = PeerInfo(
+            ip="10.0.0.3", port=5050, group_code="TEAM1",
+            project_id="a" * 32, project_name="三门湾调查",
+        )
+        svc._peers["10.0.0.4:5050"] = PeerInfo(
+            ip="10.0.0.4", port=5050, group_code="TEAM1",
+            project_id="c" * 32, project_name="福建调查",
+        )
+        projects = svc.discover_team_projects()
+        assert len(projects) == 2
+        by_name = {p["name"]: p for p in projects}
+        assert by_name["三门湾调查"]["peer_count"] == 2
+        assert by_name["福建调查"]["peer_count"] == 1
+        assert by_name["三门湾调查"]["code"].startswith("SPP-PROJECT:")
+
+    def test_discover_team_projects_ignores_other_teams(self):
+        svc = self._make_service()
+        svc.set_group_code("TEAM1")
+        svc._peers["10.0.0.9:5050"] = PeerInfo(
+            ip="10.0.0.9", port=5050, group_code="OTHER-TEAM",
+            project_id="d" * 32, project_name="别的团队项目",
+        )
+        assert svc.discover_team_projects() == []
+
+    def test_discover_team_projects_skips_peers_without_id(self):
+        svc = self._make_service()
+        svc.set_group_code("TEAM1")
+        svc._peers["10.0.0.9:5050"] = PeerInfo(
+            ip="10.0.0.9", port=5050, group_code="TEAM1",
+            project_id="", project_name="没有身份的项目",
+        )
+        assert svc.discover_team_projects() == []
+
+    # ── same-name / different-ID bind suggestion ────────────────────────────
+
+    def _bind_peer(self, pid: str, name: str = "三门湾调查") -> PeerInfo:
+        return PeerInfo(
+            ip="10.0.0.2", port=5050, hostname="peer-pc",
+            group_code="TEAM1", project_id=pid, project_name=name,
+        )
+
+    def test_bind_suggested_for_same_name_different_id(self):
+        svc = self._make_service()
+        svc.set_group_code("TEAM1")
+        svc._project_id = "f" * 32          # larger than peer's → we prompt
+        svc._project_name = "D:/data/三门湾调查"
+        received: list[tuple] = []
+        svc.project_bind_suggested.connect(lambda *a: received.append(a))
+        svc._check_project_bind_suggestions([self._bind_peer("a" * 32)])
+        assert len(received) == 1
+        peer_name, project_name, code = received[0]
+        assert peer_name == "peer-pc"
+        assert project_name == "三门湾调查"
+        assert code.startswith("SPP-PROJECT:")
+
+    def test_bind_not_suggested_when_our_id_is_smaller(self):
+        """Deterministic tie-break: the smaller-ID side keeps quiet."""
+        svc = self._make_service()
+        svc.set_group_code("TEAM1")
+        svc._project_id = "a" * 32
+        svc._project_name = "三门湾调查"
+        received: list[tuple] = []
+        svc.project_bind_suggested.connect(lambda *a: received.append(a))
+        svc._check_project_bind_suggestions([self._bind_peer("f" * 32)])
+        assert received == []
+
+    def test_bind_suggested_only_once_per_peer_project(self):
+        svc = self._make_service()
+        svc.set_group_code("TEAM1")
+        svc._project_id = "f" * 32
+        svc._project_name = "三门湾调查"
+        received: list[tuple] = []
+        svc.project_bind_suggested.connect(lambda *a: received.append(a))
+        peer = self._bind_peer("a" * 32)
+        svc._check_project_bind_suggestions([peer])
+        svc._check_project_bind_suggestions([peer])
+        assert len(received) == 1
+
+    def test_bind_not_suggested_for_different_names(self):
+        svc = self._make_service()
+        svc.set_group_code("TEAM1")
+        svc._project_id = "f" * 32
+        svc._project_name = "三门湾调查"
+        received: list[tuple] = []
+        svc.project_bind_suggested.connect(lambda *a: received.append(a))
+        svc._check_project_bind_suggestions(
+            [self._bind_peer("a" * 32, name="福建调查")]
+        )
+        assert received == []
+
+    def test_bind_not_suggested_across_teams(self):
+        svc = self._make_service()
+        svc.set_group_code("TEAM1")
+        svc._project_id = "f" * 32
+        svc._project_name = "三门湾调查"
+        received: list[tuple] = []
+        svc.project_bind_suggested.connect(lambda *a: received.append(a))
+        peer = self._bind_peer("a" * 32)
+        peer.group_code = "OTHER"
+        svc._check_project_bind_suggestions([peer])
+        assert received == []
 
 
 # ── Release-to-reuse (revoke a UID claim) ────────────────────────────────────
@@ -929,6 +1091,54 @@ class TestCollabViewSmoke:
             panel.close()
             svc.stop()
 
+    def test_workbench_collab_panel_scan_buttons_are_independent(self):
+        from app.widgets.collab_panel import CollabPanel
+
+        ctx = MagicMock()
+        svc = CollabService()
+        svc.scan_lan = MagicMock()
+        ctx.collab_service = svc
+        ctx.current_project_dir = "/data/Project-A"
+        ctx.settings = MagicMock()
+        ctx.settings.last_project_dir = "/data/Project-A"
+
+        panel = CollabPanel(ctx)
+        try:
+            panel._on_scan()
+            assert panel._peer_scan_btn.text() == "搜索中…"
+            assert panel._subnet_scan_btn.text() == "扫描局域网"
+            panel._re_enable_scan()
+
+            svc.scan_subnet_peers = lambda on_done=None: on_done and on_done(1)
+            panel._on_scan_subnet()
+            assert panel._peer_scan_btn.text() == "搜索队友"
+            assert panel._subnet_scan_btn.text() == "扫描局域网"
+        finally:
+            panel.close()
+            svc.stop()
+
+    def test_hidden_collab_panel_conflict_signal_does_not_show_modal(self, monkeypatch):
+        from app.utils import ui
+        from app.widgets.collab_panel import CollabPanel
+
+        ctx = MagicMock()
+        svc = CollabService()
+        ctx.collab_service = svc
+        ctx.current_project_dir = "/data/Project-A"
+        ctx.settings = MagicMock()
+        ctx.settings.last_project_dir = "/data/Project-A"
+        warned = []
+        monkeypatch.setattr(ui, "warn", lambda *args, **kwargs: warned.append(args))
+
+        panel = CollabPanel(ctx)
+        try:
+            panel.hide()
+            svc.conflict_detected.emit("DUP-1")
+            assert warned == []
+        finally:
+            panel.close()
+            svc.stop()
+
 
 # ── TaskRecord serialization ──────────────────────────────────────────────────
 
@@ -1231,11 +1441,12 @@ class TestOfflineDraftQueue:
     def test_retry_promotes_when_peer_available(self):
         """With a peer that accepts, draft is promoted and removed from queue."""
         svc = self._make_service()
+        svc.set_group_code("G1")
         svc.mark_offline_draft("OD-RETRY")
 
         # Add a fake peer so the retry path runs
         from app.services.collab_service import PeerInfo
-        svc._peers["10.9.9.1:5050"] = PeerInfo(ip="10.9.9.1", port=5050)
+        svc._peers["10.9.9.1:5050"] = PeerInfo(ip="10.9.9.1", port=5050, group_code="G1")
 
         mock_resp = MagicMock()
         mock_resp.status_code = 201
@@ -1247,6 +1458,24 @@ class TestOfflineDraftQueue:
         assert promoted == 1
         # Should be removed from queue after promotion
         assert all(d.uid != "OD-RETRY" for d in svc.load_offline_drafts())
+
+    def test_retry_promotes_when_local_task_already_exists(self):
+        svc = self._make_service()
+        svc.set_group_code("G1")
+        svc.store.create("OD-LOCAL")
+        svc.mark_offline_draft("OD-LOCAL")
+        svc._peers["10.9.9.1:5050"] = PeerInfo(ip="10.9.9.1", port=5050, group_code="G1")
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 201
+        mock_resp.json.return_value = {"uid": "OD-LOCAL", "status": "created"}
+
+        with patch("httpx.post", return_value=mock_resp):
+            promoted = svc.retry_offline_drafts()
+
+        assert promoted == 1
+        assert svc.store.exists("OD-LOCAL")
+        assert all(d.uid != "OD-LOCAL" for d in svc.load_offline_drafts())
 
     def test_offline_draft_to_dict_round_trip(self):
         from app.services.collab_service import OfflineDraft

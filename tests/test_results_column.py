@@ -719,6 +719,7 @@ def test_results_sort_by_name_reorders_cards(qtbot):
 
 def test_results_paired_columns_align_tiff_left_zip_right(qtbot):
     """Paired columns keep matching TIFF and ZIP in one aligned two-column row."""
+    from PyQt6.QtWidgets import QSizePolicy
     from app.widgets.results_column import (
         ResultsColumn, _ArchiveCard, _ResultPairIndicator, _ResultRow, _TiffCard,
     )
@@ -736,6 +737,7 @@ def test_results_paired_columns_align_tiff_left_zip_right(qtbot):
     assert isinstance(row._rows[0], _TiffCard)
     assert isinstance(row._rows[1], _ArchiveCard)
     assert len(row.findChildren(_ResultPairIndicator)) == 1
+    assert row.sizePolicy().verticalPolicy() == QSizePolicy.Policy.Fixed
 
 
 def test_results_paired_columns_fall_back_when_narrow(qtbot):

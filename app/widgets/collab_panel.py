@@ -164,11 +164,11 @@ class CollabPanel(QWidget):
         self._diagnose_btn.clicked.connect(self._on_diagnose)
         action_row.addWidget(self._diagnose_btn)
 
-        self._scan_btn = QPushButton("搜索队友")
-        self._scan_btn.setObjectName("Ghost")
-        self._scan_btn.setFixedHeight(26)
-        self._scan_btn.clicked.connect(self._on_scan)
-        action_row.addWidget(self._scan_btn)
+        self._peer_scan_btn = QPushButton("搜索队友")
+        self._peer_scan_btn.setObjectName("Ghost")
+        self._peer_scan_btn.setFixedHeight(26)
+        self._peer_scan_btn.clicked.connect(self._on_scan)
+        action_row.addWidget(self._peer_scan_btn)
 
         self._setup_btn = QPushButton("一键协作")
         self._setup_btn.setObjectName("Outline")
@@ -197,8 +197,8 @@ class CollabPanel(QWidget):
         dev_lay.setContentsMargins(0, 0, 0, 0)
         dev_lay.setSpacing(6)
 
-        self._device_table = QTableWidget(0, 5)
-        self._device_table.setHorizontalHeaderLabels(["主机名", "项目", "照片", "地址", "延迟"])
+        self._device_table = QTableWidget(0, 4)
+        self._device_table.setHorizontalHeaderLabels(["设备名", "延迟", "状态", "操作"])
         self._device_table.horizontalHeader().setStretchLastSection(False)
         self._device_table.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.ResizeMode.Stretch
@@ -211,9 +211,6 @@ class CollabPanel(QWidget):
         )
         self._device_table.horizontalHeader().setSectionResizeMode(
             3, QHeaderView.ResizeMode.ResizeToContents
-        )
-        self._device_table.horizontalHeader().setSectionResizeMode(
-            4, QHeaderView.ResizeMode.ResizeToContents
         )
         self._device_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._device_table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
@@ -308,36 +305,50 @@ class CollabPanel(QWidget):
         share_row.addWidget(self._copy_btn)
         root.addLayout(share_row)
 
-        # Group code
-        gc_row = QHBoxLayout()
-        gc_label = QLabel("组码:")
-        gc_label.setObjectName("MutedSmall")
-        gc_label.setFixedWidth(40)
-        self._group_code_label = QLabel("—")
-        self._group_code_label.setObjectName("MutedSmall")
-        gc_row.addWidget(gc_label)
-        gc_row.addWidget(self._group_code_label, 1)
-        self._edit_gc_btn = QPushButton("修改")
-        self._edit_gc_btn.setObjectName("Ghost")
-        self._edit_gc_btn.setFixedHeight(24)
-        self._edit_gc_btn.clicked.connect(self._on_edit_group_code)
-        gc_row.addWidget(self._edit_gc_btn)
-        root.addLayout(gc_row)
+        # ── 协作会话区 ──────────────────────────────────────────────────────
+        sess_row = QHBoxLayout()
+        self._session_status_label = QLabel("未加入团队")
+        self._session_status_label.setObjectName("MutedSmall")
+        sess_row.addWidget(self._session_status_label, 1)
+        self._new_session_btn = QPushButton("新建团队")
+        self._new_session_btn.setObjectName("Ghost")
+        self._new_session_btn.setFixedHeight(24)
+        self._new_session_btn.setToolTip(
+            "建立协作团队，同事扫描后直接加入，无需填写 IP。"
+            "加入一次永久有效；打开同名项目的队友自动同步数据。"
+        )
+        self._new_session_btn.clicked.connect(self._on_new_session)
+        sess_row.addWidget(self._new_session_btn)
+        self._leave_session_btn = QPushButton("退出团队")
+        self._leave_session_btn.setObjectName("Ghost")
+        self._leave_session_btn.setFixedHeight(24)
+        self._leave_session_btn.hide()
+        self._leave_session_btn.clicked.connect(self._on_leave_session)
+        sess_row.addWidget(self._leave_session_btn)
+        root.addLayout(sess_row)
 
-        # Pairing
-        pair_row = QHBoxLayout()
-        self._pairing_show_btn = QPushButton("显示配对码")
-        self._pairing_show_btn.setObjectName("Ghost")
-        self._pairing_show_btn.setFixedHeight(24)
-        self._pairing_show_btn.clicked.connect(self._on_show_pairing)
-        pair_row.addWidget(self._pairing_show_btn)
-        self._pairing_join_btn = QPushButton("加入配对码")
-        self._pairing_join_btn.setObjectName("Ghost")
-        self._pairing_join_btn.setFixedHeight(24)
-        self._pairing_join_btn.clicked.connect(self._on_join_pairing)
-        pair_row.addWidget(self._pairing_join_btn)
-        pair_row.addStretch()
-        root.addLayout(pair_row)
+        # Teams discovered on the subnet
+        self._discovered_sessions_label = QLabel("发现的团队")
+        self._discovered_sessions_label.setObjectName("MutedSmall")
+        root.addWidget(self._discovered_sessions_label)
+        self._discovered_sessions_widget = QWidget()
+        self._discovered_sessions_lay = QVBoxLayout(self._discovered_sessions_widget)
+        self._discovered_sessions_lay.setContentsMargins(0, 0, 0, 0)
+        self._discovered_sessions_lay.setSpacing(4)
+        root.addWidget(self._discovered_sessions_widget)
+
+        # Subnet scan
+        scan_row = QHBoxLayout()
+        self._scan_btn = QPushButton("扫描局域网")
+        self._scan_btn.setObjectName("Ghost")
+        self._scan_btn.setFixedHeight(24)
+        self._scan_btn.setToolTip("手动扫描子网，发现未通过 mDNS 被发现的设备。")
+        self._scan_btn.clicked.connect(self._on_scan_subnet)
+        scan_row.addWidget(self._scan_btn)
+        # alias for test compatibility
+        self._subnet_scan_btn = self._scan_btn
+        scan_row.addStretch()
+        root.addLayout(scan_row)
 
         root.addStretch()
 
@@ -363,14 +374,77 @@ class CollabPanel(QWidget):
             return
         svc.peers_changed.connect(self._refresh_devices)
         svc.peers_changed.connect(self._refresh_health)
+        svc.peers_changed.connect(self._refresh_session_ui)
         svc.tasks_changed.connect(self._refresh_tasks)
         svc.tasks_changed.connect(self._refresh_health)
         svc.server_ready.connect(self._on_server_ready)
         svc.conflict_detected.connect(self._on_conflict)
+        svc.data_overwritten.connect(self._on_data_overwritten)
         svc.diagnostics_changed.connect(self._refresh_health)
         svc.activity_logged.connect(self._refresh_activity)
+        svc.pairing_requested.connect(self._on_pairing_requested)
+        svc.pairing_accepted.connect(self._on_pairing_accepted)
+        svc.project_bind_suggested.connect(self._on_project_bind_suggested)
 
     # ── Refresh slots ──────────────────────────────────────────────────────
+
+    def _refresh_session_ui(self) -> None:
+        """Refresh the session status label and discovered sessions list."""
+        svc = self._svc
+        in_session = svc is not None and bool(svc.group_code)
+        name = svc.session_name if svc and svc.session_name else ""
+        code = svc.group_code if svc else ""
+
+        if in_session and name:
+            self._session_status_label.setText(f"团队：{name}（{code}）")
+        elif in_session:
+            self._session_status_label.setText(f"团队码：{code}")
+        else:
+            self._session_status_label.setText("未加入团队")
+
+        self._new_session_btn.setVisible(not in_session)
+        self._leave_session_btn.setVisible(in_session)
+
+        # Rebuild discovered sessions list
+        lay = self._discovered_sessions_lay
+        while lay.count():
+            item = lay.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+
+        if svc is None:
+            self._discovered_sessions_label.hide()
+            return
+
+        # Group peers by session code
+        sessions: dict[str, list] = {}
+        for peer in svc.peers():
+            if peer.group_code and peer.group_code != svc.group_code:
+                label = peer.session_name or peer.hostname or peer.ip
+                if peer.group_code not in sessions:
+                    sessions[peer.group_code] = {"name": label, "count": 0, "peer": peer}
+                sessions[peer.group_code]["count"] += 1
+
+        self._discovered_sessions_label.setVisible(bool(sessions))
+        for sess_code, info in sessions.items():
+            row = QWidget()
+            row_lay = QHBoxLayout(row)
+            row_lay.setContentsMargins(0, 0, 0, 0)
+            row_lay.setSpacing(6)
+            lbl = QLabel(f"{info['name']} ({info['count']} 台)")
+            lbl.setObjectName("MutedSmall")
+            row_lay.addWidget(lbl, 1)
+            join_btn = QPushButton("加入")
+            join_btn.setObjectName("Ghost")
+            join_btn.setFixedHeight(22)
+            _code = sess_code
+            _name = info["name"]
+            join_btn.clicked.connect(
+                lambda _=False, c=_code, n=_name: self._on_join_session(c, n)
+            )
+            row_lay.addWidget(join_btn)
+            lay.addWidget(row)
 
     def _refresh_health(self) -> None:
         svc = self._svc
@@ -394,22 +468,47 @@ class CollabPanel(QWidget):
         if svc is None:
             return
         peers = svc.peers()
+        # Order: same-team-same-project first, then teammates on other
+        # projects, then unconnected strangers.
+        syncing   = [p for p in peers if svc._data_sync_allowed(p)]
+        teammates = [p for p in peers if svc._group_matches(p) and not svc._data_sync_allowed(p)]
+        strangers = [p for p in peers if not svc._group_matches(p)]
         self._dev_title.setText(f"在线设备 ({len(peers)})")
-        self._device_table.setRowCount(len(peers))
-        for row, peer in enumerate(peers):
+        all_shown = syncing + teammates + strangers
+        self._device_table.setRowCount(len(all_shown))
+        for row, peer in enumerate(all_shown):
             self._device_table.setItem(row, 0, _ro_item(peer.hostname or peer.ip))
-            self._device_table.setItem(row, 1, _ro_item(_project_display(peer.project_name) or "—"))
-            media_label = self._peer_media_sync_label(peer)
-            media_item = _ro_item(media_label)
-            if media_label == "仅任务":
-                media_item.setToolTip("同组但项目同步码不同；到协作中心绑定后才能同步照片。")
-            elif media_label == "可同步":
-                media_item.setToolTip("同组且项目同步码相同，可以同步照片/TIF/ZIP。")
-            self._device_table.setItem(row, 2, media_item)
-            addr = f"{peer.ip}:{peer.port}" + (" ✎" if peer.manual else "")
-            self._device_table.setItem(row, 3, _ro_item(addr))
             lat = f"{peer.latency_ms:.0f} ms" if peer.latency_ms is not None else "—"
-            self._device_table.setItem(row, 4, _ro_item(lat))
+            self._device_table.setItem(row, 1, _ro_item(lat))
+            if peer in syncing:
+                status_item = _ro_item("● 同步中")
+                status_item.setForeground(QColor("#2e7d32"))
+                status_item.setToolTip("同团队且打开同名项目，数据实时同步。")
+                self._device_table.setItem(row, 2, status_item)
+                self._device_table.setCellWidget(row, 3, None)
+            elif peer in teammates:
+                proj = _project_display(peer.project_name) or "其他项目"
+                status_item = _ro_item(f"◐ {proj}")
+                status_item.setForeground(QColor("#f9a825"))
+                status_item.setToolTip(
+                    "同团队队友，但当前打开的项目不同——仅显示在线状态，"
+                    "数据不互通。对方切到同名项目后自动开始同步。"
+                )
+                self._device_table.setItem(row, 2, status_item)
+                self._device_table.setCellWidget(row, 3, None)
+            else:
+                status_item = _ro_item("○ 未连接")
+                status_item.setForeground(QColor("#9e9e9e"))
+                self._device_table.setItem(row, 2, status_item)
+                connect_btn = QPushButton("连接")
+                connect_btn.setObjectName("Ghost")
+                connect_btn.setFixedHeight(22)
+                connect_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                _ip, _port = peer.ip, peer.port
+                connect_btn.clicked.connect(
+                    lambda _=False, ip=_ip, port=_port: self._on_connect_peer(ip, port)
+                )
+                self._device_table.setCellWidget(row, 3, connect_btn)
 
     def _refresh_tasks(self) -> None:
         svc = self._svc
@@ -533,8 +632,74 @@ class CollabPanel(QWidget):
         self.closed.emit()
 
     def _on_conflict(self, uid: str) -> None:
-        # Refresh will show the conflict status in the table
+        """Show a dialog when a UID creation conflict (409) is detected."""
+        if not self.isVisible():
+            self._refresh_tasks()
+            return
+        from app.utils import ui
+        ui.warn(
+            self,
+            "编号冲突",
+            f"编号 <b>{uid}</b> 已存在于局域网中的另一台设备。<br><br>"
+            "请换一个编号，或与对方确认后由一方将其标记为「作废」。",
+        )
         self._refresh_tasks()
+
+    def _on_data_overwritten(self, overwrites: list) -> None:
+        """Show a banner in the panel when LWW sync silently overwrites task states."""
+        if not overwrites:
+            return
+        lines = []
+        for o in overwrites[:5]:
+            old = _STATUS_LABEL.get(o.get("old_status", ""), o.get("old_status", ""))
+            new = _STATUS_LABEL.get(o.get("new_status", ""), o.get("new_status", ""))
+            lines.append(f"· {o.get('uid', '?')}：{old} → {new}")
+        if len(overwrites) > 5:
+            lines.append(f"（另有 {len(overwrites) - 5} 条未显示）")
+        detail = "\n".join(lines)
+        self._show_sync_banner(
+            f"同步更新了 {len(overwrites)} 条任务状态（远端版本较新）",
+            detail,
+        )
+        self._refresh_tasks()
+
+    def _show_sync_banner(self, title: str, detail: str = "") -> None:
+        """Show a transient non-modal banner at the top of the panel."""
+        banner = getattr(self, "_sync_banner", None)
+        if banner is None:
+            from PyQt6.QtWidgets import QFrame, QVBoxLayout
+            banner = QFrame(self)
+            banner.setObjectName("CollabSyncBanner")
+            banner.setStyleSheet(
+                "QFrame#CollabSyncBanner {"
+                " background: #fff8e1; border: 1px solid #ffe082;"
+                " border-radius: 6px; padding: 6px 10px;"
+                "}"
+            )
+            banner_lay = QVBoxLayout(banner)
+            banner_lay.setContentsMargins(6, 4, 6, 4)
+            banner_lay.setSpacing(2)
+            self._banner_title = QLabel()
+            self._banner_title.setObjectName("MutedSmall")
+            self._banner_title.setWordWrap(True)
+            self._banner_detail = QLabel()
+            self._banner_detail.setObjectName("MutedSmall")
+            self._banner_detail.setWordWrap(True)
+            banner_lay.addWidget(self._banner_title)
+            banner_lay.addWidget(self._banner_detail)
+            # Insert below header (index 1)
+            root_lay = self.layout()
+            if root_lay is not None:
+                root_lay.insertWidget(1, banner)
+            self._sync_banner = banner
+            self._banner_hide_timer = QTimer(self)
+            self._banner_hide_timer.setSingleShot(True)
+            self._banner_hide_timer.timeout.connect(banner.hide)
+        self._banner_title.setText(f"⟳ {title}")
+        self._banner_detail.setText(detail)
+        self._banner_detail.setVisible(bool(detail))
+        self._sync_banner.show()
+        self._banner_hide_timer.start(8000)
 
     def _on_update_status(self, uid: str, new_status: str) -> None:
         if self._svc is None:
@@ -588,30 +753,175 @@ class CollabPanel(QWidget):
         self._svc.release_task(uid)
         self._refresh_tasks()
 
-    def _broadcast_status_update(self, uid: str, new_status: str) -> None:
-        """POST status update to all online peers (best-effort)."""
-        if self._svc is None:
-            return
-        peers = self._svc.peers()
-        if not peers:
-            return
-        try:
-            import httpx
-        except ImportError:
-            return
-        payload = {"uid": uid, "status": new_status, "deviceId": socket.gethostname(),
-                   "groupCode": self._svc.group_code}
-        for peer in peers:
-            try:
-                httpx.post(
-                    f"{peer.base_url}/api/collab/tasks/update-status",
-                    json=payload,
-                    timeout=3.0,
-                )
-            except Exception:  # noqa: BLE001
-                pass
+    def _broadcast_status_update(self, uid: str, new_status: str,
+                                  assignee: Optional[str] = None) -> None:
+        """Delegate to CollabService.broadcast_status_update (non-blocking)."""
+        if self._svc is not None:
+            self._svc.broadcast_status_update(uid, new_status, assignee=assignee)
 
     # ── Footer actions ─────────────────────────────────────────────────────
+
+    def _persist_team_code(self, code: str) -> None:
+        """Save the team code so it survives restarts (auto-reconnect).
+
+        A non-empty code also enables collab-on-startup; clearing the code
+        disables it.
+        """
+        try:
+            self.ctx.settings.team_code = code
+            self.ctx.settings.collab_enabled = bool(code)
+            self.ctx.settings.flush_to_disk()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _on_new_session(self) -> None:
+        svc = self._svc
+        if svc is None:
+            return
+        code = svc.create_session()
+        self._persist_team_code(code)
+        self._refresh_session_ui()
+        self._refresh_devices()
+        from app.utils import ui
+        ui.info(self, "协作团队已创建",
+                f"团队码：<b>{code}</b>\n\n"
+                "同事打开协作面板后会看到你的团队，点「加入」即可。\n"
+                "加入一次永久有效，重启软件自动重连；\n"
+                "之后团队成员打开同名项目就会自动同步数据。")
+
+    def _on_leave_session(self) -> None:
+        svc = self._svc
+        if svc is None:
+            return
+        svc.leave_session()
+        self._persist_team_code("")
+        self._refresh_session_ui()
+        self._refresh_devices()
+
+    def _on_join_session(self, code: str, name: str) -> None:
+        svc = self._svc
+        if svc is None:
+            return
+        svc.join_session(code, session_name=name)
+        self._persist_team_code(code)
+        self._refresh_session_ui()
+        self._refresh_devices()
+        from app.utils import ui
+        ui.info(self, "已加入协作团队",
+                f"成功加入「{name}」，加入一次永久有效。\n"
+                "与你打开同名项目的队友会自动同步数据；\n"
+                "打开其他项目的队友仅显示在线状态，数据互不影响。")
+
+    def _on_connect_peer(self, ip: str, port: int) -> None:
+        """User clicked '连接' on a discovered but unpaired peer."""
+        svc = self._svc
+        if svc is None:
+            return
+        ok = svc.request_pairing(ip, port)
+        if ok:
+            from app.utils import ui
+            ui.info(self, "配对请求已发送",
+                    f"已向 {ip} 发送协作邀请，等待对方确认。\n对方确认后将自动开始同步。")
+        else:
+            from app.utils import ui
+            ui.warn(self, "连接失败",
+                    f"无法连接到 {ip}:{port}。\n请确认对方软件已运行，且在同一网络中。")
+
+    def _on_pairing_requested(self, from_ip: str, from_hostname: str,
+                               their_code: str) -> None:
+        """Show a confirmation dialog when another device wants to pair."""
+        from PyQt6.QtWidgets import QMessageBox
+        msg = QMessageBox(self)
+        msg.setWindowTitle("收到协作邀请")
+        msg.setText(f"<b>{from_hostname}</b>（{from_ip}）\n请求与你开始协作同步。")
+        msg.setInformativeText("接受后双方将共享编号认领状态，实时同步。")
+        msg.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        msg.button(QMessageBox.StandardButton.Yes).setText("接受")
+        msg.button(QMessageBox.StandardButton.No).setText("拒绝")
+        msg.setDefaultButton(QMessageBox.StandardButton.Yes)
+        if msg.exec() == QMessageBox.StandardButton.Yes:
+            svc = self._svc
+            if svc is not None:
+                peer_port = svc._port or 5050
+                # Find the peer's actual port from known peers
+                with svc._peers_lock:
+                    for p in svc._peers.values():
+                        if p.ip == from_ip:
+                            peer_port = p.port
+                            break
+                svc.accept_pairing(from_ip, peer_port, their_code)
+                self._refresh_devices()
+                self._refresh_health()
+
+    def _on_project_bind_suggested(self, peer_name: str, project_name: str,
+                                   sync_code: str) -> None:
+        """Teammate has a same-named project with a different identity —
+        ask whether to bind them into one synced project."""
+        from PyQt6.QtWidgets import QMessageBox
+        msg = QMessageBox(self)
+        msg.setWindowTitle("发现同名项目")
+        msg.setText(
+            f"队友 <b>{peer_name}</b> 也在做「{project_name}」。\n"
+            "是否把两边绑定为同一个项目并开始同步？"
+        )
+        msg.setInformativeText(
+            "绑定后：编号认领和标本记录实时互通。\n"
+            "如果这只是恰好同名的两个不同项目，请选「不绑定」。"
+        )
+        msg.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        msg.button(QMessageBox.StandardButton.Yes).setText("绑定并同步")
+        msg.button(QMessageBox.StandardButton.No).setText("不绑定")
+        msg.setDefaultButton(QMessageBox.StandardButton.Yes)
+        if msg.exec() != QMessageBox.StandardButton.Yes:
+            return
+        svc = self._svc
+        if svc is None:
+            return
+        try:
+            svc.apply_project_sync_code(sync_code)
+        except Exception as exc:  # noqa: BLE001
+            from app.utils import ui
+            ui.warn(self, "绑定失败", f"无法绑定项目：{exc}")
+            return
+        # Freshly bound — pull the teammate's existing records right away
+        try:
+            svc.pull_all_specimens_from_session()
+        except Exception:  # noqa: BLE001
+            pass
+        self._refresh_devices()
+        self._refresh_health()
+
+    def _on_pairing_accepted(self, ip: str, hostname: str) -> None:
+        """Called when a peer we invited has accepted."""
+        from app.utils import ui
+        ui.info(self, "协作已建立",
+                f"{hostname or ip} 已接受邀请，双方现在开始实时同步。")
+        self._refresh_devices()
+        self._refresh_health()
+
+    def _on_scan_subnet(self) -> None:
+        """Trigger a manual /24 subnet scan for collab peers."""
+        svc = self._svc
+        if svc is None:
+            return
+        self._scan_btn.setText("扫描中…")
+        self._scan_btn.setEnabled(False)
+
+        def _done(found: int) -> None:
+            self._scan_btn.setText("扫描局域网")
+            self._scan_btn.setEnabled(True)
+            if found:
+                self._refresh_devices()
+                self._refresh_health()
+            else:
+                from app.utils import ui
+                ui.info(self, "扫描完成", "未在子网中发现其他协作节点。\n请确认对方软件已运行，且在同一 Wi-Fi / 网段。")
+
+        svc.scan_subnet_peers(on_done=_done)
 
     def _on_copy_addr(self) -> None:
         svc = self._svc
@@ -756,14 +1066,14 @@ class CollabPanel(QWidget):
         svc = self._svc
         if svc is None:
             return
-        self._scan_btn.setEnabled(False)
-        self._scan_btn.setText("搜索中…")
+        self._peer_scan_btn.setEnabled(False)
+        self._peer_scan_btn.setText("搜索中…")
         svc.scan_lan()
         QTimer.singleShot(5000, self._re_enable_scan)
 
     def _re_enable_scan(self) -> None:
-        self._scan_btn.setEnabled(True)
-        self._scan_btn.setText("搜索队友")
+        self._peer_scan_btn.setEnabled(True)
+        self._peer_scan_btn.setText("搜索队友")
 
     def _on_setup_wizard(self) -> None:
         from app.widgets.collab_setup_wizard import CollabSetupWizard
@@ -799,7 +1109,7 @@ class CollabPanel(QWidget):
         self._refresh_tasks()
         self._refresh_activity()
         self._share_label.setText(f"分享: {svc.local_address()}" if svc.is_running() else "分享: —")
-        self._group_code_label.setText(svc.group_code or "（未设置）")
+        self._refresh_session_ui()
         status = build_collab_status(svc, svc.peers())
         self._setup_btn.setVisible(status.state in {"not_started", "missing_group"})
 

@@ -17,10 +17,11 @@ def db():
     conn.close()
 
 
-def _make_ctx(db=None):
+def _make_ctx(db=None, project_dir=None):
     ctx = MagicMock()
     ctx.get_db.return_value = db
-    ctx.current_project_dir = None
+    ctx.current_project_dir = project_dir
+    ctx.current_project_root = None
     ctx.settings.auto_activate_on_new_specimen = False
     ctx.settings.delete_jpg_after_archive = True
     ctx.settings.current_theme = "dark"
@@ -48,6 +49,34 @@ def test_drawer_has_printing_tab(qtbot):
     assert "命名" in tab_texts
     assert "TIFF" in tab_texts
     assert "打印" in tab_texts
+
+
+def test_overview_shows_current_project_scope(qtbot, db, tmp_path):
+    from app.widgets.project_settings_drawer import ProjectSettingsDrawer
+
+    project_dir = tmp_path / "zhengli"
+    project_dir.mkdir()
+    ctx = _make_ctx(db=db, project_dir=str(project_dir))
+    d = ProjectSettingsDrawer(ctx)
+    qtbot.addWidget(d)
+
+    d.refresh()
+
+    assert "zhengli" in d._title_label.text()
+    assert str(project_dir) in d._header_scope_lbl.text()
+    assert "_data" in d._project_scope_lbl.text()
+
+
+def test_naming_advanced_settings_are_collapsed_by_default(qtbot):
+    from app.widgets.project_settings_drawer import ProjectSettingsDrawer
+
+    d = ProjectSettingsDrawer(_make_ctx())
+    qtbot.addWidget(d)
+
+    assert d._naming_advanced_body.isHidden() is True
+    d._toggle_naming_advanced()
+    assert d._naming_advanced_body.isHidden() is False
+    assert "收起" in d._naming_advanced_btn.text()
 
 
 def test_template_manager_focuses_requested_bucket(qtbot, db, monkeypatch):
@@ -225,6 +254,55 @@ def test_print_settings_roundtrip(qtbot, db):
         assert "无需排版" in d._sample_imposition_btn.text()
     else:
         assert "多标签排版" in d._sample_imposition_btn.text()
+
+
+def test_print_settings_lists_niimbot_virtual_printer(qtbot, db, monkeypatch):
+    from app.services import niimbot_print_service as niimbot
+    from app.widgets.project_settings_drawer import ProjectSettingsDrawer
+
+    monkeypatch.setattr(
+        niimbot,
+        "available_printers",
+        lambda: [niimbot.NiimbotPrinter(
+            id=niimbot.printer_id("COM5"),
+            name="NIIMBOT B203 USB (COM5)",
+            port="COM5",
+        )],
+    )
+    ctx = _make_ctx(db=db)
+    d = ProjectSettingsDrawer(ctx)
+    qtbot.addWidget(d)
+
+    d._refresh_printer_combo(d._sample_printer_combo, niimbot.printer_id("COM5"))
+
+    assert d._sample_printer_combo.findData("NIIMBOT:B203:COM5") >= 0
+    assert d._sample_printer_combo.currentData() == "NIIMBOT:B203:COM5"
+
+
+def test_print_settings_shows_niimbot_media_warning(qtbot, db, monkeypatch):
+    from app.services import niimbot_print_service as niimbot
+    from app.widgets.project_settings_drawer import ProjectSettingsDrawer
+
+    monkeypatch.setattr(
+        niimbot,
+        "available_printers",
+        lambda: [niimbot.NiimbotPrinter(
+            id=niimbot.printer_id("COM5"),
+            name="NIIMBOT B203 USB (COM5)",
+            port="COM5",
+        )],
+    )
+    ctx = _make_ctx(db=db)
+    d = ProjectSettingsDrawer(ctx)
+    qtbot.addWidget(d)
+
+    d._refresh_printer_combo(d._sample_printer_combo, niimbot.printer_id("COM5"))
+    d._sample_paper_combo.setCurrentIndex(d._sample_paper_combo.findData("a4"))
+    d._sync_niimbot_print_hint()
+
+    assert not d._niimbot_print_hint.isHidden()
+    assert "T40×30mm" in d._niimbot_print_hint.text()
+    assert "A4/A5" in d._niimbot_print_hint.text()
 
 
 def test_imposition_buttons_follow_sheet_paper_selection(qtbot, db):

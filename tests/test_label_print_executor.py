@@ -20,12 +20,12 @@ class _FakePrinter:
         return self.name
 
 
-def _job(bucket="sample", n=1):
+def _job(bucket="sample", n=1, paper_type="a4"):
     return {
         "bucket": bucket,
         "items": [{"idx": i, "data": {"uniqueId": f"U{i}"}} for i in range(n)],
         "labels": [{"uniqueId": f"U{i}"} for i in range(n)],
-        "paperType": "a4",
+        "paperType": paper_type,
         "gridOpts": {"orientation": "landscape"},
     }
 
@@ -201,3 +201,79 @@ def test_executor_direct_path_empty_printer_means_system_default():
     assert result.printed is True
     assert result.printer_name == "default"
     assert captured["printer_name"] == ""
+
+
+def test_executor_direct_niimbot_path_bypasses_qt_and_windows(monkeypatch):
+    from app.services import niimbot_print_service as niimbot
+
+    captured = {}
+
+    def fake_print(jobs, **kw):
+        captured["jobs"] = jobs
+        captured["kw"] = kw
+        return "NIIMBOT B203 USB (COM5)"
+
+    def build_should_not_run(job, grid_opts=None):
+        raise AssertionError("Qt printer path should not run for NIIMBOT")
+
+    monkeypatch.setattr(niimbot, "print_jobs_to_niimbot", fake_print)
+
+    result = LabelPrintExecutor(
+        build_printer_fn=build_should_not_run,
+        windows_print_module=_WindowsUnavailable,
+    ).print_direct([_job(paper_type="label")], printer_name=niimbot.printer_id("COM5"))
+
+    assert result.printed is True
+    assert result.printer_name == "NIIMBOT B203 USB (COM5)"
+    assert captured["kw"]["printer_name"] == "NIIMBOT:B203:COM5"
+    assert captured["kw"]["document_name"]
+
+
+def test_executor_dialog_niimbot_path_bypasses_windows_bridge(monkeypatch):
+    from app.services import niimbot_print_service as niimbot
+
+    captured = {}
+
+    class WindowsAvailable:
+        @staticmethod
+        def is_available():
+            return True
+
+        @staticmethod
+        def print_jobs_with_windows_dialog(jobs, **kw):
+            raise AssertionError("Windows bridge should not handle NIIMBOT")
+
+    class Dialog:
+        def __init__(self, jobs, parent=None):
+            captured["dialog_jobs"] = jobs
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+        def selected_printer(self):
+            return niimbot.printer_id("COM5")
+
+    monkeypatch.setattr(
+        niimbot,
+        "available_printers",
+        lambda: [niimbot.NiimbotPrinter(
+            id=niimbot.printer_id("COM5"),
+            name="NIIMBOT B203 USB (COM5)",
+            port="COM5",
+        )],
+    )
+    def fake_niimbot_print(jobs, **kw):
+        captured["niimbot_jobs"] = jobs
+        captured["niimbot_kw"] = kw
+        return "NIIMBOT B203 USB (COM5)"
+
+    monkeypatch.setattr(niimbot, "print_jobs_to_niimbot", fake_niimbot_print)
+
+    result = LabelPrintExecutor(
+        dialog_cls=Dialog,
+        windows_print_module=WindowsAvailable,
+    ).print_with_dialog([_job(paper_type="label")])
+
+    assert result.printed is True
+    assert result.printer_name == "NIIMBOT B203 USB (COM5)"
+    assert captured["niimbot_kw"]["printer_name"] == "NIIMBOT:B203:COM5"

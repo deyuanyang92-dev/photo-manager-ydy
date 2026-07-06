@@ -2135,24 +2135,24 @@ QScrollArea#NavScroll QScrollBar::handle:horizontal:hover {{ background: {t["scr
 
 QScrollArea#RightRailScroll {{
     background-color: {t["panel_2"]};
-    border-left: 1px solid {t["border_medium"]};
+    border-left: 2px solid {t["border_strong"]};
     border-top: none;
-    border-right: none;
+    border-right: 1px solid {t["border_medium"]};
     border-bottom: none;
 }}
 QWidget#RightRailContent {{
     background-color: {t["panel_2"]};
 }}
 QScrollArea#RightRailScroll QScrollBar:vertical {{
-    background: {t["panel_inset"]};
-    width: 12px;
+    background: {t["panel"]};
+    width: 14px;
     margin: 0;
-    border-left: 1px solid {t["border"]};
+    border-left: 1px solid {t["border_medium"]};
 }}
 QScrollArea#RightRailScroll QScrollBar::handle:vertical {{
-    background: {t["scrollbar_handle"]};
-    border-radius: 6px;
-    min-height: 34px;
+    background: {t["border_strong"]};
+    border-radius: 5px;
+    min-height: 44px;
     margin: 2px;
 }}
 QScrollArea#RightRailScroll QScrollBar::handle:vertical:hover {{

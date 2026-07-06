@@ -40,6 +40,48 @@ if TYPE_CHECKING:
     from app.app_context import AppContext
 
 
+# ── collapsible section helper ────────────────────────────────────────────────
+
+class _CollapsibleSection(QWidget):
+    """A disclosure-style section: click header to show/hide body."""
+
+    def __init__(self, title: str, collapsed: bool = True,
+                 parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(4)
+
+        self._toggle = QPushButton(f"▸ {title}" if collapsed else f"▾ {title}")
+        self._toggle.setObjectName("Ghost")
+        self._toggle.setFixedHeight(28)
+        self._toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._toggle.setStyleSheet("text-align: left; padding-left: 2px;")
+        root.addWidget(self._toggle)
+
+        self._body = QWidget()
+        body_lay = QVBoxLayout(self._body)
+        body_lay.setContentsMargins(8, 0, 0, 0)
+        body_lay.setSpacing(6)
+        self._body_lay = body_lay
+        self._body.setVisible(not collapsed)
+        root.addWidget(self._body)
+
+        self._collapsed = collapsed
+        self._title = title
+        self._toggle.clicked.connect(self._on_toggle)
+
+    def _on_toggle(self) -> None:
+        self._collapsed = not self._collapsed
+        self._body.setVisible(not self._collapsed)
+        self._toggle.setText(
+            f"▸ {self._title}" if self._collapsed else f"▾ {self._title}"
+        )
+
+    def body_layout(self) -> QVBoxLayout:
+        return self._body_lay
+
+
 # ── inline KV dict editor ──────────────────────────────────────────────────────
 
 class _KVEditor(QWidget):
@@ -253,9 +295,18 @@ class ProjectSettingsDrawer(QWidget):
         head = QHBoxLayout(head_w)
         head.setContentsMargins(20, 14, 12, 14)
         head.setSpacing(8)
-        title = QLabel("当前项目设置")
-        title.setObjectName("WorkspaceTitle")
-        head.addWidget(title)
+        title_box = QWidget()
+        title_lay = QVBoxLayout(title_box)
+        title_lay.setContentsMargins(0, 0, 0, 0)
+        title_lay.setSpacing(2)
+        self._title_label = QLabel("当前项目设置")
+        self._title_label.setObjectName("WorkspaceTitle")
+        self._header_scope_lbl = QLabel("未选择项目")
+        self._header_scope_lbl.setObjectName("MutedSmall")
+        self._header_scope_lbl.setWordWrap(True)
+        title_lay.addWidget(self._title_label)
+        title_lay.addWidget(self._header_scope_lbl)
+        head.addWidget(title_box, 1)
         head.addStretch()
         close_btn = QPushButton("✕")
         close_btn.setObjectName("Ghost")
@@ -286,6 +337,15 @@ class ProjectSettingsDrawer(QWidget):
     def _build_tab_overview(self) -> QWidget:
         w, lay = _scrollable_tab()
         lay.setSpacing(10)
+
+        self._project_scope_lbl = QLabel("未选择项目")
+        self._project_scope_lbl.setObjectName("MutedSmall")
+        self._project_scope_lbl.setWordWrap(True)
+        lay.addWidget(self._project_scope_lbl)
+
+        project_lbl = QLabel("项目资料（保存到当前项目）")
+        project_lbl.setObjectName("Section")
+        lay.addWidget(project_lbl)
 
         # Project meta fields
         meta_fields = [
@@ -319,14 +379,24 @@ class ProjectSettingsDrawer(QWidget):
 
         lay.addWidget(_divider())
 
+        local_lbl = QLabel("本机工作台偏好（所有项目共用）")
+        local_lbl.setObjectName("Section")
+        local_lbl.setWordWrap(True)
+        lay.addWidget(local_lbl)
+        local_hint = QLabel("这些开关跟当前电脑和操作习惯有关，不写入项目数据库。")
+        local_hint.setObjectName("MutedSmall")
+        local_hint.setWordWrap(True)
+        lay.addWidget(local_hint)
+
         # Auto-activate toggle
         self._auto_activate_cb = QCheckBox("新建编号后自动激活")
+        self._auto_activate_cb.setToolTip("本机偏好：切换项目后仍沿用。")
         self._auto_activate_cb.toggled.connect(self._save_auto_activate_new_specimen_setting)
         lay.addWidget(self._auto_activate_cb)
 
         self._silent_compose_cb = QCheckBox("静默合成（跳过预览确认）")
         self._silent_compose_cb.setToolTip(
-            "打开后：选中 JPG 点合成会直接运行 Helicon，成果先生成在 incoming。"
+            "本机偏好：打开后，选中 JPG 点合成会直接运行 Helicon，成果先生成在 incoming。"
         )
         self._silent_compose_cb.toggled.connect(self._save_silent_compose_setting)
         lay.addWidget(self._silent_compose_cb)
@@ -345,7 +415,7 @@ class ProjectSettingsDrawer(QWidget):
         lay.addWidget(_divider())
 
         # Helicon section (Qt-specific, web oracle uses separate modal)
-        hel_lbl = QLabel("Helicon Focus 配置")
+        hel_lbl = QLabel("Helicon Focus 配置（本机）")
         hel_lbl.setObjectName("Section")
         lay.addWidget(hel_lbl)
         self._helicon_status_lbl = QLabel("检测中…")
@@ -510,6 +580,14 @@ class ProjectSettingsDrawer(QWidget):
         w, lay = _scrollable_tab()
         lay.setSpacing(10)
 
+        common_lbl = QLabel("常用编号前缀")
+        common_lbl.setObjectName("Section")
+        lay.addWidget(common_lbl)
+        common_hint = QLabel("通常只需要设置地区代码和样地代码；下面会实时显示编号示例。")
+        common_hint.setObjectName("MutedSmall")
+        common_hint.setWordWrap(True)
+        lay.addWidget(common_hint)
+
         # Basic code inputs
         self._province_edit = QLineEdit()
         self._province_edit.setFixedHeight(30)
@@ -525,102 +603,146 @@ class ProjectSettingsDrawer(QWidget):
 
         lay.addWidget(_divider())
 
+        self._naming_advanced_btn = QPushButton("展开高级命名设置")
+        self._naming_advanced_btn.setObjectName("Ghost")
+        self._naming_advanced_btn.setFixedHeight(28)
+        self._naming_advanced_btn.clicked.connect(self._toggle_naming_advanced)
+        lay.addWidget(self._naming_advanced_btn)
+
+        self._naming_advanced_body = QWidget()
+        self._naming_advanced_body.setVisible(False)
+        advanced_lay = QVBoxLayout(self._naming_advanced_body)
+        advanced_lay.setContentsMargins(0, 0, 0, 0)
+        advanced_lay.setSpacing(10)
+        lay.addWidget(self._naming_advanced_body)
+
         from app.services.naming_field_catalog import (
             component_fields,
             default_components,
         )
 
-        custom_lbl = QLabel("自定义命名字段（新增后可勾选为必填或加入编号组成）")
+        custom_lbl = QLabel("自定义命名字段（一般不用）")
         custom_lbl.setObjectName("Section")
         custom_lbl.setWordWrap(True)
-        lay.addWidget(custom_lbl)
+        advanced_lay.addWidget(custom_lbl)
         self._naming_custom_fields = _CustomFieldEditor()
         self._naming_custom_fields.changed.connect(self._save_naming_rules)
-        lay.addWidget(self._naming_custom_fields)
+        advanced_lay.addWidget(self._naming_custom_fields)
 
-        lay.addWidget(_divider())
+        advanced_lay.addWidget(_divider())
 
-        req_lbl = QLabel("必填字段（右侧编号卡按此显示 * 并提示缺项）")
-        req_lbl.setObjectName("Section")
-        req_lbl.setWordWrap(True)
-        lay.addWidget(req_lbl)
+        fields_lbl = QLabel("编号字段规则")
+        fields_lbl.setObjectName("Section")
+        advanced_lay.addWidget(fields_lbl)
+        fields_hint = QLabel("控制哪些字段必填、哪些字段参与编号，以及编号拼接顺序。默认规则通常够用。")
+        fields_hint.setObjectName("MutedSmall")
+        fields_hint.setWordWrap(True)
+        advanced_lay.addWidget(fields_hint)
+
+        # Column header
+        hdr = QWidget()
+        hdr_lay = QHBoxLayout(hdr)
+        hdr_lay.setContentsMargins(2, 0, 2, 2)
+        hdr_lay.setSpacing(0)
+        hdr_field = QLabel("字段")
+        hdr_field.setObjectName("MutedSmall")
+        hdr_lay.addWidget(hdr_field, 1)
+        for _txt, _w in (("必填", 52), ("参与编号", 68), ("顺序", 56)):
+            lbl = QLabel(_txt)
+            lbl.setObjectName("MutedSmall")
+            lbl.setFixedWidth(_w)
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            hdr_lay.addWidget(lbl)
+        advanced_lay.addWidget(hdr)
+
         self._naming_required_checks: dict[str, QCheckBox] = {}
-        self._naming_required_rows = QWidget()
-        self._naming_required_rows_lay = QVBoxLayout(self._naming_required_rows)
-        self._naming_required_rows_lay.setContentsMargins(0, 0, 0, 0)
-        self._naming_required_rows_lay.setSpacing(4)
-        lay.addWidget(self._naming_required_rows)
-        self._rebuild_naming_required_rows({})
-
-        lay.addWidget(_divider())
-
-        comp_lbl = QLabel("编号组成（按下方顺序拼接；可用上/下调整，分类/备注字段默认不参与）")
-        comp_lbl.setObjectName("Section")
-        comp_lbl.setWordWrap(True)
-        lay.addWidget(comp_lbl)
         self._naming_component_checks: dict[str, QCheckBox] = {}
-        self._naming_component_order = [field.key for field in component_fields()]
-        self._naming_component_rows = QWidget()
-        self._naming_component_rows_lay = QVBoxLayout(self._naming_component_rows)
-        self._naming_component_rows_lay.setContentsMargins(0, 0, 0, 0)
-        self._naming_component_rows_lay.setSpacing(4)
-        lay.addWidget(self._naming_component_rows)
-        self._rebuild_naming_component_rows(set(default_components()))
+        self._naming_component_order = [f.key for f in component_fields()]
+        self._naming_unified_rows = QWidget()
+        self._naming_unified_rows_lay = QVBoxLayout(self._naming_unified_rows)
+        self._naming_unified_rows_lay.setContentsMargins(0, 0, 0, 0)
+        self._naming_unified_rows_lay.setSpacing(2)
+        advanced_lay.addWidget(self._naming_unified_rows)
+        self._rebuild_naming_unified_table({}, set(default_components()))
 
-        lay.addWidget(_divider())
+        advanced_lay.addWidget(_divider())
 
         # 默认采集坐标 / 地理区（项目级兜底）。新建标本自动带；选定具体站位后，
         # 该站采集记录会以更高优先级覆盖（见 metadata_panel.apply_autofill）。
-        cap_lbl = QLabel("默认采集坐标 / 地理区（新标本兜底，选站位后由采集记录覆盖）")
+        cap_lbl = QLabel("默认采集坐标 / 地理区（可选）")
         cap_lbl.setObjectName("Section")
         cap_lbl.setWordWrap(True)
-        lay.addWidget(cap_lbl)
+        advanced_lay.addWidget(cap_lbl)
+        cap_hint = QLabel("仅在每个新标本都使用同一默认经纬度/地理区时填写；选中具体站位后会被采集记录覆盖。")
+        cap_hint.setObjectName("MutedSmall")
+        cap_hint.setWordWrap(True)
+        advanced_lay.addWidget(cap_hint)
         self._cap_lon_edit = QLineEdit()
         self._cap_lon_edit.setFixedHeight(30)
-        self._cap_lon_edit.setPlaceholderText("默认经度，如 121.5")
+        self._cap_lon_edit.setPlaceholderText("可留空")
         self._cap_lon_edit.editingFinished.connect(self._save_capture_defaults)
-        lay.addWidget(_settings_form_row("默认经度", self._cap_lon_edit, width=80))
+        advanced_lay.addWidget(_settings_form_row("默认经度", self._cap_lon_edit, width=80))
         self._cap_lat_edit = QLineEdit()
         self._cap_lat_edit.setFixedHeight(30)
-        self._cap_lat_edit.setPlaceholderText("默认纬度，如 29.1")
+        self._cap_lat_edit.setPlaceholderText("可留空")
         self._cap_lat_edit.editingFinished.connect(self._save_capture_defaults)
-        lay.addWidget(_settings_form_row("默认纬度", self._cap_lat_edit, width=80))
+        advanced_lay.addWidget(_settings_form_row("默认纬度", self._cap_lat_edit, width=80))
         self._cap_geo_edit = QLineEdit()
         self._cap_geo_edit.setFixedHeight(30)
-        self._cap_geo_edit.setPlaceholderText("默认采集地理区，如 三门湾")
+        self._cap_geo_edit.setPlaceholderText("可留空，如 三门湾")
         self._cap_geo_edit.editingFinished.connect(self._save_capture_defaults)
-        lay.addWidget(_settings_form_row("默认地理区", self._cap_geo_edit, width=80))
+        advanced_lay.addWidget(_settings_form_row("默认地理区", self._cap_geo_edit, width=80))
 
-        lay.addWidget(_divider())
+        advanced_lay.addWidget(_divider())
 
         # Stations dict
-        sta_lbl = QLabel("站位说明（缩写 → 中文）")
+        sta_lbl = QLabel("站位说明（可选）")
         sta_lbl.setObjectName("Section")
-        lay.addWidget(sta_lbl)
+        advanced_lay.addWidget(sta_lbl)
+        sta_hint = QLabel("只是把站位缩写翻译成中文备注，不影响编号生成；没有站位说明时可以不填。")
+        sta_hint.setObjectName("MutedSmall")
+        sta_hint.setWordWrap(True)
+        advanced_lay.addWidget(sta_hint)
         self._stations_kv = _KVEditor(key_placeholder="缩写", val_placeholder="中文说明")
         self._stations_kv.changed.connect(self._save_code_labels)
-        lay.addWidget(self._stations_kv)
+        advanced_lay.addWidget(self._stations_kv)
 
-        lay.addWidget(_divider())
+        advanced_lay.addWidget(_divider())
 
         # Species dict
-        sp_lbl = QLabel("物种缩写说明（如 DLC001 的前缀 → 中文）")
+        sp_lbl = QLabel("物种缩写说明（可选）")
         sp_lbl.setObjectName("Section")
-        lay.addWidget(sp_lbl)
+        advanced_lay.addWidget(sp_lbl)
+        sp_hint = QLabel("只是给 DLC001 这类前缀加中文说明，方便查看；不填写也不影响拍照整理。")
+        sp_hint.setObjectName("MutedSmall")
+        sp_hint.setWordWrap(True)
+        advanced_lay.addWidget(sp_hint)
         self._species_kv = _KVEditor(key_placeholder="缩写", val_placeholder="中文说明")
         self._species_kv.changed.connect(self._save_code_labels)
-        lay.addWidget(self._species_kv)
+        advanced_lay.addWidget(self._species_kv)
 
         lay.addWidget(_divider())
 
-        # Preview
-        preview_lbl = QLabel("解析预览（第一个标本）")
+        # Preview card
+        preview_lbl = QLabel("编号示例")
         preview_lbl.setObjectName("Section")
         lay.addWidget(preview_lbl)
-        self._code_preview_lbl = QLabel("（无标本）")
-        self._code_preview_lbl.setObjectName("Mono")
-        self._code_preview_lbl.setWordWrap(True)
-        lay.addWidget(self._code_preview_lbl)
+
+        self._code_preview_card = QFrame()
+        self._code_preview_card.setObjectName("NamingPreviewGroup")
+        self._code_preview_card_lay = QHBoxLayout(self._code_preview_card)
+        self._code_preview_card_lay.setContentsMargins(10, 8, 10, 8)
+        self._code_preview_card_lay.setSpacing(0)
+        lay.addWidget(self._code_preview_card)
+
+        # fallback label (shown when no segments)
+        self._code_preview_uid = QLabel("—")
+        self._code_preview_uid.setObjectName("Muted")
+        self._code_preview_card_lay.addWidget(self._code_preview_uid)
+        self._code_preview_card_lay.addStretch()
+
+        # keep old attr name so existing call sites still work
+        self._code_preview_lbl = self._code_preview_uid
 
         lay.addStretch()
         return w
@@ -734,6 +856,7 @@ class ProjectSettingsDrawer(QWidget):
         self._sample_printer_combo = QComboBox()
         self._sample_printer_combo.setFixedHeight(30)
         self._sample_printer_combo.currentIndexChanged.connect(self._save_print_settings)
+        self._sample_printer_combo.currentIndexChanged.connect(self._sync_niimbot_print_hint)
 
         self._sample_template_combo = QComboBox()
         self._sample_template_combo.setFixedHeight(30)
@@ -769,6 +892,7 @@ class ProjectSettingsDrawer(QWidget):
         self._tissue_printer_combo = QComboBox()
         self._tissue_printer_combo.setFixedHeight(30)
         self._tissue_printer_combo.currentIndexChanged.connect(self._save_print_settings)
+        self._tissue_printer_combo.currentIndexChanged.connect(self._sync_niimbot_print_hint)
 
         self._tissue_template_combo = QComboBox()
         self._tissue_template_combo.setFixedHeight(30)
@@ -811,6 +935,12 @@ class ProjectSettingsDrawer(QWidget):
         )
         lay.addWidget(tissue_grp)
 
+        self._niimbot_print_hint = QLabel("")
+        self._niimbot_print_hint.setObjectName("MutedSmall")
+        self._niimbot_print_hint.setWordWrap(True)
+        self._niimbot_print_hint.setVisible(False)
+        lay.addWidget(self._niimbot_print_hint)
+
         default_row = QHBoxLayout()
         default_row.setSpacing(6)
         self._save_print_default_btn = QPushButton("设为全局默认")
@@ -845,11 +975,54 @@ class ProjectSettingsDrawer(QWidget):
             names = []
         for name in sorted({n for n in names if n}):
             combo.addItem(name, name)
+        try:
+            from app.services import niimbot_print_service
+            for printer in niimbot_print_service.available_printers():
+                combo.addItem(printer.name, printer.id)
+        except Exception:
+            pass
         if selected and combo.findData(selected) < 0:
             combo.addItem(f"{selected}（未检测到）", selected)
         idx = combo.findData(selected or "")
         combo.setCurrentIndex(idx if idx >= 0 else 0)
         combo.blockSignals(False)
+
+    def _sync_niimbot_print_hint(self, *_args) -> None:
+        hint = getattr(self, "_niimbot_print_hint", None)
+        if hint is None:
+            return
+        sample_combo = getattr(self, "_sample_printer_combo", None)
+        tissue_combo = getattr(self, "_tissue_printer_combo", None)
+        if sample_combo is None or tissue_combo is None:
+            return
+        sample_printer = str(sample_combo.currentData() or "")
+        tissue_printer = str(tissue_combo.currentData() or "")
+        try:
+            from app.services import niimbot_print_service
+            sample_b203 = niimbot_print_service.is_niimbot_printer_id(sample_printer)
+            tissue_b203 = niimbot_print_service.is_niimbot_printer_id(tissue_printer)
+            if not (sample_b203 or tissue_b203):
+                hint.clear()
+                hint.setVisible(False)
+                return
+            paper_types = []
+            if sample_b203:
+                paper_types.append(str(self._sample_paper_combo.currentData() or ""))
+            if tissue_b203:
+                paper_types.append(str(self._tissue_paper_combo.currentData() or ""))
+            buckets = []
+            if sample_b203:
+                buckets.append("瓶签")
+            if tissue_b203:
+                buckets.append("RNA 签")
+            hint.setText(
+                f"NIIMBOT B203 已用于{'、'.join(buckets)}。"
+                f"{niimbot_print_service.compatibility_notice(paper_types)}"
+            )
+            hint.setVisible(True)
+        except Exception:
+            hint.clear()
+            hint.setVisible(False)
 
     def _refresh_template_combo(self, combo: QComboBox, bucket: str, selected: str) -> None:
         combo.blockSignals(True)
@@ -1056,78 +1229,142 @@ class ProjectSettingsDrawer(QWidget):
         except Exception:
             return []
 
-    def _rebuild_naming_required_rows(self, checked_required: dict[str, bool] | None = None) -> None:
-        from app.services.naming_field_catalog import required_fields
+    def _rebuild_naming_unified_table(
+        self,
+        checked_required: dict[str, bool] | None = None,
+        checked_components: set[str] | None = None,
+    ) -> None:
+        """Single pass: build the merged 字段 / 必填 / 参与编号 / 顺序 table."""
+        from app.services.naming_field_catalog import (
+            all_fields,
+            component_fields,
+            required_fields,
+            field_label,
+        )
 
-        checked_required = checked_required or {}
+        if checked_required is None:
+            checked_required = {
+                key: cb.isChecked()
+                for key, cb in self._naming_required_checks.items()
+            }
+        if checked_components is None:
+            checked_components = {
+                key for key, cb in self._naming_component_checks.items()
+                if cb.isChecked()
+            }
+
         custom_fields = self._custom_naming_fields()
-        lay = self._naming_required_rows_lay
+        catalog_keys = [f.key for f in component_fields(custom_fields)]
+        order = list(getattr(self, "_naming_component_order", []) or catalog_keys)
+        self._naming_component_order = [
+            k for k in order if k in catalog_keys or k in checked_components
+        ]
+        for key in catalog_keys:
+            if key not in self._naming_component_order:
+                self._naming_component_order.append(key)
+
+        req_keys = {f.key for f in required_fields(custom_fields)}
+        comp_keys = set(catalog_keys)
+
+        # Display order: component-ordered fields first, then required-only, then rest
+        comp_set = set(self._naming_component_order)
+        req_only = [f.key for f in all_fields(custom_fields) if f.key not in comp_set and f.key in req_keys]
+        all_keys_ordered = list(self._naming_component_order) + req_only
+
+        field_map = {f.key: f for f in all_fields(custom_fields)}
+        last_comp_idx = len(self._naming_component_order) - 1
+
+        lay = self._naming_unified_rows_lay
         while lay.count():
             item = lay.takeAt(0)
             if item and item.widget():
                 item.widget().deleteLater()
 
         self._naming_required_checks = {}
-        for field in required_fields(custom_fields):
-            cb = QCheckBox(field.label)
-            cb.setChecked(bool(checked_required.get(field.key, field.default_required)))
-            cb.stateChanged.connect(self._save_naming_rules)
-            self._naming_required_checks[field.key] = cb
-            lay.addWidget(cb)
-
-    def _rebuild_naming_component_rows(self, checked_components: set[str] | None = None) -> None:
-        from app.services.naming_field_catalog import component_fields, field_label
-
-        if checked_components is None:
-            checked_components = {
-                key for key, cb in self._naming_component_checks.items()
-                if cb.isChecked()
-            }
-        custom_fields = self._custom_naming_fields()
-        catalog_keys = [field.key for field in component_fields(custom_fields)]
-        order = list(getattr(self, "_naming_component_order", []) or catalog_keys)
-        self._naming_component_order = [
-            key for key in order
-            if key in catalog_keys or key in checked_components
-        ]
-        for key in catalog_keys:
-            if key not in self._naming_component_order:
-                self._naming_component_order.append(key)
-
-        lay = self._naming_component_rows_lay
-        while lay.count():
-            item = lay.takeAt(0)
-            if item and item.widget():
-                item.widget().deleteLater()
-
         self._naming_component_checks = {}
-        last = len(self._naming_component_order) - 1
-        for idx, key in enumerate(self._naming_component_order):
+
+        for key in all_keys_ordered:
+            f = field_map.get(key)
+            if f is None:
+                continue
+            is_req = key in req_keys
+            is_comp = key in comp_keys
+            comp_pos = self._naming_component_order.index(key) if key in comp_set else -1
+
             row = QWidget()
             row_lay = QHBoxLayout(row)
-            row_lay.setContentsMargins(0, 0, 0, 0)
-            row_lay.setSpacing(6)
-            cb = QCheckBox(field_label(key, custom_fields=custom_fields))
-            cb.setChecked(key in checked_components)
-            cb.stateChanged.connect(self._save_naming_rules)
-            self._naming_component_checks[key] = cb
-            row_lay.addWidget(cb, 1)
+            row_lay.setContentsMargins(2, 1, 2, 1)
+            row_lay.setSpacing(0)
 
-            up_btn = QPushButton("上")
-            up_btn.setObjectName("Ghost")
-            up_btn.setFixedSize(30, 24)
-            up_btn.setEnabled(idx > 0)
-            up_btn.clicked.connect(lambda _checked=False, k=key: self._move_naming_component(k, -1))
-            row_lay.addWidget(up_btn)
+            lbl = QLabel(f.label)
+            row_lay.addWidget(lbl, 1)
 
-            down_btn = QPushButton("下")
-            down_btn.setObjectName("Ghost")
-            down_btn.setFixedSize(30, 24)
-            down_btn.setEnabled(idx < last)
-            down_btn.clicked.connect(lambda _checked=False, k=key: self._move_naming_component(k, 1))
-            row_lay.addWidget(down_btn)
+            # 必填 column (52 px)
+            req_cell = QWidget()
+            req_cell.setFixedWidth(52)
+            rc_lay = QHBoxLayout(req_cell)
+            rc_lay.setContentsMargins(0, 0, 0, 0)
+            rc_lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            if is_req:
+                cb_req = QCheckBox()
+                cb_req.setChecked(bool(checked_required.get(key, f.default_required)))
+                cb_req.stateChanged.connect(self._save_naming_rules)
+                self._naming_required_checks[key] = cb_req
+                rc_lay.addWidget(cb_req)
+            else:
+                dash = QLabel("—")
+                dash.setObjectName("Muted")
+                dash.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                rc_lay.addWidget(dash)
+            row_lay.addWidget(req_cell)
+
+            # 参与编号 column (68 px)
+            comp_cell = QWidget()
+            comp_cell.setFixedWidth(68)
+            cc_lay = QHBoxLayout(comp_cell)
+            cc_lay.setContentsMargins(0, 0, 0, 0)
+            cc_lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            if is_comp:
+                cb_comp = QCheckBox()
+                cb_comp.setChecked(key in checked_components)
+                cb_comp.stateChanged.connect(self._save_naming_rules)
+                self._naming_component_checks[key] = cb_comp
+                cc_lay.addWidget(cb_comp)
+            else:
+                dash2 = QLabel("—")
+                dash2.setObjectName("Muted")
+                dash2.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                cc_lay.addWidget(dash2)
+            row_lay.addWidget(comp_cell)
+
+            # 顺序 column (56 px): only for component fields
+            ord_cell = QWidget()
+            ord_cell.setFixedWidth(56)
+            oc_lay = QHBoxLayout(ord_cell)
+            oc_lay.setContentsMargins(0, 0, 0, 0)
+            oc_lay.setSpacing(2)
+            if is_comp and comp_pos >= 0:
+                up_btn = QPushButton("↑")
+                up_btn.setObjectName("Ghost")
+                up_btn.setFixedSize(24, 22)
+                up_btn.setEnabled(comp_pos > 0)
+                up_btn.clicked.connect(lambda _=False, k=key: self._move_naming_component(k, -1))
+                down_btn = QPushButton("↓")
+                down_btn.setObjectName("Ghost")
+                down_btn.setFixedSize(24, 22)
+                down_btn.setEnabled(comp_pos < last_comp_idx)
+                down_btn.clicked.connect(lambda _=False, k=key: self._move_naming_component(k, 1))
+                oc_lay.addWidget(up_btn)
+                oc_lay.addWidget(down_btn)
+            row_lay.addWidget(ord_cell)
 
             lay.addWidget(row)
+
+    def _rebuild_naming_required_rows(self, checked_required: dict[str, bool] | None = None) -> None:
+        self._rebuild_naming_unified_table(checked_required=checked_required)
+
+    def _rebuild_naming_component_rows(self, checked_components: set[str] | None = None) -> None:
+        self._rebuild_naming_unified_table(checked_components=checked_components)
 
     def _move_naming_component(self, key: str, delta: int) -> None:
         try:
@@ -1141,17 +1378,24 @@ class ProjectSettingsDrawer(QWidget):
             self._naming_component_order[new_idx],
             self._naming_component_order[idx],
         )
-        checked = {
-            k for k, cb in self._naming_component_checks.items()
-            if cb.isChecked()
-        }
-        self._rebuild_naming_component_rows(checked)
+        self._rebuild_naming_unified_table()
         self._save_naming_rules()
+
+    def _toggle_naming_advanced(self) -> None:
+        body = getattr(self, "_naming_advanced_body", None)
+        btn = getattr(self, "_naming_advanced_btn", None)
+        if body is None or btn is None:
+            return
+        visible = not body.isVisible()
+        body.setVisible(visible)
+        btn.setText("收起高级命名设置" if visible else "展开高级命名设置")
 
     # ── Public API ────────────────────────────────────────────────────────────
 
     def refresh(self) -> None:
         """Reload from DB + Helicon detection. Call after project open/change."""
+        self._refresh_project_scope()
+
         # Helicon
         try:
             from app.services.helicon_service import detect_helicon
@@ -1202,6 +1446,31 @@ class ProjectSettingsDrawer(QWidget):
 
     # ── Private: load/save ────────────────────────────────────────────────────
 
+    def _current_project_label(self) -> tuple[str, str]:
+        project_dir = getattr(self.ctx, "current_project_dir", None)
+        if not project_dir:
+            return "未选择项目", ""
+        path_text = str(project_dir)
+        name = os.path.basename(os.path.normpath(path_text)) or path_text
+        return name, path_text
+
+    def _refresh_project_scope(self) -> None:
+        name, path_text = self._current_project_label()
+        if path_text:
+            db_text = os.path.join(path_text, "_data", "project.db")
+            self._title_label.setText(f"当前项目设置：{name}")
+            self._header_scope_lbl.setText(path_text)
+            self._project_scope_lbl.setText(
+                f"当前绑定项目：{name}\n项目级内容保存到：{db_text}"
+            )
+            name_edit = getattr(self, "_meta_edits", {}).get("name")
+            if name_edit is not None:
+                name_edit.setPlaceholderText(f"默认：{name}")
+        else:
+            self._title_label.setText("当前项目设置")
+            self._header_scope_lbl.setText("未选择项目")
+            self._project_scope_lbl.setText("未选择项目；项目级字段暂不可保存。")
+
     def _load_from_db(self, db) -> None:
         from app.services.project_settings_service import (
             load_setting,
@@ -1248,12 +1517,14 @@ class ProjectSettingsDrawer(QWidget):
             rules.get("required", DEFAULT_NAMING_RULES["required"]),
             custom_fields,
         )
-        self._rebuild_naming_required_rows(required)
         components = rules.get("components", DEFAULT_NAMING_RULES["components"])
         if not isinstance(components, list):
             components = DEFAULT_NAMING_RULES["components"]
         self._naming_component_order = ordered_component_keys(components, custom_fields)
-        self._rebuild_naming_component_rows({str(key) for key in components})
+        self._rebuild_naming_unified_table(
+            checked_required=required,
+            checked_components={str(key) for key in components},
+        )
         # 默认采集坐标 / 地理区
         cap = load_setting(db, "capture_defaults", DEFAULT_CAPTURE_DEFAULTS)
         self._cap_lon_edit.setText(str(cap.get("lon", "") or ""))
@@ -1362,6 +1633,7 @@ class ProjectSettingsDrawer(QWidget):
         self._tissue_strategy_combo.setCurrentIndex(idx if idx >= 0 else 0)
         self._tissue_strategy_combo.blockSignals(False)
         self._sync_imposition_buttons()
+        self._sync_niimbot_print_hint()
         if migrated_studio_mode:
             self._save_print_settings()
 
@@ -1435,13 +1707,16 @@ class ProjectSettingsDrawer(QWidget):
         if custom_fields != old_custom_fields:
             self._naming_custom_fields.load_fields(custom_fields)
             self._naming_custom_field_snapshot = list(custom_fields)
-            self._rebuild_naming_required_rows(data["required"])
             self._naming_component_order = [
                 key for key in self._naming_component_order
                 if key in self._naming_component_checks
                 or any(field.get("key") == key for field in custom_fields)
             ]
-            self._rebuild_naming_component_rows(set(data["components"]))
+            self._rebuild_naming_unified_table(
+                checked_required=data["required"],
+                checked_components=set(data["components"]),
+            )
+        self._update_code_preview(db)
         self.naming_rules_changed.emit()
 
     def _save_capture_defaults(self) -> None:
@@ -1505,22 +1780,114 @@ class ProjectSettingsDrawer(QWidget):
     def _on_sample_paper_changed(self) -> None:
         self._save_print_settings()
         self._sync_imposition_buttons()
+        self._sync_niimbot_print_hint()
 
     def _on_tissue_paper_changed(self) -> None:
         self._save_print_settings()
         self._sync_imposition_buttons()
+        self._sync_niimbot_print_hint()
 
     def _update_code_preview(self, db) -> None:
         try:
+            from app.services.naming_field_catalog import (
+                field_label,
+                ordered_component_keys,
+            )
+            from app.services.project_settings_service import (
+                DEFAULT_CODE_LABELS,
+                DEFAULT_NAMING_RULES,
+                load_setting,
+            )
+
+            rules = load_setting(db, "naming_rules", DEFAULT_NAMING_RULES)
+            components = rules.get("components") or DEFAULT_NAMING_RULES["components"]
+            custom_fields = rules.get("custom_fields", [])
+            ordered = ordered_component_keys(components, custom_fields)
+            active_comps = [k for k in ordered if k in set(components)]
+
+            # Gather segment values
             row = db.execute(
                 "SELECT uid FROM specimens ORDER BY rowid LIMIT 1"
             ).fetchone()
-            if row:
-                self._code_preview_lbl.setText(row[0])
+
+            seg_pairs: list[tuple[str, str]] = []  # (value, label)
+            if row and row[0]:
+                uid = row[0]
+                parts = uid.split("-")
+                for i, key in enumerate(active_comps):
+                    seg = parts[i] if i < len(parts) else "…"
+                    seg_pairs.append((seg, field_label(key, custom_fields=custom_fields)))
             else:
-                self._code_preview_lbl.setText("（无标本）")
+                cl = load_setting(db, "code_labels", DEFAULT_CODE_LABELS)
+                example = {
+                    "province": cl.get("province") or "地区",
+                    "site": cl.get("site") or "样地",
+                    "station": "B2",
+                    "species_id": "DLC001",
+                    "storage": "D95E",
+                    "date_seg": "20260101",
+                }
+                for key in active_comps:
+                    val = example.get(key) or key
+                    seg_pairs.append((val, field_label(key, custom_fields=custom_fields)))
+
+            self._rebuild_code_preview_card(seg_pairs, is_example=not (row and row[0]))
         except Exception:
-            self._code_preview_lbl.setText("（无标本）")
+            self._rebuild_code_preview_card([], is_example=False)
+
+    def _rebuild_code_preview_card(
+        self,
+        seg_pairs: list[tuple[str, str]],
+        *,
+        is_example: bool = False,
+    ) -> None:
+        """Clear and rebuild the UID preview card from (value, label) pairs."""
+        lay = self._code_preview_card_lay
+        while lay.count():
+            item = lay.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+
+        if not seg_pairs:
+            placeholder = QLabel("（请先勾选参与编号的字段）")
+            placeholder.setObjectName("Muted")
+            lay.addWidget(placeholder)
+            lay.addStretch()
+            self._code_preview_lbl = placeholder
+            return
+
+        for idx, (val, lbl_text) in enumerate(seg_pairs):
+            if idx > 0:
+                sep = QLabel("-")
+                sep.setObjectName("NamingGroupTitle")
+                sep.setContentsMargins(4, 0, 4, 12)
+                lay.addWidget(sep)
+
+            seg_w = QWidget()
+            seg_lay = QVBoxLayout(seg_w)
+            seg_lay.setContentsMargins(0, 0, 0, 0)
+            seg_lay.setSpacing(1)
+
+            val_lbl = QLabel(val)
+            val_lbl.setObjectName("Mono")
+            val_lbl.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+
+            name_lbl = QLabel(lbl_text)
+            name_lbl.setObjectName("NamingGroupTitle")
+            name_lbl.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+
+            seg_lay.addWidget(val_lbl)
+            seg_lay.addWidget(name_lbl)
+            lay.addWidget(seg_w)
+
+        lay.addStretch()
+
+        if is_example:
+            hint = QLabel("示例")
+            hint.setObjectName("MutedSmall")
+            hint.setContentsMargins(6, 0, 0, 0)
+            lay.addWidget(hint)
 
     # ── Custom storages list ──────────────────────────────────────────────────
 

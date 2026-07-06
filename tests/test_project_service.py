@@ -647,6 +647,46 @@ class TestEnterWorkspace:
         assert (proj / "results").exists()
         assert (proj / "_data").exists()
 
+    def test_backfills_project_meta_from_recent_descriptor(self, tmp_path):
+        import json
+        from app.db.db_manager import open_project_db
+        from app.services.project_service import enter_workspace
+        from app.services.project_settings_service import (
+            DEFAULT_PERSONNEL,
+            DEFAULT_PROJECT_META,
+            load_setting,
+        )
+
+        ctx = _FakeCtx()
+        proj = tmp_path / "legacy"
+        proj.mkdir()
+        json_path = tmp_path / "user_projects.json"
+        json_path.write_text(
+            json.dumps({
+                "version": 1,
+                "projects": [{
+                    "directory": str(proj),
+                    "name": "旧项目",
+                    "projectCode": "PRJ-2026-09",
+                    "location": "gd",
+                    "collector": "ydy",
+                    "year": "2026",
+                    "dateRange": "20260622",
+                }],
+            }, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        enter_workspace(ctx, str(proj), projects_json_path=str(json_path))
+
+        db = open_project_db(str(proj), create=False)
+        meta = load_setting(db, "project_meta", DEFAULT_PROJECT_META)
+        personnel = load_setting(db, "personnel", DEFAULT_PERSONNEL)
+        assert meta["project_code"] == "PRJ-2026-09"
+        assert meta["name"] == "旧项目"
+        assert meta["location"] == "gd"
+        assert personnel["collector"] == "ydy"
+
 
 # ── record_recent_workspace (feeds 项目总览's flat list) ─────────────────────
 
@@ -737,6 +777,89 @@ class TestSaveProjectDescriptor:
         assert entry["location"] == "福建 · 厦门"
         assert entry["collector"] == "杨德援"
         assert entry["dateRange"] == "20260601 ~ 20260615"
+
+    def test_persists_creation_metadata_to_project_settings(self, tmp_path):
+        from app.db.db_manager import open_project_db
+        from app.services.project_service import save_project_descriptor
+        from app.services.project_settings_service import (
+            DEFAULT_PERSONNEL,
+            DEFAULT_PROJECT_META,
+            load_setting,
+        )
+
+        json_path = tmp_path / "user_projects.json"
+        project_dir = tmp_path / "厦门潮间带"
+        project_dir.mkdir()
+        project = {
+            "name": "厦门潮间带多毛类调查",
+            "directory": str(project_dir),
+            "projectCode": "PRJ-2026-01",
+            "location": "福建 · 厦门",
+            "collector": "杨德援",
+            "year": "2026",
+            "dateRange": "20260601 ~ 20260615",
+        }
+
+        save_project_descriptor(str(json_path), project)
+
+        db = open_project_db(str(project_dir), create=False)
+        try:
+            meta = load_setting(db, "project_meta", DEFAULT_PROJECT_META)
+            personnel = load_setting(db, "personnel", DEFAULT_PERSONNEL)
+        finally:
+            db.close()
+        assert meta["project_code"] == "PRJ-2026-01"
+        assert meta["name"] == "厦门潮间带多毛类调查"
+        assert meta["year"] == "2026"
+        assert meta["date_range"] == "20260601 ~ 20260615"
+        assert meta["location"] == "福建 · 厦门"
+        assert personnel["collector"] == "杨德援"
+
+    def test_existing_project_descriptor_does_not_overwrite_project_settings(self, tmp_path):
+        from app.db.db_manager import close_project_db, open_project_db
+        from app.services.project_service import save_project_descriptor
+        from app.services.project_settings_service import (
+            DEFAULT_PROJECT_META,
+            load_setting,
+            save_setting,
+        )
+
+        json_path = tmp_path / "user_projects.json"
+        project_dir = tmp_path / "旧项目"
+        project_dir.mkdir()
+        save_project_descriptor(str(json_path), {
+            "name": "旧项目",
+            "directory": str(project_dir),
+            "year": "2021",
+            "dateRange": "20210101",
+        })
+        db = open_project_db(str(project_dir), create=False)
+        try:
+            meta = load_setting(db, "project_meta", DEFAULT_PROJECT_META)
+            meta.update({
+                "name": "数据库真实名称",
+                "year": "2024",
+                "date_range": "20240501 ~ 20240510",
+            })
+            save_setting(db, "project_meta", meta)
+        finally:
+            close_project_db(str(project_dir))
+
+        save_project_descriptor(str(json_path), {
+            "name": "打开对话框名称",
+            "directory": str(project_dir),
+            "year": "2026",
+            "dateRange": "20260707",
+        })
+
+        db = open_project_db(str(project_dir), create=False)
+        try:
+            meta = load_setting(db, "project_meta", DEFAULT_PROJECT_META)
+        finally:
+            close_project_db(str(project_dir))
+        assert meta["name"] == "数据库真实名称"
+        assert meta["year"] == "2024"
+        assert meta["date_range"] == "20240501 ~ 20240510"
 
     def test_upserts_by_resolved_directory(self, tmp_path):
         from app.services.project_service import save_project_descriptor

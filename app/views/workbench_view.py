@@ -1904,6 +1904,9 @@ class WorkbenchView(BaseView):
         right_scroll.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
+        right_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOn
+        )
         right_scroll.setMinimumWidth(320)   # web bindPanelResize 下限
         right_scroll.setMaximumWidth(500)   # web bindPanelResize 上限
         self._right_scroll = right_scroll
@@ -2586,6 +2589,7 @@ class WorkbenchView(BaseView):
         try:
             from PyQt6.QtPrintSupport import QPrinterInfo
             from app.services import label_service
+            from app.services import niimbot_print_service
             from app.services import project_settings_service as pss
             import app.utils.label_print as label_print
 
@@ -2635,6 +2639,7 @@ class WorkbenchView(BaseView):
                     for p in QPrinterInfo.availablePrinters()
                     if p.printerName()
                 }
+            available.update(niimbot_print_service.available_printer_ids())
             sample_printer = self._resolve_quick_printer(
                 str(print_settings.get("sample_printer") or ""),
                 default_printer,
@@ -2722,7 +2727,8 @@ class WorkbenchView(BaseView):
 
             if quick_mode == "dialog":
                 # ── Dialog path: user picks printer, all jobs printed together ──
-                if windows_print.is_available():
+                has_niimbot_printer = bool(niimbot_print_service.available_printers())
+                if windows_print.is_available() and not has_niimbot_printer:
                     ok, printer_name = windows_print.print_jobs_with_windows_dialog(
                         direct_jobs, document_name=f"标本标签 {uid}"
                     )
@@ -2751,23 +2757,40 @@ class WorkbenchView(BaseView):
                             self._status_message(f"RNAlater 标签已加入合版队列：当前 {rna_queue.pending_count(db)} 张")
                         return False
 
-                    printer_name = dlg.selected_printer()
-                    printer = label_print.build_printer(direct_jobs[0])
-                    if printer_name:
-                        printer.setPrinterName(printer_name)
+                    printer_name = str(dlg.selected_printer() or "")
+                    if niimbot_print_service.is_niimbot_printer_id(printer_name):
+                        printer_display = niimbot_print_service.print_jobs_to_niimbot(
+                            direct_jobs,
+                            printer_name=printer_name,
+                            document_name=f"标本标签 {uid}",
+                        )
+                    elif windows_print.is_available():
+                        ok, used_printer = windows_print.print_jobs_with_windows_dialog(
+                            direct_jobs,
+                            document_name=f"标本标签 {uid}",
+                            printer_name=printer_name,
+                            show_dialog=False,
+                        )
+                        if not ok:
+                            return False
+                        printer_display = used_printer or printer_name or "Windows 打印机"
+                    else:
+                        printer = label_print.build_printer(direct_jobs[0])
+                        if printer_name:
+                            printer.setPrinterName(printer_name)
 
-                    if not label_print.paint_jobs(printer, direct_jobs):
-                        return False
+                        if not label_print.paint_jobs(printer, direct_jobs):
+                            return False
+                        printer_display = printer_name or printer.printerName() or "默认打印机"
                     if record_print_jobs is not None:
                         try:
                             record_print_jobs(
                                 db, direct_jobs, actor=actor,
-                                printer_name=printer_name or printer.printerName() or "default",
+                                printer_name=printer_display,
                             )
                         except Exception:
                             pass
                     printed = sum(len(j.get("labels") or []) for j in direct_jobs)
-                    printer_display = printer_name or printer.printerName() or "默认打印机"
                     printers_used = [printer_display] if printed else []
                     printed_details = [f"{len(direct_jobs)} 个作业 → {printer_display}"]
             else:
@@ -2776,7 +2799,17 @@ class WorkbenchView(BaseView):
                     target = tissue_printer if job.get("bucket") == "tissue" else sample_printer
                     if not target:
                         return False
-                    if windows_print.is_available():
+                    if niimbot_print_service.is_niimbot_printer_id(target):
+                        try:
+                            target = niimbot_print_service.print_jobs_to_niimbot(
+                                [job],
+                                printer_name=target,
+                                document_name=f"标本标签 {uid}",
+                            )
+                        except Exception as exc:
+                            self._status_message(f"NIIMBOT 打印失败：{exc}", 7000)
+                            return True
+                    elif windows_print.is_available():
                         ok, used_printer = windows_print.print_jobs_with_windows_dialog(
                             [job], document_name=f"标本标签 {uid}",
                             printer_name=target, show_dialog=False,
@@ -2871,6 +2904,7 @@ class WorkbenchView(BaseView):
         try:
             from PyQt6.QtPrintSupport import QPrinterInfo
             from app.services import label_service
+            from app.services import niimbot_print_service
             from app.services import project_settings_service as pss
             from app.services import rna_label_queue_service as rna_queue
             from app.services.label_print_executor import LabelPrintExecutor
@@ -2906,6 +2940,7 @@ class WorkbenchView(BaseView):
                 for p in QPrinterInfo.availablePrinters()
                 if p.printerName()
             }
+            available.update(niimbot_print_service.available_printer_ids())
             tissue_printer = self._resolve_quick_printer(
                 str(settings.get("tissue_printer") or ""),
                 default_printer,
@@ -7624,6 +7659,14 @@ class WorkbenchView(BaseView):
 
         if reload:
             self._load_specimen(uid)
+
+        # Push updated specimen to collaboration peers (fire-and-forget)
+        svc = getattr(self.ctx, "collab_service", None)
+        if svc is not None and uid:
+            try:
+                svc.push_specimen(uid)
+            except Exception:
+                pass
 
     # ── WoRMS fill hook ───────────────────────────────────────────────────────
 

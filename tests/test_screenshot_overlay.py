@@ -11,7 +11,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtCore import QEvent, QPoint, QRect, Qt
 from PyQt6.QtGui import QColor, QKeyEvent, QPixmap
-from PyQt6.QtWidgets import QApplication, QWidget
+from PyQt6.QtWidgets import QApplication, QPushButton, QWidget
 
 _APP = QApplication.instance() or QApplication([])
 
@@ -27,6 +27,39 @@ def test_overlay_is_application_modal():
 
     overlay = ScreenshotOverlay()
     assert overlay.windowModality() == Qt.WindowModality.ApplicationModal
+    assert overlay.focusPolicy() == Qt.FocusPolicy.StrongFocus
+
+
+def test_overlay_has_visible_cancel_button():
+    from app.widgets.screenshot_overlay import ScreenshotOverlay
+
+    overlay = ScreenshotOverlay()
+    cancelled = []
+    overlay.cancelled.connect(lambda: cancelled.append(True))
+    btn = overlay.findChild(QPushButton, "ShotCancelButton")
+
+    assert btn is not None
+    assert "Esc" in btn.text()
+    btn.click()
+    assert cancelled == [True]
+
+
+def test_overlay_enter_edit_mode_wires_toolbar_undo():
+    from app.widgets.screenshot_annotations import Annotation, Tool
+    from app.widgets.screenshot_overlay import ScreenshotOverlay
+
+    overlay = ScreenshotOverlay()
+    overlay.resize(240, 180)
+    overlay._sel = QRect(20, 20, 120, 90)
+    overlay._annotations.append(
+        Annotation(tool=Tool.RECT, points=[QPoint(30, 30), QPoint(80, 80)])
+    )
+
+    overlay._enter_edit_mode()
+    assert overlay._toolbar is not None
+
+    overlay._toolbar.undoRequested.emit()
+    assert overlay._annotations == []
 
 
 # ── WSLg/XWayland black-screen capture regression ───────────────────────────

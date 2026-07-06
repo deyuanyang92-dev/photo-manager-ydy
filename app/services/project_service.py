@@ -412,6 +412,8 @@ def save_project_descriptor(
         if existing_projects is not None
         else list_projects(user_projects_json_path)
     )
+    sync_entry: dict | None = None
+    sync_fill_empty_only = True
     for idx, existing in enumerate(projects):
         existing_dir = existing.get("directory") or existing.get("dir") or ""
         if existing_dir and _same_path(existing_dir, resolved):
@@ -422,10 +424,14 @@ def save_project_descriptor(
             merged["directory"] = resolved
             merged["dir"] = resolved
             projects[idx] = merged
+            sync_entry = merged
+            sync_fill_empty_only = True
             break
     else:
         entry.setdefault("id", str(uuid.uuid4()))
         projects.append(entry)
+        sync_entry = entry
+        sync_fill_empty_only = False
 
     out = Path(localize_path(user_projects_json_path))
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -434,7 +440,67 @@ def save_project_descriptor(
         encoding="utf-8",
     )
     clear_project_list_cache(user_projects_json_path)
+    if sync_entry is not None:
+        sync_project_descriptor_to_settings(
+            sync_entry,
+            fill_empty_only=sync_fill_empty_only,
+        )
     return projects
+
+
+def sync_project_descriptor_to_settings(
+    project: dict, *, fill_empty_only: bool = False
+) -> None:
+    """Persist creation-dialog metadata into the workspace project settings.
+
+    ``user_projects.json`` is only the app's recent-project index.  Project
+    identity belongs in the workspace database too, otherwise the settings drawer
+    opens with empty project fields right after creation.
+    """
+    raw_dir = project.get("directory") or project.get("dir") or ""
+    if not raw_dir:
+        return
+
+    from app.db.db_manager import open_project_db
+    from app.services import project_settings_service as pss
+
+    resolved = normalize_path(raw_dir)
+    if not Path(resolved).is_dir():
+        return
+    db = open_project_db(resolved, create=True)
+    meta = pss.load_setting(db, "project_meta", pss.DEFAULT_PROJECT_META)
+    field_map = {
+        "project_code": project.get("projectCode") or project.get("project_code"),
+        "name": project.get("name"),
+        "year": project.get("year"),
+        "date_range": project.get("dateRange") or project.get("date_range"),
+        "location": project.get("location"),
+        "photo_location": project.get("photoLocation") or project.get("photo_location"),
+    }
+    for key, value in field_map.items():
+        text = str(value or "").strip()
+        if text and (not fill_empty_only or not str(meta.get(key) or "").strip()):
+            meta[key] = text
+    pss.save_setting(db, "project_meta", meta)
+
+    collector = str(project.get("collector") or "").strip()
+    if collector:
+        personnel = pss.load_setting(db, "personnel", pss.DEFAULT_PERSONNEL)
+        if not fill_empty_only or not str(personnel.get("collector") or "").strip():
+            personnel["collector"] = collector
+        pss.save_setting(db, "personnel", personnel)
+
+
+def backfill_project_settings_from_recent(
+    user_projects_json_path: str, project_dir: str
+) -> None:
+    """Backfill empty workspace project settings from the recent-project record."""
+    resolved = normalize_path(project_dir)
+    for project in list_projects(user_projects_json_path):
+        existing_dir = project.get("directory") or project.get("dir") or ""
+        if existing_dir and _same_path(existing_dir, resolved):
+            sync_project_descriptor_to_settings(project, fill_empty_only=True)
+            return
 
 
 def enter_workspace(
@@ -490,6 +556,7 @@ def enter_workspace(
     if projects_json_path:
         try:
             record_recent_workspace(projects_json_path, resolved, root)
+            backfill_project_settings_from_recent(projects_json_path, resolved)
         except Exception:
             pass
     return resolved

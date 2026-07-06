@@ -67,6 +67,7 @@ if TYPE_CHECKING:
 
 _K_SCREENSHOT_TOOL_ENABLED = "ui/screenshot_tool_enabled"
 _K_SCREENSHOT_DEFAULT_MIGRATED = "ui/screenshot_tool_default_migrated"
+_K_SCREENSHOT_OPT_IN_MIGRATED = "ui/screenshot_tool_opt_in_migrated"
 
 
 class _UpdateWorker(QObject):
@@ -516,7 +517,7 @@ class MainWindow(QMainWindow):
         self._shot_menu.setToolTipsVisible(True)
 
         shot_specs = [
-            ("region", "区域截图", "框选屏幕区域", lambda: self._shot_ctrl.capture_region()),
+            ("region", "开始区域截图", "像 Snipaste 一样框选屏幕区域；Esc/右键取消，Enter 完成", lambda: self._shot_ctrl.capture_region()),
             ("fullscreen", "全屏截图", "截取整个屏幕", lambda: self._shot_ctrl.capture_fullscreen()),
             ("window", "当前窗口", "截取当前窗口", lambda: self._shot_ctrl.capture_window()),
             ("view", "当前页面", "截取当前应用页面", lambda: self._shot_ctrl.capture_view()),
@@ -527,6 +528,23 @@ class MainWindow(QMainWindow):
             action.triggered.connect(callback)
             self._shot_menu.addAction(action)
             self._shot_actions[key] = action
+        self._shot_menu.addSeparator()
+        self._shot_actions["settings"] = QAction(
+            icons.icon("mdi6.cog-outline", color=icons.TONE_MUTED),
+            tr("截图设置"),
+            self,
+        )
+        self._shot_actions["settings"].setToolTip(tr("打开设置页，修改截图开关和快捷键"))
+        self._shot_actions["settings"].triggered.connect(lambda: self.navigate_to("settings"))
+        self._shot_menu.addAction(self._shot_actions["settings"])
+        self._shot_actions["disable"] = QAction(
+            icons.icon("mdi6.eye-off-outline", color=icons.TONE_MUTED),
+            tr("关闭截图工具"),
+            self,
+        )
+        self._shot_actions["disable"].setToolTip(tr("隐藏截图按钮，并停用截图快捷键"))
+        self._shot_actions["disable"].triggered.connect(lambda: self.set_screenshot_tool_enabled(False))
+        self._shot_menu.addAction(self._shot_actions["disable"])
         self._update_screenshot_tooltip()
 
     def _build_update_action(self) -> None:
@@ -668,6 +686,8 @@ class MainWindow(QMainWindow):
             ("fullscreen", "全屏截图", "截取整个屏幕"),
             ("window", "当前窗口", "截取当前窗口"),
             ("view", "当前页面", "截取当前应用页面"),
+            ("settings", "截图设置", "打开设置页，修改截图开关和快捷键"),
+            ("disable", "关闭截图工具", "隐藏截图按钮，并停用截图快捷键"),
         ):
             action = self._shot_actions.get(key)
             if action is not None:
@@ -900,12 +920,23 @@ class MainWindow(QMainWindow):
         from app.views.overview_view import _load_projects
 
         existing = _load_projects()
-        dlg = ProjectDialog(mode=mode, existing_projects=existing, parent=self)
+        team_projects: list[dict] = []
+        svc = getattr(self.ctx, "collab_service", None)
+        if mode == "new" and svc is not None and getattr(svc, "group_code", ""):
+            try:
+                team_projects = svc.discover_team_projects()
+            except Exception:
+                team_projects = []
+        dlg = ProjectDialog(
+            mode=mode, existing_projects=existing, parent=self,
+            team_projects=team_projects,
+        )
         if dlg.exec() != ProjectDialog.DialogCode.Accepted:
             return
         proj = dlg.result_project()
         if not proj:
             return
+        join_code = dlg.result_join_project_code()
 
         try:
             with ui.busy_cursor():
@@ -923,6 +954,11 @@ class MainWindow(QMainWindow):
                     proj.get("directory", ""),
                     projects_json_path=default_user_projects_json_path(),
                 )
+                if join_code and svc is not None:
+                    try:
+                        svc.apply_project_sync_code(join_code)
+                    except Exception:
+                        pass
                 self.navigate_to("workbench")
                 self.refresh_context_bar()
 
@@ -962,17 +998,25 @@ class MainWindow(QMainWindow):
         return seq or "Alt+A"
 
     def _migrate_screenshot_tool_default(self) -> None:
-        """Restore screenshot visibility once for configs saved by older builds."""
+        """Record default migration without force-enabling screenshot capture.
+
+        Older builds silently enabled the global screenshot hotkey on startup
+        and persisted that as ``true``.  We cannot reliably distinguish that
+        old default from an intentional user choice, so this migration disables
+        it once.  A later manual enable is treated as explicit opt-in.
+        """
         qs = self.ctx.settings._qs
         migrated = qs.value(_K_SCREENSHOT_DEFAULT_MIGRATED, "", type=str)
-        if str(migrated).lower() == "true":
-            return
-        qs.setValue(_K_SCREENSHOT_DEFAULT_MIGRATED, "true")
-        qs.setValue(_K_SCREENSHOT_TOOL_ENABLED, "true")
+        if str(migrated).lower() != "true":
+            qs.setValue(_K_SCREENSHOT_DEFAULT_MIGRATED, "true")
+        opt_in_migrated = qs.value(_K_SCREENSHOT_OPT_IN_MIGRATED, "", type=str)
+        if str(opt_in_migrated).lower() != "true":
+            qs.setValue(_K_SCREENSHOT_OPT_IN_MIGRATED, "true")
+            qs.setValue(_K_SCREENSHOT_TOOL_ENABLED, "false")
 
     def screenshot_tool_enabled(self) -> bool:
-        """Whether the screenshot menu and hotkey are enabled. Default: on."""
-        raw = self.ctx.settings._qs.value(_K_SCREENSHOT_TOOL_ENABLED, "true")
+        """Whether the screenshot menu and hotkey are enabled. Default: off."""
+        raw = self.ctx.settings._qs.value(_K_SCREENSHOT_TOOL_ENABLED, "false")
         return str(raw).lower() == "true"
 
     def set_screenshot_tool_enabled(self, enabled: bool) -> None:
@@ -981,6 +1025,7 @@ class MainWindow(QMainWindow):
             _K_SCREENSHOT_TOOL_ENABLED,
             "true" if enabled else "false",
         )
+        self.ctx.settings._qs.setValue(_K_SCREENSHOT_OPT_IN_MIGRATED, "true")
         self.ctx.settings.flush_to_disk()
         self._apply_screenshot_tool_enabled()
 
@@ -994,8 +1039,9 @@ class MainWindow(QMainWindow):
         if shot_btn is not None:
             shot_btn.setVisible(enabled)
             shot_btn.setEnabled(enabled)
-        for action in self._shot_actions.values():
-            action.setEnabled(enabled)
+        for key, action in self._shot_actions.items():
+            if key not in {"settings", "disable"}:
+                action.setEnabled(enabled)
 
         shortcut = getattr(self, "_screenshot_shortcut", None)
         if shortcut is not None:
@@ -1013,8 +1059,10 @@ class MainWindow(QMainWindow):
         seq = seq or self.screenshot_shortcut_seq()
         region = self._shot_actions.get("region")
         if region is not None:
-            region.setText(f"{tr('区域截图')}    {seq}")
-            region.setToolTip(f"{seq} {tr('区域截图')}")
+            region.setText(f"{tr('开始区域截图')}    {seq}")
+            region.setToolTip(
+                f"{seq} {tr('开始区域截图')} · Esc/右键 {tr('取消')} · Enter {tr('完成')}"
+            )
         shot_menu = getattr(self, "_shot_menu", None)
         if shot_menu is not None:
             shot_menu.menuAction().setToolTip(tr("截图工具（{} 区域截图）").format(seq))
@@ -1022,7 +1070,7 @@ class MainWindow(QMainWindow):
         shot_btn = getattr(self, "_shot_btn", None)
         if shot_btn is not None:
             shot_btn.setToolTip(
-                tr("截图工具：点击区域截图（{}），下拉选择全屏/窗口/页面").format(seq)
+                tr("截图工具：点击开始区域截图（{}）；框选后 Enter 完成，Esc/右键取消；下拉可关闭截图工具").format(seq)
             )
 
     def _wire_screenshot(self) -> None:

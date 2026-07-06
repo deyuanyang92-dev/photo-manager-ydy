@@ -1072,24 +1072,24 @@ QScrollArea#NavScroll QScrollBar::handle:horizontal:hover { background: #0f766e;
 
 QScrollArea#RightRailScroll {
     background-color: #f8fafc;
-    border-left: 1px solid rgba(15,23,42,0.13);
+    border-left: 2px solid rgba(15,23,42,0.22);
     border-top: none;
-    border-right: none;
+    border-right: 1px solid rgba(15,23,42,0.13);
     border-bottom: none;
 }
 QWidget#RightRailContent {
     background-color: #f8fafc;
 }
 QScrollArea#RightRailScroll QScrollBar:vertical {
-    background: #eef2f6;
-    width: 12px;
+    background: #ffffff;
+    width: 14px;
     margin: 0;
-    border-left: 1px solid rgba(15,23,42,0.08);
+    border-left: 1px solid rgba(15,23,42,0.13);
 }
 QScrollArea#RightRailScroll QScrollBar::handle:vertical {
-    background: #cbd5e1;
-    border-radius: 6px;
-    min-height: 34px;
+    background: rgba(15,23,42,0.22);
+    border-radius: 5px;
+    min-height: 44px;
     margin: 2px;
 }
 QScrollArea#RightRailScroll QScrollBar::handle:vertical:hover {

@@ -1239,12 +1239,24 @@ class OverviewView(BaseView):
             save_project_descriptor,
         )
         existing = _load_projects()
-        dlg = ProjectDialog(mode="new", existing_projects=existing, parent=self)
+        main_win = self.window()
+        team_projects: list[dict] = []
+        svc = getattr(getattr(main_win, "ctx", None), "collab_service", None)
+        if svc is not None and getattr(svc, "group_code", ""):
+            try:
+                team_projects = svc.discover_team_projects()
+            except Exception:
+                team_projects = []
+        dlg = ProjectDialog(
+            mode="new", existing_projects=existing, parent=self,
+            team_projects=team_projects,
+        )
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         proj = dlg.result_project()
         if not proj:
             return
+        join_code = dlg.result_join_project_code()
         try:
             save_project_descriptor(
                 default_user_projects_json_path(),
@@ -1253,7 +1265,6 @@ class OverviewView(BaseView):
             )
             self._load_projects()
             # Activate new project in context and navigate to workbench
-            main_win = self.window()
             if hasattr(main_win, "ctx"):
                 from app.services.project_service import enter_workspace
                 enter_workspace(
@@ -1261,6 +1272,11 @@ class OverviewView(BaseView):
                     proj.get("directory", ""),
                     projects_json_path=default_user_projects_json_path(),
                 )
+                if join_code and svc is not None:
+                    try:
+                        svc.apply_project_sync_code(join_code)
+                    except Exception:
+                        pass
             if hasattr(main_win, "navigate_to"):
                 main_win.navigate_to("workbench")
             if hasattr(main_win, "refresh_context_bar"):

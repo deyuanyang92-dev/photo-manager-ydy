@@ -13,6 +13,7 @@ from typing import Callable, Optional
 
 from PyQt6.QtWidgets import QDialog, QMessageBox, QWidget
 
+from app.services import niimbot_print_service
 from app.utils.label_print import build_printer, paint_jobs
 
 
@@ -72,7 +73,8 @@ class LabelPrintExecutor:
         if windows_print is None:
             from app.utils import windows_print as windows_print
 
-        if windows_print.is_available():
+        use_app_dialog = bool(niimbot_print_service.available_printers())
+        if windows_print.is_available() and not use_app_dialog:
             try:
                 ok, printer_name = windows_print.print_jobs_with_windows_dialog(
                     printable_jobs,
@@ -99,6 +101,34 @@ class LabelPrintExecutor:
             return LabelPrintResult(printed=False, accepted=False)
 
         printer_name = str(dlg.selected_printer() or "")
+        if niimbot_print_service.is_niimbot_printer_id(printer_name):
+            return self._print_niimbot(
+                printable_jobs,
+                printer_name=printer_name,
+                document_name=document_name,
+                grid_opts=grid_opts,
+                cut_marks=cut_marks,
+                draw_crop_marks=draw_crop_marks,
+            )
+        if windows_print.is_available():
+            try:
+                ok, used = windows_print.print_jobs_with_windows_dialog(
+                    printable_jobs,
+                    document_name=document_name,
+                    printer_name=printer_name,
+                    show_dialog=False,
+                    cut_marks=cut_marks,
+                    draw_crop_marks=draw_crop_marks,
+                )
+            except Exception as exc:
+                error = str(exc)
+                self._message_box.critical(self._parent, "打印失败", error)
+                return LabelPrintResult(printed=False, accepted=True, error=error)
+            if not ok:
+                return LabelPrintResult(printed=False, accepted=True)
+            used = used or printer_name or "Windows 打印机"
+            self._record_print_jobs(printable_jobs, used)
+            return LabelPrintResult(printed=True, printer_name=used)
         first_grid_opts = printable_jobs[0].get("gridOpts") or grid_opts
         printer = self._build_printer(printable_jobs[0], grid_opts=first_grid_opts)
         if printer_name:
@@ -133,6 +163,16 @@ class LabelPrintExecutor:
         if not printable_jobs:
             return LabelPrintResult(printed=False, accepted=False)
         target = str(printer_name or "").strip()
+
+        if niimbot_print_service.is_niimbot_printer_id(target):
+            return self._print_niimbot(
+                printable_jobs,
+                printer_name=target,
+                document_name=document_name,
+                grid_opts=grid_opts,
+                cut_marks=cut_marks,
+                draw_crop_marks=draw_crop_marks,
+            )
 
         windows_print = self._windows_print
         if windows_print is None:
@@ -173,6 +213,31 @@ class LabelPrintExecutor:
             return LabelPrintResult(printed=False, accepted=True)
         used = printer.printerName() or target or "default"
         self._record_print_jobs(printable_jobs, used)
+        return LabelPrintResult(printed=True, printer_name=used)
+
+    def _print_niimbot(
+        self,
+        jobs: list[dict],
+        *,
+        printer_name: str,
+        document_name: str,
+        grid_opts: Optional[dict],
+        cut_marks: bool,
+        draw_crop_marks: Optional[Callable],
+    ) -> LabelPrintResult:
+        try:
+            used = niimbot_print_service.print_jobs_to_niimbot(
+                jobs,
+                printer_name=printer_name,
+                document_name=document_name,
+                cut_marks=cut_marks,
+                draw_crop_marks=draw_crop_marks,
+            )
+        except Exception as exc:
+            error = str(exc)
+            self._message_box.critical(self._parent, "打印失败", error)
+            return LabelPrintResult(printed=False, accepted=True, error=error)
+        self._record_print_jobs(jobs, used)
         return LabelPrintResult(printed=True, printer_name=used)
 
     def _record_print_jobs(self, jobs: list[dict], printer_name: str) -> None:

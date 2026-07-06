@@ -31,7 +31,7 @@ from PyQt6.QtGui import (
     QPainter,
     QPixmap,
 )
-from PyQt6.QtWidgets import QApplication, QLineEdit, QWidget
+from PyQt6.QtWidgets import QApplication, QLineEdit, QPushButton, QWidget
 
 from app.widgets.screenshot_annotations import (
     DRAG_TOOLS,
@@ -129,6 +129,17 @@ class ScreenshotOverlay(QWidget):
         self._text_edit: QLineEdit | None = None
 
         self._toolbar: ScreenshotToolbar | None = None
+        self._cancel_btn = QPushButton("取消 Esc", self)
+        self._cancel_btn.setObjectName("ShotCancelButton")
+        self._cancel_btn.setToolTip("取消本次截图；也可以按 Esc 或鼠标右键")
+        self._cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._cancel_btn.setFixedSize(88, 30)
+        self._cancel_btn.setStyleSheet(
+            "#ShotCancelButton{background:#1e1e1e;color:#f5f5f5;"
+            "border:1px solid #555;border-radius:6px;font-weight:600;}"
+            "#ShotCancelButton:hover{background:#333;border-color:#888;}"
+        )
+        self._cancel_btn.clicked.connect(self._cancel)
 
         # NOTE: no BypassWindowManagerHint — an override-redirect fullscreen
         # window renders black on some X11 compositors (Mutter/GNOME on certain
@@ -143,6 +154,7 @@ class ScreenshotOverlay(QWidget):
         self.setWindowModality(Qt.WindowModality.ApplicationModal)
         self.setCursor(Qt.CursorShape.CrossCursor)
         self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
     # ── lifecycle ─────────────────────────────────────────────────────────
     def start(self, preset_rect: QRect | None = None, screen=None) -> None:
@@ -182,6 +194,13 @@ class ScreenshotOverlay(QWidget):
         self.showFullScreen()
         self.raise_()
         self.activateWindow()
+        self.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
+        self._position_cancel_button()
+        self._cancel_btn.raise_()
+        try:
+            self.grabKeyboard()
+        except Exception:
+            pass
 
     def _grab_root(self, screen) -> QPixmap:
         """Native full-desktop grab — overridable seam (tested by faking a
@@ -206,11 +225,29 @@ class ScreenshotOverlay(QWidget):
         (deliver / pin / Esc / right-click cancel) in one place.
         """
         anchor = self._anchor
+        try:
+            self.releaseKeyboard()
+        except Exception:
+            pass
         if anchor is not None:
             win = anchor.window()
             win.raise_()
             win.activateWindow()
         super().closeEvent(e)
+
+    def resizeEvent(self, e) -> None:
+        super().resizeEvent(e)
+        self._position_cancel_button()
+        self._place_toolbar()
+
+    def _position_cancel_button(self) -> None:
+        if not hasattr(self, "_cancel_btn"):
+            return
+        margin = 16
+        self._cancel_btn.move(
+            max(margin, self.width() - self._cancel_btn.width() - margin),
+            margin,
+        )
 
     # ── painting ──────────────────────────────────────────────────────────
     def paintEvent(self, _e) -> None:
@@ -258,7 +295,7 @@ class ScreenshotOverlay(QWidget):
         p.drawText(
             self.rect(),
             Qt.AlignmentFlag.AlignCenter,
-            "拖动选择截图区域 · Enter 完成 · Esc 取消",
+            "拖动选择截图区域 · Enter/双击 完成 · Esc/右键/右上角按钮 取消",
         )
 
     def _paint_selection_badge(self, p: QPainter, sel: QRect) -> None:
@@ -474,7 +511,7 @@ class ScreenshotOverlay(QWidget):
         tb.toolChanged.connect(self._set_tool)
         tb.colorChanged.connect(self._set_color)
         tb.widthChanged.connect(self._set_width)
-        tb.undoRequested.connect(self._undo)
+        tb.undoRequested.connect(self._undo_last_annotation)
         tb.copyRequested.connect(lambda: self._deliver(self.actionCopy))
         tb.saveRequested.connect(lambda: self._deliver(self.actionSave))
         tb.pinRequested.connect(self._deliver_pin)

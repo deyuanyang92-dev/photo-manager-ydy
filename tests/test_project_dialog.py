@@ -115,6 +115,63 @@ class TestProjectDialogConstruction:
         assert "PRJ" in dlg._code_edit.placeholderText()
 
 
+# ── Team project join (exact-ID binding, not name guessing) ──────────────────
+
+class TestProjectDialogTeamJoin:
+    def test_no_join_ui_when_no_team_projects(self, qapp):
+        from app.views.project_dialog import ProjectDialog
+        dlg = ProjectDialog(mode="new")
+        assert dlg._create_new_rb is None
+        assert dlg._join_team_rb is None
+        assert dlg.result_join_project_code() == ""
+
+    def test_join_ui_appears_with_team_projects(self, qapp):
+        from app.views.project_dialog import ProjectDialog
+        team_projects = [
+            {"name": "三门湾调查", "code": "SPP-PROJECT:abc", "peer_count": 2},
+        ]
+        dlg = ProjectDialog(mode="new", team_projects=team_projects)
+        assert dlg._create_new_rb is not None
+        assert dlg._join_team_rb is not None
+        assert dlg._create_new_rb.isChecked()  # default: independent project
+        assert not dlg._team_project_combo.isEnabled()
+        assert dlg._team_project_combo.count() == 1
+        assert dlg._team_project_combo.itemData(0) == "SPP-PROJECT:abc"
+
+    def test_selecting_join_enables_combo(self, qapp):
+        from app.views.project_dialog import ProjectDialog
+        team_projects = [{"name": "P1", "code": "CODE1", "peer_count": 1}]
+        dlg = ProjectDialog(mode="new", team_projects=team_projects)
+        dlg._join_team_rb.setChecked(True)
+        assert dlg._team_project_combo.isEnabled()
+
+    def test_accept_with_join_selected_returns_code(self, qapp, tmp_path):
+        from app.views.project_dialog import ProjectDialog
+        team_projects = [{"name": "P1", "code": "CODE-XYZ", "peer_count": 1}]
+        dlg = ProjectDialog(mode="new", team_projects=team_projects)
+        dlg._name_edit.setText("新的本地文件夹")
+        dlg._dir_edit.setText(str(tmp_path))
+        dlg._location_edit.setText("福建")
+        dlg._collector_edit.setText("张三")
+        dlg._join_team_rb.setChecked(True)
+        dlg._accept_valid_project_form()
+        assert dlg.result_join_project_code() == "CODE-XYZ"
+        assert dlg.result_project() is not None
+
+    def test_accept_with_create_new_returns_empty_code(self, qapp, tmp_path):
+        from app.views.project_dialog import ProjectDialog
+        team_projects = [{"name": "P1", "code": "CODE-XYZ", "peer_count": 1}]
+        dlg = ProjectDialog(mode="new", team_projects=team_projects)
+        dlg._name_edit.setText("独立新项目")
+        dlg._dir_edit.setText(str(tmp_path))
+        dlg._location_edit.setText("福建")
+        dlg._collector_edit.setText("张三")
+        # _create_new_rb stays checked (default)
+        dlg._accept_valid_project_form()
+        assert dlg.result_join_project_code() == ""
+        assert dlg.result_project() is not None
+
+
 # ── Light mode（采集地图轻量新建）─────────────────────────────────────────────
 
 class TestProjectDialogLight:

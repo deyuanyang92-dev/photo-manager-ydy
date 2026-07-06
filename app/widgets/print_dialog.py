@@ -90,8 +90,16 @@ class PrintJobDialog(QDialog):
         self._printer_combo = QComboBox()
         self._printer_combo.setFixedHeight(32)
         self._refresh_printer_combo()
+        self._printer_combo.currentIndexChanged.connect(self._sync_niimbot_hint)
         lay.addWidget(printer_label)
         lay.addWidget(self._printer_combo)
+
+        self._niimbot_hint = QLabel("")
+        self._niimbot_hint.setObjectName("MutedSmall")
+        self._niimbot_hint.setWordWrap(True)
+        self._niimbot_hint.setVisible(False)
+        lay.addWidget(self._niimbot_hint)
+        self._sync_niimbot_hint()
 
         # job summary
         summary_title = QLabel("打印内容")
@@ -130,23 +138,46 @@ class PrintJobDialog(QDialog):
         self.accept()
 
     def _refresh_printer_combo(self, selected: str = "") -> None:
-        """Populate the printer combo from ``QPrinterInfo``.
-
-        Mirrors the pattern in ``project_settings_drawer.py:698-713``:
-        first item = "系统默认打印机" (data=""), then sorted unique
-        names from ``availablePrinters()``.
-        """
+        """Populate the printer combo from Qt/Windows printers plus virtual ones."""
         self._printer_combo.blockSignals(True)
         self._printer_combo.clear()
         self._printer_combo.addItem("系统默认打印机", "")
         try:
-            names = [p.printerName() for p in QPrinterInfo.availablePrinters()]
+            from app.utils import windows_print
+            if windows_print.is_available():
+                names = windows_print.windows_printer_names()
+            else:
+                names = [p.printerName() for p in QPrinterInfo.availablePrinters()]
         except Exception:
             names = []
         for name in sorted({n for n in names if n}):
             self._printer_combo.addItem(name, name)
+        try:
+            from app.services import niimbot_print_service
+            for printer in niimbot_print_service.available_printers():
+                self._printer_combo.addItem(printer.name, printer.id)
+        except Exception:
+            pass
         if selected and self._printer_combo.findData(selected) < 0:
             self._printer_combo.addItem(f"{selected}（未检测到）", selected)
         idx = self._printer_combo.findData(selected or "")
         self._printer_combo.setCurrentIndex(idx if idx >= 0 else 0)
         self._printer_combo.blockSignals(False)
+
+    def _sync_niimbot_hint(self, *_args) -> None:
+        hint = getattr(self, "_niimbot_hint", None)
+        if hint is None:
+            return
+        try:
+            from app.services import niimbot_print_service
+            printer_id = str(self._printer_combo.currentData() or "")
+            if not niimbot_print_service.is_niimbot_printer_id(printer_id):
+                hint.clear()
+                hint.setVisible(False)
+                return
+            paper_types = [str(job.get("paperType") or "") for job in self._jobs]
+            hint.setText(niimbot_print_service.compatibility_notice(paper_types))
+            hint.setVisible(True)
+        except Exception:
+            hint.clear()
+            hint.setVisible(False)

@@ -459,7 +459,7 @@ class _TiffLightboxDialog(QDialog):
 
 # ── Thumbnail decode (cached at ResultsColumn level) ───────────────────────────
 
-_DEFAULT_THUMB = 48
+_DEFAULT_THUMB = 42
 _MIN_THUMB = 32
 _MAX_THUMB = 160
 _LARGE_THUMB_MIN_SIZE = 128
@@ -557,8 +557,8 @@ class _ResultCardBase(QFrame):
 
     def _setup_list_ui(self) -> None:
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(7, 4, 7, 4)
-        lay.setSpacing(7)
+        lay.setContentsMargins(6, 3, 6, 3)
+        lay.setSpacing(6)
 
         self._select_badge = self._create_select_badge()
         lay.addWidget(self._select_badge)
@@ -974,11 +974,12 @@ class _ResultRow(QFrame):
         self.setObjectName("ResultRow")
         self.setProperty("pairedColumns", "true" if show_paired_columns else "false")
         self.setMinimumWidth(0)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._rows = [r for r in (tiff_row, zip_row) if r is not None]
         self._pair_indicator = None
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(6)
+        row.setSpacing(4)
 
         seq_badge = QLabel(_compact_result_sequence_label(seq_label))
         seq_badge.setObjectName("ResultSeqBadge")
@@ -1256,8 +1257,8 @@ class ResultsColumn(QWidget):
         self._body.verticalScrollBar().setSingleStep(36)
         self._rows_container = QWidget()
         self._rows_lay = QVBoxLayout(self._rows_container)
-        self._rows_lay.setContentsMargins(0, 2, 0, 2)
-        self._rows_lay.setSpacing(6)
+        self._rows_lay.setContentsMargins(0, 1, 0, 1)
+        self._rows_lay.setSpacing(4)
         self._rows_lay.setAlignment(Qt.AlignmentFlag.AlignTop)
         self._body.setWidget(self._rows_container)
         root.addWidget(self._body, stretch=1)

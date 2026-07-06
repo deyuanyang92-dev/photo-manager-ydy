@@ -105,7 +105,7 @@ _K_UI_ICON_GPS = "ui/icon_gps"             # default "📡"
 _K_UI_ICON_MAP = "ui/icon_map"             # default "📍"
 _K_UI_ICON_FOLDER = "ui/icon_folder"       # default "📁"
 _K_UI_ICON_SEARCH = "ui/icon_search"       # default "🔍"
-_K_SCREENSHOT_TOOL_ENABLED = "ui/screenshot_tool_enabled"  # default true
+_K_SCREENSHOT_TOOL_ENABLED = "ui/screenshot_tool_enabled"  # default false
 _K_DEBUG_USE_REAL_COMPRESSION = "debug/use_real_compression"  # default False
 
 _THEME_CHOICES = ("classic_light", "lab_light", "graphite_focus")
@@ -1214,7 +1214,7 @@ class SettingsView(BaseView):
         screenshot_form.addRow(tr("截图入口"), self._screenshot_tool_chk)
 
         screenshot_note = QLabel(
-            tr("默认开启。关闭后菜单入口隐藏，Alt+A 不再触发截图。")
+            tr("默认关闭。需要截图时，在这里开启；关闭后菜单入口隐藏，Alt+A 不再触发截图。")
         )
         screenshot_note.setObjectName("MutedSmall")
         screenshot_note.setWordWrap(True)
@@ -1501,7 +1501,7 @@ class SettingsView(BaseView):
         self._icon_folder_edit.setText(qs.value(_K_UI_ICON_FOLDER, ""))
         self._icon_search_edit.setText(qs.value(_K_UI_ICON_SEARCH, ""))
 
-        raw_screenshot_tool = qs.value(_K_SCREENSHOT_TOOL_ENABLED, "true")
+        raw_screenshot_tool = qs.value(_K_SCREENSHOT_TOOL_ENABLED, "false")
         screenshot_tool_enabled = str(raw_screenshot_tool).lower() == "true"
         self._screenshot_tool_chk.blockSignals(True)
         self._screenshot_tool_chk.setChecked(screenshot_tool_enabled)
