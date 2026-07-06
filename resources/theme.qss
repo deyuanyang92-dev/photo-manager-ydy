@@ -9,7 +9,7 @@
 QWidget {
     background-color: #f4f6f8;
     color: #17212b;
-    font-family: "Noto Sans CJK SC", "Noto Sans SC", "Source Han Sans SC", "Microsoft YaHei", "微软雅黑", "SimHei", "黑体", "PingFang SC", "Hiragino Sans GB", "Heiti SC", "WenQuanYi Micro Hei", "Segoe UI", "Arial", "Calibri", sans-serif;
+    font-family: "Microsoft YaHei UI", "Microsoft YaHei", "微软雅黑", "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", "Noto Sans SC", "Source Han Sans SC", "WenQuanYi Micro Hei", "Arial", "Calibri", sans-serif;
     font-size: 13px;
     selection-background-color: #0f766e;
     selection-color: #f4f6f8;
@@ -33,9 +33,9 @@ QFrame#TopBar {
 }
 QFrame#TopBarDivider { background: rgba(15,23,42,0.08); border: none; }
 QLabel#BrandWord {
-    font-family: "Noto Sans CJK SC", "Noto Sans SC", "Source Han Sans SC", "Microsoft YaHei", "微软雅黑", "SimHei", "黑体", "PingFang SC", "Hiragino Sans GB", "Heiti SC", "WenQuanYi Micro Hei", "Segoe UI", "Arial", "Calibri", sans-serif;
+    font-family: "Microsoft YaHei UI", "Microsoft YaHei", "微软雅黑", "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", "Noto Sans SC", "Source Han Sans SC", "WenQuanYi Micro Hei", "Arial", "Calibri", sans-serif;
     font-size: 15px;
-    font-weight: 700;
+    font-weight: 600;
     color: #17212b;
     letter-spacing: 0;
 }
@@ -48,7 +48,7 @@ QPushButton#NavSegment {
     border: 1px solid transparent;
     color: #475569;
     font-size: 12px;
-    font-weight: 600;
+    font-weight: 500;
     min-height: 32px;
     padding: 0 13px;
     margin: 0 1px;
@@ -64,7 +64,7 @@ QPushButton#NavSegment:checked {
     color: #0d9488;
     background-color: #e6f5f3;
     border-color: #0f766e;
-    font-weight: 700;
+    font-weight: 600;
 }
 
 QToolButton#NavMenuButton {
@@ -74,7 +74,7 @@ QToolButton#NavMenuButton {
     border-radius: 8px;
     padding: 0 10px;
     font-size: 12px;
-    font-weight: 700;
+    font-weight: 600;
 }
 QToolButton#NavMenuButton:hover {
     color: #0d9488;
@@ -126,8 +126,8 @@ QFrame#ContextBar {
 QLabel#ContextLabel {
     color: #94a3b8;
     font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 0.08em;
+    font-weight: 500;
+    letter-spacing: 0;
 }
 QPushButton#ProjectSwitcher {
     background-color: #ffffff;
@@ -136,7 +136,7 @@ QPushButton#ProjectSwitcher {
     padding: 7px 12px;
     color: #17212b;
     font-size: 12px;
-    font-weight: 700;
+    font-weight: 600;
     text-align: left;
 }
 QPushButton#ProjectSwitcher:hover {
@@ -150,7 +150,7 @@ QPushButton#CrumbSeg {
     padding: 7px 4px;
     color: #64748b;
     font-size: 12px;
-    font-weight: 600;
+    font-weight: 500;
 }
 QPushButton#CrumbSeg:hover {
     color: #0f766e;
@@ -167,7 +167,7 @@ QPushButton#CrumbLeaf {
     padding: 7px 11px;
     color: #17212b;
     font-size: 12px;
-    font-weight: 700;
+    font-weight: 600;
     text-align: left;
 }
 QPushButton#CrumbLeaf:hover {
@@ -197,7 +197,7 @@ QToolButton#WorkspaceFolderButton {
     padding: 0;
     color: #64748b;
     font-size: 12px;
-    font-weight: 700;
+    font-weight: 600;
 }
 QToolButton#WorkspaceMenuButton:hover,
 QToolButton#WorkspaceFolderButton:hover {
@@ -216,8 +216,8 @@ QLabel#ActiveBadgeOn {
     padding: 5px 14px;
     font-family: "JetBrains Mono", "Cascadia Code", "SF Mono", "Consolas", "Courier New", "DejaVu Sans Mono", monospace;
     font-size: 12px;
-    font-weight: 700;
-    letter-spacing: 0.5px;
+    font-weight: 600;
+    letter-spacing: 0;
 }
 QLabel#ActiveBadgeOff {
     background-color: #eef2f6;
@@ -227,25 +227,49 @@ QLabel#ActiveBadgeOff {
     padding: 4px 14px;
     font-family: "JetBrains Mono", "Cascadia Code", "SF Mono", "Consolas", "Courier New", "DejaVu Sans Mono", monospace;
     font-size: 12px;
-    font-weight: 600;
+    font-weight: 500;
 }
 
 QStackedWidget { background: transparent; border: none; }
 
 /* ── Workspace header ────────────────────────────────────────────── */
 QLabel#WorkspaceTitle {
-    font-family: "Noto Sans CJK SC", "Noto Sans SC", "Source Han Sans SC", "Microsoft YaHei", "微软雅黑", "SimHei", "黑体", "PingFang SC", "Hiragino Sans GB", "Heiti SC", "WenQuanYi Micro Hei", "Segoe UI", "Arial", "Calibri", sans-serif;
+    font-family: "Microsoft YaHei UI", "Microsoft YaHei", "微软雅黑", "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", "Noto Sans SC", "Source Han Sans SC", "WenQuanYi Micro Hei", "Arial", "Calibri", sans-serif;
     font-size: 18px;
+    font-weight: 500;
+    color: #17212b;
+    letter-spacing: 0;
+}
+QLabel#WorkbenchTitle {
+    font-family: "Microsoft YaHei UI", "Microsoft YaHei", "微软雅黑", "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", "Noto Sans SC", "Source Han Sans SC", "WenQuanYi Micro Hei", "Arial", "Calibri", sans-serif;
+    font-size: 15px;
     font-weight: 600;
     color: #17212b;
+    letter-spacing: 0;
+}
+QLabel#WorkbenchCount {
+    color: #64748b;
+    font-size: 12px;
+    font-weight: 500;
+}
+QLabel#WorkbenchSubTitle {
+    color: #334155;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0;
+}
+QLabel#WorkbenchHint {
+    color: #94a3b8;
+    font-size: 11px;
+    font-weight: 500;
     letter-spacing: 0;
 }
 QLabel#TagSea, QLabel#TagWarn, QLabel#TagOk {
     border-radius: 999px;
     padding: 4px 12px;
     font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 0.3px;
+    font-weight: 500;
+    letter-spacing: 0;
 }
 QLabel#TagSea { background-color: rgba(15,118,110,0.11); color: #0d9488; }
 QLabel#TagWarn { background-color: rgba(180,83,9,0.11); color: #b45309; }
@@ -260,8 +284,8 @@ QFrame#DirStrip {
 QLabel#DirLabel {
     color: #94a3b8;
     font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 0.04em;
+    font-weight: 500;
+    letter-spacing: 0;
 }
 QLabel#DirPath {
     font-family: "JetBrains Mono", "Cascadia Code", "SF Mono", "Consolas", "Courier New", "DejaVu Sans Mono", monospace;
@@ -282,13 +306,13 @@ QFrame#WorkflowDashboard {
 QLabel#WorkflowDashEyebrow {
     color: #94a3b8;
     font-size: 11px;
-    font-weight: 700;
-    letter-spacing: 0.08em;
+    font-weight: 600;
+    letter-spacing: 0;
 }
 QLabel#WorkflowDashTitle {
     color: #17212b;
     font-size: 15px;
-    font-weight: 700;
+    font-weight: 600;
 }
 QLabel#WorkflowDashDetail {
     color: #64748b;
@@ -301,12 +325,12 @@ QFrame#WorkflowDashMetric {
 QLabel#WorkflowDashMetricLabel {
     color: #94a3b8;
     font-size: 11px;
-    font-weight: 700;
+    font-weight: 500;
 }
 QLabel#WorkflowDashMetricValue {
     color: #334155;
     font-size: 12px;
-    font-weight: 700;
+    font-weight: 600;
 }
 
 QFrame#Panel, QFrame#WorkbenchSection, QFrame#PanelCard {
@@ -462,6 +486,93 @@ QLabel#FileThumb[hasThumbnail="true"] {
     background: #ffffff;
     border-color: rgba(15,23,42,0.13);
 }
+QLabel#FileName,
+QFrame#ResultFile QLabel#Mono,
+QFrame#ResultGroupHeader QLabel#Mono {
+    font-family: "JetBrains Mono", "Cascadia Code", "SF Mono", "Consolas", "Courier New", "DejaVu Sans Mono", monospace;
+    font-size: 12px;
+    color: #334155;
+    background: transparent;
+    border: none;
+    padding: 0;
+}
+QLabel#FileName {
+    font-weight: 500;
+    color: #17212b;
+}
+QFrame#ResultFile QLabel#Mono {
+    font-weight: 500;
+}
+QLabel#FileUid,
+QLabel#FileUidActive,
+QLabel#FileUidMissing,
+QLabel#FileUidMuted,
+QLabel#FileStateRaw,
+QLabel#FileStateTiff,
+QLabel#FileStateArchived,
+QLabel#FileStateComposed {
+    border-radius: 3px;
+    font-size: 11px;
+    font-weight: 500;
+    padding: 1px 7px;
+    letter-spacing: 0;
+}
+QLabel#FileUid {
+    font-family: "JetBrains Mono", "Cascadia Code", "SF Mono", "Consolas", "Courier New", "DejaVu Sans Mono", monospace;
+    color: #115e59;
+    background: transparent;
+    border: none;
+    padding: 1px 2px;
+}
+QLabel#FileUidActive {
+    font-family: "JetBrains Mono", "Cascadia Code", "SF Mono", "Consolas", "Courier New", "DejaVu Sans Mono", monospace;
+    color: #0f766e;
+    background: transparent;
+    border: none;
+    padding: 1px 2px;
+    font-weight: 600;
+}
+QLabel#FileUidMissing {
+    color: #b45309;
+    background: rgba(180,83,9,0.11);
+    border: 1px solid rgba(180,83,9,0.22);
+}
+QLabel#FileUidMuted {
+    font-family: "JetBrains Mono", "Cascadia Code", "SF Mono", "Consolas", "Courier New", "DejaVu Sans Mono", monospace;
+    color: #64748b;
+    background: transparent;
+    border: none;
+    padding: 1px 2px;
+}
+QLabel#FileStateRaw {
+    color: #b45309;
+    background: transparent;
+    border: 1px solid rgba(180,83,9,0.18);
+}
+QLabel#FileStateTiff {
+    color: #15803d;
+    background: transparent;
+    border: 1px solid rgba(21,128,61,0.20);
+}
+QLabel#FileStateArchived {
+    color: #64748b;
+    background: transparent;
+    border: 1px solid rgba(15,23,42,0.08);
+}
+QLabel#FileStateComposed {
+    color: #2563eb;
+    background: transparent;
+    border: 1px solid rgba(37,99,235,0.20);
+}
+QFrame#CardSelected QLabel#FileName,
+QFrame#Card[resultSelected="true"] QLabel#FileName {
+    color: #1d6fd1;
+    font-weight: 600;
+}
+QFrame#ResultGroupHeader QLabel#Mono {
+    font-weight: 600;
+    color: #334155;
+}
 
 QFrame#NamingGroup {
     background: #f8fafc;
@@ -476,13 +587,13 @@ QFrame#NamingPreviewGroup {
 QLabel#NamingGroupTitle {
     color: #64748b;
     font-size: 11px;
-    font-weight: 700;
-    letter-spacing: 0.06em;
+    font-weight: 600;
+    letter-spacing: 0;
 }
 QLabel#CompactFieldLabel {
     color: #334155;
     font-size: 11px;
-    font-weight: 600;
+    font-weight: 500;
 }
 QToolButton#CompactIconButton {
     background: transparent;
@@ -500,6 +611,16 @@ QFrame#BatchIdentBar {
     border-top: 1px solid rgba(255,255,255,0.72);
     border-radius: 8px;
     min-height: 36px;
+}
+QFrame#WorkbenchSelectionBar {
+    background-color: #f8fafc;
+    border: 1px solid rgba(15,23,42,0.08);
+    border-radius: 6px;
+}
+QLabel#WorkbenchSelectionText {
+    color: #64748b;
+    font-size: 11px;
+    font-weight: 500;
 }
 QFrame#Divider { background-color: rgba(15,23,42,0.08); max-height: 1px; min-height: 1px; border: none; }
 
@@ -545,12 +666,12 @@ QLabel { background: transparent; color: #17212b; }
 QLabel#Muted { color: #64748b; }
 QLabel#MutedSmall { color: #94a3b8; font-size: 11px; }
 QLabel#Accent { color: #0f766e; }
-QLabel#Title { font-family: "Noto Sans CJK SC", "Noto Sans SC", "Source Han Sans SC", "Microsoft YaHei", "微软雅黑", "SimHei", "黑体", "PingFang SC", "Hiragino Sans GB", "Heiti SC", "WenQuanYi Micro Hei", "Segoe UI", "Arial", "Calibri", sans-serif; font-size: 20px; font-weight: 600; color: #17212b; }
+QLabel#Title { font-family: "Microsoft YaHei UI", "Microsoft YaHei", "微软雅黑", "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", "Noto Sans SC", "Source Han Sans SC", "WenQuanYi Micro Hei", "Arial", "Calibri", sans-serif; font-size: 20px; font-weight: 600; color: #17212b; }
 QLabel#Section, QLabel#CardTitle {
     font-size: 11px;
-    font-weight: 700;
+    font-weight: 600;
     color: #64748b;
-    letter-spacing: 0.1em;
+    letter-spacing: 0;
 }
 QLabel#Placeholder { color: #64748b; font-size: 15px; }
 QLabel#EmptyState {
@@ -566,8 +687,8 @@ QLabel#EmptyState {
 QLabel#BatchUid {
     font-family: "JetBrains Mono", "Cascadia Code", "SF Mono", "Consolas", "Courier New", "DejaVu Sans Mono", monospace;
     color: #0d9488;
-    font-size: 13px;
-    font-weight: 600;
+    font-size: 12px;
+    font-weight: 500;
 }
 QLabel#ActivateState {
     color: #94a3b8;
@@ -580,14 +701,14 @@ QLabel#ActivateState {
 QLabel#ActivateStateOn {
     color: #0d9488;
     font-size: 11px;
-    font-weight: 600;
+    font-weight: 500;
     padding: 3px 11px;
     border-radius: 999px;
     background-color: rgba(15,118,110,0.11);
     border: 1px solid rgba(15,118,110,0.24);
 }
 QLabel#StatValue { font-size: 20px; font-weight: 700; color: #17212b; }
-QLabel#StatLabel { font-size: 11px; color: #94a3b8; letter-spacing: 0.03em; }
+QLabel#StatLabel { font-size: 11px; color: #94a3b8; letter-spacing: 0; }
 
 /* ── Collaboration centre ───────────────────────────────────────── */
 QFrame#CollabHeader {
@@ -685,9 +806,9 @@ QLabel#ChipRaw, QLabel#ChipAttributed, QLabel#ChipComposed,
 QLabel#ChipArchived, QLabel#ChipTiff, QLabel#ChipUnattributed {
     border-radius: 999px;
     font-size: 11px;
-    font-weight: 600;
+    font-weight: 500;
     padding: 2px 10px;
-    letter-spacing: 0.2px;
+    letter-spacing: 0;
 }
 QLabel#ChipRaw { background-color: rgba(180,83,9,0.11); color: #b45309; }
 QLabel#ChipAttributed { background-color: rgba(21,128,61,0.11); color: #15803d; }
@@ -719,7 +840,7 @@ QPushButton#Primary {
     color: #f4f6f8;
     border: 1px solid #0f766e;
     border-top: 1px solid #14b8a6;
-    font-weight: 700;
+    font-weight: 600;
 }
 QPushButton#Primary:hover { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #0d9488, stop:1 #0f766e); border-color: #0d9488; }
 QPushButton#Primary:pressed { background-color: #115e59; }
@@ -749,7 +870,7 @@ QPushButton#PhasePill, QPushButton#PhasePillActive {
     border-radius: 999px;
     padding: 2px 12px;
     font-size: 11px;
-    font-weight: 600;
+    font-weight: 500;
 }
 QPushButton#PhasePill {
     background-color: transparent;
@@ -808,7 +929,7 @@ QPushButton#StorageBtn {
     border-radius: 999px;
     padding: 3px 10px;
     font-size: 11px;
-    font-weight: 600;
+    font-weight: 500;
     font-family: "JetBrains Mono", "Cascadia Code", "SF Mono", "Consolas", "Courier New", "DejaVu Sans Mono", monospace;
 }
 QPushButton#StorageBtn:hover {
@@ -820,7 +941,7 @@ QPushButton#StorageBtn:checked {
     background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #14b8a6, stop:1 #0f766e);
     color: #f4f6f8;
     border-color: #0f766e;
-    font-weight: 700;
+    font-weight: 600;
 }
 
 /* ── Drop target ─────────────────────────────────────────────────── */
@@ -1037,13 +1158,13 @@ QLabel#SpecimenUid {
     font-family: "JetBrains Mono", "Cascadia Code", "SF Mono", "Consolas", "Courier New", "DejaVu Sans Mono", monospace;
     color: #17212b;
     font-size: 12px;
-    font-weight: 700;
+    font-weight: 600;
     letter-spacing: 0;
 }
 QLabel#SpecimenSubtext {
-    color: #334155;
-    font-size: 13px;
-    font-weight: 500;
+    color: #64748b;
+    font-size: 12px;
+    font-weight: 400;
 }
 QLabel#SpecimenMissingText {
     color: #64748b;
@@ -1051,7 +1172,7 @@ QLabel#SpecimenMissingText {
     border: none;
     padding: 0px;
     font-size: 11px;
-    font-weight: 600;
+    font-weight: 500;
 }
 QLabel#SpecimenBadge {
     color: #0d9488;
@@ -1060,7 +1181,7 @@ QLabel#SpecimenBadge {
     border-radius: 999px;
     padding: 1px 7px;
     font-size: 11px;
-    font-weight: 600;
+    font-weight: 500;
 }
 QLabel#SpecimenRnaBadge {
     color: #0f766e;
@@ -1069,7 +1190,7 @@ QLabel#SpecimenRnaBadge {
     border-radius: 999px;
     padding: 2px 8px;
     font-size: 11px;
-    font-weight: 700;
+    font-weight: 600;
 }
 QLabel#SpecimenProgressBadge {
     color: #15803d;
@@ -1078,12 +1199,12 @@ QLabel#SpecimenProgressBadge {
     border-radius: 999px;
     padding: 1px 7px;
     font-size: 11px;
-    font-weight: 700;
+    font-weight: 600;
 }
 QLabel#SpecimenStorageText {
     color: #64748b;
     font-size: 11px;
-    font-weight: 600;
+    font-weight: 500;
 }
 QLabel#SpecimenActivePill {
     color: #f4f6f8;
@@ -1091,7 +1212,7 @@ QLabel#SpecimenActivePill {
     border-radius: 999px;
     padding: 2px 8px;
     font-size: 11px;
-    font-weight: 700;
+    font-weight: 600;
 }
 QLabel#SpecimenInactivePill {
     color: #64748b;
@@ -1100,7 +1221,7 @@ QLabel#SpecimenInactivePill {
     border-radius: 999px;
     padding: 2px 8px;
     font-size: 11px;
-    font-weight: 600;
+    font-weight: 500;
 }
 QPushButton#SpecimenPrintButton {
     background-color: transparent;
@@ -1144,11 +1265,12 @@ QLabel#StatusSegmentAccent { color: #0f766e; padding: 0 10px; font-size: 11px; }
 /* ── Mono label (file paths / UIDs) ──────────────────────────────── */
 QLabel#Mono {
     font-family: "JetBrains Mono", "Cascadia Code", "SF Mono", "Consolas", "Courier New", "DejaVu Sans Mono", monospace;
-    font-size: 11px;
-    color: #0f766e;
-    background-color: #ffffff;
-    border-radius: 6px;
-    padding: 3px 8px;
+    font-size: 12px;
+    color: #334155;
+    background-color: transparent;
+    border: none;
+    border-radius: 0;
+    padding: 0;
 }
 
 /* ── Menu ────────────────────────────────────────────────────────── */
@@ -1193,8 +1315,8 @@ QHeaderView::section {
     border-bottom: 1px solid rgba(15,23,42,0.08);
     padding: 6px 11px;
     font-size: 11px;
-    font-weight: 700;
-    letter-spacing: 0.06em;
+    font-weight: 600;
+    letter-spacing: 0;
 }
 
 /* ── Slider ──────────────────────────────────────────────────── */
