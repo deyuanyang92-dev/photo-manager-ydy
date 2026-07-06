@@ -1,4 +1,4 @@
-# 标本照片工作台 v0.03
+# 标本照片工作台 v0.51
 
 把 `photo-platform-ydy/` 的 Web 原型复现为 Windows / macOS / Linux 桌面 GUI（PyQt6）。
 功能 100% 照搬 Web 原型，界面美观+顺手，真实数据只读导入零丢失。
@@ -7,7 +7,7 @@
 
 仓库内已提供 Windows 便携版：
 
-- 下载：`releases/SpecimenPhotoWorkbench-v0.03-win64.zip`
+- 下载：GitHub Releases 中的 `SpecimenPhotoWorkbench-v0.51-win64.zip`
 - 解压到普通目录，例如 `D:\Apps\SpecimenPhotoWorkbench\`
 - 双击 `SpecimenPhotoWorkbench.exe`
 - 进入后在“项目总览”中新建或打开项目目录
@@ -42,7 +42,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build_windows.ps1
 ```
 
 输出目录为 `dist\SpecimenPhotoWorkbench\`，可分发压缩包为
-`dist\SpecimenPhotoWorkbench-v0.03-win64.zip`。安装与使用说明见
+`dist\SpecimenPhotoWorkbench-v0.51-win64.zip`。安装与使用说明见
 `docs/windows-install.md`。
 
 ## 红线（绝不破）

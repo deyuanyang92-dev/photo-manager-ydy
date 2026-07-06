@@ -1070,6 +1070,32 @@ QScrollArea#NavScroll QScrollBar:horizontal { height: 5px; background: transpare
 QScrollArea#NavScroll QScrollBar::handle:horizontal { background: rgba(15,23,42,0.22); border-radius: 2px; min-width: 28px; }
 QScrollArea#NavScroll QScrollBar::handle:horizontal:hover { background: #0f766e; }
 
+QScrollArea#RightRailScroll {
+    background-color: #f8fafc;
+    border-left: 1px solid rgba(15,23,42,0.13);
+    border-top: none;
+    border-right: none;
+    border-bottom: none;
+}
+QWidget#RightRailContent {
+    background-color: #f8fafc;
+}
+QScrollArea#RightRailScroll QScrollBar:vertical {
+    background: #eef2f6;
+    width: 12px;
+    margin: 0;
+    border-left: 1px solid rgba(15,23,42,0.08);
+}
+QScrollArea#RightRailScroll QScrollBar::handle:vertical {
+    background: #cbd5e1;
+    border-radius: 6px;
+    min-height: 34px;
+    margin: 2px;
+}
+QScrollArea#RightRailScroll QScrollBar::handle:vertical:hover {
+    background: #0f766e;
+}
+
 /* ── Splitter ────────────────────────────────────────────────────── */
 QSplitter#WorkbenchSplitter::handle { background: transparent; }
 QSplitter::handle { background-color: transparent; }

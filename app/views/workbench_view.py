@@ -1824,8 +1824,9 @@ class WorkbenchView(BaseView):
         #    invented to reclaim, so the naming panel keeps a width floor (never
         #    clips the UID / copy buttons) as a plain column — no tabs.
         right = QWidget()
+        right.setObjectName("RightRailContent")
         right_lay = QVBoxLayout(right)
-        right_lay.setContentsMargins(0, 0, 0, 0)
+        right_lay.setContentsMargins(12, 10, 8, 10)
         right_lay.setSpacing(12)
 
         # Right-rail command strip.  Keep the global save action visible without
@@ -1896,7 +1897,7 @@ class WorkbenchView(BaseView):
         right_lay.addStretch(1)
 
         right_scroll = QScrollArea()
-        right_scroll.setObjectName("ColumnScroll")
+        right_scroll.setObjectName("RightRailScroll")
         right_scroll.setWidget(right)
         right_scroll.setWidgetResizable(True)
         right_scroll.setFrameShape(QFrame.Shape.NoFrame)

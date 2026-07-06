@@ -2133,6 +2133,32 @@ QScrollArea#NavScroll QScrollBar:horizontal {{ height: 5px; background: transpar
 QScrollArea#NavScroll QScrollBar::handle:horizontal {{ background: {t["border_strong"]}; border-radius: 2px; min-width: 28px; }}
 QScrollArea#NavScroll QScrollBar::handle:horizontal:hover {{ background: {t["scrollbar_handle_hover"]}; }}
 
+QScrollArea#RightRailScroll {{
+    background-color: {t["panel_2"]};
+    border-left: 1px solid {t["border_medium"]};
+    border-top: none;
+    border-right: none;
+    border-bottom: none;
+}}
+QWidget#RightRailContent {{
+    background-color: {t["panel_2"]};
+}}
+QScrollArea#RightRailScroll QScrollBar:vertical {{
+    background: {t["panel_inset"]};
+    width: 12px;
+    margin: 0;
+    border-left: 1px solid {t["border"]};
+}}
+QScrollArea#RightRailScroll QScrollBar::handle:vertical {{
+    background: {t["scrollbar_handle"]};
+    border-radius: 6px;
+    min-height: 34px;
+    margin: 2px;
+}}
+QScrollArea#RightRailScroll QScrollBar::handle:vertical:hover {{
+    background: {t["scrollbar_handle_hover"]};
+}}
+
 /* ── Splitter ────────────────────────────────────────────────────── */
 QSplitter#WorkbenchSplitter::handle {{ background: transparent; }}
 QSplitter::handle {{ background-color: transparent; }}
