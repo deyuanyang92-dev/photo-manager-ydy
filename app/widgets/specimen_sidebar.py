@@ -651,20 +651,20 @@ class SpecimenSidebar(QWidget):
         row = QFrame()
         row.setObjectName("SpecimenRowActive" if active else "SpecimenRow")
         row.setProperty("selected", False)
-        row.setMinimumHeight(86)
+        row.setMinimumHeight(88)
         v = QVBoxLayout(row)
-        v.setContentsMargins(8, 6, 8, 6)
-        v.setSpacing(3)
+        v.setContentsMargins(7, 5, 7, 5)
+        v.setSpacing(2)
 
-        uid_lbl = QLabel(self._compact_uid(uid))
+        uid_lbl = QLabel(self._display_uid(uid))
         uid_lbl.setObjectName("SpecimenUid")
         uid_lbl.setToolTip(uid)
         uid_lbl.setMinimumWidth(0)
-        uid_lbl.setWordWrap(False)
+        uid_lbl.setWordWrap(True)
         uid_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         uid_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
 
-        status_pill = QLabel("当前激活" if active else "未激活")
+        status_pill = QLabel("当前" if active else "未激活")
         status_pill.setObjectName(
             "SpecimenActivePill" if active else "SpecimenInactivePill"
         )
@@ -697,10 +697,10 @@ class SpecimenSidebar(QWidget):
         badge = self._collab_badge(uid, svc)
         line = QHBoxLayout()
         line.setContentsMargins(0, 0, 0, 0)
-        line.setSpacing(8)
+        line.setSpacing(6)
 
         if is_rna:
-            rna_badge = _ClickableLabel(f"已取 RNA · {storage or 'RNAlater'}")
+            rna_badge = _ClickableLabel("RNA")
             rna_badge.setObjectName("SpecimenRnaBadge")
             rna_badge.setCursor(Qt.CursorShape.PointingHandCursor)
             rna_badge.setToolTip("点击筛选所有已取 RNA 组织的编号")
@@ -724,13 +724,13 @@ class SpecimenSidebar(QWidget):
 
         dots_row = QHBoxLayout()
         dots_row.setContentsMargins(0, 0, 0, 0)
-        dots_row.setSpacing(7)
+        dots_row.setSpacing(6)
         for code, obj_name, tip in self._PHASE_DOTS:
             dot = QPushButton()
             dot.setObjectName(obj_name)
             # 强制正方固定尺寸 —— 仅靠 QSS max-width 拗不过按钮默认 padding，会被撑成
             # 矩形；setFixedSize 锁死，配 QSS border-radius=半径 → 真·小圆点。
-            dot.setFixedSize(13, 13)
+            dot.setFixedSize(12, 12)
             dot.setCheckable(True)
             dot.setChecked(code == current)
             dot.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -744,7 +744,7 @@ class SpecimenSidebar(QWidget):
 
         print_btn = QPushButton()
         print_btn.setObjectName("SpecimenPrintButton")
-        print_btn.setFixedSize(22, 22)
+        print_btn.setFixedSize(20, 20)
         print_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         print_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         print_btn.setToolTip("按默认模板打印该编号标签")
@@ -762,8 +762,8 @@ class SpecimenSidebar(QWidget):
         if count <= 0:
             return ""
         if total > count:
-            return f"{count}/{total}角度"
-        return f"{count}角度"
+            return f"{count}/{total}"
+        return str(count)
 
     def _progress_badge_text(self, progress: dict) -> str:
         total = int(progress.get("total") or 0)
@@ -771,11 +771,11 @@ class SpecimenSidebar(QWidget):
         composed = int(progress.get("composed") or 0)
         grouped = int(progress.get("grouped") or 0)
         if organized:
-            return f"已整理 {organized}角度"
+            return f"整 {organized}"
         if composed:
-            return f"已合成 {self._format_angle_count(composed, total)}"
+            return f"合 {self._format_angle_count(composed, total)}"
         if grouped:
-            return f"已分组 {self._format_angle_count(grouped, total)}"
+            return f"组 {self._format_angle_count(grouped, total)}"
         return ""
 
     @staticmethod
@@ -817,11 +817,17 @@ class SpecimenSidebar(QWidget):
         self._filter_attention_btn.setEnabled(attention_total > 0)
 
     @staticmethod
-    def _compact_uid(uid: str) -> str:
-        """Single-line UID for the sidebar; full value stays in tooltip."""
-        if len(uid) <= 34:
-            return uid
-        return f"{uid[:16]}…{uid[-14:]}"
+    def _display_uid(uid: str) -> str:
+        """Readable sidebar UID: keep the full value, wrap long IDs by segment."""
+        text = str(uid or "").strip()
+        if len(text) <= 30 or "-" not in text:
+            return text
+        parts = text.split("-")
+        if len(parts) < 5:
+            return text
+        head = "-".join(parts[:3])
+        tail = "-".join(parts[3:])
+        return f"{head}-\n{tail}"
 
     def _normalize_project_specimen_uids(self, db, project_dir: str) -> None:
         """Migrate old lowercase UID rows to the canonical uppercase spelling.

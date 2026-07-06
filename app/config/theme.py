@@ -2276,8 +2276,8 @@ QLabel#SpecimenRnaBadge {{
     color: #0f766e;
     background-color: rgba(20, 184, 166, 0.14);
     border: 1px solid rgba(15, 118, 110, 0.28);
-    border-radius: {t["radius_pill"]};
-    padding: 2px 8px;
+    border-radius: {t["radius_sm"]};
+    padding: 1px 6px;
     font-size: {t["font_xs"]};
     font-weight: 600;
 }}
@@ -2285,8 +2285,8 @@ QLabel#SpecimenProgressBadge {{
     color: {t["success"]};
     background-color: {t["success_soft"]};
     border: 1px solid {t["success"]};
-    border-radius: {t["radius_pill"]};
-    padding: 1px 7px;
+    border-radius: {t["radius_sm"]};
+    padding: 1px 6px;
     font-size: {t["font_xs"]};
     font-weight: 600;
 }}
@@ -2298,8 +2298,8 @@ QLabel#SpecimenStorageText {{
 QLabel#SpecimenActivePill {{
     color: {t["bg"]};
     background-color: {t["accent"]};
-    border-radius: {t["radius_pill"]};
-    padding: 2px 8px;
+    border-radius: {t["radius_sm"]};
+    padding: 1px 6px;
     font-size: {t["font_xs"]};
     font-weight: 600;
 }}
@@ -2307,8 +2307,8 @@ QLabel#SpecimenInactivePill {{
     color: {t["muted"]};
     background-color: {t["panel_2"]};
     border: 1px solid {t["border_medium"]};
-    border-radius: {t["radius_pill"]};
-    padding: 2px 8px;
+    border-radius: {t["radius_sm"]};
+    padding: 1px 6px;
     font-size: {t["font_xs"]};
     font-weight: 500;
 }}

@@ -75,8 +75,9 @@ _ATTR = {
     "unattributed": "ChipUnattributed",
     "readonly":     "ChipArchived",
 }
-_FILE_THUMB_SIZE = 92
-_FILE_CARD_HEIGHT = 110
+_FILE_THUMB_SIZE = 56
+_FILE_TILE_MIN_WIDTH = 190
+_FILE_TILE_MAX_COLUMNS = 4
 _FILE_THUMB_DECODE_SIZE = 220
 _FILE_THUMB_MIN_SIZE = 56
 _FILE_THUMB_MAX_SIZE = 180
@@ -126,7 +127,7 @@ def _clamp_file_thumb_size(size: int) -> int:
 
 
 def _file_card_height_for_thumb(size: int) -> int:
-    return max(68, int(size) + 18)
+    return max(78, int(size) + 18)
 
 
 class _FileCard(QFrame):
@@ -176,7 +177,7 @@ class _FileCard(QFrame):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(8, 5, 8, 5)
+        lay.setContentsMargins(7, 5, 7, 5)
         lay.setSpacing(7)
 
         kind = getattr(self._entry, "kind", "jpg")
@@ -515,6 +516,7 @@ class MonitorPanel(QWidget):
         self._sort_key: str = "default"
         self._sort_reverse: bool = False
         self._pending_thumb_size: int = _FILE_THUMB_SIZE
+        self._current_grid_cols: int = 1
         self._shortcuts: list[QShortcut] = []
         self._drop_targets: list[QWidget] = []
         self._setup_ui()
@@ -883,6 +885,12 @@ class MonitorPanel(QWidget):
             self._zoom_pending_thumbnails_by_wheel_delta(event.angleDelta().y())
             event.accept()
             return True
+        if (
+            event.type() == QEvent.Type.Resize
+            and hasattr(self, "_stream_scroll")
+            and watched is self._stream_scroll.viewport()
+        ):
+            self._reflow_cards_for_viewport()
         if watched in self._drop_targets:
             if event.type() in (
                 QEvent.Type.DragEnter,
@@ -1287,7 +1295,7 @@ class MonitorPanel(QWidget):
         was_enabled = self._grid_widget.updatesEnabled()
         self._grid_widget.setUpdatesEnabled(False)
         try:
-            cols = 1 if self._view_mode == "list" else 2
+            cols = self._grid_column_count()
             desired = {getattr(f, "path", ""): f for f in all_files}
 
             # Drop cards for files that vanished.
@@ -1314,14 +1322,37 @@ class MonitorPanel(QWidget):
                     card = self._make_card(f)
                     self._card_by_key[key] = card
                     self._card_sig_by_key[key] = sig
-                self._grid.addWidget(card, idx // cols, idx % cols)
                 self._cards.append(card)
-            for c in range(cols):
-                self._grid.setColumnStretch(c, 1)
-            for c in range(cols, 3):
-                self._grid.setColumnStretch(c, 0)
+            self._layout_cards(cols)
         finally:
             self._grid_widget.setUpdatesEnabled(was_enabled)
+
+    def _grid_column_count(self) -> int:
+        if self._view_mode == "list":
+            return 1
+        viewport = getattr(self, "_stream_scroll", None)
+        width = viewport.viewport().width() if viewport is not None else self.width()
+        width = max(1, int(width or 1))
+        return max(1, min(_FILE_TILE_MAX_COLUMNS, width // _FILE_TILE_MIN_WIDTH))
+
+    def _layout_cards(self, cols: int) -> None:
+        cols = max(1, int(cols or 1))
+        while self._grid.count():
+            self._grid.takeAt(0)
+        for idx, card in enumerate(self._cards):
+            self._grid.addWidget(card, idx // cols, idx % cols)
+        for c in range(_FILE_TILE_MAX_COLUMNS):
+            self._grid.setColumnStretch(c, 1 if c < cols else 0)
+        self._current_grid_cols = cols
+
+    def _reflow_cards_for_viewport(self) -> None:
+        if not getattr(self, "_cards", None):
+            return
+        cols = self._grid_column_count()
+        if cols == self._current_grid_cols:
+            return
+        self._layout_cards(cols)
+        self._grid_widget.updateGeometry()
 
     def _clear_grid(self) -> None:
         self._thumb_queue.clear()

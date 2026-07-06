@@ -1213,8 +1213,8 @@ QLabel#SpecimenRnaBadge {
     color: #0f766e;
     background-color: rgba(20, 184, 166, 0.14);
     border: 1px solid rgba(15, 118, 110, 0.28);
-    border-radius: 999px;
-    padding: 2px 8px;
+    border-radius: 6px;
+    padding: 1px 6px;
     font-size: 11px;
     font-weight: 600;
 }
@@ -1222,8 +1222,8 @@ QLabel#SpecimenProgressBadge {
     color: #15803d;
     background-color: rgba(21,128,61,0.11);
     border: 1px solid #15803d;
-    border-radius: 999px;
-    padding: 1px 7px;
+    border-radius: 6px;
+    padding: 1px 6px;
     font-size: 11px;
     font-weight: 600;
 }
@@ -1235,8 +1235,8 @@ QLabel#SpecimenStorageText {
 QLabel#SpecimenActivePill {
     color: #f4f6f8;
     background-color: #0f766e;
-    border-radius: 999px;
-    padding: 2px 8px;
+    border-radius: 6px;
+    padding: 1px 6px;
     font-size: 11px;
     font-weight: 600;
 }
@@ -1244,8 +1244,8 @@ QLabel#SpecimenInactivePill {
     color: #64748b;
     background-color: #f8fafc;
     border: 1px solid rgba(15,23,42,0.13);
-    border-radius: 999px;
-    padding: 2px 8px;
+    border-radius: 6px;
+    padding: 1px 6px;
     font-size: 11px;
     font-weight: 500;
 }

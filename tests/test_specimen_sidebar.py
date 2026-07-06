@@ -304,7 +304,7 @@ def test_active_specimen_row_has_active_style_and_badge(ctx, db):
         w for w in row.findChildren(QLabel)
         if w.objectName() == "SpecimenActivePill"
     ]
-    assert badges and badges[0].text() == "当前激活"
+    assert badges and badges[0].text() == "当前"
 
 
 def test_inactive_specimen_row_has_explicit_inactive_badge(ctx, db):
@@ -371,7 +371,7 @@ def test_row_shows_organize_progress_from_grouping(ctx, db):
         w for w in row.findChildren(QLabel)
         if w.objectName() == "SpecimenProgressBadge"
     ]
-    assert badges and badges[0].text() == "已整理 1角度"
+    assert badges and badges[0].text() == "整 1"
 
 
 def test_organized_progress_badge_does_not_show_total_groups(ctx, db):
@@ -400,7 +400,7 @@ def test_organized_progress_badge_does_not_show_total_groups(ctx, db):
         w for w in row.findChildren(QLabel)
         if w.objectName() == "SpecimenProgressBadge"
     ]
-    assert badges and badges[0].text() == "已整理 2角度"
+    assert badges and badges[0].text() == "整 2"
 
 
 def test_selected_specimen_row_gets_explicit_selected_property(ctx, db):
@@ -485,9 +485,26 @@ def test_rna_badge_and_missing_species_are_visible_on_row(ctx, db):
         if w.objectName() == "SpecimenMissingText"
     ]
 
-    assert rna_badges and "已取 RNA" in rna_badges[0].text()
-    assert "RT95E" in rna_badges[0].text()
+    assert rna_badges and rna_badges[0].text() == "RNA"
+    assert "RT95E" not in rna_badges[0].text()
     assert missing and missing[0].text() == "未填写物种信息"
+
+
+def test_long_uid_wraps_without_static_ellipsis(ctx, db):
+    uid = "FJ-YGLZ-B2-DLC001-RT95E-20260810-0"
+    _add_specimen(db, uid, storage="RT95E")
+    sb = SpecimenSidebar(ctx)
+    sb.refresh()
+
+    row = sb._list.itemWidget(sb._list.item(0))
+    uid_labels = [
+        w for w in row.findChildren(QLabel)
+        if w.objectName() == "SpecimenUid"
+    ]
+
+    assert uid_labels
+    assert "…" not in uid_labels[0].text()
+    assert uid_labels[0].text().replace("\n", "") == uid
 
 
 def test_clicking_rna_badge_filters_to_rna_specimens(ctx, db, qtbot):

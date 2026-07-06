@@ -299,12 +299,13 @@ def test_pending_stream_windows_shortcuts(panel, qtbot):
         _jpg_entry(name="b.jpg", path="/tmp/b.jpg"),
     ]))
     panel.setFocus()
+    initial = panel._pending_thumb_size
 
     qtbot.keyClick(panel, Qt.Key.Key_Plus, modifier=Qt.KeyboardModifier.ControlModifier)
-    assert panel._pending_thumb_size > 92
+    assert panel._pending_thumb_size > initial
 
     qtbot.keyClick(panel, Qt.Key.Key_0, modifier=Qt.KeyboardModifier.ControlModifier)
-    assert panel._pending_thumb_size == 92
+    assert panel._pending_thumb_size == initial
 
     qtbot.keyClick(panel, Qt.Key.Key_A, modifier=Qt.KeyboardModifier.ControlModifier)
     assert len(panel.selected_all_paths()) == 2
@@ -423,6 +424,25 @@ class TestPendingViewAndSort:
         assert panel._grid.itemAtPosition(0, 1) is None
         assert panel._grid.itemAtPosition(1, 0) is not None
         assert panel._grid.itemAtPosition(2, 0) is not None
+
+    def test_tiles_view_uses_four_columns_on_wide_viewport(self, panel, qtbot):
+        panel.resize(820, 720)
+        panel._stream_scroll.viewport().resize(820, 520)
+        panel.load_scan(_scan([
+            _jpg_entry("a.jpg", "/tmp/a.jpg"),
+            _jpg_entry("b.jpg", "/tmp/b.jpg"),
+            _jpg_entry("c.jpg", "/tmp/c.jpg"),
+            _jpg_entry("d.jpg", "/tmp/d.jpg"),
+            _jpg_entry("e.jpg", "/tmp/e.jpg"),
+        ]))
+        qtbot.wait(10)
+
+        assert panel._view_mode == "tiles"
+        assert panel._grid.itemAtPosition(0, 0) is not None
+        assert panel._grid.itemAtPosition(0, 1) is not None
+        assert panel._grid.itemAtPosition(0, 2) is not None
+        assert panel._grid.itemAtPosition(0, 3) is not None
+        assert panel._grid.itemAtPosition(1, 0) is not None
 
     def test_stream_context_menu_contains_view_sort_refresh(self, panel):
         actions_seen = []
