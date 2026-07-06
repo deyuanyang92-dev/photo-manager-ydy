@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import os
 from types import SimpleNamespace
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -165,17 +164,61 @@ class TestCollabTab:
         assert view._collab_pairing_input is not None
         assert view._collab_health_light is not None
 
-    def test_health_status_shows_diagnostic_reason(self, view: SettingsView) -> None:
-        svc = MagicMock()
-        svc.overall_health.return_value = "yellow"
-        svc.diagnostics.return_value = [
-            SimpleNamespace(code="config_no_group", title="未设置协作组码")
+    def test_enable_checkbox_text_matches_live_behavior(self, view: SettingsView) -> None:
+        text = view._collab_enabled_chk.text()
+        assert "立即生效" in text
+        assert "协作中心" in text
+        assert "重启" not in text
+
+    def test_health_status_uses_shared_not_started_state(self, view: SettingsView) -> None:
+        from app.services.collab_service import CollabService
+
+        svc = CollabService()
+        view.ctx.collab_service = svc
+        view._refresh_collab_health()
+
+        assert view._collab_health_text.text() == "协作未启动"
+
+    def test_health_status_uses_shared_missing_group_state(self, view: SettingsView) -> None:
+        from app.services.collab_service import CollabService
+
+        svc = CollabService()
+        svc._running = True
+        view.ctx.collab_service = svc
+
+        view._refresh_collab_health(recompute=True)
+
+        assert view._collab_health_text.text() == "未设置协作组码"
+        svc.stop()
+
+    def test_health_status_uses_shared_no_peers_state(self, view: SettingsView) -> None:
+        from app.services.collab_service import CollabService
+
+        svc = CollabService()
+        svc._running = True
+        svc.set_group_code("TEAM-1")
+        view.ctx.collab_service = svc
+
+        view._refresh_collab_health(recompute=True)
+
+        assert view._collab_health_text.text() == "未发现其他设备"
+        svc.stop()
+
+    def test_health_status_keeps_diagnostic_reason_as_detail(self, view: SettingsView) -> None:
+        from app.services.collab_service import CollabService
+
+        svc = CollabService()
+        svc._running = True
+        svc.set_group_code("TEAM-1")
+        svc._diagnostics = [
+            SimpleNamespace(code="firewall_blocked", level="warn", title="防火墙可能阻止连接")
         ]
         view.ctx.collab_service = svc
 
         view._refresh_collab_health()
 
-        assert view._collab_health_text.text() == "有注意事项：未设置协作组码"
+        assert view._collab_health_text.text() == "未发现其他设备；诊断：防火墙可能阻止连接"
+        svc.stop()
 
 
 # ── Product workflow: verified archive replaces loose JPGs ──────────────────
@@ -247,6 +290,26 @@ class TestDeleteJpgDefault:
         assert view._delete_jpg_chk.isChecked() is False
 
 
+class TestArchiveModeDefault:
+    """Fast JPG ZIP is the migrated default; high compression must be explicit."""
+
+    def test_legacy_jxl_mode_migrates_to_fast_zip(self, ctx: AppContext) -> None:
+        ctx.settings._qs.setValue(_K_JXL_EFFORT, 1)
+        ctx.settings._qs.remove("archive/mode_v2_fast_default_applied")
+        ctx.settings._migrate_archive_mode_default()
+
+        assert int(ctx.settings._qs.value(_K_JXL_EFFORT, 0)) == 0
+        assert ctx.settings.jxl_effort_method == "standard"
+
+    def test_saving_archive_mode_marks_new_mode_migrated(self, view: SettingsView) -> None:
+        view._jxl_effort_combo.setCurrentIndex(1)
+        view._save_archive()
+
+        raw = view.ctx.settings._qs.value("archive/mode_v2_fast_default_applied")
+        assert str(raw).lower() == "true"
+        assert view.ctx.settings.jxl_effort_method == "maximum"
+
+
 # ── Settings round-trip ───────────────────────────────────────────────────────
 
 class TestRoundTrip:
@@ -263,13 +326,13 @@ class TestRoundTrip:
         assert "HeliconFocus" in view._helicon_exe_edit.text()
 
     def test_jxl_effort_round_trip(self, view: SettingsView) -> None:
-        view._jxl_effort_combo.setCurrentIndex(1)  # maximum
+        view._jxl_effort_combo.setCurrentIndex(1)  # high compression
         view._save_archive()
         view.on_activate()
         assert view._jxl_effort_combo.currentIndex() == 1
         assert view.ctx.settings.jxl_effort_method == "maximum"
 
-        view._jxl_effort_combo.setCurrentIndex(0)  # recommended standard
+        view._jxl_effort_combo.setCurrentIndex(0)  # fast standard ZIP
         view._jxl_concurrency_spin.setValue(4)
         view._save_archive()
         assert view.ctx.settings.jxl_effort_method == "standard"

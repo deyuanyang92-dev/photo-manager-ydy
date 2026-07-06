@@ -17,6 +17,7 @@ from app.services.monitor_service import (
     AttributionCtx,
     FileEntry,
     ScanResult,
+    build_attribution_context,
     scan_project,
     ensure_seen_files_table,
 )
@@ -91,6 +92,30 @@ class TestScanMarksGroupedJpg:
 
         result = scan_project(self.tmpdir, self.db)
 
+        assert [f.name for f in result.jpg_files] == []
+
+    def test_scan_with_attribution_context_hides_archived_jpgs(self):
+        """Worker scans use AttributionCtx; retained archived JPGs still vanish."""
+        jpg_path = self._make_jpg("archived-with-attr.jpg")
+        results_dir = Path(self.tmpdir) / "results"
+        results_dir.mkdir()
+        zip_path = results_dir / "UID-001-1.zip"
+        zip_path.write_bytes(b"zip")
+
+        _ensure_grouping_table(self.db)
+        group = Group(
+            group_index=0,
+            angle_label="A",
+            jpg_paths=[jpg_path],
+            status="organized",
+            archive_zip=str(zip_path),
+        )
+        save_grouping(self.db, "UID-001", [group], clean_phantoms=False)
+        attr = build_attribution_context(self.tmpdir, self.db)
+
+        result = scan_project(self.tmpdir, self.db, attr=attr)
+
+        assert str(Path(jpg_path).resolve()) in attr.organized_group_paths
         assert [f.name for f in result.jpg_files] == []
 
     def test_only_grouped_jpg_marked_not_others(self):

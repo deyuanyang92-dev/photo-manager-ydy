@@ -47,7 +47,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build_windows.ps1
 程序本身可以启动和录入数据。以下工具只影响对应高级功能：
 
 - Helicon Focus：用于真实景深合成；未安装时相关功能不可用或需手动处理。
-- JPEG XL `cjxl/djxl`：用于更高压缩比的内部 JPG 中转；缺失时自动退回普通 JPG ZIP。
+- JPEG XL `cjxl/djxl`：仅在“高压缩 JPEG XL”归档模式下使用；默认“快速 JPG ZIP”不依赖它。
 
 ## 常用操作
 

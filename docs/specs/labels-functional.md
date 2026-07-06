@@ -31,6 +31,22 @@
 - **printLabels(bucket)**:QPrinter 先出 PDF 预览再 QPrintDialog。**两独立按钮:打印样品瓶 / 打印 RNAlater 组织管**,各自 disabled 当 count=0。
 - 状态栏:模式名 + 选中 N + 样品 N + RNAlater N + 共 N 张 + 首条 warning。
 
+## 批次打印（A4/A5 标签纸）
+- 日常贴标签有两种入口：当前勾选立即打印；或先加入待打印批次，等积累到一张 A4/A5 后统一打印。
+- 批次按 bucket 独立保存：样品瓶批次与 RNAlater 组织管批次不混排。切换 bucket 只切换当前批次视图。
+- `加入批次` 使用当前勾选编号；样品瓶接收全部勾选，RNA签只接收 R 前缀标本。
+- 批次去重且保持加入顺序；当前勾选清空或继续筛选，不影响已加入批次。
+- `打印批次` 使用当前 bucket 的模板、标签尺寸、纸张、份数和 A4/A5 拼版参数生成 print job。
+- 空批次不能因为“空白手写标签”设置而变成可打印批次；只有批次内已有编号时，才允许在末尾追加空白手写标签。
+- `清空` 只清当前 bucket 的批次；切换/重载项目时清空批次，避免跨项目编号错打。
+
+## 打印执行 Module
+- `build_printer()` / `paint_jobs()` 保持为无状态底层 Adapter：只负责 QPrinter 页面设置和把 print job 绘制到设备。
+- 应用级打印会话必须走 `LabelPrintExecutor` 类：负责 Windows 打印桥接、Qt 打印机选择、默认打印、错误弹窗和打印审计。
+- View 层不应再展开“选择打印机 → 构建 QPrinter → paint_jobs → record_print_jobs”的完整流程；只负责构建 print job 和传入会话参数。
+- 项目打印设置的默认 `quick_print_mode` 是 `direct`：点击工作台打印、标签页打印或打印批次时，默认直接发送到系统默认/指定打印机。
+- 只有用户把 `点击打印` 改成 `dialog` 时，点击打印才打开打印窗口确认。
+
 ## 支撑函数（全部照 web 实现/复用 label_core.py）
 `bucketSpecimens(R→两桶)` / `specimenToLabelData` / `hasRnaTissue/rnaPreservative` / `getActiveTemplate(bucket)` / `getLabelDims(bucket)` / QR 生成(纠错级 Q) / `uniqueSpecimenIndices`(去重一标本一张)。
 

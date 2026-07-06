@@ -78,6 +78,20 @@ def test_tree_has_context_menu(qtbot, tmp_path, ctx):
     assert view._tree.contextMenuPolicy() == Qt.ContextMenuPolicy.CustomContextMenu
 
 
+def test_open_directory_uses_shared_file_manager(qtbot, tmp_path, ctx, monkeypatch):
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    opened = []
+    monkeypatch.setattr(
+        "app.utils.file_manager.open_directory",
+        lambda path: opened.append(path) or True,
+    )
+
+    view._open_directory(str(tmp_path))
+
+    assert opened == [str(tmp_path)]
+
+
 def test_rooted_tree_auto_selects_first_item(qtbot, tmp_path, ctx):
     root = tmp_path / "zhengli"
     _make_workspace(root)
@@ -325,6 +339,46 @@ def test_no_root_auto_discovers_workspace_candidates_near_cwd(qtbot, tmp_path, c
     ]
     assert any("ceshi6" in text and "工作区" in text for text in labels)
     assert any("ceshi8" in text and "可导入" in text for text in labels)
+
+
+def test_kind_filter_selects_first_matching_workspace(qtbot, tmp_path, ctx):
+    root = tmp_path / "调查区"
+    workspace = root / "断面a"
+    folder = root / "断面b"
+    folder.mkdir(parents=True)
+    _make_workspace(workspace)
+    ctx.settings.project_tree_root = str(root)
+
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    view.on_activate()
+
+    view._set_kind_filter("workspace")
+
+    assert view._tree_count_lbl.text() == "1/3 个匹配"
+    assert "工作区" in view._tree.currentItem().text(0)
+    assert view._detail_kind.text() == "工作区"
+    assert view._detail_path.text() == str(workspace)
+
+
+def test_no_match_state_clears_selected_detail_actions(qtbot, tmp_path, ctx):
+    root = tmp_path / "调查区"
+    _make_workspace(root / "断面a")
+    ctx.settings.project_tree_root = str(root)
+
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    view.on_activate()
+    assert view._btn_enter.isEnabled()
+
+    view._search.setText("不存在的节点")
+
+    assert view._tree_count_lbl.text() == "0/2 个匹配"
+    assert view._detail_kind.text() == "无匹配"
+    assert view._detail_path.text() == ""
+    assert not view._btn_enter.isEnabled()
+    assert not view._btn_summary.isEnabled()
+    assert not view._btn_station_import.isEnabled()
 
 
 def test_enter_node_sets_ctx_and_root(qtbot, tmp_path, ctx, monkeypatch):

@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Optional
 
 from PyQt6.QtCore import QEvent, QPoint, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QImage, QPainter, QPixmap
+from PyQt6.QtGui import QImage, QKeySequence, QPainter, QPixmap, QShortcut
 from PyQt6.QtWidgets import (
     QApplication,
     QDialog,
@@ -460,6 +460,8 @@ class _TiffLightboxDialog(QDialog):
 # ── Thumbnail decode (cached at ResultsColumn level) ───────────────────────────
 
 _DEFAULT_THUMB = 48
+_MIN_THUMB = 32
+_MAX_THUMB = 160
 _LARGE_THUMB_MIN_SIZE = 128
 _BASE_THUMB = 280  # base decode size; zoom scales DOWN from this cached pixmap
 _PREVIEW_MAX_SIZE = None
@@ -1154,7 +1156,9 @@ class ResultsColumn(QWidget):
         self._display_mode = "single"
         self._filename_mode = "full"
         self._rendered_paired_columns = True
+        self._shortcuts: list[QShortcut] = []
         self._setup_ui()
+        self._install_shortcuts()
 
     # ── UI ────────────────────────────────────────────────────────────────────
 
@@ -1189,11 +1193,11 @@ class ResultsColumn(QWidget):
         hdr.addWidget(self._collapse_btn)
 
         self._title = QLabel("成果")
-        self._title.setObjectName("WorkspaceTitle")
+        self._title.setObjectName("WorkbenchTitle")
         hdr.addWidget(self._title)
 
         self._count = QLabel("0 项")
-        self._count.setObjectName("MutedSmall")
+        self._count.setObjectName("WorkbenchCount")
         hdr.addWidget(self._count)
 
         self._current_mode_btn = QPushButton("当前")
@@ -1302,10 +1306,9 @@ class ResultsColumn(QWidget):
                     thumb_provider=self._thumb_provider,
                     thumb_size=self._thumb_size,
                     result_view_mode=self._result_view_mode,
-                    defer_thumbnail=True,
+                    defer_thumbnail=False,
                 )
                 self._cards.append(tc)
-                self._queue_thumbnail(tc)
             if zinfo is not None:
                 zc = _ArchiveCard(
                     self._display_info(zinfo), open_fn=self._open_in_explorer,
@@ -1388,10 +1391,9 @@ class ResultsColumn(QWidget):
                         thumb_provider=self._thumb_provider,
                         thumb_size=self._thumb_size,
                         result_view_mode=self._result_view_mode,
-                        defer_thumbnail=True,
+                        defer_thumbnail=False,
                     )
                     self._cards.append(tc)
-                    self._queue_thumbnail(tc)
                 if zinfo is not None:
                     zc = _ArchiveCard(
                         self._display_info(zinfo), open_fn=self._open_in_explorer,
@@ -1445,7 +1447,12 @@ class ResultsColumn(QWidget):
         if not path:
             return ""
         try:
-            return str(Path(path).resolve())
+            from app.utils.path_utils import localize_path
+            localized = localize_path(str(path))
+            p = Path(localized)
+            if p.exists():
+                return str(p.resolve())
+            return localized
         except OSError:
             return str(path)
 
@@ -1640,6 +1647,13 @@ class ResultsColumn(QWidget):
         if hasattr(self, "_body") and obj is self._body.viewport():
             if event.type() == QEvent.Type.Resize:
                 self._schedule_layout_refresh()
+            if (
+                event.type() == QEvent.Type.Wheel
+                and event.modifiers() & Qt.KeyboardModifier.ControlModifier
+            ):
+                self._zoom_results_by_wheel_delta(event.angleDelta().y())
+                event.accept()
+                return True
         return super().eventFilter(obj, event)
 
     def resizeEvent(self, event) -> None:
@@ -1746,10 +1760,32 @@ class ResultsColumn(QWidget):
 
     def _set_zoom(self, size: int) -> None:
         """Resize every result thumbnail."""
+        size = max(_MIN_THUMB, min(_MAX_THUMB, int(size)))
+        if size == self._thumb_size:
+            return
         self._thumb_size = size
         for c in self._cards:
             c.set_thumb_size(size)
         self._update_options_button_tooltip()
+
+    def _install_shortcuts(self) -> None:
+        def add(seq, callback) -> None:
+            shortcut = QShortcut(QKeySequence(seq), self)
+            shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            shortcut.activated.connect(callback)
+            self._shortcuts.append(shortcut)
+
+        add("Ctrl++", lambda: self._set_zoom(self._thumb_size + 16))
+        add("Ctrl+=", lambda: self._set_zoom(self._thumb_size + 16))
+        add("Ctrl+-", lambda: self._set_zoom(self._thumb_size - 16))
+        add("Ctrl+0", lambda: self._set_zoom(_DEFAULT_THUMB))
+
+    def _zoom_results_by_wheel_delta(self, delta: int) -> None:
+        if delta == 0:
+            return
+        steps = max(1, abs(delta) // 120)
+        direction = 1 if delta > 0 else -1
+        self._set_zoom(self._thumb_size + direction * steps * 16)
 
     def _set_collapsed(self, collapsed: bool) -> None:
         """Collapse / expand the whole results area (single toggle)."""

@@ -2,6 +2,62 @@
 
 This file records durable project decisions that the user has had to repeat many times. Future Codex / Claude Code sessions must read this before changing core workflow logic.
 
+## Regression discipline for core workflow changes
+
+The user is a beginner and relies on agents to keep the application coherent. Do not fix one visible bug by casually changing a shared workflow and leaving adjacent features unverified.
+
+## Preserved UI fixes and no-regression areas
+
+The user explicitly asked that successful fixes must be recorded and preserved. Do not casually rewrite these areas while fixing another visible issue:
+
+- Windows/WSL path compatibility is required. A project saved as `/mnt/n/...` in WSL and reopened as `N:\...` on Windows must still resolve to the same workspace, including `owner_project_dir` lookups for the specimen sidebar and UID checks.
+- The workbench specimen sidebar must show records from the current workspace even when the DB stores the owner path in the other runtime's syntax. Do not return to `owner_project_dir = current_project_dir` only.
+- Pending photo cards must show real JPG/TIFF thumbnails when the files are decodable. Do not replace them with generic icon-only cards or a hidden/lazy path that leaves the user seeing no pictures.
+- Organized results must show real TIFF thumbnails/previews when the TIFF is decodable. ZIP may remain a file/archive icon, but TIFF result cards should not be icon-only by default.
+- The screenshot tool needs a visible, direct top-bar entry. It must not be discoverable only through a nested toolbox menu.
+- When touching one of these areas, run the focused tests for that area and report exactly what was tested. Do not claim unrelated workflows were verified.
+
+Do not tell the user a change is globally "fixed", "complete", "10/10", or "done" when only a local slice was changed or tested. Completion reports must distinguish:
+
+- changed scope: exactly what was edited;
+- verified scope: exact commands/tests/manual checks that passed;
+- unverified scope: related workflows not exercised;
+- residual risk: what can still break and why.
+
+Before changing core workflow logic, the agent must:
+
+- Identify the affected workflow area: naming, right rail save, compose/organise, TIFF preview, label printing, sidebar activation, collection autofill, or collaboration.
+- State the likely adjacent features that can regress.
+- Add or update at least one focused regression test when fixing a bug or changing behavior.
+- Prefer a deep Module with one Interface over duplicating conditions across views. Good seams concentrate behavior and tests.
+- Preserve user-repeated requirements already recorded in this file.
+- Run the focused regression suite for the touched area before reporting completion.
+
+The helper script is:
+
+```bash
+python scripts/run_core_regression.py
+python scripts/run_core_regression.py naming
+python scripts/run_core_regression.py workbench compose
+python scripts/run_core_regression.py labels
+python scripts/run_core_regression.py collab
+python scripts/run_core_regression.py all-core
+```
+
+Default `quick` is the minimum smoke gate for small workflow edits. If the touched area is known, run its named suite too. If a test cannot be run, report that explicitly and explain the remaining risk.
+
+## Windows/WSL same-workspace path scenario
+
+User-confirmed scenario: the same specimen-photo workspace may be processed from WSL and later opened from Windows, or the other way around. Example: WSL stores a recent project as `/mnt/n/claude/zhengli`; Windows must treat that as the same workspace as `N:\claude\zhengli`.
+
+Requirements to preserve:
+
+- Persisted project paths, recent-workspace entries, `owner_project_dir`, UID checks, summaries, and file-open actions must tolerate both `/mnt/<drive>/...` and `<Drive>:\...` forms.
+- UI entries such as “最近使用 / 磁盘目录” should show and operate on the path form usable by the current runtime, without corrupting the stored project identity.
+- When the app runs in WSL but opens a folder on a mounted Windows drive, use the Windows Explorer path (`N:\...`) so the Windows desktop can open it.
+- Do not narrow the model back to string equality on one path spelling. Use the shared path helpers and focused regression tests before changing this area.
+- Once the user confirms a path-compatibility implementation works for this scenario, future agents must not casually rewrite it while fixing unrelated workflow issues.
+
 ## Workbench selected-JPG compose and organise
 
 The user has repeatedly clarified this rule: selecting JPG files in the monitor is already an explicit manual operation. The software must not block that workflow with "please activate a specimen number first".

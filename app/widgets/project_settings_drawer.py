@@ -135,6 +135,89 @@ class _KVEditor(QWidget):
         self.changed.emit()
 
 
+class _CustomFieldEditor(QWidget):
+    """Editable project custom naming fields."""
+
+    changed = pyqtSignal()
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._rows: list[tuple[QLineEdit, QLineEdit]] = []
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(4)
+
+        self._rows_widget = QWidget()
+        self._rows_lay = QVBoxLayout(self._rows_widget)
+        self._rows_lay.setContentsMargins(0, 0, 0, 0)
+        self._rows_lay.setSpacing(4)
+        root.addWidget(self._rows_widget)
+
+        add_btn = QPushButton("+ 添加字段")
+        add_btn.setObjectName("Ghost")
+        add_btn.setFixedHeight(26)
+        add_btn.setToolTip("添加可参与编号的项目字段，例如 水深、潮位、天气。")
+        add_btn.clicked.connect(lambda _checked=False: self._add_row())
+        root.addWidget(add_btn)
+
+    def load_fields(self, fields: object) -> None:
+        from app.services.naming_field_catalog import normalize_custom_fields
+
+        self._clear_rows()
+        for item in normalize_custom_fields(fields):
+            self._add_row(item.get("label", ""), item.get("key", ""))
+
+    def fields(self) -> list[dict[str, str]]:
+        from app.services.naming_field_catalog import normalize_custom_fields
+
+        return normalize_custom_fields([
+            {"label": label.text().strip(), "key": key.text().strip()}
+            for label, key in self._rows
+        ])
+
+    def _clear_rows(self) -> None:
+        while self._rows_lay.count():
+            item = self._rows_lay.takeAt(0)
+            if item and item.widget():
+                item.widget().deleteLater()
+        self._rows.clear()
+
+    def _add_row(self, label: str = "", key: str = "") -> None:
+        row_w = QWidget()
+        h = QHBoxLayout(row_w)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(4)
+
+        label_edit = QLineEdit(label)
+        label_edit.setPlaceholderText("字段名，如 水深")
+        label_edit.setFixedHeight(28)
+        label_edit.editingFinished.connect(self.changed.emit)
+
+        key_edit = QLineEdit(key)
+        key_edit.setPlaceholderText("key 自动")
+        key_edit.setFixedWidth(100)
+        key_edit.setFixedHeight(28)
+        key_edit.editingFinished.connect(self.changed.emit)
+
+        del_btn = QPushButton("×")
+        del_btn.setObjectName("Ghost")
+        del_btn.setFixedSize(24, 28)
+        del_btn.clicked.connect(lambda: self._remove_row(row_w, label_edit, key_edit))
+
+        h.addWidget(label_edit, 1)
+        h.addWidget(key_edit)
+        h.addWidget(del_btn)
+
+        self._rows.append((label_edit, key_edit))
+        self._rows_lay.addWidget(row_w)
+
+    def _remove_row(self, row_w: QWidget, label_edit: QLineEdit, key_edit: QLineEdit) -> None:
+        if (label_edit, key_edit) in self._rows:
+            self._rows.remove((label_edit, key_edit))
+        row_w.deleteLater()
+        self.changed.emit()
+
+
 # ── main drawer ───────────────────────────────────────────────────────────────
 
 class ProjectSettingsDrawer(QWidget):
@@ -442,56 +525,47 @@ class ProjectSettingsDrawer(QWidget):
 
         lay.addWidget(_divider())
 
+        from app.services.naming_field_catalog import (
+            component_fields,
+            default_components,
+        )
+
+        custom_lbl = QLabel("自定义命名字段（新增后可勾选为必填或加入编号组成）")
+        custom_lbl.setObjectName("Section")
+        custom_lbl.setWordWrap(True)
+        lay.addWidget(custom_lbl)
+        self._naming_custom_fields = _CustomFieldEditor()
+        self._naming_custom_fields.changed.connect(self._save_naming_rules)
+        lay.addWidget(self._naming_custom_fields)
+
+        lay.addWidget(_divider())
+
         req_lbl = QLabel("必填字段（右侧编号卡按此显示 * 并提示缺项）")
         req_lbl.setObjectName("Section")
         req_lbl.setWordWrap(True)
         lay.addWidget(req_lbl)
         self._naming_required_checks: dict[str, QCheckBox] = {}
-        required_fields = [
-            ("地区", "province"),
-            ("样地", "site"),
-            ("站位", "station"),
-            ("物种缩写", "species_id"),
-            ("保存方式", "storage"),
-            ("采集日期", "collection_date"),
-            ("拍摄日期", "photo_date"),
-        ]
-        for label, key in required_fields:
-            cb = QCheckBox(label)
-            cb.stateChanged.connect(self._save_naming_rules)
-            self._naming_required_checks[key] = cb
-            lay.addWidget(cb)
+        self._naming_required_rows = QWidget()
+        self._naming_required_rows_lay = QVBoxLayout(self._naming_required_rows)
+        self._naming_required_rows_lay.setContentsMargins(0, 0, 0, 0)
+        self._naming_required_rows_lay.setSpacing(4)
+        lay.addWidget(self._naming_required_rows)
+        self._rebuild_naming_required_rows({})
 
         lay.addWidget(_divider())
 
-        comp_lbl = QLabel("编号组成（按固定顺序拼接，分类/备注字段默认不参与）")
+        comp_lbl = QLabel("编号组成（按下方顺序拼接；可用上/下调整，分类/备注字段默认不参与）")
         comp_lbl.setObjectName("Section")
         comp_lbl.setWordWrap(True)
         lay.addWidget(comp_lbl)
         self._naming_component_checks: dict[str, QCheckBox] = {}
-        component_fields = [
-            ("地区", "province"),
-            ("样地", "site"),
-            ("站位", "station"),
-            ("物种缩写", "species_id"),
-            ("保存方式", "storage"),
-            ("日期段", "date_seg"),
-            ("类群", "taxon_group"),
-            ("目", "order_name"),
-            ("科", "family"),
-            ("属", "genus"),
-            ("物种学名", "scientific_name"),
-            ("物种中文名", "scientific_name_cn"),
-            ("备注标签", "notes"),
-            ("拍照备注", "photo_notes"),
-            ("采集人", "collector"),
-            ("拍摄人", "photographer"),
-        ]
-        for label, key in component_fields:
-            cb = QCheckBox(label)
-            cb.stateChanged.connect(self._save_naming_rules)
-            self._naming_component_checks[key] = cb
-            lay.addWidget(cb)
+        self._naming_component_order = [field.key for field in component_fields()]
+        self._naming_component_rows = QWidget()
+        self._naming_component_rows_lay = QVBoxLayout(self._naming_component_rows)
+        self._naming_component_rows_lay.setContentsMargins(0, 0, 0, 0)
+        self._naming_component_rows_lay.setSpacing(4)
+        lay.addWidget(self._naming_component_rows)
+        self._rebuild_naming_component_rows(set(default_components()))
 
         lay.addWidget(_divider())
 
@@ -640,8 +714,8 @@ class ProjectSettingsDrawer(QWidget):
         # ── 单张打印 ──────────────────────────────────────────────────────────
         self._quick_print_mode = QComboBox()
         self._quick_print_mode.setFixedHeight(30)
-        self._quick_print_mode.addItem("打开 Windows 打印窗口（推荐）", "dialog")
-        self._quick_print_mode.addItem("直接发送到指定打印机", "direct")
+        self._quick_print_mode.addItem("直接发送到默认/指定打印机（推荐）", "direct")
+        self._quick_print_mode.addItem("打开打印窗口再确认", "dialog")
         self._quick_print_mode.currentIndexChanged.connect(self._save_print_settings)
 
         self._print_tissue_cb = QCheckBox("RNA 编号加打 RNA签")
@@ -825,20 +899,40 @@ class ProjectSettingsDrawer(QWidget):
             "tissue": label_service.LabelTemplateLibrary("tissue"),
         }
         dlg = QDialog(self)
-        dlg.setWindowTitle("管理标签模板")
-        dlg.resize(900, 700)
+        bucket_title = "瓶签模板中心" if bucket == "sample" else "RNA签模板中心"
+        dlg.setWindowTitle(bucket_title)
+        dlg.resize(1040, 760)
         layout = QVBoxLayout(dlg)
-        manager = LabelStep2Templates(libs, dlg)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        scroll = QScrollArea(dlg)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        manager = LabelStep2Templates(
+            libs,
+            scroll,
+            visible_buckets=[bucket],
+            title=bucket_title,
+            subtitle="当前选择会成为项目设置里的默认打印模板。",
+            manager_mode=True,
+        )
         try:
             specimens = label_service.load_specimen_dicts(self.ctx.get_db())
         except Exception:
             specimens = []
-        # The settings dialog must always allow configuring both routes, even
-        # before the current project contains its first RNA specimen.
-        if not any(str(item.get("storage") or "").upper().startswith("R") for item in specimens):
-            specimens.append(self._demo_specimen_for_bucket("tissue"))
-        manager.set_data(specimens, [])
-        layout.addWidget(manager)
+        preview_indices = list(range(len(specimens)))
+        if bucket == "tissue":
+            preview_indices = [
+                i for i, item in enumerate(specimens)
+                if str(item.get("storage") or "").upper().startswith("R")
+            ]
+        if not preview_indices:
+            specimens = [self._demo_specimen_for_bucket(bucket)]
+            preview_indices = [0]
+        manager.set_data(specimens, preview_indices)
+        scroll.setWidget(manager)
+        layout.addWidget(scroll, stretch=1)
         close_btn = QPushButton("完成")
         close_btn.setObjectName("Primary")
         close_btn.clicked.connect(dlg.accept)
@@ -953,6 +1047,107 @@ class ProjectSettingsDrawer(QWidget):
         if dlg.exec() == QDialog.DialogCode.Accepted:
             label_service.persist_imposition(bucket, dlg.imposition())
 
+    def _custom_naming_fields(self) -> list[dict[str, str]]:
+        editor = getattr(self, "_naming_custom_fields", None)
+        if editor is None:
+            return []
+        try:
+            return editor.fields()
+        except Exception:
+            return []
+
+    def _rebuild_naming_required_rows(self, checked_required: dict[str, bool] | None = None) -> None:
+        from app.services.naming_field_catalog import required_fields
+
+        checked_required = checked_required or {}
+        custom_fields = self._custom_naming_fields()
+        lay = self._naming_required_rows_lay
+        while lay.count():
+            item = lay.takeAt(0)
+            if item and item.widget():
+                item.widget().deleteLater()
+
+        self._naming_required_checks = {}
+        for field in required_fields(custom_fields):
+            cb = QCheckBox(field.label)
+            cb.setChecked(bool(checked_required.get(field.key, field.default_required)))
+            cb.stateChanged.connect(self._save_naming_rules)
+            self._naming_required_checks[field.key] = cb
+            lay.addWidget(cb)
+
+    def _rebuild_naming_component_rows(self, checked_components: set[str] | None = None) -> None:
+        from app.services.naming_field_catalog import component_fields, field_label
+
+        if checked_components is None:
+            checked_components = {
+                key for key, cb in self._naming_component_checks.items()
+                if cb.isChecked()
+            }
+        custom_fields = self._custom_naming_fields()
+        catalog_keys = [field.key for field in component_fields(custom_fields)]
+        order = list(getattr(self, "_naming_component_order", []) or catalog_keys)
+        self._naming_component_order = [
+            key for key in order
+            if key in catalog_keys or key in checked_components
+        ]
+        for key in catalog_keys:
+            if key not in self._naming_component_order:
+                self._naming_component_order.append(key)
+
+        lay = self._naming_component_rows_lay
+        while lay.count():
+            item = lay.takeAt(0)
+            if item and item.widget():
+                item.widget().deleteLater()
+
+        self._naming_component_checks = {}
+        last = len(self._naming_component_order) - 1
+        for idx, key in enumerate(self._naming_component_order):
+            row = QWidget()
+            row_lay = QHBoxLayout(row)
+            row_lay.setContentsMargins(0, 0, 0, 0)
+            row_lay.setSpacing(6)
+            cb = QCheckBox(field_label(key, custom_fields=custom_fields))
+            cb.setChecked(key in checked_components)
+            cb.stateChanged.connect(self._save_naming_rules)
+            self._naming_component_checks[key] = cb
+            row_lay.addWidget(cb, 1)
+
+            up_btn = QPushButton("上")
+            up_btn.setObjectName("Ghost")
+            up_btn.setFixedSize(30, 24)
+            up_btn.setEnabled(idx > 0)
+            up_btn.clicked.connect(lambda _checked=False, k=key: self._move_naming_component(k, -1))
+            row_lay.addWidget(up_btn)
+
+            down_btn = QPushButton("下")
+            down_btn.setObjectName("Ghost")
+            down_btn.setFixedSize(30, 24)
+            down_btn.setEnabled(idx < last)
+            down_btn.clicked.connect(lambda _checked=False, k=key: self._move_naming_component(k, 1))
+            row_lay.addWidget(down_btn)
+
+            lay.addWidget(row)
+
+    def _move_naming_component(self, key: str, delta: int) -> None:
+        try:
+            idx = self._naming_component_order.index(key)
+        except ValueError:
+            return
+        new_idx = idx + delta
+        if new_idx < 0 or new_idx >= len(self._naming_component_order):
+            return
+        self._naming_component_order[idx], self._naming_component_order[new_idx] = (
+            self._naming_component_order[new_idx],
+            self._naming_component_order[idx],
+        )
+        checked = {
+            k for k, cb in self._naming_component_checks.items()
+            if cb.isChecked()
+        }
+        self._rebuild_naming_component_rows(checked)
+        self._save_naming_rules()
+
     # ── Public API ────────────────────────────────────────────────────────────
 
     def refresh(self) -> None:
@@ -1023,6 +1218,11 @@ class ProjectSettingsDrawer(QWidget):
             load_global_print_defaults,
             merge_print_settings,
         )
+        from app.services.naming_field_catalog import (
+            normalize_required,
+            ordered_component_keys,
+            normalize_custom_fields,
+        )
 
         # 概要
         meta = load_setting(db, "project_meta", DEFAULT_PROJECT_META)
@@ -1041,18 +1241,19 @@ class ProjectSettingsDrawer(QWidget):
         self._stations_kv.load_entries(cl.get("stations", {}))
         self._species_kv.load_entries(cl.get("species", {}))
         rules = load_setting(db, "naming_rules", DEFAULT_NAMING_RULES)
-        required = rules.get("required", DEFAULT_NAMING_RULES["required"])
-        for key, cb in self._naming_required_checks.items():
-            cb.blockSignals(True)
-            cb.setChecked(bool(required.get(key, DEFAULT_NAMING_RULES["required"].get(key, False))))
-            cb.blockSignals(False)
+        custom_fields = normalize_custom_fields(rules.get("custom_fields", []))
+        self._naming_custom_fields.load_fields(custom_fields)
+        self._naming_custom_field_snapshot = custom_fields
+        required = normalize_required(
+            rules.get("required", DEFAULT_NAMING_RULES["required"]),
+            custom_fields,
+        )
+        self._rebuild_naming_required_rows(required)
         components = rules.get("components", DEFAULT_NAMING_RULES["components"])
         if not isinstance(components, list):
             components = DEFAULT_NAMING_RULES["components"]
-        for key, cb in self._naming_component_checks.items():
-            cb.blockSignals(True)
-            cb.setChecked(key in components)
-            cb.blockSignals(False)
+        self._naming_component_order = ordered_component_keys(components, custom_fields)
+        self._rebuild_naming_component_rows({str(key) for key in components})
         # 默认采集坐标 / 地理区
         cap = load_setting(db, "capture_defaults", DEFAULT_CAPTURE_DEFAULTS)
         self._cap_lon_edit.setText(str(cap.get("lon", "") or ""))
@@ -1206,16 +1407,41 @@ class ProjectSettingsDrawer(QWidget):
             load_setting,
             save_setting,
         )
+        from app.services.naming_field_catalog import (
+            component_fields,
+            normalize_required,
+            required_fields,
+        )
         data = load_setting(db, "naming_rules", DEFAULT_NAMING_RULES)
+        custom_fields = self._custom_naming_fields()
+        old_custom_fields = getattr(self, "_naming_custom_field_snapshot", [])
+        data["custom_fields"] = custom_fields
+        valid_required = {field.key for field in required_fields(custom_fields)}
         data["required"] = {
             key: cb.isChecked()
             for key, cb in self._naming_required_checks.items()
+            if key in valid_required
         }
+        data["required"] = normalize_required(data["required"], custom_fields)
+        valid_components = {field.key for field in component_fields(custom_fields)}
         data["components"] = [
-            key for key, cb in self._naming_component_checks.items()
-            if cb.isChecked()
+            key
+            for key in getattr(self, "_naming_component_order", [])
+            if self._naming_component_checks.get(key)
+            and key in valid_components
+            and self._naming_component_checks[key].isChecked()
         ]
         save_setting(db, "naming_rules", data)
+        if custom_fields != old_custom_fields:
+            self._naming_custom_fields.load_fields(custom_fields)
+            self._naming_custom_field_snapshot = list(custom_fields)
+            self._rebuild_naming_required_rows(data["required"])
+            self._naming_component_order = [
+                key for key in self._naming_component_order
+                if key in self._naming_component_checks
+                or any(field.get("key") == key for field in custom_fields)
+            ]
+            self._rebuild_naming_component_rows(set(data["components"]))
         self.naming_rules_changed.emit()
 
     def _save_capture_defaults(self) -> None:
@@ -1256,7 +1482,7 @@ class ProjectSettingsDrawer(QWidget):
         save_setting(db, "print_settings", self._collect_print_settings())
 
     def _collect_print_settings(self) -> dict:
-        quick_mode = str(self._quick_print_mode.currentData() or "dialog")
+        quick_mode = str(self._quick_print_mode.currentData() or "direct")
         return {
             # Kept true for old readers: both modern modes are printing modes.
             "quick_print": True,
@@ -1490,6 +1716,7 @@ class ProjectSettingsDrawer(QWidget):
             edit.setEnabled(enabled)
         self._province_edit.setEnabled(enabled)
         self._site_edit.setEnabled(enabled)
+        self._naming_custom_fields.setEnabled(enabled)
         for cb in self._naming_required_checks.values():
             cb.setEnabled(enabled)
         for cb in self._naming_component_checks.values():
@@ -1525,6 +1752,9 @@ class ProjectSettingsDrawer(QWidget):
     def _hide_drawer_and_emit_closed(self) -> None:
         self.hide()
         self.closed.emit()
+
+    def _on_close(self) -> None:
+        self._hide_drawer_and_emit_closed()
 
     def _detect_and_apply_helicon_path(self) -> None:
         custom_path = self._helicon_path_edit.text().strip()

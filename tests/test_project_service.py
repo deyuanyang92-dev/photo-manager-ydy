@@ -161,6 +161,27 @@ class TestListProjects:
 
         assert second[0]["name"] == "A"
 
+    def test_localizes_wsl_project_paths_on_windows(self, tmp_path, monkeypatch):
+        import app.utils.path_utils as path_utils
+        from app.services.project_service import clear_project_list_cache, list_projects
+
+        monkeypatch.setattr(path_utils.sys, "platform", "win32")
+        json_path = tmp_path / "user_projects.json"
+        _write_projects_json(json_path, [{
+            "id": "1",
+            "name": "A",
+            "directory": "/mnt/n/projects/specimen_A",
+            "dir": "/mnt/n/projects/specimen_A",
+            "root": "/mnt/n/projects",
+        }])
+        clear_project_list_cache(str(json_path))
+
+        result = list_projects(str(json_path))
+
+        assert result[0]["directory"] == "N:\\projects\\specimen_A"
+        assert result[0]["dir"] == "N:\\projects\\specimen_A"
+        assert result[0]["root"] == "N:\\projects"
+
     def test_save_project_descriptor_clears_project_list_cache(self, tmp_path):
         from app.services.project_service import (
             clear_project_list_cache,

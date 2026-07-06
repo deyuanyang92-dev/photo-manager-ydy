@@ -8,7 +8,6 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 
 class HeliconWorker(QThread):
-    progress = pyqtSignal(int)    # percent 0-100
     finished = pyqtSignal(object) # Path of output TIFF
     failed = pyqtSignal(str)      # error message
 
@@ -17,8 +16,10 @@ class HeliconWorker(QThread):
         self._cmd = cmd
         self._output_path = Path(output_path) if output_path else Path()
         self._proc = None
+        self._cancel_requested = False
 
     def cancel(self) -> None:
+        self._cancel_requested = True
         if self._proc and self._proc.poll() is None:
             self._proc.kill()
         self.quit()
@@ -37,7 +38,14 @@ class HeliconWorker(QThread):
             except subprocess.TimeoutExpired:
                 self._proc.kill()
                 self._proc.communicate()
-                self.failed.emit("Helicon 进程超时（10 分钟）")
+                message = (
+                    "用户取消"
+                    if self._cancel_requested
+                    else "Helicon 进程超时（10 分钟）"
+                )
+                self.failed.emit(message)
+                return
+            if self._cancel_requested:
                 return
             if self._proc.returncode != 0:
                 self.failed.emit(stderr.decode(errors="replace") or "Helicon 返回错误")

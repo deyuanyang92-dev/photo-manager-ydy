@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Optional
 
 from app.config.settings import AppSettings
 from app.db.db_manager import get_db, is_database_locked, open_project_db
+from app.utils.path_utils import localize_path
 
 if TYPE_CHECKING:
     from app.services.collab_service import CollabService
@@ -51,6 +52,7 @@ class AppContext:
 
     @current_project_dir.setter
     def current_project_dir(self, path: Optional[str]) -> None:
+        path = localize_path(path) if path else path
         self._project_dir = path
         if path:
             self.settings.last_project_dir = path
@@ -74,6 +76,7 @@ class AppContext:
 
     @current_project_root.setter
     def current_project_root(self, path: Optional[str]) -> None:
+        path = localize_path(path) if path else path
         self._project_root = path
         self.settings.project_tree_root = path
 

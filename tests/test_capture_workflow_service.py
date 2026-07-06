@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -28,6 +29,7 @@ from app.services.grouping_service import (
     load_grouping,
     save_grouping,
 )
+from app.utils.path_utils import windows_to_wsl
 
 
 def _db() -> sqlite3.Connection:
@@ -189,6 +191,32 @@ def test_result_infos_from_grouping_infers_zip_next_to_tiff(tmp_path):
         "group_index": 2,
         "registered": False,
     }]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows path localization")
+def test_result_infos_from_grouping_localizes_wsl_result_paths(tmp_path):
+    uid = "FJ-XM-A01-DLC001-T95E-20260601"
+    tiff = tmp_path / "result-wsl.tif"
+    zip_path = tmp_path / "result-wsl.zip"
+    tiff.write_bytes(b"tiff")
+    zip_path.write_bytes(b"zip-data")
+    wsl_tiff = windows_to_wsl(str(tiff))
+    assert wsl_tiff
+    grouping = load_grouping(_db(), uid)
+    grouping.groups = [
+        Group(
+            group_index=2,
+            composed_tiff_path=wsl_tiff,
+            result_sequence=7,
+        )
+    ]
+
+    tiffs, zips = result_infos_from_grouping(grouping)
+
+    assert tiffs[0]["path"] == str(tiff)
+    assert tiffs[0]["name"] == tiff.name
+    assert zips[0]["path"] == str(zip_path)
+    assert zips[0]["name"] == zip_path.name
 
 
 def test_move_result_file_avoids_overwriting_existing_result(tmp_path):

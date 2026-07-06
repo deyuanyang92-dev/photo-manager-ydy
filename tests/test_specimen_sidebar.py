@@ -116,6 +116,36 @@ def test_each_specimen_renders_four_phase_dots(ctx, db):
     assert all(isinstance(b, QPushButton) and b.isCheckable() for b in dots.values())
 
 
+def test_sidebar_loads_wsl_owned_specimens_from_windows(monkeypatch, db):
+    import sys
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.delenv("WSL_DISTRO_NAME", raising=False)
+    db.execute(
+        """
+        INSERT INTO specimens (uid, scientific_name, owner_project_dir)
+        VALUES (?, ?, ?)
+        """,
+        (
+            "GXFCG-BLW-BZC003-R-20260618",
+            "Marphysa sp.",
+            "/mnt/n/claude/zhegnli",
+        ),
+    )
+    db.commit()
+
+    c = MagicMock()
+    c.get_db.return_value = db
+    c.current_project_dir = "N:\\claude\\zhegnli"
+    c.collab_service = None
+
+    sb = SpecimenSidebar(c)
+    sb.refresh()
+
+    assert sb._list.count() == 1
+    assert sb._list.item(0).data(Qt.ItemDataRole.UserRole) == "GXFCG-BLW-BZC003-R-20260618"
+
+
 def test_grouping_progress_batches_large_uid_lists(ctx, db):
     from app.services.grouping_service import _ensure_grouping_table
 

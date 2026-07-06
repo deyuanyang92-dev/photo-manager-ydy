@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Optional
 
 from app.db.db_manager import open_project_db
+from app.utils.path_utils import normalize_path
 
 
 def _utc_now_iso() -> str:
@@ -35,7 +36,7 @@ def ensure_survey_project(
     raw: Optional[dict] = None,
 ) -> dict:
     """Ensure the survey root has a catalog row and return it as a dict."""
-    root = Path(root_dir).resolve()
+    root = Path(normalize_path(root_dir))
     conn = open_project_db(str(root), create=True)
     row = _fetch_one_row(conn, "SELECT * FROM survey_project LIMIT 1")
     ts = _utc_now_iso()
@@ -97,11 +98,11 @@ def ensure_workspace_meta(
     raw: Optional[dict] = None,
 ) -> dict:
     """Ensure a workspace has stable ``workspace_meta`` in its own DB."""
-    workspace = Path(workspace_dir).resolve()
+    workspace = Path(normalize_path(workspace_dir))
     conn = open_project_db(str(workspace), create=True)
     row = _fetch_one_row(conn, "SELECT * FROM workspace_meta LIMIT 1")
     ts = _utc_now_iso()
-    root_hint = str(Path(root_dir).resolve()) if root_dir else None
+    root_hint = normalize_path(root_dir) if root_dir else None
     if row is None:
         workspace_id = str(uuid.uuid4())
         conn.execute(
@@ -166,8 +167,8 @@ def register_workspace(
     Returns a dict with ``project`` and ``workspace`` rows. Paths stored in the
     root catalog are relative to ``root_dir`` so a whole survey folder can move.
     """
-    root = Path(root_dir).resolve()
-    workspace = Path(workspace_dir).resolve()
+    root = Path(normalize_path(root_dir))
+    workspace = Path(normalize_path(workspace_dir))
     project = ensure_survey_project(
         str(root),
         name=(project_meta or {}).get("name"),
@@ -223,7 +224,7 @@ def register_workspace(
 
 def list_registered_workspaces(root_dir: str) -> list[dict]:
     """Return active workspace catalog rows for a survey root."""
-    conn = open_project_db(str(Path(root_dir).resolve()), create=True)
+    conn = open_project_db(normalize_path(root_dir), create=True)
     return [
         dict(r)
         for r in conn.execute(

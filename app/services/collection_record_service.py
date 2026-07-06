@@ -345,33 +345,39 @@ def upsert_record(db: sqlite3.Connection, data: dict) -> int:
         db.commit()
         return int(rid)
 
+    existing = db.execute(
+        """SELECT id FROM collection_records
+            WHERE province=? AND site=?
+              AND COALESCE(station, '')=COALESCE(?, '')
+              AND collection_date=?""",
+        (
+            data.get("province"),
+            data.get("site"),
+            data.get("station"),
+            data.get("collection_date"),
+        ),
+    ).fetchone()
+    if existing is not None:
+        # zone：incoming 空时保留既有分类（COALESCE 跳过空串），不冲掉已设 zone。
+        assignments = ", ".join(
+            f"{c}=COALESCE(NULLIF(?, ''), {c})" if c == "zone" else f"{c}=?"
+            for c in _COLUMNS
+        )
+        row_id = int(existing["id"])
+        db.execute(
+            f"UPDATE collection_records SET {assignments}, raw_json=? WHERE id=?",
+            (*values, raw_json, row_id),
+        )
+        db.commit()
+        return row_id
+
     placeholders = ", ".join("?" for _ in _COLUMNS)
-    # zone：ON CONFLICT 更新时，excluded.zone 空→保留本行既有 zone。
-    updates = ", ".join(
-        f"{c}=COALESCE(NULLIF(excluded.{c},''), collection_records.{c})"
-        if c == "zone" else f"{c}=excluded.{c}"
-        for c in _COLUMNS
-    )
     cur = db.execute(
         f"""INSERT INTO collection_records ({", ".join(_COLUMNS)}, raw_json)
-             VALUES ({placeholders}, ?)
-             ON CONFLICT(province, site, station, collection_date)
-             DO UPDATE SET {updates}, raw_json=excluded.raw_json""",
+             VALUES ({placeholders}, ?)""",
         (*values, raw_json),
     )
     db.commit()
-    if cur.lastrowid:
-        # On a plain INSERT lastrowid is the new id; on ON CONFLICT update it
-        # may not reflect the existing row — re-resolve by the four keys.
-        row = db.execute(
-            """SELECT id FROM collection_records
-                WHERE province=? AND site=? AND station=? AND collection_date=?""",
-            (data.get("province"), data.get("site"),
-             data.get("station"), data.get("collection_date")),
-        ).fetchone()
-        if row is not None:
-            return int(row["id"])
-        return int(cur.lastrowid)
     return int(cur.lastrowid)
 
 
@@ -410,9 +416,9 @@ def set_station_coords(
 
 
 # ── Auto-fill ─────────────────────────────────────────────────────────────────
-# The subset of record fields the workbench capture cards can hold. Habitat /
-# tide / salinity / … have no capture slot — they live only in the record and
-# are NOT auto-filled (joined at export instead).
+# The subset of record fields the fixed workbench capture cards can hold.
+# Dynamic naming fields (for example habitat) are filled separately by the
+# naming panel only when a project rule exposes a matching input.
 AUTOFILL_FIELDS: tuple[str, ...] = (
     "collector", "photographer", "identifier",
     "lon", "lat", "geo_area", "photo_date",

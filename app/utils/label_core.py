@@ -87,14 +87,16 @@ def unique_id(specimen: Optional[dict]) -> str:
     if not specimen:
         return ""
     parts = [
-        specimen.get("province", ""),
-        specimen.get("site", ""),
-        specimen.get("station", ""),
-        specimen.get("id", ""),
-        specimen.get("storage", ""),
-        date_segment(specimen),
+        specimen.get("province"),
+        specimen.get("site"),
+        specimen.get("station"),
+        specimen.get("id"),
+        specimen.get("storage"),
+        date_segment(specimen) or None,
     ]
-    return "-".join(str(p) for p in parts)
+    joined = "-".join(str(p) for p in parts if p)
+    from app.utils.naming import normalize_uid
+    return normalize_uid(joined)
 
 
 def has_rna_tissue(specimen: Optional[dict]) -> bool:

@@ -6,6 +6,9 @@ qtawesome>=1.3               # 矢量图标（Material Design Icons / Feather）
 
 # 图像 / 二维码 / 导出
 Pillow>=10.3.0
+numpy>=1.26
+tifffile>=2024.5.22
+imagecodecs>=2024.6.1          # TIFF compressed-result previews
 matplotlib>=3.8              # 采集地图出版底图渲染 + 导出（PNG/PDF/SVG/EPS）
 pyproj>=3.6                  # 采集地图生成底图（Nature/R 风）投影变换；自带 PROJ wheel
 qrcode[pil]>=7.4              # 标签二维码，纠错级 Q

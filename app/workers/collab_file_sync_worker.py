@@ -19,6 +19,7 @@ class CollabFileSyncWorker(QThread):
         project_dir: str,
         peers: Iterable,
         group_code: str,
+        project_id: str,
         uids: Optional[list[str]] = None,
         mode: str = "smart",
         max_workers: int = 4,
@@ -28,6 +29,7 @@ class CollabFileSyncWorker(QThread):
         self._project_dir = project_dir
         self._peers = list(peers)
         self._group_code = group_code
+        self._project_id = project_id
         self._uids = list(uids or []) or None
         self._mode = mode
         self._max_workers = max_workers
@@ -38,6 +40,7 @@ class CollabFileSyncWorker(QThread):
                 project_dir=self._project_dir,
                 peers=self._peers,
                 group_code=self._group_code,
+                project_id=self._project_id,
                 uids=self._uids,
                 mode=self._mode,
                 max_workers=self._max_workers,

@@ -280,6 +280,23 @@ class TestTablePopulation:
         w = self._make_view_with_projects(tmp_path, _SAMPLE_PROJECTS)
         assert "/tmp/xiamen" in w._table.item(0, 1).text()
 
+    def test_wsl_saved_directory_displays_as_windows_path_on_windows(self, tmp_path, monkeypatch):
+        from app.utils import path_utils
+
+        monkeypatch.setattr(path_utils.sys, "platform", "win32")
+        monkeypatch.delenv("WSL_DISTRO_NAME", raising=False)
+        projects = [
+            {
+                "id": "cross-path",
+                "name": "跨平台路径项目",
+                "directory": "/mnt/n/claude/zhengli",
+                "isDemo": True,
+            }
+        ]
+        w = self._make_view_with_projects(tmp_path, projects)
+
+        assert w._table.item(0, 1).text() == "N:\\claude\\zhengli"
+
     def test_location_in_fourth_column(self, tmp_path):
         w = self._make_view_with_projects(tmp_path, _SAMPLE_PROJECTS)
         assert "厦门" in w._table.item(0, 3).text()

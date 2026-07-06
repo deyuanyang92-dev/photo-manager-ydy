@@ -20,6 +20,11 @@ from app.services.import_service import import_all, ImportReport
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 SOURCE_DATA = Path("/mnt/n/claude/photo-platform-ydy/prototype-photo-gui/data")
+SOURCE_JSON_FILES = (
+    "user_specimens.json",
+    "specimen_tasks.json",
+    "grouping_confirmations.json",
+)
 
 
 def _sha256(path: str) -> str:
@@ -31,10 +36,14 @@ def _sha256(path: str) -> str:
 
 
 def _make_ro_copy(tmp_path: Path) -> Path:
-    """Copy the real data dir to tmp_path and make it read-only."""
+    """Copy the import inputs to tmp_path and make them read-only."""
     dst = tmp_path / "data"
     if SOURCE_DATA.exists():
-        shutil.copytree(str(SOURCE_DATA), str(dst))
+        dst.mkdir()
+        for name in SOURCE_JSON_FILES:
+            src = SOURCE_DATA / name
+            if src.exists():
+                shutil.copy2(str(src), str(dst / name))
         # Make read-only
         for f in dst.rglob("*"):
             if f.is_file():

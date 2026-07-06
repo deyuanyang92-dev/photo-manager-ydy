@@ -10,7 +10,7 @@ Architecture (confirmed by user 2026-06-02, oracle: collab.md § Desktop GUI):
   peers using httpx (synchronous, runs in the same sync slot, cheap).
 
   Each peer exposes:
-    GET  /api/node/info       → {hostname, projectName, lanIp, port}
+    GET  /api/node/info       → {hostname, projectName, projectId, lanIp, port}
     GET  /api/node/health     → {"ok": true}
     GET  /api/collab/tasks    → list[TaskRecord]
     POST /api/collab/tasks/create   → 201 | 409 Conflict
@@ -156,6 +156,7 @@ class PeerInfo:
     port: int
     hostname: str = ""
     project_name: str = ""
+    project_id: str = ""
     group_code: str = ""          # collaboration-group code; only matching peers sync
     last_seen: float = field(default_factory=time.time)
     latency_ms: Optional[float] = None
@@ -421,11 +422,14 @@ def _build_fastapi_app(store: TaskStore, node_info_fn: Callable[[], dict],
         return {"ok": True, "uid": uid, "kind": kind, "count": count}
 
     @app.get("/api/collab/files/manifest")
-    async def file_manifest(groupCode: str = "", uids: str = "") -> dict:
+    async def file_manifest(groupCode: str = "", projectId: str = "", uids: str = "") -> dict:
         """Return project media manifest for selected UIDs or the whole project."""
         local_group = node_info_fn().get("groupCode", "")
         if not local_group or groupCode != local_group:
             raise HTTPException(status_code=403, detail="collaboration group mismatch")
+        local_project = str(node_info_fn().get("projectId", "") or "")
+        if not local_project or projectId != local_project:
+            raise HTTPException(status_code=403, detail="project identity mismatch")
         if file_manifest_fn is None:
             return {"files": []}
         uid_list = [u.strip() for u in str(uids or "").split(",") if u.strip()]
@@ -435,11 +439,14 @@ def _build_fastapi_app(store: TaskStore, node_info_fn: Callable[[], dict],
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     @app.get("/api/collab/files/download")
-    async def download_file(path: str = "", groupCode: str = "") -> Any:
+    async def download_file(path: str = "", groupCode: str = "", projectId: str = "") -> Any:
         """Download one project-relative media file."""
         local_group = node_info_fn().get("groupCode", "")
         if not local_group or groupCode != local_group:
             raise HTTPException(status_code=403, detail="collaboration group mismatch")
+        local_project = str(node_info_fn().get("projectId", "") or "")
+        if not local_project or projectId != local_project:
+            raise HTTPException(status_code=403, detail="project identity mismatch")
         if file_path_fn is None:
             raise HTTPException(status_code=404, detail="file sync unavailable")
         try:
@@ -841,6 +848,7 @@ class CollabService(QObject):
         self._hostname = socket.gethostname()
         self._port: Optional[int] = None
         self._project_name: str = ""
+        self._project_id: str = ""
         self._project_dir: str = ""
         self._group_code: str = ""
         self._running: bool = False
@@ -874,6 +882,7 @@ class CollabService(QObject):
         self._project_name = project_name
         if project_dir:
             self._project_dir = project_dir
+            self._project_id = self._ensure_project_id(project_dir)
         if group_code:
             self._group_code = group_code.strip()
         self._running = True
@@ -933,6 +942,56 @@ class CollabService(QObject):
         """True between start() and stop()."""
         return self._running
 
+    @property
+    def project_name(self) -> str:
+        """Current project label advertised to collaboration peers."""
+        return self._project_name
+
+    @property
+    def project_id(self) -> str:
+        """Stable current-project identity used to gate media sync."""
+        return self._project_id
+
+    def project_sync_code(self) -> str:
+        """Return the copy/paste code for binding another PC to this project."""
+        if not self._project_id:
+            return ""
+        from app.services.project_identity_service import project_sync_code
+        return project_sync_code(
+            self._project_id,
+            project_name=Path(str(self._project_name or "")).name,
+        )
+
+    def apply_project_sync_code(self, code: str) -> str:
+        """Adopt a project sync code after the UI has asked for confirmation."""
+        if not self._project_dir:
+            raise ValueError("current project is not open")
+        from app.db.db_manager import open_project_db_private
+        from app.services.project_identity_service import (
+            parse_project_sync_code,
+            set_project_identity,
+        )
+
+        parsed = parse_project_sync_code(code)
+        new_project_id = parsed["projectId"]
+        remote_name = parsed.get("projectName", "")
+        db = open_project_db_private(self._project_dir)
+        try:
+            self._project_id = set_project_identity(
+                db,
+                new_project_id,
+                project_name=remote_name or Path(str(self._project_name or "")).name,
+                previous_project_id=self._project_id,
+            )
+        finally:
+            db.close()
+        self._log_activity(
+            "project-sync-code",
+            detail="当前项目已加入共享照片同步身份",
+        )
+        self.peers_changed.emit()
+        return self._project_id
+
     # ── Activity logging ──────────────────────────────────────────────────
 
     def _log_activity(self, action: str, target_uid: str = "",
@@ -965,6 +1024,26 @@ class CollabService(QObject):
         self._project_dir = str(project_dir or "")
         if project_dir:
             self._project_name = str(project_dir)
+            self._project_id = self._ensure_project_id(project_dir)
+        else:
+            self._project_id = ""
+
+    def _ensure_project_id(self, project_dir: str | Path | None) -> str:
+        if not project_dir:
+            return ""
+        try:
+            from app.db.db_manager import open_project_db_private
+            from app.services.project_identity_service import ensure_project_identity
+            db = open_project_db_private(str(project_dir))
+            try:
+                return ensure_project_identity(
+                    db,
+                    project_name=Path(str(project_dir)).name,
+                )
+            finally:
+                db.close()
+        except Exception:  # noqa: BLE001
+            return ""
 
     def _group_matches(self, peer: PeerInfo) -> bool:
         """A peer syncs with us only when both sides share a non-empty code."""
@@ -1090,6 +1169,8 @@ class CollabService(QObject):
                 st = data.get("serverTime")
                 if isinstance(st, (int, float)):
                     peer.clock_skew_ms = (time.time() - float(st)) * 1000.0
+                peer.project_name = data.get("projectName", peer.project_name)
+                peer.project_id = data.get("projectId", peer.project_id)
                 if not peer.group_code:
                     peer.group_code = data.get("groupCode", "")
                 try:
@@ -1156,6 +1237,7 @@ class CollabService(QObject):
                     hostname=data.get("hostname", ""),
                     group_code=data.get("groupCode", ""),
                     project_name=data.get("projectName", ""),
+                    project_id=data.get("projectId", ""),
                     manual=True,
                 )
             except Exception:  # noqa: BLE001
@@ -1237,6 +1319,7 @@ class CollabService(QObject):
                 data = resp.json()
                 peer.hostname = data.get("hostname", peer.hostname)
                 peer.project_name = data.get("projectName", "")
+                peer.project_id = data.get("projectId", "")
                 peer.group_code = data.get("groupCode", "")
                 peer.last_seen = time.time()
         except Exception:  # noqa: BLE001
@@ -1289,43 +1372,88 @@ class CollabService(QObject):
 
         NOTE: Network 409 checks require live peers — tested with doubles.
         """
-        # 1. Local check
+        # 1. Local check — memory store + SQLite specimens table
         if self.store.exists(uid):
             msg = f"409: UID '{uid}' already exists on this device"
             self.conflict_detected.emit(uid)
             self._log_activity("conflict", uid, detail=f"编号 {uid} 在本机已存在", severity="error")
             return False, msg
+        if self._project_dir:
+            try:
+                from app.db.db_manager import open_project_db_private
+                _db = open_project_db_private(self._project_dir)
+                try:
+                    row = _db.execute(
+                        "SELECT 1 FROM specimens WHERE uid = ? LIMIT 1", (uid,)
+                    ).fetchone()
+                finally:
+                    _db.close()
+                if row:
+                    msg = f"409: UID '{uid}' already exists in local DB"
+                    self.conflict_detected.emit(uid)
+                    self._log_activity("conflict", uid, detail=f"编号 {uid} 在本地数据库已存在", severity="error")
+                    return False, msg
+            except Exception:
+                pass
 
-        # 2. Remote check — broadcast POST to same-group peers, abort on first 409
-        peers_snapshot: list[PeerInfo]
-        with self._peers_lock:
-            peers_snapshot = [p for p in self._peers.values() if self._group_matches(p)]
-
-        for peer in peers_snapshot:
-            ok, conflict_msg = self._remote_create(peer, uid, assignee, device_id)
-            if not ok:
-                self.conflict_detected.emit(uid)
-                self._log_activity("conflict", uid, detail=f"编号 {uid} 在远程设备已存在", severity="error")
-                return False, conflict_msg
-
-        # 3. Record locally
+        # 2. Create locally first — this device is the source of truth.
         try:
             self.store.create(uid, assignee=assignee, device_id=device_id,
                               project_name=self._project_name)
         except ValueError as exc:
-            # race condition — another peer created it between steps 1 and 3
             self.conflict_detected.emit(uid)
             return False, str(exc)
+
+        # 3. Broadcast to peers; roll back local + remote claims on conflict.
+        peers_snapshot: list[PeerInfo]
+        with self._peers_lock:
+            peers_snapshot = [p for p in self._peers.values() if self._group_matches(p)]
+
+        claimed_peers: list[PeerInfo] = []
+        for peer in peers_snapshot:
+            ok, conflict_msg, created = self._remote_create(peer, uid, assignee, device_id)
+            if not ok:
+                self.conflict_detected.emit(uid)
+                self._log_activity("conflict", uid, detail=f"编号 {uid} 在远程设备已存在", severity="error")
+                self._rollback_task_claim(uid, claimed_peers)
+                return False, conflict_msg
+            if created:
+                claimed_peers.append(peer)
 
         self.tasks_changed.emit()
         self._log_activity("claimed", uid, detail=f"认领了编号 {uid}")
         self.specimen_status_changed.emit(uid)
         return True, "ok"
 
+    def _remote_release(self, peer: PeerInfo, uid: str) -> None:
+        """Ask a peer to release a UID claim (best-effort compensation)."""
+        try:
+            import httpx
+            httpx.post(
+                f"{peer.base_url}/api/collab/tasks/release",
+                json={"uid": uid, "groupCode": self._group_code},
+                timeout=4.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("collab: remote release failed for %s: %s", peer.base_url, exc)
+
+    def _rollback_task_claim(self, uid: str, remote_peers: list[PeerInfo]) -> None:
+        """Undo a failed distributed claim (local delete + remote release)."""
+        try:
+            self.store.delete(uid)
+        except Exception:
+            pass
+        for peer in remote_peers:
+            self._remote_release(peer, uid)
+
     def _remote_create(self, peer: PeerInfo, uid: str,
                        assignee: Optional[str], device_id: Optional[str]
-                       ) -> tuple[bool, str]:
-        """POST create to a single peer.  Returns (True, "") or (False, reason)."""
+                       ) -> tuple[bool, str, bool]:
+        """POST create to a single peer.
+
+        Returns ``(ok, message, created_on_peer)``.
+        Network failure is treated as peer unavailable (``ok=True``, ``created=False``).
+        """
         try:
             import httpx
             resp = httpx.post(
@@ -1341,11 +1469,14 @@ class CollabService(QObject):
             )
             if resp.status_code == 409:
                 detail = resp.json().get("detail", "conflict")
-                return False, f"409: {detail} (peer {peer.hostname or peer.ip})"
+                return False, f"409: {detail} (peer {peer.hostname or peer.ip})", False
+            if resp.status_code == 201:
+                return True, "", True
+            return False, f"remote create failed ({resp.status_code})", False
         except Exception as exc:  # noqa: BLE001
             # Network failure is treated as "peer unavailable, not a conflict"
             logger.debug("collab: remote create failed for %s: %s", peer.base_url, exc)
-        return True, ""
+        return True, "", False
 
     # ── Offline draft queue ───────────────────────────────────────────────
     # Mirrors: loadCollabOfflineDrafts / saveCollabOfflineDrafts /
@@ -1490,6 +1621,7 @@ class CollabService(QObject):
         return {
             "hostname":    self._hostname,
             "projectName": self._project_name,
+            "projectId":   self._project_id,
             "groupCode":   self._group_code,
             "serverTime":  time.time(),
             "lanIp":       _get_local_ip(),
@@ -1510,6 +1642,7 @@ class CollabService(QObject):
                 db=db,
                 uids=uids,
                 device_id=self._hostname,
+                project_id=self._project_id,
             )
         finally:
             db.close()

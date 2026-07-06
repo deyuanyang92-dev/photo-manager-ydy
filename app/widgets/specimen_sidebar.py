@@ -28,7 +28,14 @@ from PyQt6.QtWidgets import (
 )
 
 from app.config import icons
-from app.utils.naming import derive_uid, normalize_uid, parse_uid
+from app.utils.naming import (
+    build_configured_uid,
+    component_values_from_specimen,
+    derive_uid,
+    normalize_uid,
+    parse_uid,
+)
+from app.utils.path_utils import equivalent_paths
 
 if TYPE_CHECKING:
     from app.app_context import AppContext
@@ -110,6 +117,7 @@ class SpecimenSidebar(QWidget):
         # uid -> {code: QPushButton} for the 4 phase dots; uid -> current code.
         self._phase_dots: dict[str, dict[str, QPushButton]] = {}
         self._phase_state: dict[str, Optional[str]] = {}
+        self._uid_normalized_projects: set[str] = set()
         self._setup_ui()
 
     # ── UI ────────────────────────────────────────────────────────────────────
@@ -243,7 +251,7 @@ class SpecimenSidebar(QWidget):
         cs_title.setObjectName("MutedSmall")
         cs_lay.addWidget(cs_title)
 
-        self._collab_addr = QLabel("分享地址: —")
+        self._collab_addr = QLabel("连接地址: —")
         self._collab_addr.setObjectName("MutedSmall")
         cs_lay.addWidget(self._collab_addr)
 
@@ -267,10 +275,12 @@ class SpecimenSidebar(QWidget):
         sync_btn_row.setContentsMargins(0, 0, 0, 0)
         sync_btn_row.setSpacing(6)
 
-        self._collab_sync_selected_btn = QPushButton("同步选中")
+        self._collab_sync_selected_btn = QPushButton("同步当前编号")
         self._collab_sync_selected_btn.setObjectName("Ghost")
         self._collab_sync_selected_btn.setFixedHeight(26)
-        self._collab_sync_selected_btn.setToolTip("从在线队友补齐当前选中编号的照片/TIF/ZIP")
+        self._collab_sync_selected_btn.setToolTip(
+            "从同组且同项目同步码的在线设备补齐当前编号的照片/TIF/ZIP；不要求两台电脑盘符一致。"
+        )
         selected_menu = QMenu(self._collab_sync_selected_btn)
         selected_smart = selected_menu.addAction("智能补齐")
         selected_force = selected_menu.addAction("强制覆盖本机")
@@ -282,7 +292,9 @@ class SpecimenSidebar(QWidget):
         self._collab_sync_project_btn = QPushButton("同步项目")
         self._collab_sync_project_btn.setObjectName("Ghost")
         self._collab_sync_project_btn.setFixedHeight(26)
-        self._collab_sync_project_btn.setToolTip("从在线队友补齐整个项目缺失的照片/TIF/ZIP")
+        self._collab_sync_project_btn.setToolTip(
+            "从同组且同项目同步码的在线设备补齐当前项目缺失的照片/TIF/ZIP；不同项目只同步任务状态。"
+        )
         project_menu = QMenu(self._collab_sync_project_btn)
         project_smart = project_menu.addAction("智能补齐")
         project_force = project_menu.addAction("强制覆盖本机")
@@ -335,12 +347,15 @@ class SpecimenSidebar(QWidget):
         if not db:
             return []
         project_dir = self.ctx.current_project_dir or ""
+        project_dirs = equivalent_paths(project_dir)
         self._normalize_project_specimen_uids(db, project_dir)
 
         rows: list[dict] = []
         try:
+            owner_filter = ",".join("?" * len(project_dirs)) or "?"
+            params = project_dirs or [project_dir]
             cursor = db.execute(
-                """
+                f"""
                 SELECT uid,
                        COALESCE(scientific_name, '') AS name,
                        COALESCE(scientific_name_cn, '') AS name_cn,
@@ -349,10 +364,10 @@ class SpecimenSidebar(QWidget):
                        COALESCE(photo_date, '') AS photo_date,
                        rowid AS row_order
                 FROM   specimens
-                WHERE  owner_project_dir = ?
+                WHERE  owner_project_dir IN ({owner_filter})
                 ORDER  BY uid
                 """,
-                (project_dir,),
+                params,
             )
             for row in cursor.fetchall():
                 rows.append(
@@ -816,15 +831,35 @@ class SpecimenSidebar(QWidget):
         """
         if not project_dir:
             return
+        project_dirs = equivalent_paths(project_dir)
+        project_key = "|".join(project_dirs or [project_dir])
+        if project_key in self._uid_normalized_projects:
+            return
+        self._uid_normalized_projects.add(project_key)
         try:
+            from app.services.project_settings_service import (
+                DEFAULT_NAMING_RULES,
+                load_setting,
+            )
+            rules = load_setting(db, "naming_rules", DEFAULT_NAMING_RULES)
+            naming_components = rules.get(
+                "components",
+                DEFAULT_NAMING_RULES["components"],
+            )
+        except Exception:
+            naming_components = []
+        try:
+            owner_filter = ",".join("?" * len(project_dirs)) or "?"
             rows = db.execute(
-                """
+                f"""
                 SELECT uid, province, site, station, id, storage,
                        collection_date, photo_date, raw_json
                 FROM specimens
-                WHERE owner_project_dir = ?
+                WHERE owner_project_dir IN ({owner_filter})
+                  AND (uid GLOB '*[a-z]*' OR LENGTH(uid) < 12)
+                LIMIT 500
                 """,
-                (project_dir,),
+                project_dirs or [project_dir],
             ).fetchall()
         except Exception:
             return
@@ -842,17 +877,41 @@ class SpecimenSidebar(QWidget):
             if not isinstance(raw, dict):
                 raw = {}
 
-            if not parse_uid(new_uid):
-                def _value(key: str, index: int, *raw_keys: str) -> str:
-                    value = row[key] if hasattr(row, "keys") else row[index]
-                    if value:
-                        return str(value)
-                    for raw_key in raw_keys:
-                        raw_value = raw.get(raw_key)
-                        if raw_value:
-                            return str(raw_value)
-                    return ""
+            def _value(key: str, index: int, *raw_keys: str) -> str:
+                value = row[key] if hasattr(row, "keys") else row[index]
+                if value:
+                    return str(value)
+                for raw_key in raw_keys:
+                    raw_value = raw.get(raw_key)
+                    if raw_value:
+                        return str(raw_value)
+                return ""
 
+            configured_values = dict(raw)
+            configured_values.update({
+                "province": _value("province", 1, "province"),
+                "site": _value("site", 2, "site"),
+                "station": _value("station", 3, "station"),
+                "id": _value("id", 4, "id", "speciesId", "species_id"),
+                "storage": _value("storage", 5, "storage"),
+                "collectionDate": _value(
+                    "collection_date", 6, "collectionDate", "collection_date"
+                ),
+                "photoDate": _value("photo_date", 7, "photoDate", "photo_date"),
+            })
+            try:
+                configured_uid = build_configured_uid(
+                    naming_components,
+                    component_values_from_specimen(configured_values),
+                )
+            except Exception:
+                configured_uid = ""
+            configured_ok = bool(
+                configured_uid and normalize_uid(configured_uid) == new_uid
+            )
+            if configured_ok:
+                new_uid = configured_uid
+            elif not parse_uid(new_uid):
                 candidate = derive_uid({
                     "province": _value("province", 1, "province"),
                     "site": _value("site", 2, "site"),
@@ -1126,16 +1185,16 @@ class SpecimenSidebar(QWidget):
         (shows static placeholder values).
         """
         if service is None:
-            self._collab_addr.setText("分享地址: —")
+            self._collab_addr.setText("连接地址: —")
             self._collab_device.setText("匿名·本机")
             self._collab_members.setText("成员: 0")
-            self._collab_sync.setText("同步编号: —")
+            self._collab_sync.setText("同步编号: 协作服务未启动")
             self._collab_sync_selected_btn.setEnabled(False)
             self._collab_sync_project_btn.setEnabled(False)
             return
 
         addr = service.local_address()
-        self._collab_addr.setText(f"分享地址: {addr}")
+        self._collab_addr.setText(f"连接地址: {addr}")
 
         peers = service.peers()
         n_peers = len(peers)
@@ -1146,8 +1205,22 @@ class SpecimenSidebar(QWidget):
         self._collab_device.setText(f"{hostname}")
 
         task_count = len(service.store.list_tasks())
-        self._collab_sync.setText(f"同步编号: {task_count} 条")
-        can_file_sync = bool(service.is_running() and service.group_code and n_peers)
+        local_project_id = str(getattr(service, "project_id", "") or "")
+        same_project_count = sum(
+            1 for peer in peers
+            if getattr(peer, "group_code", "") == service.group_code
+            and str(getattr(peer, "project_id", "") or "") == local_project_id
+        ) if local_project_id else 0
+        from app.services.collab_status import build_collab_status
+        status = build_collab_status(service, peers)
+        self._collab_sync.setText(
+            f"同步编号: {task_count} 条 · {status.plain_status} · 可同步设备: {same_project_count}"
+        )
+        can_file_sync = bool(
+            service.is_running()
+            and service.group_code
+            and same_project_count
+        )
         self._collab_sync_selected_btn.setEnabled(can_file_sync)
         self._collab_sync_project_btn.setEnabled(can_file_sync)
 

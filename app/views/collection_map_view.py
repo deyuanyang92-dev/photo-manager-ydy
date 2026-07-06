@@ -853,8 +853,9 @@ class CollectionMapView(BaseView):
                 proj,
                 existing_projects=_load_projects(),
             )
-            self._project_filter = d
-            self.ctx.current_project_dir = d
+            from app.services.project_service import enter_workspace
+            enter_workspace(self.ctx, d, projects_json_path=default_user_projects_json_path())
+            self._project_filter = self.ctx.current_project_dir or d
             self._populate_projects()
             self._update_edit_buttons()
             self._reload_collection_map_points()
@@ -948,8 +949,13 @@ class CollectionMapView(BaseView):
                     f"该项目所在磁盘未挂载或路径不可用：\n{directory}\n\n"
                     "请接回数据盘后再进入。数据仍在盘上，没有丢失。")
             return
-        self.ctx.current_project_dir = directory
-        self._project_filter = directory
+        from app.services.project_service import enter_workspace
+        try:
+            enter_workspace(self.ctx, directory)
+        except Exception as exc:
+            ui.warn(self, "打开项目失败", str(exc))
+            return
+        self._project_filter = self.ctx.current_project_dir or directory
         self._populate_projects()
         win = self.window()
         nav = getattr(win, "navigate_to", None)
@@ -958,16 +964,26 @@ class CollectionMapView(BaseView):
 
     def _open_project_directory_in_file_manager(self, directory) -> None:
         """在系统文件管理器中打开项目目录。"""
-        from PyQt6.QtGui import QDesktopServices
-        from PyQt6.QtCore import QUrl
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(directory)))
+        from pathlib import Path
+
+        from app.utils.file_manager import local_path, open_directory
+
+        display_path = local_path(str(directory or ""))
+        if not display_path or not Path(display_path).exists():
+            ui.warn(self, "打开文件夹", f"目录不存在或磁盘未连接：\n{display_path or directory or '—'}")
+            return
+        if not open_directory(display_path):
+            ui.warn(self, "打开文件夹", f"无法打开文件夹：\n{display_path}")
 
     def _copy_project_path_to_clipboard(self, directory) -> None:
         """复制项目路径到剪贴板。"""
         from PyQt6.QtWidgets import QApplication
-        QApplication.clipboard().setText(str(directory))
+        from app.utils.file_manager import local_path
+
+        display_path = local_path(str(directory or ""))
+        QApplication.clipboard().setText(display_path)
         from app.utils.ui import info
-        info(self, "已复制", f"项目路径已复制到剪贴板：\n{directory}")
+        info(self, "已复制", f"项目路径已复制到剪贴板：\n{display_path}")
 
     def _rename_project_display_name(self, directory) -> None:
         """重命名项目显示名称（仅改注册表，不改文件夹名）。"""

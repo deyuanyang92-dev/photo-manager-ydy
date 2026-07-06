@@ -104,6 +104,11 @@ def _decode_image(
     if not path:
         return None
     try:
+        from app.utils.path_utils import localize_path
+        path = localize_path(path)
+    except Exception:
+        pass
+    try:
         if not os.path.exists(path):
             return None
     except Exception:
@@ -133,6 +138,12 @@ def _decode_image(
             _cache_put(key, pm)
         return pm
 
+    pm = _decode_malformed_lzw_tiff(path, max_size)
+    if pm is not None:
+        if use_cache:
+            _cache_put(key, pm)
+        return pm
+
     pm = _decode_with_imagemagick(path, max_size)
     if use_cache:
         _cache_put(key, pm)
@@ -151,16 +162,36 @@ def _decode_with_qt(path: str, max_size: int | None) -> Optional[QPixmap]:
         if image.isNull():
             return None
         pixmap = QPixmap.fromImage(image)
-        if max_size is None:
-            return pixmap
-        return pixmap.scaled(
-            max_size,
-            max_size,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
+        return pixmap
     except Exception:
         return None
+
+
+def _pil_image_to_pixmap(image, max_size: int | None) -> Optional[QPixmap]:
+    if max_size is not None:
+        image.thumbnail((max_size, max_size))
+    if image.mode not in {"RGB", "RGBA", "L"}:
+        image = image.convert("RGBA")
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+        tmp_path = tmp.name
+    try:
+        image.save(tmp_path)
+        pm = QPixmap(tmp_path)
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+    if pm.isNull():
+        return None
+    if max_size is None:
+        return pm
+    return pm.scaled(
+        max_size,
+        max_size,
+        Qt.AspectRatioMode.KeepAspectRatio,
+        Qt.TransformationMode.SmoothTransformation,
+    )
 
 
 def _decode_with_pillow(path: str, max_size: int | None) -> Optional[QPixmap]:
@@ -169,30 +200,7 @@ def _decode_with_pillow(path: str, max_size: int | None) -> Optional[QPixmap]:
 
         with Image.open(path) as image:
             image.seek(0)
-            if max_size is not None:
-                image.thumbnail((max_size, max_size))
-            if image.mode not in {"RGB", "RGBA"}:
-                image = image.convert("RGBA")
-            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-                tmp_path = tmp.name
-            try:
-                image.save(tmp_path)
-                pm = QPixmap(tmp_path)
-            finally:
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
-        if pm.isNull():
-            return None
-        if max_size is None:
-            return pm
-        return pm.scaled(
-            max_size,
-            max_size,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
+            return _pil_image_to_pixmap(image, max_size)
     except Exception:
         return None
 
@@ -224,31 +232,89 @@ def _decode_with_tifffile(path: str, max_size: int | None) -> Optional[QPixmap]:
             if amax > amin:
                 arr = (arr - amin) * (255.0 / (amax - amin))
             arr = np.clip(arr, 0, 255).astype("uint8")
-        image = Image.fromarray(arr)
-        if max_size is not None:
-            image.thumbnail((max_size, max_size))
-        if image.mode not in {"RGB", "RGBA", "L"}:
-            image = image.convert("RGBA")
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-            tmp_path = tmp.name
-        try:
-            image.save(tmp_path)
-            pm = QPixmap(tmp_path)
-        finally:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-        if pm.isNull():
+        return _pil_image_to_pixmap(Image.fromarray(arr), max_size)
+    except Exception:
+        return None
+
+
+def _decode_malformed_lzw_tiff(path: str, max_size: int | None) -> Optional[QPixmap]:
+    """Decode baseline RGB LZW TIFFs whose IFD confuses Pillow/tifffile.
+
+    Some legacy Helicon outputs in the user's results folder expose valid
+    strip offsets/byte counts, but high-level readers fail.  This fallback only
+    handles simple chunky RGB/RGBA 8-bit LZW strips and returns None for
+    anything else.
+    """
+    if Path(path).suffix.lower() not in {".tif", ".tiff"}:
+        return None
+    try:
+        import imagecodecs
+        import numpy as np
+        import tifffile
+        from PIL import Image
+
+        with tifffile.TiffFile(str(path)) as tf:
+            page = tf.pages[0]
+            tags = page.tags
+
+            def tag_value(code: int, default=None):
+                tag = tags.get(code)
+                return tag.value if tag is not None else default
+
+            width = int(tag_value(256, 0) or 0)
+            height = int(tag_value(257, 0) or 0)
+            bits = tag_value(258, ())
+            if isinstance(bits, int):
+                bits = (bits,)
+            compression = int(tag_value(259, 0) or 0)
+            photometric = int(tag_value(262, 0) or 0)
+            offsets = tuple(tag_value(273, ()) or ())
+            samples = int(tag_value(277, 1) or 1)
+            rows_per_strip = int(tag_value(278, height) or height)
+            bytecounts = tuple(tag_value(279, ()) or ())
+            planar = int(tag_value(284, 1) or 1)
+            predictor = int(tag_value(317, 1) or 1)
+
+        if (
+            width <= 0
+            or height <= 0
+            or compression != 5
+            or photometric != 2
+            or samples not in {3, 4}
+            or planar != 1
+            or not offsets
+            or len(offsets) != len(bytecounts)
+            or any(int(b) != 8 for b in bits)
+        ):
             return None
-        if max_size is None:
-            return pm
-        return pm.scaled(
-            max_size,
-            max_size,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
+
+        data = Path(path).read_bytes()
+        arr = np.empty((height, width, samples), dtype=np.uint8)
+        row = 0
+        for offset, bytecount in zip(offsets, bytecounts):
+            rows = min(rows_per_strip, height - row)
+            if rows <= 0:
+                break
+            raw = data[int(offset): int(offset) + int(bytecount)]
+            decoded = imagecodecs.lzw_decode(raw)
+            expected = rows * width * samples
+            if len(decoded) < expected:
+                return None
+            strip = np.frombuffer(decoded[:expected], dtype=np.uint8).reshape(
+                rows, width, samples
+            )
+            if predictor == 2:
+                strip = (np.cumsum(strip.astype(np.uint16), axis=1) & 0xFF).astype(
+                    np.uint8
+                )
+            elif predictor != 1:
+                return None
+            arr[row: row + rows] = strip
+            row += rows
+        if row < height:
+            return None
+        mode = "RGBA" if samples == 4 else "RGB"
+        return _pil_image_to_pixmap(Image.fromarray(arr, mode), max_size)
     except Exception:
         return None
 

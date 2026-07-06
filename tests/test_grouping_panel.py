@@ -1020,6 +1020,41 @@ def test_drop_external_jpg_with_project_copies_to_incoming_before_grouping(qtbot
     assert panel._grouping.groups[0].jpg_paths == [str(imported.resolve())]
 
 
+def test_add_picker_jpg_to_adhoc_group_does_not_manual_assign(
+    qtbot, tmp_path, monkeypatch
+):
+    from app.services.grouping_service import ADHOC_GROUPING_UID
+    from app.widgets.grouping_panel import GroupingPanel
+
+    external = tmp_path / "camera" / "a.jpg"
+    external.parent.mkdir()
+    external.write_bytes(b"j")
+    project = tmp_path / "project"
+    incoming = project / "incoming-jpg"
+    incoming.mkdir(parents=True)
+    ctx = _make_app_context()
+    ctx.current_project_dir = str(project)
+    ctx.settings = MagicMock()
+    ctx.settings.incoming_subdir = "incoming-jpg"
+    panel = GroupingPanel(ctx)
+    qtbot.addWidget(panel)
+    panel.load_grouping(
+        ADHOC_GROUPING_UID,
+        _make_grouping([{"index": 0, "jpgs": []}]),
+    )
+    calls = []
+    monkeypatch.setattr(
+        "app.services.activation_service.manual_assign",
+        lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+
+    panel._add_selected_media_paths_to_group(0, [str(external)])
+
+    imported = incoming / "a.jpg"
+    assert panel._grouping.groups[0].jpg_paths == [str(imported.resolve())]
+    assert calls == []
+
+
 def test_drop_external_tiff_sets_output_name_and_composed(qtbot, tmp_path):
     from app.widgets.grouping_panel import GroupingPanel
 

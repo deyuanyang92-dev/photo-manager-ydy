@@ -7,7 +7,6 @@ Covers:
 - is_wsl_runtime (detection, not mocked)
 - SafePathRegistry: register_root / assert_safe allow + block + path.relative semantics
 """
-import os
 import sys
 import pytest
 from pathlib import Path
@@ -137,7 +136,9 @@ class TestNormalizePath:
         p = "/tmp/test"
         result = normalize_path(p)
         # Should resolve to an absolute path
-        assert result.startswith("/")
+        assert Path(result).is_absolute()
+        if sys.platform != "win32":
+            assert result.startswith("/")
 
     def test_doubles_repaired(self):
         from app.utils.path_utils import normalize_path
@@ -161,24 +162,56 @@ class TestNormalizePath:
 
 # ── is_wsl_runtime ──────────────────────────────────────────────────────────
 
+class TestLocalizePath:
+    def test_wsl_mount_path_becomes_windows_path_on_windows(self, monkeypatch):
+        from app.utils.path_utils import localize_path
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.delenv("WSL_DISTRO_NAME", raising=False)
+        assert localize_path("/mnt/n/projects/specimen_A") == "N:\\projects\\specimen_A"
+
+    def test_windows_path_becomes_wsl_path_inside_wsl(self, monkeypatch):
+        from app.utils.path_utils import localize_path
+        monkeypatch.setattr(sys, "platform", "linux")
+        monkeypatch.setenv("WSL_DISTRO_NAME", "Ubuntu")
+        assert localize_path("N:\\projects\\specimen_A") == "/mnt/n/projects/specimen_A"
+
+    def test_repairs_doubled_mount_before_windows_conversion(self, monkeypatch):
+        from app.utils.path_utils import localize_path
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.delenv("WSL_DISTRO_NAME", raising=False)
+        assert localize_path("/mnt/n/mnt/n/projects/specimen_A") == "N:\\projects\\specimen_A"
+
+
+class TestEquivalentPaths:
+    def test_includes_windows_and_wsl_forms_on_windows(self, monkeypatch):
+        from app.utils.path_utils import equivalent_paths
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.delenv("WSL_DISTRO_NAME", raising=False)
+        variants = equivalent_paths("N:\\claude\\zhegnli")
+        assert "N:\\claude\\zhegnli" in variants
+        assert "/mnt/n/claude/zhegnli" in variants
+
+    def test_includes_repaired_forms(self, monkeypatch):
+        from app.utils.path_utils import equivalent_paths
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.delenv("WSL_DISTRO_NAME", raising=False)
+        variants = equivalent_paths("/mnt/n/mnt/n/claude/zhegnli")
+        assert "N:\\claude\\zhegnli" in variants
+        assert "/mnt/n/claude/zhegnli" in variants
+
+
 class TestIsWslRuntime:
     def test_returns_bool(self):
         from app.utils.path_utils import is_wsl_runtime
         result = is_wsl_runtime()
         assert isinstance(result, bool)
 
-    def test_true_on_wsl_env(self):
+    def test_true_on_wsl_env(self, monkeypatch):
         """If WSL_DISTRO_NAME env var is set, must return True."""
         from app.utils.path_utils import is_wsl_runtime
-        original = os.environ.get("WSL_DISTRO_NAME")
-        os.environ["WSL_DISTRO_NAME"] = "Ubuntu"
-        try:
-            assert is_wsl_runtime() is True
-        finally:
-            if original is None:
-                del os.environ["WSL_DISTRO_NAME"]
-            else:
-                os.environ["WSL_DISTRO_NAME"] = original
+        monkeypatch.setattr(sys, "platform", "linux")
+        monkeypatch.setenv("WSL_DISTRO_NAME", "Ubuntu")
+        assert is_wsl_runtime() is True
 
     def test_false_without_wsl_env_on_non_linux(self, monkeypatch):
         """On non-linux platform with no WSL markers, must return False."""

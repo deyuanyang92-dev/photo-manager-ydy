@@ -386,6 +386,78 @@ def test_project_naming_components_can_include_taxonomy_and_notes(qapp):
         db.close()
 
 
+def test_project_naming_components_can_include_habitat_dynamic_field(qapp):
+    import sqlite3
+    from app.db.db_manager import ensure_schema
+    from app.services.project_settings_service import DEFAULT_NAMING_RULES, save_setting
+    from app.widgets.naming_panel import NamingPanel
+
+    db = sqlite3.connect(":memory:")
+    ensure_schema(db)
+    rules = dict(DEFAULT_NAMING_RULES)
+    rules["components"] = [
+        "province", "site", "habitat", "species_id", "storage", "date_seg"
+    ]
+    rules["required"] = dict(DEFAULT_NAMING_RULES["required"])
+    rules["required"]["habitat"] = True
+    save_setting(db, "naming_rules", rules)
+
+    ctx = MagicMock()
+    ctx.get_db.return_value = db
+    p = NamingPanel(ctx)
+    p.show()
+    try:
+        assert "habitat" in p._dynamic_naming_edits
+        p._province.setText("FJ")
+        p._site.setText("SMW")
+        p._species_id.setText("DLC001")
+        p._storage.setText("T95E")
+        p._collection_date.setText("20260612")
+        qapp.processEvents()
+        assert "生境" in p.missing_required_fields()
+
+        p._dynamic_naming_edits["habitat"].setText("泥滩")
+        assert p.current_uid() == "FJ-SMW-泥滩-DLC001-T95E-20260612"
+        assert p.naming_extra_field_values()["habitat"] == "泥滩"
+    finally:
+        p.close()
+        db.close()
+
+
+def test_project_custom_naming_field_uses_project_label(qapp):
+    import sqlite3
+    from app.db.db_manager import ensure_schema
+    from app.services.project_settings_service import DEFAULT_NAMING_RULES, save_setting
+    from app.widgets.naming_panel import NamingPanel
+
+    db = sqlite3.connect(":memory:")
+    ensure_schema(db)
+    rules = dict(DEFAULT_NAMING_RULES)
+    rules["custom_fields"] = [{"key": "depth", "label": "水深"}]
+    rules["components"] = ["province", "site", "depth", "species_id", "date_seg"]
+    rules["required"] = dict(DEFAULT_NAMING_RULES["required"])
+    rules["required"]["depth"] = True
+    save_setting(db, "naming_rules", rules)
+
+    ctx = MagicMock()
+    ctx.get_db.return_value = db
+    p = NamingPanel(ctx)
+    p.show()
+    try:
+        assert "depth" in p._dynamic_naming_edits
+        assert any("水深" in label.text() for label in p._field_labels.values())
+        p._province.setText("FJ")
+        p._site.setText("SMW")
+        p._species_id.setText("DLC001")
+        p._collection_date.setText("20260612")
+        assert "水深" in p.missing_required_fields()
+        p._dynamic_naming_edits["depth"].setText("12m")
+        assert p.current_uid() == "FJ-SMW-12m-DLC001-20260612"
+    finally:
+        p.close()
+        db.close()
+
+
 class TestUidDisplaySummary:
     def test_default_summary_shows_people_and_photo_notes(self, panel):
         panel.set_display_metadata({

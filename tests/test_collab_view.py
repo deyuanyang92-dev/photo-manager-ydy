@@ -108,6 +108,105 @@ class TestCollabShareDialog:
 
         assert hasattr(view, "_share_btn"), "CollabView must have _share_btn"
 
+    def test_collab_view_promotes_setup_as_primary_entry(self, qtbot, mock_ctx):
+        from app.views.collab_view import CollabView
+
+        view = CollabView(mock_ctx)
+        qtbot.addWidget(view)
+
+        assert view._setup_btn.text() == "打开项目后启用"
+        assert view._setup_btn.objectName() == "Primary"
+        assert not view._setup_btn.isEnabled()
+        assert not view._share_btn.isEnabled()
+
+    def test_collab_view_presents_three_step_actions(self, qtbot, mock_ctx):
+        from PyQt6.QtWidgets import QFrame
+        from app.views.collab_view import CollabView
+
+        view = CollabView(mock_ctx)
+        qtbot.addWidget(view)
+
+        steps = [
+            frame for frame in view.findChildren(QFrame)
+            if frame.objectName() == "CollabStepPanel"
+        ]
+        assert len(steps) == 3
+        assert view._setup_btn.text() == "打开项目后启用"
+        assert view._share_btn.text() == "复制连接地址"
+        assert view._project_code_btn.text() == "绑定同一项目"
+
+    def test_manual_connection_is_hidden_until_requested(self, qtbot, mock_ctx):
+        from app.views.collab_view import CollabView
+
+        view = CollabView(mock_ctx)
+        qtbot.addWidget(view)
+
+        assert view._manual_group.isHidden()
+        assert not view._manual_toggle_btn.isEnabled()
+
+
+class TestUserFacingEmptyStates:
+    def test_device_empty_state_explains_next_action(self, qtbot):
+        from app.services.collab_service import CollabService
+        from app.views.collab_view import CollabView
+
+        ctx = MagicMock()
+        svc = CollabService()
+        svc._running = True
+        svc.set_group_code("TEAM-1")
+        ctx.collab_service = svc
+
+        view = CollabView(ctx)
+        qtbot.addWidget(view)
+        view.on_activate()
+
+        assert view._setup_btn.text() == "管理协作组"
+        assert view._share_btn.isEnabled()
+        assert "暂无在线设备" in view._device_list.item(0, 0).text()
+        assert "本机地址" in view._connection_label.text()
+        view.close()
+        svc.stop()
+
+    def test_task_empty_state_points_back_to_workbench(self, qtbot):
+        from app.services.collab_service import CollabService
+        from app.views.collab_view import CollabView
+
+        ctx = MagicMock()
+        svc = CollabService()
+        svc._running = True
+        svc.set_group_code("TEAM-1")
+        ctx.collab_service = svc
+
+        view = CollabView(ctx)
+        qtbot.addWidget(view)
+        view.on_activate()
+
+        assert "照片工作区" in view._task_table.item(0, 0).text()
+        view.close()
+        svc.stop()
+
+    def test_running_service_can_expand_manual_connection(self, qtbot):
+        from app.services.collab_service import CollabService
+        from app.views.collab_view import CollabView
+
+        ctx = MagicMock()
+        svc = CollabService()
+        svc._running = True
+        svc.set_group_code("TEAM-1")
+        ctx.collab_service = svc
+
+        view = CollabView(ctx)
+        qtbot.addWidget(view)
+        view.on_activate()
+
+        assert view._manual_group.isHidden()
+        assert view._manual_toggle_btn.isEnabled()
+        view._manual_toggle_btn.setChecked(True)
+        assert not view._manual_group.isHidden()
+        assert view._manual_toggle_btn.text() == "收起手动"
+        view.close()
+        svc.stop()
+
 
 # ── 1-K: Sidebar collab strip update ─────────────────────────────────────────
 
@@ -133,7 +232,7 @@ class TestSidebarCollabStrip:
 
         sb.update_collab_status(None)
 
-        assert sb._collab_addr.text() == "分享地址: —"
+        assert sb._collab_addr.text() == "连接地址: —"
 
     def test_open_collab_view_calls_navigate(self, qtbot, mock_ctx):
         """_open_collab_view must call navigate_to('collab') on the window."""

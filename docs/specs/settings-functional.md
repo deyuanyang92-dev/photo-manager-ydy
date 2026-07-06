@@ -133,12 +133,12 @@ UI 布局（在 Helicon tab 的 `合成参数预设` QGroupBox 内）：
 
 **Web Oracle：** `server.js` compress 配置 + `CLAUDE.md` 删除 JPG 前置条件
 
-### 3.1 JXL effort
+### 3.1 归档模式
 
 | 索引 | 标签 | 含义 |
 |------|------|------|
-| 0 | `standard — cjxl -e 7（推荐）` | EFFORT_MAP standard=7 |
-| 1 | `maximum  — cjxl -e 9（慢，文件更小）` | EFFORT_MAP maximum=9 |
+| 0 | `快速 JPG ZIP（推荐）` | 直接存储原始 JPG，速度优先 |
+| 1 | `高压缩 JPEG XL（较慢）` | 使用 `cjxl -e 9` 中转，体积更小但耗时明显增加 |
 
 **QSettings key：** `archive/jxl_effort`（整数 0 或 1）
 
@@ -146,11 +146,11 @@ UI 布局（在 Helicon tab 的 `合成参数预设` QGroupBox 内）：
 
 **硬规则：** 整理后 ZIP 消耗 JPG；`_delete_jpg_chk.setChecked(True)` 是默认流程。用户可以显式关闭此项以保留散落 JPG。整理/归档不能自动删除 TIFF；合成不满意的 TIFF 可由用户手动删除或撤销。
 
-四项前置条件（`CLAUDE.md` + web NOTES.md 均记载）：
-1. `cjxl` 可用（JPEG XL 无损压缩工具已安装）
-2. ZIP 已生成且大小 > 32 字节
-3. 清单完整（文件数 + 名称 + 大小全部核验通过）
-4. JXL 可恢复（`djxl` 能重解码每一帧，输出大小 > 0）
+删除前置条件：
+1. ZIP 已生成且大小 > 32 字节
+2. ZIP 能被读取
+3. ZIP 内每张 JPG 的名称、大小、SHA-256 与原图一致
+4. 高压缩 JPEG XL 模式还必须通过 `djxl` 还原校验
 
 **QSettings key：** `archive/delete_jpg`（字符串 `"true"` / `"false"`）
 

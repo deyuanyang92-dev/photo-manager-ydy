@@ -25,7 +25,8 @@ def _restore_last_project(ctx, win) -> bool:
     + 刷新顶栏。返回是否成功恢复。
     """
     try:
-        last = ctx.settings.last_project_dir
+        from app.utils.path_utils import localize_path
+        last = localize_path(ctx.settings.last_project_dir)
     except Exception:
         return False
     if not last or not os.path.isdir(last):
@@ -33,7 +34,7 @@ def _restore_last_project(ctx, win) -> bool:
     if not os.path.isfile(os.path.join(last, "_data", "project.db")):
         return False  # 不是 workspace(没库)→ 不恢复
     try:
-        saved_root = ctx.settings.project_tree_root
+        saved_root = localize_path(ctx.settings.project_tree_root)
         root = last
         if saved_root and os.path.isdir(saved_root):
             last_abs = os.path.abspath(last)
@@ -43,8 +44,8 @@ def _restore_last_project(ctx, win) -> bool:
                     root = saved_root
             except ValueError:
                 pass  # Different drives: the saved root cannot own this workspace.
-        ctx.current_project_root = root
-        ctx.current_project_dir = last
+        from app.services.project_service import enter_workspace
+        enter_workspace(ctx, last, root=root)
         if hasattr(win, "refresh_context_bar"):
             win.refresh_context_bar()
         return True
@@ -77,6 +78,7 @@ _runtime_dir = _writable_runtime_dir()
 _mpl_dir = _runtime_dir / "matplotlib"
 _mpl_dir.mkdir(parents=True, exist_ok=True)
 _INSTANCE_LOCK_HANDLE = None
+_INSTANCE_MUTEX_HANDLE = None
 # Set unconditionally (not setdefault): a stale/unwritable inherited value would
 # bring back the very warning we are killing.
 os.environ["MPLCONFIGDIR"] = str(_mpl_dir)
@@ -87,6 +89,16 @@ _HEADLESS_SMOKE = "--smoke" in sys.argv or os.environ.get("QT_QPA_PLATFORM") == 
 if "--smoke" in sys.argv:
     sys.argv.remove("--smoke")
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+
+def _safe_stderr_print(*args, **kwargs) -> None:
+    """Best-effort stderr logging; a closed launcher pipe must not crash startup."""
+    kwargs.pop("file", None)
+    try:
+        print(*args, file=sys.stderr, **kwargs)
+    except (BrokenPipeError, OSError):
+        pass
+
 
 @dataclass(frozen=True)
 class QtPlatformProbe:
@@ -166,20 +178,20 @@ def _qt_candidates() -> list[str]:
 
 
 def _print_gui_diagnostics(probes: list[QtPlatformProbe] | None = None) -> None:
-    print("GUI 环境诊断：", file=sys.stderr)
-    print(f"  WSL: {'yes' if _is_wsl else 'no'}", file=sys.stderr)
-    print(f"  uid: {os.geteuid() if hasattr(os, 'geteuid') else 'n/a'}", file=sys.stderr)
+    _safe_stderr_print("GUI 环境诊断：")
+    _safe_stderr_print(f"  WSL: {'yes' if _is_wsl else 'no'}")
+    _safe_stderr_print(f"  uid: {os.geteuid() if hasattr(os, 'geteuid') else 'n/a'}")
     for key in ("DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "QT_QPA_PLATFORM"):
-        print(f"  {key}: {os.environ.get(key) or '<empty>'}", file=sys.stderr)
+        _safe_stderr_print(f"  {key}: {os.environ.get(key) or '<empty>'}")
     for path in ("/tmp/.X11-unix/X0", "/mnt/wslg/.X11-unix/X0", "/mnt/wslg/runtime-dir/wayland-0"):
-        print(f"  {path}: {'exists' if Path(path).exists() else 'missing'}", file=sys.stderr)
+        _safe_stderr_print(f"  {path}: {'exists' if Path(path).exists() else 'missing'}")
     if probes:
         for probe in probes:
             status = "OK" if probe.ok else f"failed ({probe.returncode})"
-            print(f"\n  Qt {probe.platform}: {status}", file=sys.stderr)
+            _safe_stderr_print(f"\n  Qt {probe.platform}: {status}")
             if probe.stderr:
                 for line in probe.stderr.splitlines()[:8]:
-                    print(f"    {line}", file=sys.stderr)
+                    _safe_stderr_print(f"    {line}")
 
 
 def _print_gui_help(probes: list[QtPlatformProbe]) -> None:
@@ -196,7 +208,7 @@ def _print_gui_help(probes: list[QtPlatformProbe]) -> None:
             "\n当前报错是 `libEGL.so.1` 缺失，优先补系统 EGL / OpenGL 运行库：\n"
             "  sudo apt update && sudo apt install -y libegl1 libgl1\n"
         )
-    print(
+    _safe_stderr_print(
         "\n无法启动 GUI：当前 WSL 环境的 Qt xcb/wayland 平台都不可用。\n"
         f"{root_hint}\n"
         f"{extra_hint}"
@@ -207,12 +219,11 @@ def _print_gui_help(probes: list[QtPlatformProbe]) -> None:
         "     `sudo apt update && sudo apt install -y libxcb-cursor0 libxcb-cursor-dev libxkbcommon-x11-0`\n"
         "  4. 诊断显示连接：`python3 main.py --check-gui`。\n"
         "  5. 只验证程序构造：`python3 main.py --smoke`。",
-        file=sys.stderr,
     )
 
 
 def _print_missing_pyqt6_help() -> None:
-    print(
+    _safe_stderr_print(
         "GUI 启动失败：当前 Python 环境未安装 PyQt6。\n"
         "\n"
         "请先在当前环境执行：\n"
@@ -220,12 +231,11 @@ def _print_missing_pyqt6_help() -> None:
         "\n"
         "如果你在 conda/venv 里运行，请先激活同一个环境再安装。\n"
         "在 WSL 里额外还需要系统 Qt X11 依赖，但现在这一步还没走到。",
-        file=sys.stderr,
     )
 
 
 def _print_missing_qt_runtime_help(detail: str) -> None:
-    print(
+    _safe_stderr_print(
         "GUI 启动失败：PyQt6 已安装，但 Qt 运行时依赖缺失。\n"
         f"  详细错误: {detail}\n"
         "\n"
@@ -235,7 +245,6 @@ def _print_missing_qt_runtime_help(detail: str) -> None:
         "  sudo apt install -y libegl1 libgl1 libxcb-cursor0 libxkbcommon-x11-0\n"
         "\n"
         "如果 `sudo` 需要密码，这一步需要你在本机终端执行。",
-        file=sys.stderr,
     )
 
 
@@ -436,6 +445,29 @@ def _acquire_single_instance_lock() -> bool:
     global _INSTANCE_LOCK_HANDLE
     if _HEADLESS_SMOKE or os.environ.get("SPECIMEN_WORKBENCH_ALLOW_MULTI") == "1":
         return True
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            name = "Local\\SpecimenPhotoWorkbench.SingleInstance"
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.CreateMutexW.argtypes = (
+                wintypes.LPVOID,
+                wintypes.BOOL,
+                wintypes.LPCWSTR,
+            )
+            kernel32.CreateMutexW.restype = wintypes.HANDLE
+            handle = kernel32.CreateMutexW(None, True, name)
+            if not handle:
+                return True
+            if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
+                kernel32.CloseHandle(handle)
+                return False
+            globals()["_INSTANCE_MUTEX_HANDLE"] = handle
+            return True
+        except Exception:
+            return True
     try:
         import fcntl
     except ImportError:
@@ -600,10 +632,10 @@ def main() -> int:
     # force a second delayed raise to absorb WM races.
     target = _startup_target_screen(app)
     if not _HEADLESS_SMOKE:
-        print(f"启动窗口目标屏幕: {_screen_label(target)}", file=sys.stderr)
+        _safe_stderr_print(f"启动窗口目标屏幕: {_screen_label(target)}")
     placement = _show_main_window_at_startup(win, app, target)
     if not _HEADLESS_SMOKE:
-        print(f"启动窗口放置策略: {placement}", file=sys.stderr)
+        _safe_stderr_print(f"启动窗口放置策略: {placement}")
         # offscreen plugin warns "does not support raise()"; only needed for a
         # real window manager anyway (pull the window to the front + focus it).
         QTimer.singleShot(250, lambda: _ensure_main_window_visible(win, app, target))
@@ -611,7 +643,7 @@ def main() -> int:
 
     if _HEADLESS_SMOKE:
         app.processEvents()
-        print("offscreen 启动冒烟通过：主窗口已构造完成。", file=sys.stderr)
+        _safe_stderr_print("offscreen 启动冒烟通过：主窗口已构造完成。")
         return 0
 
     return app.exec()

@@ -99,6 +99,23 @@ def paint_jobs(
         # per-job 排版设计 opts win over the shared param (一键双打 buckets
         # may carry different impositions); legacy callers pass neither.
         job_opts = job.get("gridOpts") or grid_opts
+        job_cut_marks = (
+            bool(job.get("cutMarks")) if "cutMarks" in job else bool(cut_marks)
+        )
+
+        # Switch paper size per job so mixed A4/label jobs print correctly.
+        if is_grid:
+            std = QPageSize.PageSizeId.A4 if paper_type == "a4" else QPageSize.PageSizeId.A5
+            printer.setPageSize(QPageSize(std))
+            printer.setPageMargins(QMarginsF(0, 0, 0, 0), QPageLayout.Unit.Millimeter)
+            if job_opts and job_opts.get("orientation") == "landscape":
+                printer.setPageOrientation(QPageLayout.Orientation.Landscape)
+            else:
+                printer.setPageOrientation(QPageLayout.Orientation.Portrait)
+        else:
+            printer.setPageSize(QPageSize(QSizeF(w_mm, h_mm), QPageSize.Unit.Millimeter, "Custom"))
+            printer.setPageMargins(QMarginsF(2, 2, 2, 2), QPageLayout.Unit.Millimeter)
+
         placements = plan_label_pages(items, dims, paper_type, paper, job_opts)
 
         if not first_job:
@@ -121,7 +138,7 @@ def paint_jobs(
                 px_per_mm=mm_to_dot * sc, x_off=float(x_off), y_off=float(y_off),
                 placeholder=False, fill_bg=True,
             )
-            if is_grid and cut_marks and draw_crop_marks is not None:
+            if is_grid and job_cut_marks and draw_crop_marks is not None:
                 draw_crop_marks(
                     painter, x_off, y_off,
                     int(w_mm * sc * mm_to_dot), int(h_mm * sc * mm_to_dot),

@@ -24,6 +24,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from app.utils.path_utils import normalize_path
+
 
 class ProjectUnavailableError(OSError):
     """A project's directory/volume is not present — refuse to fabricate it.
@@ -39,7 +41,7 @@ def project_root_available(project_dir: str | None) -> bool:
     if not project_dir:
         return False
     try:
-        return Path(project_dir).resolve().is_dir()
+        return Path(normalize_path(project_dir)).is_dir()
     except OSError:
         return False
 
@@ -51,7 +53,7 @@ def require_project_root(project_dir: str | None) -> Path:
     """
     if not project_dir:
         raise ProjectUnavailableError("未指定项目目录")
-    root = Path(project_dir).resolve()
+    root = Path(normalize_path(project_dir))
     if not root.is_dir():
         raise ProjectUnavailableError(
             f"项目目录不可用（盘未挂载 / 路径丢失）：{project_dir}"
@@ -65,7 +67,7 @@ def require_creatable_parent(project_dir: str) -> Path:
     Creating a brand-new project may make the leaf folder, but only when the
     parent volume is present — otherwise we'd fabricate on a phantom path again.
     """
-    root = Path(project_dir).resolve()
+    root = Path(normalize_path(project_dir))
     if root.is_dir():
         return root
     parent = root.parent

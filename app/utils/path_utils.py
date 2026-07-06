@@ -119,16 +119,73 @@ def repair_doubled_mount(p: str) -> str:
 
 # ── normalize_path ─────────────────────────────────────────────────────────────
 
+def localize_path(p: str) -> str:
+    """Return *p* in the path syntax used by the current runtime.
+
+    A project can be persisted from WSL as ``/mnt/n/...`` and later opened from
+    Windows, where the same location is ``N:\\...``. This converts only those
+    cross-runtime forms, plus the historical doubled-mount repair; it does not
+    resolve the path or require it to exist.
+    """
+    p = repair_doubled_mount(str(p or "").strip())
+    if not p:
+        return p
+    if is_wsl_runtime():
+        converted = windows_to_wsl(p)
+        if converted is not None:
+            return converted
+    elif sys.platform == "win32":
+        converted = wsl_to_windows(p)
+        if converted is not None:
+            return converted
+    return p
+
+
+def equivalent_paths(p: str) -> list[str]:
+    """Return known spellings for the same Windows/WSL filesystem location.
+
+    Older project metadata can store ``N:\\...`` while WSL-created rows store
+    ``/mnt/n/...``.  SQLite equality checks need both forms because those rows
+    are compared as plain text.
+    """
+    raw = str(p or "").strip()
+    if not raw:
+        return []
+
+    variants: list[str] = []
+
+    def add(value: Optional[str]) -> None:
+        if not value:
+            return
+        value = str(value).strip()
+        if value and value not in variants:
+            variants.append(value)
+
+    repaired = repair_doubled_mount(raw)
+    add(raw)
+    add(repaired)
+    localized = localize_path(repaired)
+    add(localized)
+
+    for value in list(variants):
+        add(wsl_to_windows(value))
+        add(windows_to_wsl(value))
+
+    for value in list(variants):
+        try:
+            add(str(Path(localize_path(value)).resolve()))
+        except OSError:
+            pass
+
+    return variants
+
+
 def normalize_path(p: str) -> str:
     """Repair doubled mount prefixes, convert Windows→POSIX on WSL, resolve.
 
     Mirrors wslpath.js::normalizePath + path-utils.js double-mount fix.
     """
-    p = repair_doubled_mount(str(p or "").strip())
-    if is_wsl_runtime():
-        converted = windows_to_wsl(p)
-        if converted is not None:
-            return str(Path(converted).resolve())
+    p = localize_path(p)
     return str(Path(p).resolve())
 
 
@@ -154,7 +211,7 @@ class SafePathRegistry:
         Resolves to absolute path before storing.
         Mirrors server.js::registerAllowedDir.
         """
-        resolved = str(Path(d).resolve())
+        resolved = str(Path(localize_path(d)).resolve())
         if resolved not in self._roots:
             self._roots.append(resolved)
 
@@ -169,10 +226,13 @@ class SafePathRegistry:
         if not path:
             raise PermissionError(f"{lbl} 必须是非空字符串")
 
-        resolved = str(Path(path).resolve())
+        resolved = str(Path(localize_path(path)).resolve())
 
         for root in self._roots:
-            rel = os.path.relpath(resolved, root)
+            try:
+                rel = os.path.relpath(resolved, root)
+            except ValueError:
+                continue  # cross-drive on Windows — cannot be a child
             # rel == '.' → same dir; not starting with '..' → child path
             if rel == "." or not rel.startswith(".."):
                 return  # inside this root — OK

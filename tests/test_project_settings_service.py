@@ -38,6 +38,10 @@ def test_load_missing_returns_default(db):
     assert result is not DEFAULT_TIFF_FIELDS  # copy, not same object
 
 
+def test_default_print_mode_is_direct():
+    assert DEFAULT_PRINT_SETTINGS["quick_print_mode"] == "direct"
+
+
 def test_save_and_load_roundtrip(db):
     data = {"collector": "张三", "photographer": "李四", "verifier": "", "logistics": "", "identifier": ""}
     save_setting(db, "personnel", data)
@@ -139,6 +143,35 @@ def test_naming_rules_default_required_fields():
     assert required["storage"] is True
     assert required["collection_date"] is True
     assert required["photo_date"] is True
+
+
+def test_naming_field_catalog_exposes_habitat_without_changing_defaults():
+    from app.services.naming_field_catalog import component_fields, field_label
+    from app.services.project_settings_service import DEFAULT_NAMING_RULES
+
+    assert "habitat" in {field.key for field in component_fields()}
+    assert field_label("habitat") == "生境"
+    assert "habitat" not in DEFAULT_NAMING_RULES["components"]
+    assert DEFAULT_NAMING_RULES["required"]["habitat"] is False
+
+
+def test_naming_field_catalog_normalizes_project_custom_fields():
+    from app.services.naming_field_catalog import (
+        field_label,
+        normalize_custom_fields,
+        required_fields,
+    )
+
+    fields = normalize_custom_fields([
+        {"label": "水深", "key": ""},
+        {"label": "潮位", "key": "tide_level"},
+    ])
+
+    assert fields[0]["key"] == "custom_field"
+    assert fields[0]["label"] == "水深"
+    assert fields[1] == {"key": "tide_level", "label": "潮位"}
+    assert field_label("tide_level", custom_fields=fields) == "潮位"
+    assert "tide_level" in {field.key for field in required_fields(fields)}
 
 
 def test_global_print_defaults_roundtrip_and_effective_fallback(tmp_path):

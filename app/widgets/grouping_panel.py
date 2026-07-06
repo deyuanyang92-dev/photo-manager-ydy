@@ -1068,7 +1068,11 @@ class _ComposedRow(QFrame):
         undo_btn.setObjectName("Ghost")
         undo_btn.setFixedSize(30, 28)
         icons.set_button_icon(undo_btn, "mdi6.undo-variant", color=icons.TONE_MUTED, size=15)
-        undo_btn.setToolTip("撤销合成：确认后删除 TIFF，并把 JPG 放回自由池")
+        undo_btn.setToolTip(
+            "撤销整理：从 ZIP 恢复 JPG，退回待整理，不删除 TIFF"
+            if archive_zip
+            else "撤销合成：确认后删除 TIFF，并把 JPG 放回自由池"
+        )
         undo_btn.clicked.connect(lambda: self.undo_clicked.emit(self._group.group_index))
         lay.addWidget(undo_btn)
 
@@ -2762,7 +2766,11 @@ class GroupingPanel(QWidget):
 
         self.drop_external_files(group_index, jpgs, tiff_path)
 
-        if jpgs and self._uid:
+        if (
+            jpgs
+            and self._uid
+            and self._uid != grouping_service.ADHOC_GROUPING_UID
+        ):
             project_dir = getattr(self.ctx, "current_project_dir", None)
             if project_dir:
                 try:

@@ -82,11 +82,15 @@ class ScreenshotController(QObject):
         return False
 
     def capture_window(self) -> None:
+        if self._delegate_to_windows():
+            return
         win = self._active_window()
         scr = win.screen() if win else None
         self._open_screenshot_overlay(self._screen_local_rect(win, scr), scr)
 
     def capture_view(self) -> None:
+        if self._delegate_to_windows():
+            return
         widget = self._view_provider() if self._view_provider else None
         scr = widget.screen() if widget else None
         self._open_screenshot_overlay(self._screen_local_rect(widget, scr) if widget else None, scr)

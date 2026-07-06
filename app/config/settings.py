@@ -12,6 +12,7 @@ from PyQt6.QtCore import QSettings, QByteArray
 _ORG = "SpecimenPhotoWorkbench"
 _APP = "标本照片工作台"
 _DELETE_JPG_DEFAULT_MIGRATION_KEY = "archive/delete_jpg_default_v2_applied"
+_ARCHIVE_MODE_V2_MIGRATION_KEY = "archive/mode_v2_fast_default_applied"
 
 
 class AppSettings:
@@ -20,6 +21,7 @@ class AppSettings:
     def __init__(self) -> None:
         self._qs = QSettings(_ORG, _APP)
         self._migrate_delete_jpg_default()
+        self._migrate_archive_mode_default()
 
     def _migrate_delete_jpg_default(self) -> None:
         """Move legacy installs to the current default: no loose JPG after organise."""
@@ -27,6 +29,13 @@ class AppSettings:
             return
         self._qs.setValue("archive/delete_jpg", "true")
         self._qs.setValue(_DELETE_JPG_DEFAULT_MIGRATION_KEY, "true")
+
+    def _migrate_archive_mode_default(self) -> None:
+        """Move legacy automatic JXL installs to the fast default archive mode."""
+        if str(self._qs.value(_ARCHIVE_MODE_V2_MIGRATION_KEY, "false")).lower() == "true":
+            return
+        self._qs.setValue("archive/jxl_effort", 0)
+        self._qs.setValue(_ARCHIVE_MODE_V2_MIGRATION_KEY, "true")
 
     # ── Window geometry ───────────────────────────────────────────────
 

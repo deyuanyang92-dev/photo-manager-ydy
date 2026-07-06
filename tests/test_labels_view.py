@@ -159,6 +159,35 @@ class TestStep2Templates:
         assert actions
         assert set(actions) >= {"new", "import", "manage"}
 
+    def test_template_manager_can_focus_one_bucket(self, qt_app):
+        from app.widgets.label_step2_templates import LabelStep2Templates
+        w = LabelStep2Templates(_libs(), visible_buckets=["sample"], manager_mode=True)
+        w.set_data([_sp(), _rna_sp()], [0, 1])
+
+        assert "sample" in w._cards
+        assert "tissue" not in w._cards
+        assert "sample" in w._summary_labels
+        assert "tissue" not in w._summary_labels
+
+    def test_template_cards_are_grouped_by_usage(self, qt_app):
+        from PyQt6.QtWidgets import QLabel
+        w = self._w(qt_app, [_sp()])
+
+        groups = [label.text() for label in w.findChildren(QLabel, "TemplateGroupLabel")]
+
+        assert any("样品瓶" in text for text in groups)
+        assert any("冻存管" in text for text in groups)
+        assert any("Falcon" in text for text in groups)
+
+    def test_template_cards_use_default_wording(self, qt_app):
+        from PyQt6.QtWidgets import QPushButton
+        w = self._w(qt_app, [_sp()])
+
+        buttons = [btn.text() for btn in w.findChildren(QPushButton, "CardChooseBtn")]
+
+        assert "设为默认" in buttons
+        assert "选用" not in buttons
+
     # ── 自由创建 + 模板管理（web oracle app.js:14961 / 15767） ──────────────────
     def test_new_custom_card_creates_record(self, qt_app):
         from app.services.label_service import key_from_id
@@ -650,6 +679,220 @@ class TestBlankHandwriteCells:
     def test_label_paper_no_injection(self, qt_app):
         v = _studio(qt_app, [_sp()], paper="label", blank=3)
         assert len(v._build_job("sample")["items"]) == 1
+
+
+class TestPrintBatch:
+    """A4/A5 sheet workflow: collect labels first, print the batch later."""
+
+    def test_batch_controls_exist(self, qt_app):
+        v = _studio(qt_app, [_sp()], paper="a4")
+        assert hasattr(v, "_btn_add_to_batch")
+        assert hasattr(v, "_btn_print_batch")
+        assert hasattr(v, "_btn_clear_batch")
+
+    def test_add_selection_to_a4_batch_accumulates_printable_labels(self, qt_app):
+        specs = [_sp(id=f"DLC{i:03d}") for i in range(10)]
+        v = _studio(qt_app, specs, paper="a4")
+        v._step1._checked = set(range(8))
+        v._step1._sync_checks()
+
+        v._add_selection_to_batch()
+
+        job = v._build_batch_job("sample")
+        assert v._print_batch.indices("sample") == list(range(8))
+        assert len(job["items"]) == 8
+        assert job["paperType"] == "a4"
+
+    def test_batch_job_is_independent_from_current_selection(self, qt_app):
+        specs = [_sp(id=f"DLC{i:03d}") for i in range(8)]
+        v = _studio(qt_app, specs, paper="a4")
+        v._print_batch.add("sample", range(8))
+        v._step1.clear_selection()
+
+        assert len(v._build_job("sample")["items"]) == 1  # standalone blank
+        assert len(v._build_batch_job("sample")["items"]) == 8
+
+    def test_tissue_batch_accepts_only_r_prefix_specimens(self, qt_app):
+        v = _studio(qt_app, [_sp(id="DLC001"), _rna_sp(id="BLC001")], paper="a4")
+        v._set_bucket("tissue")
+
+        v._add_selection_to_batch()
+
+        assert v._print_batch.indices("tissue") == [1]
+        assert len(v._build_batch_job("tissue")["items"]) == 1
+
+    def test_print_batch_uses_one_batch_job(self, qt_app):
+        captured = {}
+        v = _studio(qt_app, [_sp(id=f"DLC{i:03d}") for i in range(8)], paper="a4")
+        v._print_batch.add("sample", range(8))
+        v._run_print_dialog = lambda jobs: captured.setdefault("jobs", jobs)
+
+        v._print_batch_job()
+
+        jobs = captured["jobs"]
+        assert len(jobs) == 1
+        assert jobs[0]["bucket"] == "sample"
+        assert len(jobs[0]["items"]) == 8
+
+    def test_empty_batch_does_not_print_blank_handwrite_cells(self, qt_app):
+        v = _studio(qt_app, [_sp()], paper="a4", blank=3)
+
+        assert len(v._build_batch_job("sample")["items"]) == 0
+        assert not v._btn_print_batch.isEnabled()
+
+
+class TestPrintSettingsDirectMode:
+    """Project print settings decide whether label-studio print is direct."""
+
+    def test_project_direct_mode_sends_label_without_dialog(
+        self, qt_app, tmp_path, monkeypatch
+    ):
+        import sqlite3
+        import app.views.labels_view as lv
+        from app.services.label_print_executor import LabelPrintResult
+        from app.services.project_settings_service import save_setting
+
+        db = sqlite3.connect(":memory:")
+        db.execute(
+            "CREATE TABLE project_settings ("
+            "setting_key TEXT PRIMARY KEY, value_json TEXT NOT NULL DEFAULT '{}')"
+        )
+        db.commit()
+        save_setting(db, "print_settings", {
+            "quick_print": True,
+            "quick_print_mode": "direct",
+            "sample_printer": "",
+            "tissue_printer": "",
+        })
+
+        class Ctx:
+            current_project_dir = str(tmp_path)
+            current_project_root = str(tmp_path)
+
+            def get_db(self):
+                return db
+
+        captured = {}
+
+        class FakeExecutor:
+            def __init__(self, **kwargs):
+                pass
+
+            def print_direct(self, jobs, **kwargs):
+                captured["direct_jobs"] = jobs
+                captured["direct_kwargs"] = kwargs
+                return LabelPrintResult(True, printer_name="default")
+
+            def print_with_dialog(self, jobs, **kwargs):
+                captured["dialog_jobs"] = jobs
+                return LabelPrintResult(True, printer_name="dialog")
+
+        monkeypatch.setattr(lv, "LabelPrintExecutor", FakeExecutor)
+
+        v = lv.LabelsView(Ctx())
+        v._specimens = [_sp()]
+        v._step1.set_specimens([_sp()])
+        v._run_print_dialog([v._build_job("sample")])
+
+        assert "direct_jobs" in captured
+        assert "dialog_jobs" not in captured
+        assert captured["direct_kwargs"]["printer_name"] == ""
+        db.close()
+
+    def test_project_default_print_settings_are_direct_when_db_exists(
+        self, qt_app, monkeypatch
+    ):
+        import sqlite3
+        import app.views.labels_view as lv
+        from app.services.label_print_executor import LabelPrintResult
+
+        db = sqlite3.connect(":memory:")
+        db.execute(
+            "CREATE TABLE project_settings ("
+            "setting_key TEXT PRIMARY KEY, value_json TEXT NOT NULL DEFAULT '{}')"
+        )
+        db.commit()
+
+        class Ctx:
+            def get_db(self):
+                return db
+
+        captured = {}
+
+        class FakeExecutor:
+            def __init__(self, **kwargs):
+                pass
+
+            def print_direct(self, jobs, **kwargs):
+                captured["direct_jobs"] = jobs
+                captured["direct_kwargs"] = kwargs
+                return LabelPrintResult(True, printer_name="default")
+
+            def print_with_dialog(self, jobs, **kwargs):
+                captured["dialog_jobs"] = jobs
+                return LabelPrintResult(True, printer_name="dialog")
+
+        monkeypatch.setattr(lv, "LabelPrintExecutor", FakeExecutor)
+
+        v = lv.LabelsView(Ctx())
+        v._specimens = [_sp()]
+        v._step1.set_specimens([_sp()])
+        v._run_print_dialog([v._build_job("sample")])
+
+        assert "direct_jobs" in captured
+        assert "dialog_jobs" not in captured
+        db.close()
+
+    def test_direct_print_uses_each_bucket_cut_marks(
+        self, qt_app, monkeypatch
+    ):
+        import sqlite3
+        import app.views.labels_view as lv
+        from app.services.label_print_executor import LabelPrintResult
+
+        db = sqlite3.connect(":memory:")
+        db.execute(
+            "CREATE TABLE project_settings ("
+            "setting_key TEXT PRIMARY KEY, value_json TEXT NOT NULL DEFAULT '{}')"
+        )
+        db.commit()
+
+        class Ctx:
+            def get_db(self):
+                return db
+
+        calls = []
+
+        class FakeExecutor:
+            def __init__(self, **kwargs):
+                pass
+
+            def print_direct(self, jobs, **kwargs):
+                calls.append((jobs[0]["bucket"], kwargs))
+                return LabelPrintResult(True, printer_name="default")
+
+            def print_with_dialog(self, jobs, **kwargs):
+                raise AssertionError("direct mode must not open dialog")
+
+        monkeypatch.setattr(lv, "LabelPrintExecutor", FakeExecutor)
+
+        v = lv.LabelsView(Ctx())
+        specs = [_rna_sp()]
+        v._specimens = specs
+        v._step1.set_specimens(specs)
+        v._step3._on_paper("sample", "a4")
+        v._step3._on_paper("tissue", "a4")
+        v._impositions["sample"] = {"cutMarks": False}
+        v._impositions["tissue"] = {"cutMarks": True}
+        v._active_bucket = "sample"
+        v._imposition = v._impositions["sample"]
+
+        v._print_both()
+
+        assert {bucket for bucket, _ in calls} == {"sample", "tissue"}
+        cut_marks = {bucket: kw["cut_marks"] for bucket, kw in calls}
+        assert cut_marks == {"sample": False, "tissue": True}
+        db.close()
 
 
 class TestStep3Persistence:

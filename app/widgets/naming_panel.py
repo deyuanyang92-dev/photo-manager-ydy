@@ -75,6 +75,7 @@ _SECTION_DEFS = [
     ("采集位置", "geo",      lambda p: p._geo_group),
     ("编号规则", "identity", lambda p: p._identity_group),
     ("日期",     "date",     lambda p: p._date_group),
+    ("扩展字段", "dynamic",  lambda p: p._dynamic_naming_group),
     ("拍照备注", "notes",    lambda p: p._notes_frame),
 ]
 
@@ -127,6 +128,9 @@ class NamingPanel(QWidget):
         self._field_label_text: dict[str, str] = {}
         self._naming_rules_required: dict[str, bool] = {}
         self._external_naming_values: dict[str, str] = {}
+        self._dynamic_naming_edits: dict[str, QLineEdit] = {}
+        self._dynamic_naming_keys: set[str] = set()
+        self._naming_value_cache: dict[str, str] = {}
         self._legacy_inline_labels: tuple[str, ...] = ()
         self._legacy_source_stem: str = ""
         self._display_metadata: dict[str, str] = {}
@@ -384,6 +388,13 @@ class NamingPanel(QWidget):
                                    help_text="拍摄 YYYYMMDD；只填其一则采集与拍摄同天"), 0, 1)
         form.addWidget(self._date_group)
 
+        self._dynamic_naming_group, self._dynamic_naming_grid = _section(
+            "扩展字段",
+            show_title=False,
+        )
+        self._dynamic_naming_group.hide()
+        form.addWidget(self._dynamic_naming_group)
+
         root.addLayout(form)
 
         # 拍照备注（可选）— full-width textarea (web naming-photo-notes, app.js:9344)
@@ -565,6 +576,10 @@ class NamingPanel(QWidget):
         self._persisted_uid = sp.get("uid") or sp.get("uniqueId") or None
         parsed_uid = parse_uid(self._persisted_uid)
         values = dict(sp)
+        self._naming_value_cache = {
+            str(key): str(value or "").strip()
+            for key, value in values.items()
+        }
         if parsed_uid:
             values.update({
                 "province": parsed_uid.get("province") or "",
@@ -644,6 +659,15 @@ class NamingPanel(QWidget):
             if widget.text().strip() and not overwrite:
                 continue
             if key == "storage" and re.fullmatch(r"\d{6,8}", val):
+                continue
+            widget.setText(val)
+        for key, widget in self._dynamic_naming_edits.items():
+            val = str(field_values.get(key) or "").strip()
+            if not val:
+                if overwrite:
+                    widget.setText("")
+                continue
+            if widget.text().strip() and not overwrite:
                 continue
             widget.setText(val)
 
@@ -741,11 +765,34 @@ class NamingPanel(QWidget):
     def set_display_metadata(self, values: dict) -> None:
         """更新 UID 下方的展示摘要；不参与 UID 构造或复制。"""
         aliases = {"photo_notes": "photoNotes"}
+        for key, value in (values or {}).items():
+            self._naming_value_cache[str(key)] = str(value or "").strip()
         self._display_metadata = {
             key: str(values.get(key) or values.get(aliases.get(key, "")) or "").strip()
             for key, _label in _UID_DISPLAY_FIELDS
         }
+        dynamic_aliases = {
+            "geo_area": "geoArea",
+            "photo_notes": "photoNotes",
+            "scientific_name": "scientificName",
+            "scientific_name_cn": "scientificNameCn",
+            "taxon_group": "taxonGroup",
+            "order_name": "order",
+        }
+        for key, edit in self._dynamic_naming_edits.items():
+            val = values.get(key)
+            if val is None:
+                val = values.get(dynamic_aliases.get(key, ""))
+            if val is None:
+                continue
+            text = str(val or "").strip()
+            if edit.text().strip() == text:
+                continue
+            edit.blockSignals(True)
+            edit.setText(text)
+            edit.blockSignals(False)
         self._refresh_display_summary()
+        self._update_preview()
 
     def set_display_fields(self, fields: set[str]) -> None:
         allowed = {key for key, _label in _UID_DISPLAY_FIELDS}
@@ -754,7 +801,7 @@ class NamingPanel(QWidget):
         settings.setValue(
             _UID_DISPLAY_SETTINGS_KEY, ",".join(sorted(self._display_fields))
         )
-        settings.flush_to_disk()
+        settings.sync()
         self._refresh_display_summary()
 
     def _load_display_fields(self) -> set[str]:
@@ -849,28 +896,19 @@ class NamingPanel(QWidget):
 
     def missing_required_fields(self) -> list[str]:
         """Return labels for project-required naming fields that are empty."""
+        from app.utils.naming import coalesce_specimen_dates
+        from app.services.naming_field_catalog import field_label
+
         required = self._load_required_rules()
         self._naming_rules_required = required
-        values = {
-            "province": self._province.text().strip(),
-            "site": self._site.text().strip(),
-            "station": self._station.text().strip(),
-            "species_id": self._species_id.text().strip(),
-            "storage": self._storage.text().strip(),
-            "collection_date": self._collection_date.text().strip(),
-            "photo_date": self._photo_date.text().strip(),
-        }
-        labels = {
-            "province": "地区",
-            "site": "样地",
-            "station": "站位",
-            "species_id": "物种编号",
-            "storage": "保存方式",
-            "collection_date": "采集日期",
-            "photo_date": "拍照日期",
-        }
+        custom_fields = self._load_custom_fields()
+        col, photo = coalesce_specimen_dates(
+            self._collection_date.text().strip(),
+            self._photo_date.text().strip(),
+        )
+        values = self._component_values(specimen_date_seg(col, photo))
         return [
-            labels[key]
+            field_label(key, custom_fields=custom_fields)
             for key, is_required in required.items()
             if is_required and not values.get(key)
         ]
@@ -914,7 +952,34 @@ class NamingPanel(QWidget):
             str(k): str(v or "").strip()
             for k, v in (values or {}).items()
         }
+        self.apply_dynamic_autofill(self._external_naming_values)
         self._update_preview()
+
+    def apply_dynamic_autofill(self, values: dict) -> bool:
+        """Fill empty dynamic naming fields from a collection/metadata record."""
+        aliases = {
+            "geo_area": "geoArea",
+            "photo_notes": "photoNotes",
+            "scientific_name": "scientificName",
+            "scientific_name_cn": "scientificNameCn",
+            "taxon_group": "taxonGroup",
+            "order_name": "order",
+        }
+        changed = False
+        for key, edit in self._dynamic_naming_edits.items():
+            if edit.text().strip():
+                continue
+            val = values.get(key)
+            if val is None:
+                val = values.get(aliases.get(key, ""))
+            text = str(val or "").strip()
+            if not text:
+                continue
+            edit.setText(text)
+            changed = True
+        if changed:
+            self._update_preview()
+        return changed
 
     # ── Collection-record keys (auto-fill source) ─────────────────────────────
 
@@ -1005,7 +1070,7 @@ class NamingPanel(QWidget):
         from PyQt6.QtCore import QSettings
         settings = QSettings()
         settings.setValue(f"naming_panel/section_visible/{key}", visible)
-        settings.flush_to_disk()
+        settings.sync()
 
     def _load_section_vis(self, key: str, default: bool = True) -> bool:
         if key in self._section_visibility_cache:
@@ -1036,6 +1101,7 @@ class NamingPanel(QWidget):
     def refresh_naming_rules(self) -> None:
         """Reload per-project required-field rules and update label stars."""
         self._naming_rules_required = self._load_required_rules()
+        self._rebuild_dynamic_naming_fields()
         for key, label_widget in self._field_labels.items():
             self._set_required_label(
                 label_widget,
@@ -1050,16 +1116,17 @@ class NamingPanel(QWidget):
         except Exception:
             db = None
         try:
+            from app.services.naming_field_catalog import normalize_required
             from app.services.project_settings_service import (
                 DEFAULT_NAMING_RULES,
                 load_setting,
             )
             defaults = DEFAULT_NAMING_RULES["required"]
             if db is None:
-                return dict(defaults)
+                return normalize_required(defaults)
             rules = load_setting(db, "naming_rules", DEFAULT_NAMING_RULES)
             required = rules.get("required", defaults)
-            return {key: bool(required.get(key, val)) for key, val in defaults.items()}
+            return normalize_required(required, rules.get("custom_fields", []))
         except Exception:
             return {
                 "province": True,
@@ -1077,20 +1144,118 @@ class NamingPanel(QWidget):
         except Exception:
             db = None
         try:
+            from app.services.naming_field_catalog import normalize_naming_components
             from app.services.project_settings_service import (
                 DEFAULT_NAMING_RULES,
                 load_setting,
             )
             defaults = DEFAULT_NAMING_RULES["components"]
             if db is None:
-                return list(defaults)
+                return normalize_naming_components(defaults)
             rules = load_setting(db, "naming_rules", DEFAULT_NAMING_RULES)
             components = rules.get("components", defaults)
-            if not isinstance(components, list):
-                return list(defaults)
-            return [str(c) for c in components if c]
+            return normalize_naming_components(components)
         except Exception:
             return ["province", "site", "station", "species_id", "storage", "date_seg"]
+
+    def _load_custom_fields(self) -> list[dict[str, str]]:
+        try:
+            db = self.ctx.get_db()
+        except Exception:
+            db = None
+        try:
+            from app.services.naming_field_catalog import normalize_custom_fields
+            from app.services.project_settings_service import (
+                DEFAULT_NAMING_RULES,
+                load_setting,
+            )
+            if db is None:
+                return []
+            rules = load_setting(db, "naming_rules", DEFAULT_NAMING_RULES)
+            return normalize_custom_fields(rules.get("custom_fields", []))
+        except Exception:
+            return []
+
+    def _dynamic_naming_values(self) -> dict[str, str]:
+        return {
+            key: edit.text().strip()
+            for key, edit in self._dynamic_naming_edits.items()
+        }
+
+    def naming_extra_field_values(self) -> dict[str, str]:
+        """Return dynamic naming-card fields for raw_json persistence."""
+        return self._dynamic_naming_values()
+
+    def naming_component_values(self) -> dict[str, str]:
+        from app.utils.naming import coalesce_specimen_dates
+
+        collection_date, photo_date = coalesce_specimen_dates(
+            self._collection_date.text().strip(),
+            self._photo_date.text().strip(),
+        )
+        return self._component_values(specimen_date_seg(collection_date, photo_date))
+
+    def _clear_dynamic_naming_grid(self) -> None:
+        while self._dynamic_naming_grid.count():
+            item = self._dynamic_naming_grid.takeAt(0)
+            if item and item.widget():
+                item.widget().deleteLater()
+
+    def _rebuild_dynamic_naming_fields(self) -> None:
+        from app.services.naming_field_catalog import dynamic_panel_keys, field_label
+
+        current_values = self._dynamic_naming_values()
+        custom_fields = self._load_custom_fields()
+        for key in self._dynamic_naming_keys:
+            self._field_labels.pop(key, None)
+            self._field_label_text.pop(key, None)
+        self._dynamic_naming_edits = {}
+        self._dynamic_naming_keys = set()
+        self._clear_dynamic_naming_grid()
+
+        keys = dynamic_panel_keys(
+            self._load_component_rules(),
+            self._naming_rules_required,
+            custom_fields,
+        )
+        self._dynamic_naming_group.setVisible(bool(keys) and self._load_section_vis("dynamic"))
+        if not keys:
+            return
+
+        for idx, key in enumerate(keys):
+            cell = QWidget()
+            cell.setObjectName("CompactField")
+            lay = QVBoxLayout(cell)
+            lay.setContentsMargins(0, 0, 0, 0)
+            lay.setSpacing(3)
+            label_text = field_label(key, custom_fields=custom_fields)
+            lbl = QLabel()
+            lbl.setObjectName("CompactFieldLabel")
+            lbl.setTextFormat(Qt.TextFormat.RichText)
+            self._field_labels[key] = lbl
+            self._field_label_text[key] = label_text
+            self._set_required_label(
+                lbl,
+                label_text,
+                bool(self._naming_rules_required.get(key, False)),
+            )
+            edit = QLineEdit()
+            edit.setFixedHeight(34)
+            edit.setPlaceholderText(f"填写{label_text}")
+            value = (
+                current_values.get(key)
+                or self._external_naming_values.get(key)
+                or self._naming_value_cache.get(key)
+                or ""
+            )
+            if value:
+                edit.setText(value)
+            edit.textChanged.connect(self._update_preview)
+            self._dynamic_naming_edits[key] = edit
+            self._dynamic_naming_keys.add(key)
+            lay.addWidget(lbl)
+            lay.addWidget(edit)
+            self._dynamic_naming_grid.addWidget(cell, idx // 2, idx % 2)
 
     def _safe_uid_segment(self, value: str) -> str:
         text = str(value or "").strip()
@@ -1109,6 +1274,9 @@ class NamingPanel(QWidget):
             "date_seg": date_seg,
         }
         values.update(self._external_naming_values)
+        for key, value in self._dynamic_naming_values().items():
+            if value:
+                values[key] = value
         return values
 
     def _build_configured_uid(self, date_seg: str, seq: int | None = None) -> str:
@@ -1317,35 +1485,24 @@ class NamingPanel(QWidget):
         photo_date = self._photo_date.text().strip()
 
         issues: list[str] = []
+        from app.services.naming_field_catalog import field_label
+        from app.utils.naming import coalesce_specimen_dates
+
         required = self._load_required_rules()
         self._naming_rules_required = required
-        values = {
-            "province": province,
-            "site": site,
-            "station": station,
-            "species_id": species_id,
-            "storage": storage,
-            "collection_date": col_date,
-            "photo_date": photo_date,
-        }
-        labels = {
-            "province": "地区",
-            "site": "样地",
-            "station": "站位",
-            "species_id": "物种缩写",
-            "storage": "保存方式",
-            "collection_date": "采集日期",
-            "photo_date": "拍摄日期",
-        }
+        custom_fields = self._load_custom_fields()
+        col, photo = coalesce_specimen_dates(col_date, photo_date)
+        values = self._component_values(specimen_date_seg(col, photo))
 
         # Only check when the user has started filling in fields
         any_filled = any([province, site, station, species_id, storage, col_date, photo_date])
+        any_filled = any_filled or any(self._dynamic_naming_values().values())
         if not any_filled:
             self._compliance_warn.hide()
             return
 
         missing = [
-            labels[key]
+            field_label(key, custom_fields=custom_fields)
             for key, is_required in required.items()
             if is_required and not values.get(key)
         ]

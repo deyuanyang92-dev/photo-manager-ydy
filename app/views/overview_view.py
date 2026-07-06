@@ -33,8 +33,8 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
-from PyQt6.QtCore import Qt, QUrl, pyqtSignal
-from PyQt6.QtGui import QDesktopServices, QPixmap
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
     QDialog,
@@ -96,6 +96,14 @@ def _load_projects() -> list[dict]:
     from app.services.project_service import list_projects
     path = _resolve_projects_json()
     return list_projects(str(path))
+
+
+def _project_directory(proj: dict) -> str:
+    """Return a project directory in the path syntax usable by this runtime."""
+    from app.utils.path_utils import localize_path
+
+    raw = proj.get("directory") or proj.get("dir") or ""
+    return localize_path(raw) if raw else ""
 
 
 def _save_projects(projects: list[dict]) -> None:
@@ -374,7 +382,7 @@ class _ProjectDetailDialog(QDialog):
 
         layout.addSpacing(6)
 
-        directory = proj.get("directory") or proj.get("dir") or ""
+        directory = _project_directory(proj)
 
         # ── Live stat cards (mirrors app.js stat-row / stat-card) ─────────────
         if directory:
@@ -908,7 +916,8 @@ class OverviewView(BaseView):
                 path = _resolve_projects_json()
                 recent = default_to_recent_real_project(str(path))
                 if recent:
-                    self.ctx.current_project_dir = recent
+                    from app.services.project_service import enter_workspace
+                    enter_workspace(self.ctx, recent)
             except Exception:
                 pass
 
@@ -932,7 +941,7 @@ class OverviewView(BaseView):
                 str(p.get("dateRange", "")),
                 str(p.get("date_range", "")),
                 str(p.get("name", "")),
-                str(p.get("directory", "")),
+                str(_project_directory(p)),
             ])
             if year in haystack:
                 result.append(p)
@@ -1013,7 +1022,7 @@ class OverviewView(BaseView):
             year = str(proj.get("year", ""))
             if year and year not in name_text:
                 name_text = f"{name_text}  {year}"
-            directory = proj.get("directory") or proj.get("dir") or ""
+            directory = _project_directory(proj)
             if directory and not proj.get("isDemo", False):
                 try:
                     from app.services.project_service import get_project_summary
@@ -1032,7 +1041,7 @@ class OverviewView(BaseView):
             self._table.setItem(row, 0, name_item)
 
             # 磁盘目录  — mono, mirrors tdDir class "mono project-dir-cell"
-            directory = proj.get("directory") or proj.get("dir") or "—"
+            directory = _project_directory(proj) or "—"
             dir_item = QTableWidgetItem(directory)
             dir_item.setToolTip(directory)
             dir_item.setFont(self._mono_font())
@@ -1082,7 +1091,7 @@ class OverviewView(BaseView):
             return
         self._table.selectRow(row)
 
-        directory = proj.get("directory") or proj.get("dir") or ""
+        directory = _project_directory(proj)
         menu = QMenu(self._table)
 
         enter_action = menu.addAction("进入工作区")
@@ -1112,15 +1121,23 @@ class OverviewView(BaseView):
         menu.exec(self._table.viewport().mapToGlobal(pos))
 
     def _open_project_directory(self, directory: str) -> None:
-        path = Path(directory) if directory else None
+        from app.utils.file_manager import local_path, open_directory
+
+        display_path = local_path(directory) if directory else ""
+        path = Path(display_path) if display_path else None
         if path is None or not path.exists():
             QMessageBox.warning(
                 self,
                 "打开文件夹",
-                f"目录不存在或磁盘未连接：\n{directory or '—'}",
+                f"目录不存在或磁盘未连接：\n{display_path or directory or '—'}",
             )
             return
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+        if not open_directory(str(path)):
+            QMessageBox.warning(
+                self,
+                "打开文件夹",
+                f"无法打开文件夹：\n{path}",
+            )
 
     def _make_action_cell(self, proj: dict) -> QWidget:
         """Build the 操作 cell with 「进入工作区」 and 「详情」 buttons."""
@@ -1170,7 +1187,7 @@ class OverviewView(BaseView):
         Mirrors app.js enterWorkspaceForProject(): update ctx.current_project_dir
         then emit a signal so MainWindow can navigate_to("workbench").
         """
-        directory = proj.get("directory") or proj.get("dir") or ""
+        directory = _project_directory(proj)
         if not directory:
             QMessageBox.information(
                 self, "进入工作区", "该项目没有关联磁盘目录，请先打开或新建一个有目录的项目。"
@@ -1181,14 +1198,23 @@ class OverviewView(BaseView):
         # workspace and never walks to an unrelated parent folder.
         from app.services.project_service import enter_workspace
         from app.services.project_paths import ProjectUnavailableError
+        import sqlite3
         root = proj.get("root") or None
         try:
-            enter_workspace(self.ctx, directory, root=root)
+            directory = enter_workspace(self.ctx, directory, root=root)
         except ProjectUnavailableError:
             QMessageBox.warning(
                 self, "盘未连接",
                 f"该项目所在磁盘未挂载或路径不可用：\n{directory}\n\n"
                 "请接回数据盘后再进入。数据仍在盘上，没有丢失。",
+            )
+            return
+        except sqlite3.Error as exc:
+            QMessageBox.warning(
+                self,
+                "打开项目失败",
+                f"项目数据库无法打开：\n{exc}\n\n"
+                "请先关闭其它正在使用该项目的窗口后重试。",
             )
             return
         # Emit signal — MainWindow wires this to navigate_to("workbench")
@@ -1229,7 +1255,12 @@ class OverviewView(BaseView):
             # Activate new project in context and navigate to workbench
             main_win = self.window()
             if hasattr(main_win, "ctx"):
-                main_win.ctx.current_project_dir = proj.get("directory", "")
+                from app.services.project_service import enter_workspace
+                enter_workspace(
+                    main_win.ctx,
+                    proj.get("directory", ""),
+                    projects_json_path=default_user_projects_json_path(),
+                )
             if hasattr(main_win, "navigate_to"):
                 main_win.navigate_to("workbench")
             if hasattr(main_win, "refresh_context_bar"):
@@ -1261,7 +1292,12 @@ class OverviewView(BaseView):
             # Activate project and navigate to workbench
             main_win = self.window()
             if hasattr(main_win, "ctx"):
-                main_win.ctx.current_project_dir = proj.get("directory", "")
+                from app.services.project_service import enter_workspace
+                enter_workspace(
+                    main_win.ctx,
+                    proj.get("directory", ""),
+                    projects_json_path=default_user_projects_json_path(),
+                )
             if hasattr(main_win, "navigate_to"):
                 main_win.navigate_to("workbench")
             if hasattr(main_win, "refresh_context_bar"):

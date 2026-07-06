@@ -1,13 +1,20 @@
 param(
     [string]$Python = "py",
     [string]$Name = "SpecimenPhotoWorkbench",
-    [string]$Version = "v0.4"
+    [string]$Version = ""
 )
 
 $ErrorActionPreference = "Stop"
 
 $Repo = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $Repo
+
+if ([string]::IsNullOrWhiteSpace($Version)) {
+    $Version = (& $Python -c "from app.config.version import APP_VERSION; print(APP_VERSION)").Trim()
+}
+if ([string]::IsNullOrWhiteSpace($Version)) {
+    throw "Could not resolve application version"
+}
 
 & $Python -m pip install -r requirements.txt
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

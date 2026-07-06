@@ -9,6 +9,8 @@ import sqlite3
 from pathlib import Path
 from typing import Optional
 
+from app.utils.path_utils import normalize_path
+
 # Cache open connections by resolved project_dir path
 _db_cache: dict[str, sqlite3.Connection] = {}
 
@@ -23,6 +25,27 @@ def is_database_locked(exc: BaseException) -> bool:
         or "database table is locked" in str(exc).lower()
         or "database is busy" in str(exc).lower()
     )
+
+
+def _configure_connection(conn: sqlite3.Connection) -> None:
+    """Apply common SQLite pragmas, falling back when WAL is unavailable.
+
+    WAL is preferred for the workbench because it keeps reads responsive while
+    writes happen. Some Windows/WSL mounted drives can still reject the WAL
+    switch with ``disk I/O error`` even though the database itself is readable
+    and writable. In that case, keep the workspace usable with SQLite's default
+    rollback journal instead of failing project entry.
+    """
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=8000")
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+    except sqlite3.OperationalError as exc:
+        if is_database_locked(exc):
+            raise
+        conn.execute("PRAGMA journal_mode=DELETE")
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.commit()
 # darwin_core 视图：原 12 术语逐字复刻 db-utils.js:75-97（仅加 s. 前缀消歧），
 # 在其后**附加**对齐 Darwin Core / Humboldt / OBIS 的标准术语——采集记录(collection_records)
 # 按四键(province/site/station/collection_date) LEFT JOIN 进来，外加导出期常量。
@@ -97,7 +120,7 @@ FROM specimens s
 LEFT JOIN collection_records cr
   ON s.province = cr.province
  AND s.site = cr.site
- AND s.station = cr.station
+ AND COALESCE(s.station, '') = COALESCE(cr.station, '')
  AND s.collection_date = cr.collection_date;
 """
 
@@ -130,7 +153,7 @@ def open_project_db(project_dir: str, *, create: bool = False) -> sqlite3.Connec
         require_project_root,
     )
 
-    resolved = str(Path(project_dir).resolve())
+    resolved = normalize_path(project_dir)
     if resolved in _db_cache:
         return _db_cache[resolved]
 
@@ -151,11 +174,7 @@ def open_project_db(project_dir: str, *, create: bool = False) -> sqlite3.Connec
     # cache) — sharing one Connection across threads corrupts cursors even
     # under WAL. (Collab already self-stores; no worker currently hits this.)
     conn = sqlite3.connect(str(db_path), timeout=8.0, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout=8000")
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    conn.commit()
+    _configure_connection(conn)
 
     ensure_schema(conn)
     _db_cache[resolved] = conn
@@ -171,7 +190,7 @@ def open_project_db_private(project_dir: str) -> sqlite3.Connection:
     """
     from app.services.project_paths import ProjectUnavailableError
 
-    resolved = str(Path(project_dir).resolve())
+    resolved = normalize_path(project_dir)
     db_path = _project_db_path(resolved)
     if not db_path.exists():
         raise ProjectUnavailableError(
@@ -179,17 +198,13 @@ def open_project_db_private(project_dir: str) -> sqlite3.Connection:
         )
 
     conn = sqlite3.connect(str(db_path), timeout=8.0)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout=8000")
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    conn.commit()
+    _configure_connection(conn)
     return conn
 
 
 def get_db(project_dir: str) -> sqlite3.Connection:
     """Return cached connection; opens if not yet open."""
-    resolved = str(Path(project_dir).resolve())
+    resolved = normalize_path(project_dir)
     if resolved not in _db_cache:
         return open_project_db(project_dir)
     return _db_cache[resolved]
@@ -278,7 +293,7 @@ def close_all() -> None:
 
 def close_project_db(project_dir: str) -> None:
     """Close and evict a single project's connection."""
-    resolved = str(Path(project_dir).resolve())
+    resolved = normalize_path(project_dir)
     conn = _db_cache.pop(resolved, None)
     if conn:
         try:

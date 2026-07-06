@@ -11,6 +11,7 @@ at the right edge of the WorkbenchView.  Width fixed at 380 px.
 from __future__ import annotations
 
 import socket
+from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
@@ -35,11 +36,12 @@ from PyQt6.QtWidgets import (
 
 from app.config.icons import icon
 from app.models.activity_log import ActivityEntry
+from app.services.collab_status import build_collab_status
 from app.widgets.activity_feed_widget import ActivityFeedWidget
 
 if TYPE_CHECKING:
     from app.app_context import AppContext
-    from app.services.collab_service import CollabService
+    from app.services.collab_service import CollabService, PeerInfo, TaskRecord
 
 # ── Status display helpers (shared with CollabManagerDialog) ──────────────────
 
@@ -83,6 +85,15 @@ def _ro_item(text: str) -> QTableWidgetItem:
     item = QTableWidgetItem(text)
     item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
     return item
+
+
+def _project_display(project: Optional[str]) -> str:
+    raw = str(project or "").strip()
+    if not raw:
+        return ""
+    normalised = raw.replace("\\", "/").rstrip("/")
+    name = Path(normalised).name
+    return name or raw
 
 
 # ── Panel ──────────────────────────────────────────────────────────────────────
@@ -141,6 +152,10 @@ class CollabPanel(QWidget):
         health_row.addWidget(self._health_text, 1)
         root.addLayout(health_row)
 
+        self._project_label = QLabel("当前项目：—")
+        self._project_label.setObjectName("MutedSmall")
+        root.addWidget(self._project_label)
+
         # Action buttons
         action_row = QHBoxLayout()
         self._diagnose_btn = QPushButton("诊断")
@@ -182,11 +197,23 @@ class CollabPanel(QWidget):
         dev_lay.setContentsMargins(0, 0, 0, 0)
         dev_lay.setSpacing(6)
 
-        self._device_table = QTableWidget(0, 3)
-        self._device_table.setHorizontalHeaderLabels(["主机名", "地址", "延迟"])
-        self._device_table.horizontalHeader().setStretchLastSection(True)
+        self._device_table = QTableWidget(0, 5)
+        self._device_table.setHorizontalHeaderLabels(["主机名", "项目", "照片", "地址", "延迟"])
+        self._device_table.horizontalHeader().setStretchLastSection(False)
         self._device_table.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.ResizeMode.Stretch
+        )
+        self._device_table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.ResizeToContents
+        )
+        self._device_table.horizontalHeader().setSectionResizeMode(
+            2, QHeaderView.ResizeMode.ResizeToContents
+        )
+        self._device_table.horizontalHeader().setSectionResizeMode(
+            3, QHeaderView.ResizeMode.ResizeToContents
+        )
+        self._device_table.horizontalHeader().setSectionResizeMode(
+            4, QHeaderView.ResizeMode.ResizeToContents
         )
         self._device_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._device_table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
@@ -350,17 +377,17 @@ class CollabPanel(QWidget):
         if svc is None:
             self._health_dot.setStyleSheet("color: #9e9e9e;")
             self._health_text.setText("协作服务未启动")
+            self._project_label.setText("当前项目：—")
             return
+        self._project_label.setText(f"当前项目：{self._local_project_display() or '—'}")
+        peers = svc.peers()
+        status = build_collab_status(svc, peers)
         health = svc.overall_health()
         colour = _HEALTH_COLOR.get(health, "#9e9e9e")
+        if status.state in {"not_started", "missing_group"}:
+            colour = "#9e9e9e"
         self._health_dot.setStyleSheet(f"color: {colour}; font-size: 16px;")
-        n_peers = len(svc.peers())
-        if n_peers:
-            self._health_text.setText(f"协作正常 · {n_peers} 台在线")
-        elif svc.is_running():
-            self._health_text.setText("已启动 · 等待队友")
-        else:
-            self._health_text.setText("未启动")
+        self._health_text.setText(status.plain_status)
 
     def _refresh_devices(self) -> None:
         svc = self._svc
@@ -371,17 +398,29 @@ class CollabPanel(QWidget):
         self._device_table.setRowCount(len(peers))
         for row, peer in enumerate(peers):
             self._device_table.setItem(row, 0, _ro_item(peer.hostname or peer.ip))
+            self._device_table.setItem(row, 1, _ro_item(_project_display(peer.project_name) or "—"))
+            media_label = self._peer_media_sync_label(peer)
+            media_item = _ro_item(media_label)
+            if media_label == "仅任务":
+                media_item.setToolTip("同组但项目同步码不同；到协作中心绑定后才能同步照片。")
+            elif media_label == "可同步":
+                media_item.setToolTip("同组且项目同步码相同，可以同步照片/TIF/ZIP。")
+            self._device_table.setItem(row, 2, media_item)
             addr = f"{peer.ip}:{peer.port}" + (" ✎" if peer.manual else "")
-            self._device_table.setItem(row, 1, _ro_item(addr))
+            self._device_table.setItem(row, 3, _ro_item(addr))
             lat = f"{peer.latency_ms:.0f} ms" if peer.latency_ms is not None else "—"
-            self._device_table.setItem(row, 2, _ro_item(lat))
+            self._device_table.setItem(row, 4, _ro_item(lat))
 
     def _refresh_tasks(self) -> None:
         svc = self._svc
         if svc is None:
             return
-        tasks = sorted(svc.store.list_tasks(), key=lambda t: t.updated_at, reverse=True)
-        self._task_title.setText(f"任务清单 ({len(tasks)})")
+        all_tasks = sorted(svc.store.list_tasks(), key=lambda t: t.updated_at, reverse=True)
+        tasks = self._visible_project_tasks(all_tasks)
+        scope = "当前项目任务" if self._local_project_display() else "任务清单"
+        self._task_title.setText(f"{scope} ({len(tasks)})")
+        if hasattr(self._task_table, "clearSpans"):
+            self._task_table.clearSpans()
         self._task_table.setRowCount(len(tasks))
         for row, task in enumerate(tasks):
             self._task_table.setItem(row, 0, _ro_item(task.uid))
@@ -403,7 +442,7 @@ class CollabPanel(QWidget):
 
         if not tasks:
             self._task_table.setRowCount(1)
-            item = QTableWidgetItem("暂无编号任务。创建编号后会出现在这里。")
+            item = QTableWidgetItem("当前项目暂无协作任务。")
             item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self._task_table.setItem(0, 0, item)
             self._task_table.setSpan(0, 0, 1, 5)
@@ -414,6 +453,37 @@ class CollabPanel(QWidget):
             return
         entries = svc.activity_log.recent(50)
         self._activity_feed.set_entries(entries)
+
+    def _local_project_display(self) -> str:
+        svc_project = getattr(self._svc, "project_name", "") if self._svc else ""
+        raw = str(
+            svc_project
+            or getattr(self.ctx, "current_project_dir", "")
+            or getattr(getattr(self.ctx, "settings", None), "last_project_dir", "")
+            or ""
+        )
+        return _project_display(raw)
+
+    def _visible_project_tasks(self, tasks: list["TaskRecord"]) -> list["TaskRecord"]:
+        local_project = self._local_project_display()
+        if not local_project:
+            return tasks
+        visible: list["TaskRecord"] = []
+        for task in tasks:
+            task_project = _project_display(getattr(task, "project_name", ""))
+            if not task_project or task_project == local_project:
+                visible.append(task)
+        return visible
+
+    def _peer_media_sync_label(self, peer: "PeerInfo") -> str:
+        svc = self._svc
+        if svc is None:
+            return "—"
+        local_project_id = str(getattr(svc, "project_id", "") or "")
+        peer_project_id = str(getattr(peer, "project_id", "") or "")
+        if local_project_id and peer_project_id == local_project_id:
+            return "可同步"
+        return "仅任务"
 
     def _on_server_ready(self, port: int) -> None:
         svc = self._svc
@@ -730,8 +800,8 @@ class CollabPanel(QWidget):
         self._refresh_activity()
         self._share_label.setText(f"分享: {svc.local_address()}" if svc.is_running() else "分享: —")
         self._group_code_label.setText(svc.group_code or "（未设置）")
-        # Show setup wizard button if not configured
-        self._setup_btn.setVisible(not svc.group_code or not svc.is_running())
+        status = build_collab_status(svc, svc.peers())
+        self._setup_btn.setVisible(status.state in {"not_started", "missing_group"})
 
 
 # ── Late import for logging ───────────────────────────────────────────────────

@@ -113,6 +113,9 @@ def render_jobs_to_pages(
         tmpl = job.get("template") or {}
         paper_type = str(job.get("paperType") or "label")
         w_mm, h_mm = _page_size(job)
+        job_cut_marks = (
+            bool(job.get("cutMarks")) if "cutMarks" in job else bool(cut_marks)
+        )
         placements = plan_label_pages(
             items, dims, paper_type, job.get("paper"), job.get("gridOpts") or {}
         )
@@ -145,7 +148,7 @@ def render_jobs_to_pages(
                 )
                 if (
                     paper_type in {"a4", "a5"}
-                    and cut_marks
+                    and job_cut_marks
                     and draw_crop_marks is not None
                 ):
                     draw_crop_marks(

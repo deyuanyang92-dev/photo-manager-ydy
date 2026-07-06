@@ -235,6 +235,7 @@ class TestOrganiseCollisionGuard:
                     tiff_path=str(tiff),
                     project_dir=str(tmp_path),
                     delete_jpg=False,
+                    method="adaptive",
                 )
 
         with zipfile.ZipFile(result.zip_path) as zf:

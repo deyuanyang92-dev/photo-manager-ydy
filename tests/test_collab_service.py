@@ -22,14 +22,17 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from app.db import db_manager
 from app.services.collab_service import (
     CollabService,
+    PeerInfo,
     TaskRecord,
     TaskStatus,
     TaskStore,
     _now_iso,
     is_valid_transition,
 )
+from app.services.project_identity_service import project_sync_code, read_project_identity
 
 
 # ── Mark for network-dependent tests ─────────────────────────────────────────
@@ -299,7 +302,38 @@ class TestCollabServiceOffline:
         assert ok
         assert svc.store.exists("NET001")
 
-    def test_add_manual_peer(self):
+    def test_create_task_rolls_back_local_and_remote_on_late_409(self):
+        """Local-first claim rolls back peer claims when a later peer returns 409."""
+        svc = self._make_service()
+        svc.set_group_code("G")
+        from app.services.collab_service import PeerInfo
+
+        svc._peers["10.0.0.2:5050"] = PeerInfo(ip="10.0.0.2", port=5050, group_code="G")
+        svc._peers["10.0.0.3:5050"] = PeerInfo(ip="10.0.0.3", port=5050, group_code="G")
+
+        release_calls: list[str] = []
+
+        def fake_post(url, **kwargs):
+            mock = MagicMock()
+            if "release" in url:
+                release_calls.append(url)
+                mock.status_code = 200
+                return mock
+            if "10.0.0.2" in url:
+                mock.status_code = 201
+                mock.json.return_value = {}
+                return mock
+            mock.status_code = 409
+            mock.json.return_value = {"detail": "UID already exists"}
+            return mock
+
+        with patch("httpx.post", side_effect=fake_post):
+            ok, msg = svc.create_task("ROLL001")
+
+        assert not ok
+        assert "409" in msg
+        assert not svc.store.exists("ROLL001")
+        assert release_calls
         svc = self._make_service()
         # Patch _fetch_peer_info to avoid real HTTP
         svc._fetch_peer_info = MagicMock()
@@ -336,8 +370,32 @@ class TestCollabServiceOffline:
         info = svc._node_info()
         assert "hostname" in info
         assert "projectName" in info
+        assert "projectId" in info
         assert "lanIp" in info
         assert "port" in info
+
+    def test_apply_project_sync_code_updates_project_identity(self, tmp_path):
+        project = tmp_path / "proj"
+        project.mkdir()
+        db_manager.open_project_db(str(project), create=True)
+        db_manager.close_project_db(str(project))
+
+        svc = self._make_service()
+        svc.set_project_dir(str(project))
+        original = svc.project_id
+        target = "b" * 32
+
+        svc.apply_project_sync_code(project_sync_code(target, project_name="Shared"))
+
+        db = db_manager.open_project_db_private(str(project))
+        try:
+            stored = read_project_identity(db)
+        finally:
+            db.close()
+        assert original and original != target
+        assert svc.project_id == target
+        assert svc._node_info()["projectId"] == target
+        assert stored == target
 
     def test_local_address_format(self):
         svc = self._make_service()
@@ -586,11 +644,39 @@ class TestCollabViewSmoke:
 
         view = CollabView(ctx)
         assert view.view_id == "collab"
-        assert view.nav_title == "项目汇总"
-        assert view.nav_icon == "📋"
+        assert view.nav_title == "协作"
+        assert view.nav_icon == "👥"
         view.close()
 
-    def test_view_with_service_shows_no_peers(self):
+    def test_share_address_uses_base_view_ctx(self, monkeypatch):
+        from app.views import collab_view
+        from app.views.collab_view import CollabView
+
+        ctx = MagicMock()
+        ctx.collab_service = None
+        created = {}
+
+        class _FakeShareDialog:
+            def __init__(self, dialog_ctx, parent):
+                created["ctx"] = dialog_ctx
+                created["parent"] = parent
+                self.exec_called = False
+
+            def exec(self):
+                self.exec_called = True
+                created["exec_called"] = True
+
+        monkeypatch.setattr(collab_view, "_CollabShareDialog", _FakeShareDialog)
+        view = CollabView(ctx)
+
+        view._on_share_addr()
+
+        assert created["ctx"] is view.ctx
+        assert created["parent"] is view
+        assert created["exec_called"] is True
+        view.close()
+
+    def test_view_with_service_not_running_shows_not_started(self):
         from app.views.collab_view import CollabView
 
         ctx = MagicMock()
@@ -599,8 +685,41 @@ class TestCollabViewSmoke:
 
         view = CollabView(ctx)
         view.on_activate()
-        # Status badge should say "未发现" since no peers
-        assert "未发现" in view._status_badge.text()
+        assert "未启动" in view._status_badge.text()
+        assert "协作未启动" in view._scope_label.text()
+        view.close()
+        svc.stop()
+
+    def test_view_running_group_without_peers_shows_no_peers(self):
+        from app.views.collab_view import CollabView
+
+        ctx = MagicMock()
+        svc = CollabService()
+        svc._running = True
+        svc.set_group_code("TEAM-1")
+        ctx.collab_service = svc
+
+        view = CollabView(ctx)
+        view.on_activate()
+
+        assert "未发现其他设备" in view._status_badge.text()
+        assert "TEAM-1" in view._scope_label.text()
+        view.close()
+        svc.stop()
+
+    def test_view_running_without_group_shows_missing_group_code(self):
+        from app.views.collab_view import CollabView
+
+        ctx = MagicMock()
+        svc = CollabService()
+        svc._running = True
+        ctx.collab_service = svc
+
+        view = CollabView(ctx)
+        view.on_activate()
+
+        assert "未设置协作组码" in view._status_badge.text()
+        assert "先启动/加入协作组" in view._scope_label.text()
         view.close()
         svc.stop()
 
@@ -637,6 +756,108 @@ class TestCollabViewSmoke:
         view.close()
         svc.stop()
 
+    def test_task_table_shows_project_column_and_filter(self):
+        from app.views.collab_view import CollabView
+
+        ctx = MagicMock()
+        svc = CollabService()
+        svc.store.create("P1-UID", assignee="Bob", project_name="/data/Project-A")
+        svc.store.create("P2-UID", assignee="Ada", project_name="/data/Project-B")
+        ctx.collab_service = svc
+
+        view = CollabView(ctx)
+        view.on_activate()
+
+        assert view._task_table.horizontalHeaderItem(1).text() == "项目"
+        idx = view._project_combo.findData("Project-A")
+        assert idx >= 0
+        view._project_combo.setCurrentIndex(idx)
+
+        assert view._task_table.rowCount() == 1
+        assert view._task_table.item(0, 0).text() == "P1-UID"
+        assert view._task_table.item(0, 1).text() == "Project-A"
+        view.close()
+        svc.stop()
+
+    def test_device_table_shows_peer_project_and_group(self):
+        from app.views.collab_view import CollabView
+
+        ctx = MagicMock()
+        svc = CollabService()
+        svc.set_group_code("TEAM-1")
+        svc._project_id = "PROJECT-B"
+        svc._peers["192.168.1.20:5050"] = PeerInfo(
+            ip="192.168.1.20",
+            port=5050,
+            hostname="shoot-pc",
+            project_name="/work/Project-B",
+            project_id="PROJECT-B",
+            group_code="TEAM-1",
+        )
+        ctx.collab_service = svc
+
+        view = CollabView(ctx)
+        view.on_activate()
+
+        assert view._device_list.item(0, 0).text() == "shoot-pc"
+        assert view._device_list.item(0, 1).text() == "Project-B"
+        assert view._device_list.item(0, 2).text() == "TEAM-1"
+        assert view._device_list.item(0, 3).text() == "可同步"
+        view.close()
+        svc.stop()
+
+    def test_next_step_guides_photo_binding_when_only_tasks_ready(self):
+        from app.views.collab_view import CollabView
+
+        ctx = MagicMock()
+        svc = CollabService()
+        svc._running = True
+        svc.set_group_code("TEAM-1")
+        svc._project_id = "LOCAL-PROJECT"
+        svc._peers["192.168.1.20:5050"] = PeerInfo(
+            ip="192.168.1.20",
+            port=5050,
+            hostname="shoot-pc",
+            project_name="/work/Project-B",
+            project_id="OTHER-PROJECT",
+            group_code="TEAM-1",
+        )
+        ctx.collab_service = svc
+
+        view = CollabView(ctx)
+        view.on_activate()
+
+        assert view._next_step_label.text() == "任务已可协作；照片还不能同步"
+        assert "绑定同一项目" in view._next_step_detail.text()
+        view.close()
+        svc.stop()
+
+    def test_next_step_reports_photo_sync_ready(self):
+        from app.views.collab_view import CollabView
+
+        ctx = MagicMock()
+        svc = CollabService()
+        svc._running = True
+        svc.set_group_code("TEAM-1")
+        svc._project_id = "PROJECT-B"
+        svc._peers["192.168.1.20:5050"] = PeerInfo(
+            ip="192.168.1.20",
+            port=5050,
+            hostname="shoot-pc",
+            project_name="/work/Project-B",
+            project_id="PROJECT-B",
+            group_code="TEAM-1",
+        )
+        ctx.collab_service = svc
+
+        view = CollabView(ctx)
+        view.on_activate()
+
+        assert view._next_step_label.text() == "照片同步已就绪"
+        assert "同步当前编号" in view._next_step_detail.text()
+        view.close()
+        svc.stop()
+
     def test_debug_drawer_toggle(self):
         from app.views.collab_view import CollabView
 
@@ -652,6 +873,61 @@ class TestCollabViewSmoke:
         view._debug_btn.setChecked(False)
         assert view._debug_drawer.isHidden()
         view.close()
+
+    def test_workbench_collab_panel_filters_current_project_tasks(self):
+        from app.widgets.collab_panel import CollabPanel
+
+        ctx = MagicMock()
+        svc = CollabService()
+        svc._project_name = "/data/Project-A"
+        svc.store.create("A-UID", project_name="/data/Project-A")
+        svc.store.create("B-UID", project_name="/data/Project-B")
+        svc.store.create("LEGACY-UID")
+        ctx.collab_service = svc
+        ctx.current_project_dir = "/data/Project-A"
+        ctx.settings = MagicMock()
+        ctx.settings.last_project_dir = "/data/Project-A"
+
+        panel = CollabPanel(ctx)
+        panel.refresh()
+
+        assert panel._task_title.text().startswith("当前项目任务 (2)")
+        uids = {
+            panel._task_table.item(row, 0).text()
+            for row in range(panel._task_table.rowCount())
+        }
+        assert uids == {"A-UID", "LEGACY-UID"}
+        panel.close()
+        svc.stop()
+
+    def test_workbench_collab_panel_uses_shared_status(self):
+        from app.widgets.collab_panel import CollabPanel
+
+        ctx = MagicMock()
+        svc = CollabService()
+        ctx.collab_service = svc
+        ctx.current_project_dir = "/data/Project-A"
+        ctx.settings = MagicMock()
+        ctx.settings.last_project_dir = "/data/Project-A"
+
+        panel = CollabPanel(ctx)
+        try:
+            panel.refresh()
+            assert panel._health_text.text() == "协作未启动"
+            assert not panel._setup_btn.isHidden()
+
+            svc._running = True
+            panel.refresh()
+            assert panel._health_text.text() == "未设置协作组码"
+            assert not panel._setup_btn.isHidden()
+
+            svc.set_group_code("TEAM-1")
+            panel.refresh()
+            assert panel._health_text.text() == "未发现其他设备"
+            assert panel._setup_btn.isHidden()
+        finally:
+            panel.close()
+            svc.stop()
 
 
 # ── TaskRecord serialization ──────────────────────────────────────────────────
@@ -769,16 +1045,31 @@ class TestSidebarCollabStrip:
     def test_update_with_none_shows_dashes(self):
         sb = self._make_sidebar()
         sb.update_collab_status(None)
-        assert sb._collab_addr.text() == "分享地址: —"
+        assert sb._collab_addr.text() == "连接地址: —"
         assert sb._collab_members.text() == "成员: 0"
+        assert "协作服务未启动" in sb._collab_sync.text()
         sb.close()
 
-    def test_update_with_service_shows_addr(self):
+    def test_update_with_service_not_running_shows_status(self):
         sb = self._make_sidebar()
         svc = CollabService()
         sb.update_collab_status(svc)
         # Should contain ":" for ip:port
         assert ":" in sb._collab_addr.text()
+        assert "协作未启动" in sb._collab_sync.text()
+        assert not sb._collab_sync_selected_btn.isEnabled()
+        assert not sb._collab_sync_project_btn.isEnabled()
+        sb.close()
+        svc.stop()
+
+    def test_update_running_without_group_shows_status(self):
+        sb = self._make_sidebar()
+        svc = CollabService()
+        svc._running = True
+        sb.update_collab_status(svc)
+        assert "未设置协作组码" in sb._collab_sync.text()
+        assert not sb._collab_sync_selected_btn.isEnabled()
+        assert not sb._collab_sync_project_btn.isEnabled()
         sb.close()
         svc.stop()
 
@@ -789,6 +1080,27 @@ class TestSidebarCollabStrip:
         svc.store.create("SB-TEST-002")
         sb.update_collab_status(svc)
         assert "2" in sb._collab_sync.text()
+        assert "协作未启动" in sb._collab_sync.text()
+        sb.close()
+        svc.stop()
+
+    def test_update_same_project_peer_enables_sync(self):
+        sb = self._make_sidebar()
+        svc = CollabService()
+        svc._running = True
+        svc.set_group_code("TEAM-1")
+        svc._project_id = "P1"
+        svc._peers["10.0.0.2:5050"] = PeerInfo(
+            ip="10.0.0.2",
+            port=5050,
+            group_code="TEAM-1",
+            project_id="P1",
+        )
+        sb.update_collab_status(svc)
+        assert "1 台在线" in sb._collab_sync.text()
+        assert "可同步设备: 1" in sb._collab_sync.text()
+        assert sb._collab_sync_selected_btn.isEnabled()
+        assert sb._collab_sync_project_btn.isEnabled()
         sb.close()
         svc.stop()
 

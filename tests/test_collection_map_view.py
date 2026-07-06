@@ -172,6 +172,7 @@ class TestAddProject:
 
     def test_add_project_persists_selects_no_navigate(self, tmp_path, monkeypatch):
         new_dir = str(tmp_path / "proj_x")
+        (tmp_path / "proj_x").mkdir()
         new_proj = {"name": "项目X", "directory": new_dir}
 
         class _FakeDialog:

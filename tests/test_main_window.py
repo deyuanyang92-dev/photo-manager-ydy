@@ -22,7 +22,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 
-from PyQt6.QtWidgets import QApplication, QMenu, QPushButton
+from PyQt6.QtWidgets import QApplication, QMenu, QPushButton, QSizePolicy, QToolButton
 
 from app.app_context import AppContext
 from app.config.i18n import set_language
@@ -128,9 +128,19 @@ def test_default_nav_pins_keep_topbar_focused():
     visible = [btn.property("view_id") for btn in win._nav_buttons if not btn.isHidden()]
     assert visible == [
         "workbench",
+        "collab",
         "project_tree",
         "collection_records",
     ]
+
+
+def test_nav_segments_keep_content_width():
+    win = _fresh_window()
+    for cls in ALL_VIEWS:
+        win.register_view(cls)
+
+    for btn in win._nav_buttons:
+        assert btn.sizePolicy().horizontalPolicy() == QSizePolicy.Policy.Fixed
 
 
 def test_function_menu_groups_all_registered_views():
@@ -151,6 +161,7 @@ def test_function_menu_groups_all_registered_views():
     project_menu = win._nav_group_menus["project"]
     assert [a.text() for a in project_menu.actions()] == [
         "照片工作区",
+        "协作",
         "最近使用",
         "项目树",
         "项目汇总",
@@ -163,6 +174,32 @@ def test_function_menu_groups_all_registered_views():
     ]
     system_menu = win._nav_group_menus["system"]
     assert "软件更新" in [a.text() for a in system_menu.actions()]
+    assert isinstance(win._update_btn, QToolButton)
+    assert win._update_btn.text() == "更新"
+    assert win._update_btn.accessibleName() == "软件更新"
+    assert win._update_btn.toolTip() == "检查并安装最新版本"
+
+
+def test_collab_status_bar_uses_shared_status():
+    from app.services.collab_service import CollabService
+
+    win = _fresh_window()
+    svc = CollabService()
+    win.ctx.collab_service = svc
+    try:
+        win._refresh_collab_status()
+        assert "协作未启动" in win._status_collab.text()
+
+        svc._running = True
+        win._refresh_collab_status()
+        assert "未设置协作组码" in win._status_collab.text()
+
+        svc.set_group_code("TEAM-1")
+        win._refresh_collab_status()
+        assert "未发现其他设备" in win._status_collab.text()
+    finally:
+        svc.stop()
+        win.close()
 
 
 def test_workspace_actions_are_integrated_into_breadcrumb():
@@ -229,7 +266,8 @@ def test_screenshot_tool_is_visible_by_default():
     for cls in ALL_VIEWS:
         win.register_view(cls)
 
-    assert not hasattr(win, "_shot_btn")
+    assert isinstance(win._shot_btn, QToolButton)
+    assert not win._shot_btn.isHidden()
     assert win.screenshot_tool_enabled()
     assert win._shot_menu.menuAction().isVisible()
     assert win._screenshot_shortcut.isEnabled()
@@ -241,7 +279,8 @@ def test_screenshot_tool_can_be_disabled_by_setting():
     for cls in ALL_VIEWS:
         win.register_view(cls)
 
-    assert not hasattr(win, "_shot_btn")
+    assert isinstance(win._shot_btn, QToolButton)
+    assert win._shot_btn.isHidden()
     assert not win.screenshot_tool_enabled()
     assert not win._shot_menu.menuAction().isVisible()
     assert not win._screenshot_shortcut.isEnabled()
@@ -261,6 +300,7 @@ def test_legacy_hidden_screenshot_setting_is_migrated_visible():
     assert win.screenshot_tool_enabled()
     assert ctx.settings._qs.value("ui/screenshot_tool_enabled") == "true"
     assert ctx.settings._qs.value("ui/screenshot_tool_default_migrated") == "true"
+    assert isinstance(win._shot_btn, QToolButton)
     assert win._shot_menu.menuAction().isVisible()
 
 
@@ -269,7 +309,8 @@ def test_screenshot_tool_can_be_enabled_in_tools_menu():
     for cls in ALL_VIEWS:
         win.register_view(cls)
 
-    assert not hasattr(win, "_shot_btn")
+    assert isinstance(win._shot_btn, QToolButton)
+    assert not win._shot_btn.isHidden()
     assert win.screenshot_tool_enabled()
     assert win._shot_menu.title() == "截图"
     assert win._shot_menu.menuAction().isVisible()
@@ -296,6 +337,7 @@ def test_rebind_screenshot_shortcut_updates_tooltip():
     win = _fresh_window()
     win.rebind_screenshot_shortcut("Ctrl+Alt+S")
     assert "Ctrl+Alt+S" in win._shot_actions["region"].text()
+    assert "Ctrl+Alt+S" in win._shot_btn.toolTip()
 
 
 def test_retranslate_ui_updates_shell_and_grouped_menu():
@@ -446,3 +488,18 @@ def test_startup_does_not_import_heavy_libs():
     r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     assert "OK" in r.stdout
+
+
+def test_startup_stderr_logging_ignores_broken_pipe(monkeypatch):
+    import main
+
+    class _BrokenStderr:
+        def write(self, _text):
+            raise BrokenPipeError(32, "Broken pipe")
+
+        def flush(self):
+            pass
+
+    monkeypatch.setattr(main.sys, "stderr", _BrokenStderr())
+
+    main._safe_stderr_print("启动窗口目标屏幕: test")

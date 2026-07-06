@@ -27,6 +27,7 @@ from app.services.grouping_service import (
     save_grouping,
     without_blank_draft_groups,
 )
+from app.utils.path_utils import localize_path
 
 
 @dataclass(frozen=True)
@@ -58,7 +59,7 @@ class ManualJpgAssignmentResult:
 
     @property
     def assigned(self) -> bool:
-        return bool(self.active_uid) and self.assigned_count >= 0
+        return bool(self.active_uid) and self.assigned_count > 0
 
 
 @dataclass(frozen=True)
@@ -254,8 +255,10 @@ def result_infos_from_grouping(grouping) -> tuple[list[dict], list[dict]]:
     owner_uid = getattr(grouping, "uid", "")
     for group in list(getattr(grouping, "groups", []) or []):
         seq = getattr(group, "result_sequence", None)
-        tiff_path = getattr(group, "composed_tiff_path", None)
-        zip_path = getattr(group, "archive_zip", None)
+        raw_tiff_path = getattr(group, "composed_tiff_path", None)
+        raw_zip_path = getattr(group, "archive_zip", None)
+        tiff_path = localize_path(raw_tiff_path) if raw_tiff_path else None
+        zip_path = localize_path(raw_zip_path) if raw_zip_path else None
         if not zip_path and tiff_path:
             inferred_zip = Path(tiff_path).with_suffix(".zip")
             if inferred_zip.is_file():

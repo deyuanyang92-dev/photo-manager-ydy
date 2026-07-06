@@ -53,6 +53,7 @@ from PyQt6.QtWidgets import (
 
 from app.config.i18n import tr
 from app.config.version import APP_VERSION
+from app.services.collab_status import build_collab_status
 from app.utils import diagnostics
 from app.views.base_view import BaseView
 
@@ -635,30 +636,29 @@ class SettingsView(BaseView):
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
         format_hint = QLabel(
-            "自动高压缩归档：可用时内部用 JPEG XL 中转压缩；软件浏览/恢复时自动还原为原始 JPG。"
+            "默认使用快速 JPG ZIP：直接打包原始 JPG，删除前仍校验名称、大小和 SHA-256。"
+            "需要更小体积时可改用 JPEG XL 高压缩，但速度会明显变慢。"
         )
         format_hint.setObjectName("Muted")
         format_hint.setWordWrap(True)
         form.addRow("归档格式", format_hint)
 
-        # Compatibility settings; kept for existing QSettings/tests, but hidden
-        # from the product UI because archive mode is automatic.
         self._jxl_effort_combo = QComboBox()
         self._jxl_effort_combo.addItems([
-            "自动 — 高压缩中转",
-            "自动 — 兼容旧设置",
+            "快速 JPG ZIP（推荐）",
+            "高压缩 JPEG XL（较慢）",
         ])
         self._jxl_effort_combo.setToolTip(
-            "归档模式自动选择：优先高压缩中转，失败时退回普通 JPG ZIP"
+            "日常拍摄整理建议用快速 JPG ZIP；JPEG XL 只适合需要节省空间且能接受等待的场景。"
         )
         self._jxl_effort_combo.currentIndexChanged.connect(self._save_archive)
-        self._jxl_effort_combo.hide()
+        form.addRow("归档模式", self._jxl_effort_combo)
 
         self._jxl_concurrency_spin = QSpinBox()
         self._jxl_concurrency_spin.setRange(1, 8)
         self._jxl_concurrency_spin.setValue(4)
         self._jxl_concurrency_spin.setToolTip(
-            "兼容旧设置；当前归档由后台自动选择安全路径"
+            "兼容旧设置；快速 JPG ZIP 不使用该参数"
         )
         self._jxl_concurrency_spin.valueChanged.connect(self._save_archive)
         self._jxl_concurrency_spin.hide()
@@ -884,93 +884,159 @@ class SettingsView(BaseView):
         adds the persistent settings (enable + code) the dialog cannot.
         """
         tab = _ScrollTab()
-        form = QFormLayout()
-        form.setHorizontalSpacing(16)
-        form.setVerticalSpacing(10)
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
-        # Tip: point users to the new collab panel
+        def _section(title: str) -> tuple[QGroupBox, QVBoxLayout]:
+            box = QGroupBox(title)
+            lay = QVBoxLayout(box)
+            lay.setContentsMargins(16, 16, 16, 14)
+            lay.setSpacing(10)
+            return box, lay
+
+        def _form() -> QFormLayout:
+            form = QFormLayout()
+            form.setHorizontalSpacing(14)
+            form.setVerticalSpacing(10)
+            form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+            return form
+
+        content = QWidget()
+        content.setMinimumWidth(760)
+        content.setMaximumWidth(880)
+        content.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
+        content_lay = QVBoxLayout(content)
+        content_lay.setContentsMargins(0, 0, 0, 0)
+        content_lay.setSpacing(14)
+
         tip = QLabel(
-            "💡 日常协作操作已移至工作台的「协作面板」"
-            "（点击侧边栏底部的「协作面板」按钮即可打开）。以下为高级设置。"
+            "日常协作操作可从主菜单「协作」或工作台「协作面板」进入。这里保留组码、连接和配对等高级设置。"
         )
         tip.setObjectName("MutedSmall")
         tip.setWordWrap(True)
-        form.addRow(tip)
+        content_lay.addWidget(tip)
 
-        self._collab_enabled_chk = QCheckBox("启用局域网协作（重启或切换后生效）")
+        status_box, status_lay = _section("协作状态")
+        status_head = QHBoxLayout()
+        status_head.setContentsMargins(0, 0, 0, 0)
+        status_head.setSpacing(10)
+        self._collab_enabled_chk = QCheckBox("启用局域网协作（立即生效，与协作中心同步）")
         self._collab_enabled_chk.toggled.connect(self._on_collab_enabled_toggled)
-        form.addRow("协作", self._collab_enabled_chk)
-
-        # Health traffic-light + one-click doctor / LAN search.
-        self._collab_health_light = QLabel("●")
-        self._collab_health_text = QLabel("—")
+        status_head.addWidget(self._collab_enabled_chk, stretch=1)
         self._collab_diagnose_btn = QPushButton("协作诊断")
         self._collab_diagnose_btn.clicked.connect(self._on_collab_diagnose)
-        self._collab_scan_btn = QPushButton("搜索局域网队友")
-        self._collab_scan_btn.clicked.connect(self._on_collab_scan)
+        status_head.addWidget(self._collab_diagnose_btn)
+        status_lay.addLayout(status_head)
+
+        status_form = _form()
+        self._collab_health_light = QLabel("●")
+        self._collab_health_text = QLabel("—")
         health_row = QHBoxLayout()
+        health_row.setContentsMargins(0, 0, 0, 0)
+        health_row.setSpacing(6)
         health_row.addWidget(self._collab_health_light)
         health_row.addWidget(self._collab_health_text, stretch=1)
-        health_row.addWidget(self._collab_diagnose_btn)
-        health_row.addWidget(self._collab_scan_btn)
         health_wrap = QWidget()
         health_wrap.setLayout(health_row)
-        form.addRow("状态", health_wrap)
+        status_form.addRow("状态", health_wrap)
 
         self._collab_team_code_edit = QLineEdit()
         self._collab_team_code_edit.setPlaceholderText("例如 SMW-2026（留空 = 不同步）")
         self._collab_team_code_edit.setMaxLength(64)
+        self._collab_team_code_edit.setMaximumWidth(360)
         self._collab_team_code_edit.editingFinished.connect(self._save_collab)
-        form.addRow("协作组码", self._collab_team_code_edit)
+        status_form.addRow("协作组码", self._collab_team_code_edit)
 
         self._collab_addr_edit = QLineEdit()
         self._collab_addr_edit.setReadOnly(True)
         self._collab_addr_edit.setPlaceholderText("—")
+        self._collab_addr_edit.setMinimumWidth(220)
+        self._collab_addr_edit.setMaximumWidth(360)
         addr_row = QHBoxLayout()
-        addr_row.addWidget(self._collab_addr_edit, stretch=1)
+        addr_row.setContentsMargins(0, 0, 0, 0)
+        addr_row.setSpacing(8)
+        addr_row.addWidget(self._collab_addr_edit)
         copy_btn = QPushButton("复制")
         copy_btn.clicked.connect(self._copy_collab_addr)
         addr_row.addWidget(copy_btn)
+        addr_row.addStretch()
         addr_wrap = QWidget()
         addr_wrap.setLayout(addr_row)
-        form.addRow("本机地址", addr_wrap)
+        status_form.addRow("本机地址", addr_wrap)
+        status_lay.addLayout(status_form)
+        content_lay.addWidget(status_box)
 
-        # Manual peer (mDNS fallback across VLANs / strict firewalls)
+        connect_box, connect_lay = _section("连接设备")
+        scan_row = QHBoxLayout()
+        scan_row.setContentsMargins(0, 0, 0, 0)
+        scan_row.setSpacing(10)
+        scan_hint = QLabel("同一局域网内可直接搜索；跨网段或自动发现失败时使用手动连接。")
+        scan_hint.setObjectName("MutedSmall")
+        scan_hint.setWordWrap(True)
+        scan_row.addWidget(scan_hint, stretch=1)
+        self._collab_scan_btn = QPushButton("搜索局域网队友")
+        self._collab_scan_btn.clicked.connect(self._on_collab_scan)
+        scan_row.addWidget(self._collab_scan_btn)
+        connect_lay.addLayout(scan_row)
+
+        connect_form = _form()
         self._collab_peer_ip_edit = QLineEdit()
         self._collab_peer_ip_edit.setPlaceholderText("对方 IP")
+        self._collab_peer_ip_edit.setMaximumWidth(420)
         self._collab_peer_port_edit = QLineEdit()
         self._collab_peer_port_edit.setPlaceholderText("端口")
-        self._collab_peer_port_edit.setFixedWidth(80)
+        self._collab_peer_port_edit.setFixedWidth(84)
         peer_row = QHBoxLayout()
-        peer_row.addWidget(self._collab_peer_ip_edit, stretch=1)
+        peer_row.setContentsMargins(0, 0, 0, 0)
+        peer_row.setSpacing(8)
+        peer_row.addWidget(self._collab_peer_ip_edit)
         peer_row.addWidget(self._collab_peer_port_edit)
         add_peer_btn = QPushButton("连接")
         add_peer_btn.clicked.connect(self._on_add_manual_peer)
         peer_row.addWidget(add_peer_btn)
+        peer_row.addStretch()
         peer_wrap = QWidget()
         peer_wrap.setLayout(peer_row)
-        form.addRow("手动连接", peer_wrap)
+        connect_form.addRow("手动连接", peer_wrap)
+        connect_lay.addLayout(connect_form)
 
+        self._collab_members_empty = QLabel("暂无在线成员")
+        self._collab_members_empty.setObjectName("MutedSmall")
+        self._collab_members_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._collab_members_empty.setMinimumHeight(48)
+        self._collab_members_empty.setStyleSheet(
+            f"border: 1px solid {_C_BORDER}; border-radius: 4px;"
+            "background: transparent;"
+        )
         self._collab_members_list = QListWidget()
-        self._collab_members_list.setMaximumHeight(140)
-        form.addRow("在线成员", self._collab_members_list)
+        self._collab_members_list.setMaximumHeight(120)
+        connect_form.addRow("在线成员", self._collab_members_empty)
+        connect_form.addRow("", self._collab_members_list)
+        content_lay.addWidget(connect_box)
 
-        # Pairing code — connect without knowing IPs (mDNS-failure fallback).
+        pairing_box, pairing_lay = _section("配对")
+        pairing_hint = QLabel("配对码会携带对方地址和协作组码，适合发给同组电脑快速加入。")
+        pairing_hint.setObjectName("MutedSmall")
+        pairing_hint.setWordWrap(True)
+        pairing_lay.addWidget(pairing_hint)
+
+        pairing_form = _form()
         self._collab_pairing_show_btn = QPushButton("显示我的配对码")
         self._collab_pairing_show_btn.clicked.connect(self._on_collab_show_pairing)
-        form.addRow("配对码", self._collab_pairing_show_btn)
+        pairing_form.addRow("我的配对码", self._collab_pairing_show_btn)
 
         self._collab_pairing_input = QLineEdit()
         self._collab_pairing_input.setPlaceholderText("粘贴队友的配对码")
         pair_join_btn = QPushButton("加入")
         pair_join_btn.clicked.connect(self._on_collab_join_pairing)
         pair_row = QHBoxLayout()
+        pair_row.setContentsMargins(0, 0, 0, 0)
+        pair_row.setSpacing(8)
         pair_row.addWidget(self._collab_pairing_input, stretch=1)
         pair_row.addWidget(pair_join_btn)
         pair_wrap = QWidget()
         pair_wrap.setLayout(pair_row)
-        form.addRow("输入配对码", pair_wrap)
+        pairing_form.addRow("输入配对码", pair_wrap)
+        pairing_lay.addLayout(pairing_form)
+        content_lay.addWidget(pairing_box)
 
         note = QLabel(
             "同一协作组码的设备会自动同步标本编号占用情况，避免重复编号。\n"
@@ -978,9 +1044,13 @@ class SettingsView(BaseView):
         )
         note.setObjectName("Muted")
         note.setWordWrap(True)
-        form.addRow("", note)
+        content_lay.addWidget(note)
 
-        tab.body.addLayout(form)
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(content)
+        row.addStretch()
+        tab.body.addLayout(row)
         tab.body.addStretch()
         self._tabs.addTab(tab, tr("协作"))
 
@@ -991,6 +1061,7 @@ class SettingsView(BaseView):
                 svc.peers_changed.connect(self._refresh_collab_members)
                 svc.peers_changed.connect(self._refresh_collab_health)
                 svc.server_ready.connect(lambda _p: self._refresh_collab_addr())
+                svc.server_ready.connect(lambda _p: self._refresh_collab_health())
                 svc.diagnostics_changed.connect(self._refresh_collab_health)
             except Exception:  # noqa: BLE001
                 pass
@@ -1542,6 +1613,7 @@ class SettingsView(BaseView):
     def _save_archive(self) -> None:
         qs = self.ctx.settings._qs
         qs.setValue(_K_JXL_EFFORT, self._jxl_effort_combo.currentIndex())
+        qs.setValue("archive/mode_v2_fast_default_applied", "true")
         qs.setValue(_K_JXL_CONCURRENCY, self._jxl_concurrency_spin.value())
         # Store as explicit "true"/"false" string for unambiguous retrieval
         qs.setValue(_K_DELETE_JPG, "true" if self._delete_jpg_chk.isChecked() else "false")
@@ -1618,6 +1690,7 @@ class SettingsView(BaseView):
                 svc.set_group_code(code)
             except Exception:  # noqa: BLE001
                 pass
+        self._refresh_collab_health()
 
     def _on_collab_enabled_toggled(self, on: bool) -> None:
         """Persist the flag and start/stop the live service immediately."""
@@ -1636,6 +1709,9 @@ class SettingsView(BaseView):
                 svc.stop()
         except Exception:  # noqa: BLE001
             pass
+        self._refresh_collab_addr()
+        self._refresh_collab_members()
+        self._refresh_collab_health(recompute=True)
 
     def _copy_collab_addr(self) -> None:
         from PyQt6.QtWidgets import QApplication
@@ -1660,16 +1736,24 @@ class SettingsView(BaseView):
 
     def _refresh_collab_addr(self) -> None:
         svc = getattr(self.ctx, "collab_service", None)
-        if svc is not None:
-            try:
-                self._collab_addr_edit.setText(svc.local_address())
-            except Exception:  # noqa: BLE001
-                pass
+        if svc is None:
+            self._collab_addr_edit.setText("—")
+            return
+        try:
+            if not svc.is_running():
+                self._collab_addr_edit.setText("—")
+                return
+            self._collab_addr_edit.setText(svc.local_address())
+        except Exception:  # noqa: BLE001
+            self._collab_addr_edit.setText("—")
 
     def _refresh_collab_members(self) -> None:
         svc = getattr(self.ctx, "collab_service", None)
         self._collab_members_list.clear()
         if svc is None:
+            self._collab_members_empty.setText("协作服务未启动")
+            self._collab_members_empty.show()
+            self._collab_members_list.hide()
             return
         try:
             for peer in svc.peers():
@@ -1677,32 +1761,61 @@ class SettingsView(BaseView):
                 self._collab_members_list.addItem(f"{name}  ({peer.ip}:{peer.port})")
         except Exception:  # noqa: BLE001
             pass
+        if self._collab_members_list.count():
+            self._collab_members_empty.hide()
+            self._collab_members_list.show()
+        else:
+            self._collab_members_empty.setText("暂无在线成员")
+            self._collab_members_empty.show()
+            self._collab_members_list.hide()
 
     _HEALTH_COLOR = {"green": "#2e7d32", "yellow": "#f9a825", "red": "#c62828"}
     _HEALTH_LABEL = {"green": "正常", "yellow": "有注意事项", "red": "有阻断问题"}
+    _COLLAB_STATUS_COLOR = {
+        "no_service": "#999",
+        "not_started": "#999",
+        "missing_group": "#f9a825",
+        "no_peers": "#999",
+        "different_group": "#f9a825",
+        "tasks_only": "#f9a825",
+        "media_ready": "#2e7d32",
+    }
 
-    def _refresh_collab_health(self) -> None:
+    def _refresh_collab_health(self, recompute: bool = False) -> None:
         svc = getattr(self.ctx, "collab_service", None)
+        status = build_collab_status(svc, [])
         if svc is None:
             self._collab_health_light.setStyleSheet("color: #999;")
-            self._collab_health_text.setText("未启用")
+            self._collab_health_text.setText(status.plain_status)
             return
+        peers = []
         try:
-            svc.run_diagnostics()
+            peers = svc.peers()
+        except Exception:  # noqa: BLE001
+            peers = []
+        status = build_collab_status(svc, peers)
+        diagnostics = []
+        health = "green"
+        try:
+            diagnostics = svc.run_diagnostics() if recompute else svc.diagnostics()
             health = svc.overall_health()
-            diagnostics = svc.diagnostics()
         except Exception:  # noqa: BLE001
             health = "red"
             diagnostics = []
-        self._collab_health_light.setStyleSheet(
-            f"color: {self._HEALTH_COLOR.get(health, '#999')};")
-        label = self._HEALTH_LABEL.get(health, "—")
+        color = self._COLLAB_STATUS_COLOR.get(status.state, "#999")
+        if health == "red":
+            color = self._HEALTH_COLOR["red"]
+        self._collab_health_light.setStyleSheet(f"color: {color};")
+        label = status.plain_status
+        if status.state in {"tasks_only", "media_ready"}:
+            label = f"{label} · {status.next_step_label}"
         reasons = [
             d.title for d in diagnostics
             if getattr(d, "code", "") != "ok" and getattr(d, "title", "")
         ]
+        reasons = [reason for reason in reasons if reason not in label]
         if reasons:
-            label = f"{label}：{'；'.join(reasons[:2])}"
+            label = f"{label}；诊断：{'；'.join(reasons[:2])}"
         self._collab_health_text.setText(label)
 
     def _on_collab_diagnose(self) -> None:
@@ -1712,7 +1825,7 @@ class SettingsView(BaseView):
         # Persist a group code adopted via a one-click fix.
         dlg.group_adopted.connect(self._on_group_adopted)
         dlg.exec()
-        self._refresh_collab_health()
+        self._refresh_collab_health(recompute=True)
 
     def _on_group_adopted(self, code: str) -> None:
         self._collab_team_code_edit.setText(code)
@@ -1731,7 +1844,7 @@ class SettingsView(BaseView):
         from app.utils.ui import info as _info
         _info(self, "搜索完成", f"发现 {len(found)} 台设备。")
         self._refresh_collab_members()
-        self._refresh_collab_health()
+        self._refresh_collab_health(recompute=True)
 
     def _on_collab_show_pairing(self) -> None:
         from app.utils.ui import info as _info
@@ -1798,7 +1911,7 @@ class SettingsView(BaseView):
         self._collab_pairing_input.clear()
         _info(self, "已加入", f"已连接 {pi.ip}:{pi.port}。")
         self._refresh_collab_members()
-        self._refresh_collab_health()
+        self._refresh_collab_health(recompute=True)
 
     def _on_font_scale_changed(self, value: float) -> None:
         """Realtime: update percentage label, persist, and re-skin the app."""
@@ -2069,9 +2182,13 @@ class SettingsView(BaseView):
             self, "选择项目目录", start
         )
         if chosen:
-            self.ctx.current_project_dir = chosen
-            self._project_dir_edit.setText(chosen)
-            self._add_to_recent(chosen)
+            try:
+                from app.services.project_service import enter_workspace
+                enter_workspace(self.ctx, chosen)
+                self._project_dir_edit.setText(self.ctx.current_project_dir or chosen)
+                self._add_to_recent(chosen)
+            except Exception as exc:
+                self._show_status(f"打开项目失败：{exc}", 5000)
 
     def _add_to_recent(self, path: str) -> None:
         qs = self.ctx.settings._qs
@@ -2091,8 +2208,12 @@ class SettingsView(BaseView):
         if item:
             path = item.text()
             if os.path.isdir(path):
-                self.ctx.current_project_dir = path
-                self._project_dir_edit.setText(path)
+                try:
+                    from app.services.project_service import enter_workspace
+                    enter_workspace(self.ctx, path)
+                    self._project_dir_edit.setText(self.ctx.current_project_dir or path)
+                except Exception as exc:
+                    self._show_status(f"打开项目失败：{exc}", 5000)
 
     def _clear_recent(self) -> None:
         qs = self.ctx.settings._qs

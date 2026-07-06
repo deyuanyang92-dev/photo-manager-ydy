@@ -119,15 +119,17 @@ class TestFileEndpointGroupGuard:
         seen = []
         app = _build_fastapi_app(
             TaskStore(),
-            lambda: {"groupCode": "G1"},
+            lambda: {"groupCode": "G1", "projectId": "P1"},
             file_manifest_fn=lambda uids=None: seen.append(uids) or {"files": []},
         )
 
-        ok = _get(app, "/api/collab/files/manifest", {"groupCode": "G1", "uids": "U1,U2"})
-        bad = _get(app, "/api/collab/files/manifest", {"groupCode": "G2"})
+        ok = _get(app, "/api/collab/files/manifest", {"groupCode": "G1", "projectId": "P1", "uids": "U1,U2"})
+        bad = _get(app, "/api/collab/files/manifest", {"groupCode": "G2", "projectId": "P1"})
+        bad_project = _get(app, "/api/collab/files/manifest", {"groupCode": "G1", "projectId": "P2"})
 
         assert ok.status_code == 200
         assert bad.status_code == 403
+        assert bad_project.status_code == 403
         assert seen == [["U1", "U2"]]
 
     def test_download_requires_same_group_before_resolving_path(self):
@@ -139,15 +141,17 @@ class TestFileEndpointGroupGuard:
 
         app = _build_fastapi_app(
             TaskStore(),
-            lambda: {"groupCode": "G1"},
+            lambda: {"groupCode": "G1", "projectId": "P1"},
             file_path_fn=_missing_path,
         )
 
-        ok = _get(app, "/api/collab/files/download", {"groupCode": "G1", "path": "incoming-jpg/a.jpg"})
-        bad = _get(app, "/api/collab/files/download", {"groupCode": "G2", "path": "incoming-jpg/a.jpg"})
+        ok = _get(app, "/api/collab/files/download", {"groupCode": "G1", "projectId": "P1", "path": "incoming-jpg/a.jpg"})
+        bad = _get(app, "/api/collab/files/download", {"groupCode": "G2", "projectId": "P1", "path": "incoming-jpg/a.jpg"})
+        bad_project = _get(app, "/api/collab/files/download", {"groupCode": "G1", "projectId": "P2", "path": "incoming-jpg/a.jpg"})
 
         assert ok.status_code == 404
         assert bad.status_code == 403
+        assert bad_project.status_code == 403
         assert seen == ["incoming-jpg/a.jpg"]
 
 
@@ -229,7 +233,7 @@ class TestCreateTaskGroupBroadcast:
 
         def fake_remote(peer, uid, assignee, device_id):
             called_peers.append(peer.ip)
-            return True, ""
+            return True, "", False
 
         svc._remote_create = fake_remote  # type: ignore[assignment]
         ok, msg = svc.create_task("UID-G", assignee="A")
@@ -243,7 +247,7 @@ class TestCreateTaskGroupBroadcast:
             svc._peers["1.1.1.1:5050"] = PeerInfo(ip="1.1.1.1", port=5050, group_code="G1")
 
         called = []
-        svc._remote_create = lambda *a: (called.append(a), (True, ""))[1]  # type: ignore
+        svc._remote_create = lambda *a: (called.append(a), (True, "", False))[1]  # type: ignore
         ok, _ = svc.create_task("UID-LOCAL")
         assert ok
         assert called == []

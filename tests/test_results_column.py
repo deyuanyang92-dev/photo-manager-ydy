@@ -5,8 +5,9 @@ import sys
 import os
 
 import pytest
-from PyQt6.QtCore import QPoint, Qt
-from PyQt6.QtWidgets import QMenu
+from PyQt6.QtCore import QPoint, QPointF, Qt
+from PyQt6.QtGui import QWheelEvent
+from PyQt6.QtWidgets import QApplication, QMenu
 
 pytestmark = pytest.mark.skipif(
     "QT_QPA_PLATFORM" not in os.environ and sys.platform != "win32",
@@ -487,6 +488,30 @@ def test_zoom_changes_thumb_size(qtbot):
     assert card._thumb_size == 80
 
 
+def test_results_ctrl_wheel_changes_thumb_size(qtbot):
+    """Ctrl+wheel follows Windows zoom convention for result thumbnails."""
+    from app.widgets.results_column import ResultsColumn
+
+    col = ResultsColumn()
+    qtbot.addWidget(col)
+    col.load_uid("UID", [{"path": "/fake/a.tif", "name": "a.tif"}], [])
+    initial = col._thumb_size
+
+    event = QWheelEvent(
+        QPointF(10, 10),
+        QPointF(10, 10),
+        QPoint(0, 0),
+        QPoint(0, 120),
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.ControlModifier,
+        Qt.ScrollPhase.ScrollUpdate,
+        False,
+    )
+    QApplication.sendEvent(col._body.viewport(), event)
+
+    assert col._thumb_size > initial
+
+
 def test_thumb_guard_on_fake_path(qtbot):
     """A non-existent path must not raise and falls back to an icon card."""
     from app.widgets.results_column import ResultsColumn, _TiffCard
@@ -516,7 +541,7 @@ def test_tiff_card_uses_real_thumbnail_when_decodable(qtbot, tmp_path):
     assert not pixmap.isNull()
 
 
-def test_results_column_defers_tiff_thumbnail_decode(qtbot, monkeypatch):
+def test_results_column_loads_tiff_thumbnail_immediately(qtbot, monkeypatch):
     from app.widgets.results_column import ResultsColumn
 
     calls = []
@@ -527,10 +552,9 @@ def test_results_column_defers_tiff_thumbnail_decode(qtbot, monkeypatch):
 
     col = ResultsColumn()
     qtbot.addWidget(col)
-    col.load_uid("UID", [{"path": "/fake/deferred.tif", "name": "deferred.tif"}], [])
+    col.load_uid("UID", [{"path": "/fake/visible.tif", "name": "visible.tif"}], [])
 
-    assert calls == []
-    qtbot.waitUntil(lambda: calls == ["/fake/deferred.tif"], timeout=1000)
+    assert calls == ["/fake/visible.tif"]
 
 
 def test_results_column_has_windows_folder_actions(qtbot, tmp_path):

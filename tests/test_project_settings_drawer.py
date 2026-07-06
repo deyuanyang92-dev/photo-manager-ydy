@@ -50,6 +50,36 @@ def test_drawer_has_printing_tab(qtbot):
     assert "打印" in tab_texts
 
 
+def test_template_manager_focuses_requested_bucket(qtbot, db, monkeypatch):
+    from PyQt6.QtWidgets import QDialog, QWidget
+    import app.widgets.label_step2_templates as label_step2_templates
+    from app.widgets.project_settings_drawer import ProjectSettingsDrawer
+
+    captured = {}
+
+    class FakeTemplateManager(QWidget):
+        def __init__(self, libs, parent=None, **kwargs):
+            super().__init__(parent)
+            captured["kwargs"] = kwargs
+
+        def set_data(self, specimens, selected_indices):
+            captured["specimens"] = specimens
+            captured["selected_indices"] = selected_indices
+
+    monkeypatch.setattr(label_step2_templates, "LabelStep2Templates", FakeTemplateManager)
+    monkeypatch.setattr(QDialog, "exec", lambda self: QDialog.DialogCode.Accepted)
+
+    ctx = _make_ctx(db=db)
+    d = ProjectSettingsDrawer(ctx)
+    qtbot.addWidget(d)
+
+    d._open_template_manager("sample")
+
+    assert captured["kwargs"]["visible_buckets"] == ["sample"]
+    assert captured["kwargs"]["manager_mode"] is True
+    assert captured["selected_indices"]
+
+
 def test_personnel_edits_exist(qtbot):
     from app.widgets.project_settings_drawer import ProjectSettingsDrawer
     ctx = _make_ctx()
@@ -279,6 +309,49 @@ def test_naming_components_roundtrip(qtbot, db):
     data = load_setting(db, "naming_rules", DEFAULT_NAMING_RULES)
     assert "scientific_name" in data["components"]
     assert "notes" in data["components"]
+
+
+def test_naming_components_can_include_habitat_and_reorder(qtbot, db):
+    from app.widgets.project_settings_drawer import ProjectSettingsDrawer
+    from app.services.project_settings_service import load_setting, DEFAULT_NAMING_RULES
+
+    ctx = _make_ctx(db=db)
+    d = ProjectSettingsDrawer(ctx)
+    qtbot.addWidget(d)
+    d.refresh()
+
+    assert "habitat" in d._naming_component_checks
+    d._naming_component_checks["habitat"].setChecked(True)
+    while d._naming_component_order.index("habitat") > 2:
+        d._move_naming_component("habitat", -1)
+    d._save_naming_rules()
+
+    data = load_setting(db, "naming_rules", DEFAULT_NAMING_RULES)
+    assert data["components"][:4] == ["province", "site", "habitat", "station"]
+
+
+def test_naming_custom_field_appears_in_required_and_components(qtbot, db):
+    from app.widgets.project_settings_drawer import ProjectSettingsDrawer
+    from app.services.project_settings_service import load_setting, DEFAULT_NAMING_RULES
+
+    ctx = _make_ctx(db=db)
+    d = ProjectSettingsDrawer(ctx)
+    qtbot.addWidget(d)
+    d.refresh()
+
+    d._naming_custom_fields._add_row("水深", "depth")
+    d._save_naming_rules()
+
+    assert "depth" in d._naming_required_checks
+    assert "depth" in d._naming_component_checks
+    d._naming_required_checks["depth"].setChecked(True)
+    d._naming_component_checks["depth"].setChecked(True)
+    d._save_naming_rules()
+
+    data = load_setting(db, "naming_rules", DEFAULT_NAMING_RULES)
+    assert data["custom_fields"] == [{"key": "depth", "label": "水深"}]
+    assert data["required"]["depth"] is True
+    assert "depth" in data["components"]
 
 
 def test_storage_tab_selects_builtin_row_into_edit_form(qtbot, db):

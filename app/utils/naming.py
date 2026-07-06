@@ -16,6 +16,12 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional, Union
 
+from app.services.naming_field_catalog import (
+    field_label,
+    normalize_naming_components as normalize_catalog_components,
+)
+from app.utils.path_utils import equivalent_paths
+
 
 def specimen_date_seg(collection_date: Optional[str], photo_date: Optional[str]) -> str:
     """Derive the date segment of a specimen UID.
@@ -131,12 +137,15 @@ def _iter_species_ids(conn, project_dir: Optional[str] = None):
     """Yield species ids from local project tables, tolerating old schemas."""
     try:
         if project_dir:
+            project_dirs = equivalent_paths(project_dir)
+            owner_filter = ",".join("?" * len(project_dirs)) or "?"
             rows = conn.execute(
-                """
+                f"""
                 SELECT id, uid FROM specimens
-                WHERE owner_project_dir IS NULL OR owner_project_dir = ?
+                WHERE owner_project_dir IS NULL
+                   OR owner_project_dir IN ({owner_filter})
                 """,
-                (project_dir,),
+                project_dirs or [project_dir],
             ).fetchall()
         else:
             rows = conn.execute("SELECT id, uid FROM specimens").fetchall()
@@ -149,7 +158,8 @@ def _iter_species_ids(conn, project_dir: Optional[str] = None):
             if from_uid:
                 yield from_uid
     except Exception:
-        pass
+        import logging
+        logging.getLogger(__name__).debug("_iter_species_ids: specimens 查询失败", exc_info=True)
 
     for table in ("tasks", "grouping"):
         try:
@@ -260,7 +270,7 @@ _LEGACY_RE = re.compile(
 )
 
 _SPECIES_ID_FULL_RE = re.compile(r"^[A-Za-z]+\d+$")
-_STORAGE_CODE_FULL_RE = re.compile(r"^[TDR][A-Za-z0-9]*$", re.IGNORECASE)
+_STORAGE_CODE_FULL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]*$", re.IGNORECASE)
 
 
 def _valid_parsed_species_id(value: str) -> bool:
@@ -455,19 +465,18 @@ def safe_uid_segment(value: Optional[str]) -> str:
     return text.replace("-", "_")
 
 
+_CODE_COMPONENT_KEYS = {"province", "site", "station", "species_id", "storage"}
+
+
+def _configured_segment_value(key: str, raw_val: Optional[str]) -> str:
+    val = str(raw_val or "").strip() if key == "date_seg" else safe_uid_segment(raw_val)
+    if key in _CODE_COMPONENT_KEYS:
+        return normalize_uid(val)
+    return val
+
+
 def normalize_naming_components(components: Optional[list]) -> list[str]:
-    defaults = [
-        "province",
-        "site",
-        "station",
-        "species_id",
-        "storage",
-        "date_seg",
-    ]
-    if not components or not isinstance(components, list):
-        return list(defaults)
-    out = [str(c) for c in components if c and str(c) != "result_seq"]
-    return out or list(defaults)
+    return normalize_catalog_components(components)
 
 
 def component_values_from_specimen(sp: dict) -> dict[str, str]:
@@ -479,7 +488,7 @@ def component_values_from_specimen(sp: dict) -> dict[str, str]:
         collection_date or None,
         photo_date or None,
     )
-    return {
+    values = {
         "province": str(sp.get("province") or "").strip(),
         "site": str(sp.get("site") or "").strip(),
         "station": str(sp.get("station") or "").strip(),
@@ -488,8 +497,11 @@ def component_values_from_specimen(sp: dict) -> dict[str, str]:
         "collection_date": collection_date,
         "photo_date": photo_date,
         "date_seg": date_seg,
+        "habitat": str(sp.get("habitat") or "").strip(),
         "collector": str(sp.get("collector") or "").strip(),
         "photographer": str(sp.get("photographer") or "").strip(),
+        "identifier": str(sp.get("identifier") or "").strip(),
+        "geo_area": str(sp.get("geo_area") or sp.get("geoArea") or "").strip(),
         "taxon_group": str(sp.get("taxonGroup") or sp.get("taxon_group") or "").strip(),
         "order_name": str(sp.get("order") or sp.get("order_name") or "").strip(),
         "family": str(sp.get("family") or "").strip(),
@@ -505,6 +517,11 @@ def component_values_from_specimen(sp: dict) -> dict[str, str]:
             sp.get("photoNotes") or sp.get("photo_notes") or ""
         ).strip(),
     }
+    for key, value in sp.items():
+        text_key = str(key or "").strip()
+        if text_key and text_key not in values:
+            values[text_key] = str(value or "").strip()
+    return values
 
 
 def _values_from_parsed_uid(parsed: dict) -> dict[str, str]:
@@ -529,10 +546,7 @@ def build_configured_result_id(
     parts: list[str] = []
     for key in comp_list:
         raw_val = values.get(key, "")
-        if key == "date_seg":
-            val = str(raw_val or "").strip()
-        else:
-            val = safe_uid_segment(raw_val)
+        val = _configured_segment_value(key, raw_val)
         if not val:
             continue
         if seq is not None and key == "storage":
@@ -541,7 +555,7 @@ def build_configured_result_id(
     if seq is not None and "storage" not in comp_list:
         insert_at = min(4, len(parts))
         parts.insert(insert_at, str(seq))
-    return normalize_uid("-".join(parts))
+    return "-".join(parts)
 
 
 def build_configured_uid(components: list[str], values: dict[str, str]) -> str:
@@ -575,26 +589,8 @@ def _extract_date_seg_from_parts(parts: list[str]) -> Optional[str]:
 
 
 def naming_rules_summary(components: list[str]) -> str:
-    labels = {
-        "province": "省",
-        "site": "样地",
-        "station": "站位",
-        "species_id": "编号",
-        "storage": "保存",
-        "date_seg": "日期",
-        "collector": "采集人",
-        "photographer": "拍摄人",
-        "taxon_group": "类群",
-        "order_name": "目",
-        "family": "科",
-        "genus": "属",
-        "scientific_name": "学名",
-        "scientific_name_cn": "中文名",
-        "notes": "备注",
-        "photo_notes": "拍照备注",
-    }
     comp_list = normalize_naming_components(components)
-    ordered = "-".join(labels.get(key, key) for key in comp_list)
+    ordered = "-".join(field_label(key, short=True) for key in comp_list)
     if "storage" in comp_list:
         seq_hint = "序号在保存方式前"
     else:

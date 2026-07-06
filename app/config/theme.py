@@ -94,7 +94,7 @@ def _detect_file_manager_profile() -> str:
     return "linux"
 
 
-def _file_manager_qss(t: dict[str, str]) -> str:
+def _file_manager_qss(t: dict[str, str], mono: str) -> str:
     """QSS for Explorer/Finder/GNOME-like file rows."""
     profile = _detect_file_manager_profile()
     if profile == "macos":
@@ -263,6 +263,93 @@ QLabel#FileThumb {{
 QLabel#FileThumb[hasThumbnail="true"] {{
     background: {t["panel"]};
     border-color: {t["border_medium"]};
+}}
+QLabel#FileName,
+QFrame#ResultFile QLabel#Mono,
+QFrame#ResultGroupHeader QLabel#Mono {{
+    font-family: {mono};
+    font-size: {t["font_sm"]};
+    color: {t["text_soft"]};
+    background: transparent;
+    border: none;
+    padding: 0;
+}}
+QLabel#FileName {{
+    font-weight: 600;
+    color: {t["text"]};
+}}
+QFrame#ResultFile QLabel#Mono {{
+    font-weight: 600;
+}}
+QLabel#FileUid,
+QLabel#FileUidActive,
+QLabel#FileUidMissing,
+QLabel#FileUidMuted,
+QLabel#FileStateRaw,
+QLabel#FileStateTiff,
+QLabel#FileStateArchived,
+QLabel#FileStateComposed {{
+    border-radius: 3px;
+    font-size: {t["font_xs"]};
+    font-weight: 600;
+    padding: 1px 7px;
+    letter-spacing: 0;
+}}
+QLabel#FileUid {{
+    font-family: {mono};
+    color: {t["accent_pressed"]};
+    background: transparent;
+    border: none;
+    padding: 1px 2px;
+}}
+QLabel#FileUidActive {{
+    font-family: {mono};
+    color: {t["accent"]};
+    background: transparent;
+    border: none;
+    padding: 1px 2px;
+    font-weight: 700;
+}}
+QLabel#FileUidMissing {{
+    color: {t["warn"]};
+    background: {t["warn_soft"]};
+    border: 1px solid rgba(180,83,9,0.22);
+}}
+QLabel#FileUidMuted {{
+    font-family: {mono};
+    color: {t["muted"]};
+    background: transparent;
+    border: none;
+    padding: 1px 2px;
+}}
+QLabel#FileStateRaw {{
+    color: {t["warn"]};
+    background: transparent;
+    border: 1px solid rgba(180,83,9,0.18);
+}}
+QLabel#FileStateTiff {{
+    color: {t["success"]};
+    background: transparent;
+    border: 1px solid rgba(21,128,61,0.20);
+}}
+QLabel#FileStateArchived {{
+    color: {t["muted"]};
+    background: transparent;
+    border: 1px solid {t["border"]};
+}}
+QLabel#FileStateComposed {{
+    color: {t["info"]};
+    background: transparent;
+    border: 1px solid rgba(37,99,235,0.20);
+}}
+QFrame#CardSelected QLabel#FileName,
+QFrame#Card[resultSelected="true"] QLabel#FileName {{
+    color: {badge_selected};
+    font-weight: 700;
+}}
+QFrame#ResultGroupHeader QLabel#Mono {{
+    font-weight: 700;
+    color: {t["text_soft"]};
 }}
 """
 
@@ -1060,9 +1147,20 @@ FONT_SANS = _SANS_FONTS
 FONT_SERIF = _SERIF_FONTS
 FONT_MONO = _MONO_FONTS
 
+_GENERIC_FONT_FAMILIES = {"serif", "sans-serif", "monospace"}
+
 
 def _font_family(fonts: tuple[str, ...]) -> str:
-    return ", ".join(f'"{f}"' if " " in f else f for f in fonts)
+    quoted: list[str] = []
+    for family in fonts:
+        name = str(family).strip()
+        if not name:
+            continue
+        if name.lower() in _GENERIC_FONT_FAMILIES:
+            quoted.append(name)
+        else:
+            quoted.append('"' + name.replace('"', '\\"') + '"')
+    return ", ".join(quoted)
 
 
 def local_font_css() -> str:
@@ -1161,7 +1259,6 @@ def build_qss() -> str:
     # fallbacks still trailing for glyph coverage.
     sans_stack = ((_FONT_FAMILY,) + FONT_SANS) if _FONT_FAMILY else FONT_SANS
     sans = _font_family(sans_stack)
-    serif = _font_family(FONT_SERIF)
     mono = _font_family(FONT_MONO)
 
     # Gradient shorthands (reused across many rules). In performance mode the
@@ -1194,7 +1291,7 @@ def build_qss() -> str:
         f"qlineargradient(x1:0, y1:0, x2:0, y2:1,"
         f" stop:0 {t['topbar_top']}, stop:1 {t['topbar_bottom']})"
     )
-    file_manager_qss = _file_manager_qss(t)
+    file_manager_qss = _file_manager_qss(t, mono)
 
     return f"""
 /* ══════════════════════════════════════════════════════════════════
@@ -1225,55 +1322,76 @@ QToolTip {{
 
 /* ── Top bar (brand + segmented nav + global actions) ───────────── */
 QFrame#TopBar {{
-    background: {t["topbar_top"]};
+    background: {topbar_grad};
     border: none;
     border-bottom: 1px solid {t["topbar_border"]};
 }}
-QFrame#TopBarDivider {{ background: {t["border_medium"]}; border: none; }}
+QFrame#TopBarDivider {{ background: {t["border"]}; border: none; }}
 QLabel#BrandWord {{
-    font-family: {serif};
-    font-size: {t["font_body"]};
-    font-weight: 600;
+    font-family: {sans};
+    font-size: {t["font_md"]};
+    font-weight: 700;
     color: {t["text"]};
-    letter-spacing: 0.2px;
+    letter-spacing: 0;
 }}
 QLabel#BrandMark {{ color: {t["accent"]}; }}
+QWidget#NavWrap {{ background: transparent; }}
 
-/* Segmented navigation — flat buttons, 2px accent underline when active */
+/* Segmented navigation — compact command-bar tabs. */
 QPushButton#NavSegment {{
     background: transparent;
     border: 1px solid transparent;
     color: {t["nav_segment_text"]};
     font-size: {t["font_sm"]};
-    font-weight: 500;
-    padding: 7px 9px;
-    margin: 0 2px;
-    border-radius: {t["radius_sm"]};
+    font-weight: 600;
+    min-height: 32px;
+    padding: 0 13px;
+    margin: 0 1px;
+    border-radius: {t["radius"]};
     letter-spacing: 0;
 }}
 QPushButton#NavSegment:hover {{
     color: {t["text"]};
     background-color: {t["nav_segment_hover_bg"]};
-    border-color: {t["border"]};
+    border-color: {t["border_medium"]};
 }}
 QPushButton#NavSegment:checked {{
     color: {t["accent_hover"]};
     background-color: {t["nav_selected_bg"]};
-    border-color: transparent;
-    font-weight: 600;
+    border-color: {t["nav_selected_border"]};
+    font-weight: 700;
+}}
+
+QToolButton#NavMenuButton {{
+    background-color: {t["panel"]};
+    color: {t["text_soft"]};
+    border: 1px solid {t["border_medium"]};
+    border-radius: {t["radius"]};
+    padding: 0 10px;
+    font-size: {t["font_sm"]};
+    font-weight: 700;
+}}
+QToolButton#NavMenuButton:hover {{
+    color: {t["accent_hover"]};
+    border-color: {t["accent"]};
+    background-color: {t["accent_softer"]};
+}}
+QToolButton#NavMenuButton::menu-indicator {{
+    image: none;
+    width: 0;
 }}
 
 /* Icon-only ghost buttons (theme toggle / settings cog) */
 QPushButton#IconGhost {{
-    background: transparent;
-    border: 1px solid transparent;
-    border-radius: {t["radius_sm"]};
+    background-color: {t["panel"]};
+    border: 1px solid {t["border_medium"]};
+    border-radius: {t["radius"]};
     color: {t["muted"]};
     padding: 0;
 }}
 QPushButton#IconGhost:hover {{
-    background-color: {t["nav_segment_hover_bg"]};
-    border-color: {t["border"]};
+    background-color: {t["accent_softer"]};
+    border-color: {t["accent"]};
 }}
 QToolButton#ScreenshotTool {{
     background-color: {t["panel"]};
@@ -1307,13 +1425,13 @@ QLabel#ContextLabel {{
     letter-spacing: 0.08em;
 }}
 QPushButton#ProjectSwitcher {{
-    background-color: {t["panel_2"]};
-    border: 1px solid {t["border"]};
-    border-radius: {t["radius_sm"]};
-    padding: 6px 12px;
+    background-color: {t["panel"]};
+    border: 1px solid {t["border_medium"]};
+    border-radius: {t["radius"]};
+    padding: 7px 12px;
     color: {t["text"]};
     font-size: {t["font_sm"]};
-    font-weight: 600;
+    font-weight: 700;
     text-align: left;
 }}
 QPushButton#ProjectSwitcher:hover {{
@@ -1324,9 +1442,10 @@ QPushButton#ProjectSwitcher:hover {{
 QPushButton#CrumbSeg {{
     background: transparent;
     border: none;
-    padding: 6px 4px;
+    padding: 7px 4px;
     color: {t["muted"]};
     font-size: {t["font_sm"]};
+    font-weight: 600;
 }}
 QPushButton#CrumbSeg:hover {{
     color: {t["accent"]};
@@ -1337,13 +1456,13 @@ QLabel#CrumbSep {{
     padding: 0 1px;
 }}
 QPushButton#CrumbLeaf {{
-    background-color: {t["panel_2"]};
-    border: 1px solid {t["border"]};
-    border-radius: {t["radius_sm"]};
-    padding: 6px 10px;
+    background-color: {t["panel"]};
+    border: 1px solid {t["border_medium"]};
+    border-radius: {t["radius"]};
+    padding: 7px 11px;
     color: {t["text"]};
     font-size: {t["font_sm"]};
-    font-weight: 600;
+    font-weight: 700;
     text-align: left;
 }}
 QPushButton#CrumbLeaf:hover {{
@@ -1354,7 +1473,7 @@ QToolButton#CrumbArrow {{
     background: transparent;
     border: 1px solid transparent;
     border-radius: {t["radius_sm"]};
-    padding: 4px 3px;
+    padding: 5px 3px;
     color: {t["muted"]};
     font-size: {t["font_xs"]};
 }}
@@ -1367,9 +1486,9 @@ QToolButton#CrumbArrow:disabled {{
 }}
 QToolButton#WorkspaceMenuButton,
 QToolButton#WorkspaceFolderButton {{
-    background-color: {t["modal_surface"]};
-    border: 1px solid {t["border"]};
-    border-radius: {t["radius_sm"]};
+    background-color: {t["panel"]};
+    border: 1px solid {t["border_medium"]};
+    border-radius: {t["radius"]};
     padding: 0;
     color: {t["muted"]};
     font-size: {t["font_sm"]};
@@ -1416,6 +1535,30 @@ QLabel#WorkspaceTitle {{
     color: {t["text"]};
     letter-spacing: 0;
 }}
+QLabel#WorkbenchTitle {{
+    font-family: {sans};
+    font-size: {t["font_md"]};
+    font-weight: 700;
+    color: {t["text"]};
+    letter-spacing: 0;
+}}
+QLabel#WorkbenchCount {{
+    color: {t["muted"]};
+    font-size: {t["font_sm"]};
+    font-weight: 500;
+}}
+QLabel#WorkbenchSubTitle {{
+    color: {t["text_soft"]};
+    font-size: {t["font_sm"]};
+    font-weight: 700;
+    letter-spacing: 0;
+}}
+QLabel#WorkbenchHint {{
+    color: {t["muted_dim"]};
+    font-size: {t["font_xs"]};
+    font-weight: 500;
+    letter-spacing: 0;
+}}
 QLabel#TagSea, QLabel#TagWarn, QLabel#TagOk {{
     border-radius: {t["radius_pill"]};
     padding: 4px 12px;
@@ -1450,6 +1593,41 @@ QLabel#DirPath {{
 
 /* ── Panels / cards / sections ───────────────────────────────────── */
 /* Cards: vertical surface gradient + faint hairline + 1px inner top lip. */
+QFrame#WorkflowDashboard {{
+    background: {panel2_grad};
+    border: 1px solid {t["border_medium"]};
+    border-radius: {t["radius"]};
+}}
+QLabel#WorkflowDashEyebrow {{
+    color: {t["muted_dim"]};
+    font-size: {t["font_xs"]};
+    font-weight: 700;
+    letter-spacing: 0.08em;
+}}
+QLabel#WorkflowDashTitle {{
+    color: {t["text"]};
+    font-size: {t["font_md"]};
+    font-weight: 700;
+}}
+QLabel#WorkflowDashDetail {{
+    color: {t["muted"]};
+    font-size: {t["font_sm"]};
+}}
+QFrame#WorkflowDashMetric {{
+    background: transparent;
+    border-left: 1px solid {t["border"]};
+}}
+QLabel#WorkflowDashMetricLabel {{
+    color: {t["muted_dim"]};
+    font-size: {t["font_xs"]};
+    font-weight: 700;
+}}
+QLabel#WorkflowDashMetricValue {{
+    color: {t["text_soft"]};
+    font-size: {t["font_sm"]};
+    font-weight: 700;
+}}
+
 QFrame#Panel, QFrame#WorkbenchSection, QFrame#PanelCard {{
     background: {panel_grad};
     border: 1px solid {t["border"]};
@@ -1497,6 +1675,16 @@ QFrame#BatchIdentBar {{
     border-radius: {t["radius"]};
     min-height: 36px;
 }}
+QFrame#WorkbenchSelectionBar {{
+    background-color: {t["panel_2"]};
+    border: 1px solid {t["border"]};
+    border-radius: {t["radius_sm"]};
+}}
+QLabel#WorkbenchSelectionText {{
+    color: {t["muted"]};
+    font-size: {t["font_xs"]};
+    font-weight: 600;
+}}
 QFrame#Divider {{ background-color: {t["border"]}; max-height: 1px; min-height: 1px; border: none; }}
 
 /* ── Grouping tool popup (分组工具) ─────────────────────────────────── */
@@ -1541,7 +1729,7 @@ QLabel {{ background: transparent; color: {t["text"]}; }}
 QLabel#Muted {{ color: {t["muted"]}; }}
 QLabel#MutedSmall {{ color: {t["muted_dim"]}; font-size: {t["font_xs"]}; }}
 QLabel#Accent {{ color: {t["accent"]}; }}
-QLabel#Title {{ font-family: {serif}; font-size: {t["font_title"]}; font-weight: 600; color: {t["text"]}; }}
+QLabel#Title {{ font-family: {sans}; font-size: {t["font_title"]}; font-weight: 600; color: {t["text"]}; }}
 QLabel#Section, QLabel#CardTitle {{
     font-size: {t["font_xs"]};
     font-weight: 700;
@@ -1584,6 +1772,97 @@ QLabel#ActivateStateOn {{
 }}
 QLabel#StatValue {{ font-size: {t["font_title"]}; font-weight: 700; color: {t["text"]}; }}
 QLabel#StatLabel {{ font-size: {t["font_xs"]}; color: {t["muted_dim"]}; letter-spacing: 0.03em; }}
+
+/* ── Collaboration centre ───────────────────────────────────────── */
+QFrame#CollabHeader {{
+    background-color: {t["panel"]};
+    border: 1px solid {t["border"]};
+    border-radius: {t["radius"]};
+}}
+QLabel#CollabTitle {{
+    color: {t["text"]};
+    font-size: {t["font_lg"]};
+    font-weight: 700;
+}}
+QLabel#CollabScope {{
+    color: {t["muted"]};
+    font-size: {t["font_sm"]};
+}}
+QLabel#CollabStatusBadge,
+QLabel#CollabMetric,
+QLabel#CollabMetricDanger {{
+    border-radius: {t["radius_pill"]};
+    padding: 4px 11px;
+    font-size: {t["font_sm"]};
+    font-weight: 600;
+}}
+QLabel#CollabStatusBadge {{
+    background-color: {t["panel_inset"]};
+    color: {t["text_soft"]};
+    border: 1px solid {t["border"]};
+}}
+QLabel#CollabMetric {{
+    background-color: {t["panel_2"]};
+    color: {t["muted"]};
+    border: 1px solid {t["border"]};
+}}
+QLabel#CollabMetricDanger {{
+    background-color: {t["danger_soft"]};
+    color: {t["danger"]};
+    border: 1px solid rgba(230,110,99,0.45);
+}}
+QFrame#CollabGuide {{
+    background-color: {t["accent_soft"]};
+    border: 1px solid {t["accent_glow"]};
+    border-radius: {t["radius"]};
+}}
+QLabel#CollabGuideTitle {{
+    color: {t["text"]};
+    font-size: {t["font_md"]};
+    font-weight: 700;
+}}
+QLabel#CollabGuideDetail {{
+    color: {t["text_soft"]};
+    font-size: {t["font_sm"]};
+}}
+QFrame#CollabStepPanel {{
+    background-color: {t["panel"]};
+    border: 1px solid {t["border"]};
+    border-radius: {t["radius"]};
+}}
+QLabel#CollabStepBadge {{
+    color: {t["accent"]};
+    background-color: {t["accent_soft"]};
+    border: 1px solid {t["accent_glow"]};
+    border-radius: 11px;
+    font-size: {t["font_sm"]};
+    font-weight: 700;
+}}
+QLabel#CollabStepTitle {{
+    color: {t["text"]};
+    font-size: {t["font_md"]};
+    font-weight: 700;
+}}
+QLabel#CollabStepDetail {{
+    color: {t["muted"]};
+    font-size: {t["font_sm"]};
+}}
+QLabel#ConflictBanner {{
+    background-color: {t["danger"]};
+    color: {t["bg"]};
+    padding: 8px 12px;
+    border-radius: {t["radius_sm"]};
+    font-weight: 700;
+}}
+QFrame#ManualConnectFrame,
+QFrame#DebugDrawer {{
+    background-color: {t["panel"]};
+    border: 1px solid {t["border"]};
+    border-radius: {t["radius_sm"]};
+}}
+QComboBox#ProjectFilterCombo {{
+    min-height: 28px;
+}}
 
 /* ── 5-state attribution chips ─────────────────────────────────── */
 QLabel#ChipRaw, QLabel#ChipAttributed, QLabel#ChipComposed,
@@ -2049,11 +2328,12 @@ QLabel#StatusSegmentAccent {{ color: {t["accent"]}; padding: 0 10px; font-size: 
 /* ── Mono label (file paths / UIDs) ──────────────────────────────── */
 QLabel#Mono {{
     font-family: {mono};
-    font-size: {t["font_xs"]};
-    color: {t["accent"]};
-    background-color: {t["modal_surface"]};
-    border-radius: {t["radius_sm"]};
-    padding: 3px 8px;
+    font-size: {t["font_sm"]};
+    color: {t["text_soft"]};
+    background-color: transparent;
+    border: none;
+    border-radius: 0;
+    padding: 0;
 }}
 
 /* ── Menu ────────────────────────────────────────────────────────── */

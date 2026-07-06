@@ -15,7 +15,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from PyQt6.QtWidgets import QApplication, QMenu
-from PyQt6.QtCore import Qt, QPoint, QMimeData, QUrl
+from PyQt6.QtCore import Qt, QPoint, QPointF, QMimeData, QUrl
+from PyQt6.QtGui import QWheelEvent
 from PyQt6.QtTest import QTest
 
 from app.services.monitor_service import FileEntry, ScanResult
@@ -108,6 +109,56 @@ def test_import_busy_disables_add_photo_button(panel):
     assert button.text() == "添加照片"
 
 
+def test_compose_organise_button_emits_only_organise_signal(panel):
+    compose = []
+    organise = []
+    panel.compose_implicit_requested.connect(lambda: compose.append(True))
+    panel.compose_implicit_organise_requested.connect(lambda: organise.append(True))
+
+    panel._compose_org_btn.click()
+
+    assert organise == [True]
+    assert compose == []
+
+
+def test_workflow_notice_shows_persistent_stage_and_detail(panel):
+    panel.set_workflow_notice(
+        "合成+整理：正在整理",
+        "正在打包第 1/2 张 JPG：a.jpg",
+        state="busy",
+    )
+
+    assert panel._workflow_notice.isVisible()
+    assert panel.workflow_notice_text() == (
+        "进行中",
+        "合成+整理：正在整理",
+        "正在打包第 1/2 张 JPG：a.jpg",
+    )
+    panel._workflow_collapse_btn.click()
+    assert not panel._workflow_detail.isVisible()
+    assert panel.workflow_notice_text()[2] == "正在打包第 1/2 张 JPG：a.jpg"
+
+    panel._workflow_hide_btn.click()
+    assert not panel._workflow_notice.isVisible()
+
+    panel.set_workflow_notice(
+        "合成+整理：正在整理",
+        "正在打包第 2/2 张 JPG：b.jpg",
+        state="busy",
+    )
+    assert not panel._workflow_notice.isVisible()
+
+    panel.set_workflow_notice(
+        "合成+整理完成",
+        "JPG 已删除。",
+        state="success",
+        force_show=True,
+    )
+    assert panel.workflow_notice_text()[0] == "完成"
+    assert panel.workflow_notice_text()[1] == "合成+整理完成"
+    assert panel._workflow_notice.isVisible()
+
+
 # ── 1-C: clipboard copy action ────────────────────────────────────────────────
 
 class TestClipboardCopyAction:
@@ -193,7 +244,7 @@ def test_file_card_uses_real_jpg_thumbnail(qtbot, tmp_path):
     assert pixmap.height() > 22
 
 
-def test_monitor_panel_defers_grid_thumbnail_decode(qtbot, panel, monkeypatch):
+def test_monitor_panel_loads_grid_thumbnail_immediately(qtbot, panel, monkeypatch):
     calls = []
     monkeypatch.setattr(
         "app.widgets.monitor_panel._file_thumb_pixmap",
@@ -202,8 +253,7 @@ def test_monitor_panel_defers_grid_thumbnail_decode(qtbot, panel, monkeypatch):
 
     panel.load_scan(_scan([_jpg_entry(path="/tmp/deferred.jpg")]))
 
-    assert calls == []
-    qtbot.waitUntil(lambda: calls == ["/tmp/deferred.jpg"], timeout=1000)
+    assert calls == ["/tmp/deferred.jpg"]
 
 
 def test_file_card_selection_has_explicit_visual_marker(qtbot):
@@ -220,6 +270,47 @@ def test_file_card_selection_has_explicit_visual_marker(qtbot):
     assert card._select_mark.property("selected") is True
     assert card._select_mark.text() == "✓"
     assert card._select_mark.toolTip() == "已选"
+
+
+def test_pending_stream_ctrl_wheel_resizes_thumbnails(panel):
+    panel.load_scan(_scan([_jpg_entry(path="/tmp/zoom.jpg")]))
+    card = panel._cards[0]
+    initial = panel._pending_thumb_size
+
+    event = QWheelEvent(
+        QPointF(10, 10),
+        QPointF(10, 10),
+        QPoint(0, 0),
+        QPoint(0, 120),
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.ControlModifier,
+        Qt.ScrollPhase.ScrollUpdate,
+        False,
+    )
+    QApplication.sendEvent(panel._stream_scroll.viewport(), event)
+
+    assert panel._pending_thumb_size > initial
+    assert card._thumb_label.width() == panel._pending_thumb_size
+
+
+def test_pending_stream_windows_shortcuts(panel, qtbot):
+    panel.load_scan(_scan([
+        _jpg_entry(name="a.jpg", path="/tmp/a.jpg"),
+        _jpg_entry(name="b.jpg", path="/tmp/b.jpg"),
+    ]))
+    panel.setFocus()
+
+    qtbot.keyClick(panel, Qt.Key.Key_Plus, modifier=Qt.KeyboardModifier.ControlModifier)
+    assert panel._pending_thumb_size > 92
+
+    qtbot.keyClick(panel, Qt.Key.Key_0, modifier=Qt.KeyboardModifier.ControlModifier)
+    assert panel._pending_thumb_size == 92
+
+    qtbot.keyClick(panel, Qt.Key.Key_A, modifier=Qt.KeyboardModifier.ControlModifier)
+    assert len(panel.selected_all_paths()) == 2
+
+    with qtbot.waitSignal(panel.refresh_requested, timeout=1000):
+        qtbot.keyClick(panel, Qt.Key.Key_F5)
 
 
 # ── 1-D: hide archived filter ─────────────────────────────────────────────────
@@ -293,7 +384,7 @@ class TestPendingViewAndSort:
         from PyQt6.QtWidgets import QPushButton
 
         texts = [b.text() for b in panel.findChildren(QPushButton)]
-        assert "列表" in texts
+        assert "平铺" in texts
         assert "排序" in texts
 
     def test_sort_by_name_reorders_pending_cards(self, panel):
@@ -353,6 +444,109 @@ class TestPendingViewAndSort:
 
 class TestContextMenuAddToGroup:
     """2-A: 加入当前分组 — adds jpg_path to the active specimen's first group."""
+
+    def test_context_menu_has_workflow_actions(self, qtbot, ctx_with_db):
+        """File-card context menu exposes the same primary workflow actions as the toolbar."""
+        entry = _jpg_entry(path="/tmp/myfile.jpg")
+        card = _FileCard(entry)
+        qtbot.addWidget(card)
+
+        actions_seen = []
+
+        def fake_exec(self_menu, *args, **kwargs):
+            actions_seen.extend([a.text() for a in self_menu.actions()])
+            return None
+
+        with patch.object(QMenu, "exec", fake_exec):
+            card._on_jpg_context_menu(QPoint(0, 0))
+
+        assert "合成" in actions_seen
+        assert "整理" in actions_seen
+        assert "合成+整理" in actions_seen
+
+    def test_context_menu_workflow_actions_emit_toolbar_signals(self, qtbot, panel):
+        """Right-click workflow actions reuse the toolbar signal chain."""
+        signals = []
+        panel.compose_implicit_requested.connect(lambda: signals.append("compose"))
+        panel.organise_selected_requested.connect(lambda: signals.append("organise"))
+        panel.compose_implicit_organise_requested.connect(
+            lambda: signals.append("compose_organise")
+        )
+
+        panel.load_scan(_scan([
+            _jpg_entry(name="a.jpg", path="/tmp/a.jpg"),
+            _jpg_entry(name="b.jpg", path="/tmp/b.jpg"),
+        ]))
+        for card in panel._cards:
+            card.set_selected(True)
+        panel._refresh_selection_bar()
+
+        wanted = {
+            "合成": "compose",
+            "整理": "organise",
+            "合成+整理": "compose_organise",
+        }
+
+        def trigger(label):
+            def fake_exec(self_menu, *args, **kwargs):
+                for action in self_menu.actions():
+                    if action.text() == label:
+                        action.trigger()
+                        break
+                return None
+            return fake_exec
+
+        for label, signal_name in wanted.items():
+            with patch.object(QMenu, "exec", trigger(label)):
+                panel._cards[0]._on_jpg_context_menu(QPoint(0, 0))
+            assert signals[-1] == signal_name
+            assert panel.selected_jpg_paths() == ["/tmp/a.jpg", "/tmp/b.jpg"]
+
+    def test_context_menu_workflow_targets_right_clicked_file_when_not_selected(
+        self, qtbot, panel
+    ):
+        panel.load_scan(_scan([
+            _jpg_entry(name="a.jpg", path="/tmp/a.jpg"),
+            _jpg_entry(name="b.jpg", path="/tmp/b.jpg"),
+        ]))
+        panel._cards[0].set_selected(True)
+        panel._refresh_selection_bar()
+
+        def fake_exec(self_menu, *args, **kwargs):
+            for action in self_menu.actions():
+                if action.text() == "合成":
+                    action.trigger()
+                    break
+            return None
+
+        with patch.object(QMenu, "exec", fake_exec):
+            panel._cards[1]._on_jpg_context_menu(QPoint(0, 0))
+
+        assert panel.selected_jpg_paths() == ["/tmp/b.jpg"]
+
+    def test_real_right_click_event_opens_workflow_actions(self, qtbot, panel):
+        """A real Qt right-click event on the card opens the workflow actions."""
+        panel.load_scan(_scan([_jpg_entry(name="a.jpg", path="/tmp/a.jpg")]))
+        card = panel._cards[0]
+        card.show()
+        actions_seen = []
+
+        def fake_exec(self_menu, *args, **kwargs):
+            actions_seen.extend([a.text() for a in self_menu.actions()])
+            return None
+
+        with patch.object(QMenu, "exec", fake_exec):
+            QTest.mouseClick(
+                card,
+                Qt.MouseButton.RightButton,
+                Qt.KeyboardModifier.NoModifier,
+                QPoint(10, 10),
+            )
+            QApplication.processEvents()
+
+        assert "合成" in actions_seen
+        assert "整理" in actions_seen
+        assert "合成+整理" in actions_seen
 
     def test_context_menu_has_add_to_group_action(self, qtbot, ctx_with_db):
         """Context menu must contain '加入当前分组' item for JPG cards."""
@@ -828,6 +1022,14 @@ class TestGroupingInMoreMenu:
         menu = panel._build_more_menu()
         action = next(a for a in menu.actions() if a.text() == "分组工具")
         with qtbot.waitSignal(panel.grouping_requested, timeout=1000):
+            action.trigger()
+
+    def test_legacy_organize_action_is_visible_and_emits_signal(self, panel, qtbot):
+        menu = panel._build_more_menu()
+        action = next(a for a in menu.actions() if a.text() == "旧照片批量整理…")
+        assert action.isEnabled()
+
+        with qtbot.waitSignal(panel.legacy_organize_requested, timeout=1000):
             action.trigger()
 
 

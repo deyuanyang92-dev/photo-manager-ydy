@@ -367,6 +367,8 @@ CREATE TABLE IF NOT EXISTS collection_records (
   photo_location  TEXT,            -- 拍摄地点
   method          TEXT,            -- 采样方法（定量框/采泥器/拖网/手拣定性）
   remark          TEXT,
-  raw_json        TEXT,            -- 兜底：零字段丢失 + 扩展字段
-  UNIQUE(province, site, station, collection_date)
+  raw_json        TEXT             -- 兜底：零字段丢失 + 扩展字段
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_collection_records_unique_event
+ON collection_records(province, site, COALESCE(station, ''), collection_date);

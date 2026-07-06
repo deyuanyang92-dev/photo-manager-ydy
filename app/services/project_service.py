@@ -18,7 +18,7 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
-from app.utils.path_utils import default_registry
+from app.utils.path_utils import default_registry, localize_path, normalize_path
 
 # ── Directory name constants ───────────────────────────────────────────────────
 # Mirrors project-paths.js constants
@@ -36,6 +36,35 @@ LEGACY_INCOMING_METADATA_FILES: frozenset[str] = frozenset({
 })
 
 _PROJECT_LIST_CACHE: dict[str, tuple[tuple, list[dict]]] = {}
+
+_PROJECT_PATH_FIELDS = (
+    "directory",
+    "dir",
+    "root",
+    "incomingJpgDir",
+    "resultsDir",
+    "dataDir",
+)
+
+
+def _localize_project_entry(project: dict) -> dict:
+    entry = dict(project)
+    for key in _PROJECT_PATH_FIELDS:
+        value = entry.get(key)
+        if isinstance(value, str) and value:
+            entry[key] = localize_path(value)
+    return entry
+
+
+def _path_identity(path: str) -> str:
+    try:
+        return normalize_path(path)
+    except (OSError, RuntimeError, ValueError):
+        return localize_path(path)
+
+
+def _same_path(left: str, right: str) -> bool:
+    return _path_identity(left) == _path_identity(right)
 
 
 # ── Low-level helpers ──────────────────────────────────────────────────────────
@@ -137,7 +166,7 @@ def resolve_incoming_jpg_dir(project_dir: str) -> str:
 
     Oracle: project-paths.js::resolveIncomingJpgDir
     """
-    root = Path(project_dir).resolve()
+    root = Path(normalize_path(project_dir))
     modern = root / INCOMING_JPG_DIR
     legacy = root / LEGACY_INCOMING_JPG_DIR
 
@@ -153,7 +182,7 @@ def resolve_results_dir(project_dir: str) -> str:
 
     Oracle: project-paths.js::resolveResultsDir
     """
-    root = Path(project_dir).resolve()
+    root = Path(normalize_path(project_dir))
     return str(root / RESULTS_DIR)
 
 
@@ -168,7 +197,7 @@ def create_project(name: str, directory: str) -> dict:
 
     Oracle: server.js project creation logic.
     """
-    resolved = str(Path(directory).resolve())
+    resolved = normalize_path(directory)
     dirs = ensure_project_dirs(resolved, create_root=True)
     # Materialise the db now (create=True) so later background reads can use the
     # strict open_project_db(create=False) path without fabricating anything.
@@ -195,7 +224,7 @@ def open_project(directory: str) -> dict:
 
     Oracle: server.js open-project endpoint + registerAllowedDir pattern.
     """
-    resolved = str(Path(directory).resolve())
+    resolved = normalize_path(directory)
     # Entering/claiming a workspace: the folder must already exist (create_root
     # =False). A gone drive raises ProjectUnavailableError rather than rebuilding
     # a ghost. The db is then materialised (create=True) so claiming an existing
@@ -254,7 +283,7 @@ def list_projects(user_projects_json_path: str) -> list:
 
     Oracle: server.js::userProjectsRead / GET /api/user-projects
     """
-    path = Path(user_projects_json_path)
+    path = Path(localize_path(user_projects_json_path))
     if not path.exists():
         return []
     key = str(path.resolve())
@@ -267,7 +296,7 @@ def list_projects(user_projects_json_path: str) -> list:
         projects = data.get("projects", [])
         if not isinstance(projects, list):
             projects = []
-        projects = [dict(p) for p in projects if isinstance(p, dict)]
+        projects = [_localize_project_entry(p) for p in projects if isinstance(p, dict)]
         _PROJECT_LIST_CACHE[key] = (sig, [dict(p) for p in projects])
         return projects
     except (json.JSONDecodeError, OSError):
@@ -279,7 +308,7 @@ def clear_project_list_cache(path: str | None = None) -> None:
         _PROJECT_LIST_CACHE.clear()
         return
     try:
-        key = str(Path(path).resolve())
+        key = str(Path(localize_path(path)).resolve())
     except OSError:
         key = str(path)
     _PROJECT_LIST_CACHE.pop(key, None)
@@ -310,7 +339,7 @@ def _workspace_display_name(resolved: str, root: Optional[str]) -> str:
     """
     if not root:
         return Path(resolved).name
-    rootp = Path(root).resolve()
+    rootp = Path(normalize_path(root))
     try:
         rel = Path(resolved).relative_to(rootp)
     except ValueError:
@@ -330,9 +359,9 @@ def record_recent_workspace(
 
     Returns the full project list after the update.
     """
-    resolved = str(Path(path).resolve())
+    resolved = normalize_path(path)
     projects = list_projects(user_projects_json_path)
-    if not any((p.get("directory") or p.get("dir")) == resolved for p in projects):
+    if not any(_same_path(p.get("directory") or p.get("dir") or "", resolved) for p in projects):
         entry = {
             "id": str(uuid.uuid4()),
             "name": _workspace_display_name(resolved, root),
@@ -340,9 +369,9 @@ def record_recent_workspace(
             "dir": resolved,
         }
         if root:
-            entry["root"] = str(Path(root).resolve())
+            entry["root"] = normalize_path(root)
         projects.append(entry)
-        out = Path(user_projects_json_path)
+        out = Path(localize_path(user_projects_json_path))
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(
             json.dumps({"version": 1, "projects": projects}, ensure_ascii=False, indent=2),
@@ -369,23 +398,23 @@ def save_project_descriptor(
     if not raw_dir:
         return list_projects(user_projects_json_path)
 
-    resolved = str(Path(raw_dir).resolve())
+    resolved = normalize_path(raw_dir)
     entry = dict(project)
     has_explicit_id = bool(entry.get("id"))
     entry["directory"] = resolved
     entry["dir"] = resolved
     entry.setdefault("name", _workspace_display_name(resolved, root))
     if root:
-        entry["root"] = str(Path(root).resolve())
+        entry["root"] = normalize_path(root)
 
     projects = (
-        list(existing_projects)
+        [_localize_project_entry(p) for p in existing_projects]
         if existing_projects is not None
         else list_projects(user_projects_json_path)
     )
     for idx, existing in enumerate(projects):
         existing_dir = existing.get("directory") or existing.get("dir") or ""
-        if existing_dir and str(Path(existing_dir).resolve()) == resolved:
+        if existing_dir and _same_path(existing_dir, resolved):
             merged = dict(existing)
             if not has_explicit_id:
                 entry.pop("id", None)
@@ -398,7 +427,7 @@ def save_project_descriptor(
         entry.setdefault("id", str(uuid.uuid4()))
         projects.append(entry)
 
-    out = Path(user_projects_json_path)
+    out = Path(localize_path(user_projects_json_path))
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(
         json.dumps({"version": 1, "projects": projects}, ensure_ascii=False, indent=2),
@@ -431,7 +460,7 @@ def enter_workspace(
 
     Returns the resolved workspace path.
     """
-    resolved = str(Path(path).resolve())
+    resolved = normalize_path(path)
     # Unavailability (drive unmounted / path gone) MUST surface — do not activate
     # a dead path, or the workbench reads a ghost. Other minor errors are
     # tolerated as before.
@@ -445,12 +474,11 @@ def enter_workspace(
     except sqlite3.Error as exc:
         if is_database_locked(exc):
             raise
-    except Exception:
-        pass
+        raise
     ctx.current_project_dir = resolved
-    ctx.current_project_root = str(Path(root).resolve()) if root else resolved
+    resolved_root = normalize_path(root) if root else resolved
+    ctx.current_project_root = resolved_root
     if root:
-        resolved_root = str(Path(root).resolve())
         if resolved_root != resolved:
             from app.services.project_catalog_service import register_workspace
             register_workspace(
@@ -488,7 +516,7 @@ def seed_region_settings(
     from app.db.db_manager import open_project_db
     from app.services import project_settings_service as pss
 
-    resolved = str(Path(region_dir).resolve())
+    resolved = normalize_path(region_dir)
     ensure_project_dirs(resolved, create_root=True)
     db = open_project_db(resolved, create=True)
 
@@ -578,7 +606,7 @@ def get_project_summary(project_dir: str) -> dict:
     import re
     import sqlite3 as _sqlite3
 
-    root = Path(project_dir).resolve()
+    root = Path(normalize_path(project_dir))
     db_path = root / DATA_SUBDIR / "project.db"
     results_root = root / RESULTS_DIR
     incoming_path = Path(resolve_incoming_jpg_dir(project_dir))
@@ -670,7 +698,7 @@ def get_project_results(project_dir: str) -> dict:
     import re as _re
     import sqlite3 as _sqlite3
 
-    root = Path(project_dir).resolve()
+    root = Path(normalize_path(project_dir))
     results_root = root / RESULTS_DIR
     freeform_dir = results_root / "freeform"
 

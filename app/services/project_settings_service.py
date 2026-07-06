@@ -13,6 +13,9 @@ from typing import Any, Optional
 
 from PyQt6.QtCore import QSettings
 
+from app.services.naming_field_catalog import default_components, default_required
+from app.utils.path_utils import normalize_path
+
 # ── Defaults (mirrors app.js:3084-3092, 9634, 9527, etc.) ─────────────────────
 
 DEFAULT_TIFF_FIELDS: dict[str, bool] = {
@@ -59,23 +62,9 @@ DEFAULT_CODE_LABELS: dict[str, Any] = {
 }
 
 DEFAULT_NAMING_RULES: dict[str, Any] = {
-    "components": [
-        "province",
-        "site",
-        "station",
-        "species_id",
-        "storage",
-        "date_seg",
-    ],
-    "required": {
-        "province": True,
-        "site": True,
-        "station": False,
-        "species_id": True,
-        "storage": True,
-        "collection_date": True,
-        "photo_date": True,
-    },
+    "components": default_components(),
+    "required": default_required(),
+    "custom_fields": [],
     "site_min_length": 2,
     "date_8_digits": True,
     "storage_prefix": True,
@@ -107,7 +96,7 @@ DEFAULT_PRINT_SETTINGS: dict[str, Any] = {
     #   "direct" — print directly to configured printer (current behavior)
     #   "dialog" — show printer-selection dialog
     #   "studio" — open the Labels print page (legacy quick_print=False)
-    "quick_print_mode": "dialog",
+    "quick_print_mode": "direct",
     "include_tissue": True,
     # Empty printer name = use the current system default.  Separate fields let
     # sample-bottle and RNAlater tube labels go to different devices/papers.
@@ -377,10 +366,10 @@ def get_effective(
     """
     result = json.loads(json.dumps(default))  # independent deep copy
 
-    leaf = Path(project_dir).resolve()
+    leaf = Path(normalize_path(project_dir))
     chain = [leaf, *leaf.parents]
     if root:
-        rp = Path(root).resolve()
+        rp = Path(normalize_path(root))
         trimmed: list[Path] = []
         for d in chain:
             trimmed.append(d)

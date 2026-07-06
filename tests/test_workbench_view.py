@@ -16,8 +16,10 @@ from __future__ import annotations
 
 import os
 import json
+import hashlib
 import sqlite3
 import tempfile
+import zipfile
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -27,7 +29,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QWidget
 
 # One shared QApplication instance for all tests in this module
 _APP = None
@@ -82,6 +84,484 @@ def _make_ctx(project_dir: str | None = None, db: sqlite3.Connection | None = No
     ctx.settings.delete_jpg_after_archive = True
     ctx.collab_service = None
     return ctx
+
+
+def _fake_zip_result(jpg_paths: list[str], zip_path: str, *, saved_percent: int = 0):
+    """Create a valid JPG ZIP and return the real archive result type."""
+    from app.services.archive_service import ZipResult
+
+    manifest_files = []
+    total_original = 0
+    Path(zip_path).parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_STORED) as zf:
+        for jpg_path in jpg_paths:
+            data = Path(jpg_path).read_bytes()
+            archive_name = Path(jpg_path).name
+            zf.writestr(archive_name, data)
+            total_original += len(data)
+            manifest_files.append({
+                "originalName": archive_name,
+                "archiveName": archive_name,
+                "originalSize": len(data),
+                "compressedSize": len(data),
+                "originalSha256": hashlib.sha256(data).hexdigest(),
+                "zipCompression": "store",
+            })
+    zip_size = Path(zip_path).stat().st_size
+    return ZipResult(
+        zip_path=zip_path,
+        zip_size=zip_size,
+        file_count=len(jpg_paths),
+        total_original=total_original,
+        total_compressed=total_original,
+        saved_percent=saved_percent,
+        delete_jpg=False,
+        requested_delete_jpg=False,
+        deletion_skipped_reason="",
+        manifest={
+            "format": "jpg-zip",
+            "method": "test-plain-jpg-zip",
+            "files": manifest_files,
+        },
+    )
+
+
+def test_workflow_notice_panel_hides_current_task_until_new_task(qtbot):
+    host = QWidget()
+    host.resize(900, 600)
+    qtbot.addWidget(host)
+    host.show()
+    from app.views.workbench_view import _WorkflowNoticePanel
+
+    dlg = _WorkflowNoticePanel(host)
+    qtbot.addWidget(dlg)
+
+    dlg.set_notice(
+        "合成+整理：正在整理",
+        "正在打包第 1/2 张 JPG：a.jpg",
+        state="busy",
+        force_show=True,
+        task_key="task-a",
+    )
+    assert dlg.isVisible()
+
+    dlg._hide_current_task()
+    assert not dlg.isVisible()
+    assert dlg._launcher is not None
+    assert dlg._launcher.isVisible()
+
+    dlg.set_notice(
+        "合成+整理：正在整理",
+        "正在打包第 2/2 张 JPG：b.jpg",
+        state="busy",
+        task_key="task-a",
+    )
+    assert not dlg.isVisible()
+    assert dlg._launcher.isVisible()
+    assert dlg.notice_text()[2] == "正在打包第 2/2 张 JPG：b.jpg"
+
+    dlg.set_notice(
+        "补处理：正在整理",
+        "正在归档旧照片。",
+        state="busy",
+        task_key="task-b",
+    )
+    assert dlg.isVisible()
+    assert not dlg._launcher.isVisible()
+
+
+def test_workflow_notice_panel_auto_hides_finished_notice(qtbot):
+    host = QWidget()
+    host.resize(900, 600)
+    qtbot.addWidget(host)
+    host.show()
+    from app.views.workbench_view import _WorkflowNoticePanel
+
+    panel = _WorkflowNoticePanel(host)
+    qtbot.addWidget(panel)
+    panel.set_notice(
+        "合成+整理完成",
+        "JPG 已写入 ZIP。",
+        state="success",
+        force_show=True,
+        task_key="done-task",
+    )
+
+    assert panel.isVisible()
+    panel._auto_hide_finished_notice()
+    assert not panel.isVisible()
+
+
+def test_compose_organise_notice_uses_single_progress_dialog(qtbot, tmp_path):
+    from app.views.workbench_view import WorkbenchView
+
+    db = _make_db(str(tmp_path / "project.db"))
+    ctx = _make_ctx(str(tmp_path), db)
+    w = WorkbenchView(ctx)
+    qtbot.addWidget(w)
+
+    w._workflow_notice(
+        "合成+整理：正在合成 TIFF",
+        "已接收 2 张 JPG。合成完成后会自动整理。",
+        state="busy",
+        force_show=True,
+        task_key="compose-org",
+    )
+    w._workflow_notice(
+        "合成+整理：正在整理",
+        "TIFF 已生成，正在打包 JPG 原片并登记 ZIP。",
+        state="busy",
+        task_key="compose-org",
+    )
+
+    assert getattr(w, "_workflow_notice_panel", None) is None
+    dlg = getattr(w, "_compose_organise_progress_dialog", None)
+    assert dlg is not None
+    assert dlg.findChild(QWidget, "ComposeOrganiseCard") is not None
+    assert dlg.parentWidget() is w
+    assert dlg.windowType() == Qt.WindowType.Widget
+    assert not bool(dlg.windowFlags() & Qt.WindowType.FramelessWindowHint)
+    assert not dlg.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+    assert dlg.stage_texts() == ("完成", "进行中")
+
+
+def test_compose_organise_dialog_buttons_compact_hide_and_restore(qtbot, tmp_path):
+    from app.views.workbench_view import WorkbenchView
+
+    db = _make_db(str(tmp_path / "project.db"))
+    ctx = _make_ctx(str(tmp_path), db)
+    w = WorkbenchView(ctx)
+    w.resize(900, 620)
+    qtbot.addWidget(w)
+    w.show()
+
+    w._workflow_notice(
+        "合成+整理：正在整理",
+        "正在打包第 1/3 张 JPG：a.jpg",
+        state="busy",
+        force_show=True,
+        task_key="compose-org-buttons",
+    )
+    dlg = getattr(w, "_compose_organise_progress_dialog", None)
+    assert dlg is not None
+    assert dlg.isVisible()
+    assert dlg._detail.isVisible()
+    received = []
+    dlg.cancel_requested.connect(received.append)
+    assert dlg._cancel_action.isEnabled()
+    assert dlg._cancel_action.text() == "取消任务"
+
+    qtbot.mouseClick(dlg._compact_action, Qt.MouseButton.LeftButton)
+    assert dlg._compact is True
+    assert not dlg._detail.isVisible()
+    assert dlg._compact_action.text() == "展开详情"
+
+    qtbot.mouseClick(dlg._hide_action, Qt.MouseButton.LeftButton)
+    assert not dlg.isVisible()
+    assert dlg._hidden_by_user is True
+    assert dlg._launcher is not None
+    assert dlg._launcher.isVisible()
+
+    w._workflow_notice(
+        "合成+整理：正在整理",
+        "正在打包第 2/3 张 JPG：b.jpg",
+        state="busy",
+        task_key="compose-org-buttons",
+    )
+    assert not dlg.isVisible()
+    assert dlg._launcher.isVisible()
+
+    qtbot.mouseClick(dlg._launcher, Qt.MouseButton.LeftButton)
+    assert dlg.isVisible()
+    assert dlg._hidden_by_user is False
+    assert not dlg._launcher.isVisible()
+
+    qtbot.mouseClick(dlg._cancel_action, Qt.MouseButton.LeftButton)
+    assert received == ["compose-org-buttons"]
+
+
+def test_compose_organise_header_buttons_and_reject_hide_running_task(qtbot, tmp_path):
+    from app.views.workbench_view import WorkbenchView
+
+    db = _make_db(str(tmp_path / "project.db"))
+    ctx = _make_ctx(str(tmp_path), db)
+    w = WorkbenchView(ctx)
+    w.resize(900, 620)
+    qtbot.addWidget(w)
+    w.show()
+
+    w._workflow_notice(
+        "合成+整理：正在整理",
+        "正在打包第 1/3 张 JPG：a.jpg",
+        state="busy",
+        force_show=True,
+        task_key="compose-org-header",
+    )
+    dlg = getattr(w, "_compose_organise_progress_dialog", None)
+    assert dlg is not None
+
+    qtbot.mouseClick(dlg._compact_btn, Qt.MouseButton.LeftButton)
+    assert not dlg.isVisible()
+    assert dlg._hidden_by_user is True
+    assert dlg._launcher is not None
+    assert dlg._launcher.isVisible()
+    assert dlg._launcher.text() == "任务 (1 进行中)"
+
+    qtbot.mouseClick(dlg._launcher, Qt.MouseButton.LeftButton)
+    assert dlg.isVisible()
+    assert dlg._hidden_by_user is False
+    qtbot.mouseClick(dlg._hide_btn, Qt.MouseButton.LeftButton)
+    assert not dlg.isVisible()
+    assert dlg._hidden_by_user is True
+    assert dlg._launcher is not None
+    assert dlg._launcher.isVisible()
+
+    w._workflow_notice(
+        "合成+整理：正在整理",
+        "正在打包第 2/3 张 JPG：b.jpg",
+        state="busy",
+        task_key="compose-org-header",
+    )
+    assert not dlg.isVisible()
+    assert dlg._launcher.isVisible()
+
+    qtbot.mouseClick(dlg._launcher, Qt.MouseButton.LeftButton)
+    assert dlg.isVisible()
+    dlg.close()
+    assert not dlg.isVisible()
+    assert dlg._launcher.isVisible()
+
+    qtbot.mouseClick(dlg._launcher, Qt.MouseButton.LeftButton)
+    assert dlg.isVisible()
+    dlg.reject()
+    assert not dlg.isVisible()
+    assert dlg._launcher.isVisible()
+
+
+def test_compose_organise_cancel_forwards_to_active_archive_worker(qtbot, tmp_path):
+    from app.views.workbench_view import WorkbenchView
+
+    db = _make_db(str(tmp_path / "project.db"))
+    ctx = _make_ctx(str(tmp_path), db)
+    w = WorkbenchView(ctx)
+    qtbot.addWidget(w)
+
+    class _DummyWorker:
+        def __init__(self) -> None:
+            self.cancel_called = False
+
+        def cancel(self) -> None:
+            self.cancel_called = True
+
+    worker = _DummyWorker()
+    w._archive_worker_by_task_key = {"task-archive": worker}
+    w._workflow_notice(
+        "合成+整理：正在整理",
+        "正在打包第 1/3 张 JPG：a.jpg",
+        state="busy",
+        force_show=True,
+        task_key="task-archive",
+    )
+
+    dlg = getattr(w, "_compose_organise_progress_dialog", None)
+    assert dlg is not None
+    qtbot.mouseClick(dlg._cancel_action, Qt.MouseButton.LeftButton)
+
+    assert worker.cancel_called is True
+    _stage, title, detail = w._workflow_notice_text()
+    assert "正在取消" in title
+    assert "不会删除 JPG" in detail
+
+
+def test_compose_organise_finished_state_has_close_not_cancel(qtbot, tmp_path):
+    from app.views.workbench_view import WorkbenchView
+
+    db = _make_db(str(tmp_path / "project.db"))
+    ctx = _make_ctx(str(tmp_path), db)
+    w = WorkbenchView(ctx)
+    w.resize(900, 620)
+    qtbot.addWidget(w)
+    w.show()
+
+    w._workflow_notice(
+        "合成+整理完成",
+        "已生成 ZIP，JPG 可从成果 ZIP 撤销恢复。",
+        state="success",
+        force_show=True,
+        task_key="task-finished",
+    )
+    dlg = getattr(w, "_compose_organise_progress_dialog", None)
+
+    assert dlg is not None
+    assert dlg.isVisible()
+    assert dlg._overall_badge.text() == "状态：完成"
+    assert not dlg._cancel_action.isVisible()
+    assert dlg._ok_action.isEnabled()
+    assert dlg._ok_action.text() == "确定"
+    assert dlg._hide_action.text() == "关闭窗口"
+
+    qtbot.mouseClick(dlg._ok_action, Qt.MouseButton.LeftButton)
+
+    assert not dlg.isVisible()
+    assert dlg._launcher is not None
+    assert not dlg._launcher.isVisible()
+
+
+def test_compose_organise_finished_close_controls_really_close(qtbot, tmp_path):
+    from app.views.workbench_view import WorkbenchView
+
+    db = _make_db(str(tmp_path / "project.db"))
+    ctx = _make_ctx(str(tmp_path), db)
+    w = WorkbenchView(ctx)
+    w.resize(900, 620)
+    qtbot.addWidget(w)
+    w.show()
+
+    w._workflow_notice(
+        "合成+整理完成",
+        "已生成 ZIP，4 张 JPG 已写入 ZIP。",
+        state="success",
+        force_show=True,
+        task_key="task-finished-close",
+    )
+    dlg = getattr(w, "_compose_organise_progress_dialog", None)
+    assert dlg is not None
+    assert dlg.isVisible()
+
+    qtbot.mouseClick(dlg._hide_action, Qt.MouseButton.LeftButton)
+
+    assert not dlg.isVisible()
+    assert dlg._launcher is not None
+    assert not dlg._launcher.isVisible()
+
+    w._workflow_notice(
+        "合成+整理完成",
+        "已生成 ZIP，4 张 JPG 已写入 ZIP。",
+        state="success",
+        force_show=True,
+        task_key="task-finished-close",
+    )
+    assert dlg.isVisible()
+
+    assert dlg.close() is True
+    assert not dlg.isVisible()
+    assert dlg._launcher is not None
+    assert not dlg._launcher.isVisible()
+
+
+def test_compose_organise_uses_operations_style_background_entry(qtbot, tmp_path):
+    """Geneious-style: no blocking scrim; Hide/minimize sends task to background."""
+    from app.views.workbench_view import WorkbenchView
+
+    db = _make_db(str(tmp_path / "project.db"))
+    ctx = _make_ctx(str(tmp_path), db)
+    w = WorkbenchView(ctx)
+    w.resize(900, 620)
+    qtbot.addWidget(w)
+    w.show()
+    qtbot.wait(50)
+
+    w._workflow_notice(
+        "合成+整理完成",
+        "已生成 demo.zip；3 张 JPG 已写入 ZIP 并从待处理区删除。",
+        state="success",
+        force_show=True,
+        task_key="backdrop-regression",
+    )
+    dlg = w._compose_organise_progress_dialog
+    assert dlg is not None
+    assert dlg.isVisible()
+    assert dlg.parentWidget() is w
+    assert dlg._cancel_action.isHidden()
+    assert dlg._ok_action.isVisible()
+
+    qtbot.mouseClick(dlg._compact_btn, Qt.MouseButton.LeftButton)
+    assert not dlg.isVisible()
+    assert dlg._launcher.isVisible()
+    assert dlg._launcher.text() == "任务 · 完成"
+
+    qtbot.mouseClick(dlg._launcher, Qt.MouseButton.LeftButton)
+    assert dlg.isVisible()
+    qtbot.mouseClick(dlg._hide_action, Qt.MouseButton.LeftButton)
+    assert not dlg.isVisible()
+    assert not dlg._launcher.isVisible()
+
+    w._workflow_notice(
+        "合成+整理完成",
+        "已生成 demo.zip；3 张 JPG 已写入 ZIP 并从待处理区删除。",
+        state="success",
+        force_show=True,
+        task_key="backdrop-regression",
+    )
+    assert dlg.isVisible()
+    qtbot.mouseClick(dlg._ok_action, Qt.MouseButton.LeftButton)
+    assert not dlg.isVisible()
+    assert not dlg._launcher.isVisible()
+
+
+def test_workflow_dashboard_allows_jpg_compose_without_active_uid(qtbot, tmp_path):
+    from app.services.monitor_service import FileEntry, ScanResult
+    from app.views.workbench_view import WorkbenchView
+
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    jpg = project_dir / "incoming-jpg" / "a.jpg"
+    jpg.parent.mkdir()
+    jpg.write_bytes(b"\xff\xd8\xff\xe0jpg")
+    db = _make_db(str(project_dir / "_data.db"))
+    ctx = _make_ctx(str(project_dir), db)
+    w = WorkbenchView(ctx)
+    qtbot.addWidget(w)
+
+    w._apply_monitor_scan_result(ScanResult(
+        project_dir=str(project_dir),
+        jpg_files=[
+            FileEntry(
+                name=jpg.name,
+                path=str(jpg),
+                kind="jpg",
+                size=jpg.stat().st_size,
+                mtime="2026-07-06T00:00:00+00:00",
+            )
+        ],
+        pending_count=1,
+        incoming_jpg_dir=str(jpg.parent),
+    ))
+
+    assert not hasattr(w, "_workflow_dashboard")
+
+
+def test_supp_compression_worker_cancel_cleans_partial_zip(qtbot, tmp_path, monkeypatch):
+    from app.services import archive_service
+    from app.workers.supp_compression_worker import SuppCompressionWorker
+
+    jpg = tmp_path / "a.jpg"
+    jpg.write_bytes(b"jpg")
+    tiff = tmp_path / "result.tif"
+    tiff.write_bytes(b"tif")
+    out_dir = tmp_path / "results"
+    out_dir.mkdir()
+    partial_zip = out_dir / "result.zip"
+
+    def _cancelled_archive(*_args, **_kwargs):
+        partial_zip.write_bytes(b"partial zip")
+        raise archive_service.ArchiveCancelled("用户取消")
+
+    monkeypatch.setattr(archive_service, "archive_group", _cancelled_archive)
+
+    worker = SuppCompressionWorker(
+        [str(jpg)],
+        str(tiff),
+        str(tmp_path),
+        output_dir=str(out_dir),
+    )
+    messages = []
+    worker.cancelled.connect(messages.append)
+
+    worker.run()
+
+    assert messages == ["用户取消"]
+    assert not partial_zip.exists()
 
 
 def _make_db(path: str) -> sqlite3.Connection:
@@ -324,6 +804,26 @@ class TestOnActivate:
         assert not w._fs_watcher.directories()
         db.close()
 
+    def test_stop_background_work_waits_for_archive_workers(self):
+        """Shutdown should wait for archive workers instead of destroying running QThreads."""
+        from app.views.workbench_view import WorkbenchView
+
+        w = WorkbenchView(_make_ctx(project_dir=None))
+        waits = []
+
+        class _Worker:
+            def isRunning(self):
+                return True
+
+            def wait(self, ms):
+                waits.append(ms)
+
+        w._archive_workers = {_Worker()}
+
+        w.stop_background_work()
+
+        assert waits == [3000]
+
     def test_on_activate_with_project(self, tmp_path):
         """on_activate must not crash with a valid (but empty) project."""
         from app.views.workbench_view import WorkbenchView
@@ -510,6 +1010,79 @@ class TestRightRailSpecimenIdentityEdits:
             ).fetchone()[0])
             assert raw["id"] == "DLC002"
             assert old_uid in raw["previousUniqueIds"]
+        finally:
+            db.close()
+
+    def test_dynamic_naming_field_is_saved_to_raw_json(self, tmp_path):
+        from app.services.project_settings_service import (
+            DEFAULT_NAMING_RULES,
+            save_setting,
+        )
+
+        w, db, _project_dir = self._make_workbench(tmp_path)
+        try:
+            rules = dict(DEFAULT_NAMING_RULES)
+            rules["components"] = [
+                "province", "site", "habitat", "species_id", "storage", "date_seg"
+            ]
+            rules["required"] = dict(DEFAULT_NAMING_RULES["required"])
+            rules["required"]["habitat"] = True
+            save_setting(db, "naming_rules", rules)
+            w._naming.refresh_naming_rules()
+
+            w._naming._province.setText("FJ")
+            w._naming._site.setText("SMW")
+            w._naming._species_id.setText("DLC001")
+            w._naming._storage.setText("T95E")
+            w._naming._collection_date.setText("20260612")
+            w._naming._photo_date.setText("20260612")
+            w._naming._dynamic_naming_edits["habitat"].setText("泥滩")
+
+            w._on_naming_save()
+
+            uid = "FJ-SMW-泥滩-DLC001-T95E-20260612"
+            raw = json.loads(db.execute(
+                "SELECT raw_json FROM specimens WHERE uid=?",
+                (uid,),
+            ).fetchone()[0])
+            assert raw["habitat"] == "泥滩"
+        finally:
+            db.close()
+
+    def test_project_custom_naming_field_is_saved_to_raw_json(self, tmp_path):
+        from app.services.project_settings_service import (
+            DEFAULT_NAMING_RULES,
+            save_setting,
+        )
+
+        w, db, _project_dir = self._make_workbench(tmp_path)
+        try:
+            rules = dict(DEFAULT_NAMING_RULES)
+            rules["custom_fields"] = [{"key": "depth", "label": "水深"}]
+            rules["components"] = [
+                "province", "site", "depth", "species_id", "storage", "date_seg"
+            ]
+            rules["required"] = dict(DEFAULT_NAMING_RULES["required"])
+            rules["required"]["depth"] = True
+            save_setting(db, "naming_rules", rules)
+            w._naming.refresh_naming_rules()
+
+            w._naming._province.setText("FJ")
+            w._naming._site.setText("SMW")
+            w._naming._species_id.setText("DLC001")
+            w._naming._storage.setText("T95E")
+            w._naming._collection_date.setText("20260612")
+            w._naming._photo_date.setText("20260612")
+            w._naming._dynamic_naming_edits["depth"].setText("12m")
+
+            w._on_naming_save()
+
+            uid = "FJ-SMW-12m-DLC001-T95E-20260612"
+            raw = json.loads(db.execute(
+                "SELECT raw_json FROM specimens WHERE uid=?",
+                (uid,),
+            ).fetchone()[0])
+            assert raw["depth"] == "12m"
         finally:
             db.close()
 
@@ -1260,6 +1833,38 @@ class TestMonitorPanel:
 
 
 class TestWorkbenchMonitorAttribution:
+    def test_refresh_while_scan_running_invalidates_stale_result(self, tmp_path, monkeypatch):
+        """归档完成触发刷新时，整理前启动的旧扫描不能再覆盖监控列表。"""
+        from app.views.workbench_view import WorkbenchView
+
+        db = _make_db(str(tmp_path / "project.db"))
+        ctx = _make_ctx(project_dir=str(tmp_path), db=db)
+        w = WorkbenchView(ctx)
+
+        class _RunningWorker:
+            request_id = 7
+
+            def isRunning(self):
+                return True
+
+        w._monitor_scan_worker = _RunningWorker()
+        w._monitor_scan_request_id = 7
+        w._monitor_scan_pending = False
+        applied = []
+        monkeypatch.setenv("QT_QPA_PLATFORM", "xcb")
+        monkeypatch.setattr(
+            w, "_apply_monitor_scan_result", lambda result: applied.append(result)
+        )
+        monkeypatch.setattr(w, "_run_pending_monitor_scan", lambda: None)
+
+        w._refresh_monitor()
+        w._on_monitor_scan_finished(7, object())
+
+        assert w._monitor_scan_pending is True
+        assert w._monitor_scan_request_id == 8
+        assert applied == []
+        db.close()
+
     def test_no_active_clears_historical_jpg_attribution_for_monitor_display_only(self):
         from app.services.monitor_service import FileEntry, ScanResult
         from app.views.workbench_view import WorkbenchView
@@ -2389,6 +2994,37 @@ class TestProjectSettingsDrawer:
         w = WorkbenchView(ctx)
         assert hasattr(w, "_settings_drawer")
 
+    def test_settings_drawer_naming_rule_signal_refreshes_naming_panel(self, tmp_path):
+        from app.services.project_settings_service import (
+            DEFAULT_NAMING_RULES,
+            save_setting,
+        )
+        from app.views.workbench_view import WorkbenchView
+
+        project_dir = str(tmp_path / "proj")
+        Path(project_dir).mkdir(parents=True)
+        db = _make_db(":memory:")
+        ctx = _make_ctx(project_dir=project_dir, db=db)
+        w = WorkbenchView(ctx)
+        try:
+            assert "depth" not in w._naming._dynamic_naming_edits
+
+            rules = dict(DEFAULT_NAMING_RULES)
+            rules["custom_fields"] = [{"key": "depth", "label": "水深"}]
+            rules["components"] = [
+                "province", "site", "depth", "species_id", "date_seg"
+            ]
+            rules["required"] = dict(DEFAULT_NAMING_RULES["required"])
+            rules["required"]["depth"] = True
+            save_setting(db, "naming_rules", rules)
+
+            w._settings_drawer.naming_rules_changed.emit()
+
+            assert "depth" in w._naming._dynamic_naming_edits
+            assert any("水深" in label.text() for label in w._naming._field_labels.values())
+        finally:
+            db.close()
+
 
 class TestGroupingPanelCaptureActions:
     def test_has_target_label(self):
@@ -2738,6 +3374,78 @@ class TestComposePreviewDialog:
         assert dlg.params()["radius"] == 4.5
         assert dlg.params()["smoothing"] == 3
 
+    def test_compose_workbench_dialog_renders_tiff_preview(self, tmp_path, qapp):
+        from PIL import Image
+
+        from app.views.workbench_view import _ComposeWorkbenchDialog
+
+        jpg1 = tmp_path / "a.jpg"
+        jpg2 = tmp_path / "b.jpg"
+        tiff = tmp_path / "out.tif"
+        jpg1.write_bytes(b"jpg1")
+        jpg2.write_bytes(b"jpg2")
+        Image.new("RGB", (64, 40), "#336699").save(tiff)
+
+        dlg = _ComposeWorkbenchDialog(
+            [str(jpg1), str(jpg2)],
+            str(tiff),
+            {"method": 1, "radius": 8, "smoothing": 4},
+        )
+
+        assert dlg._tiff_preview.source_pixmap() is not None
+        assert not dlg._tiff_preview.source_pixmap().isNull()
+
+    def test_compose_workbench_preview_supports_windows_zoom(self, tmp_path, qapp):
+        from PIL import Image
+
+        from app.views.workbench_view import _ComposeWorkbenchDialog
+
+        jpg1 = tmp_path / "a.jpg"
+        tiff = tmp_path / "out.tif"
+        jpg1.write_bytes(b"jpg1")
+        Image.new("RGB", (64, 40), "#336699").save(tiff)
+
+        dlg = _ComposeWorkbenchDialog(
+            [str(jpg1)],
+            str(tiff),
+            {"method": 1, "radius": 8, "smoothing": 4},
+        )
+
+        source_width = dlg._tiff_preview.source_pixmap().width()
+
+        dlg._tiff_preview.set_zoom_percent(150)
+        assert dlg._tiff_preview._fit_to_window is False
+        assert dlg._tiff_preview._zoom_percent == 150
+        assert dlg._tiff_preview.pixmap().width() == int(source_width * 1.5)
+
+        dlg._tiff_preview.actual_size()
+        assert dlg._tiff_preview._zoom_percent == 100
+        assert dlg._tiff_preview.pixmap().width() == source_width
+
+        dlg._tiff_preview.fit_to_window()
+        assert dlg._tiff_preview._fit_to_window is True
+
+    def test_compose_workbench_dialog_renders_source_thumbnails(self, tmp_path, qapp):
+        from PIL import Image
+
+        from app.views.workbench_view import _ComposeWorkbenchDialog
+
+        jpg1 = tmp_path / "a.jpg"
+        jpg2 = tmp_path / "b.jpg"
+        tiff = tmp_path / "out.tif"
+        Image.new("RGB", (32, 24), "#884422").save(jpg1)
+        Image.new("RGB", (32, 24), "#228844").save(jpg2)
+        Image.new("RGB", (64, 40), "#336699").save(tiff)
+
+        dlg = _ComposeWorkbenchDialog(
+            [str(jpg1), str(jpg2)],
+            str(tiff),
+            {"method": 1, "radius": 8, "smoothing": 4},
+        )
+
+        assert len(dlg._checks) == 2
+        assert all(not checkbox.icon().isNull() for checkbox, _ in dlg._checks)
+
 
 # ── _BatchResultDialog ────────────────────────────────────────────
 
@@ -2882,6 +3590,22 @@ class TestCollabPostPhotoIndex:
         w._current_uid = uid
         w._on_organize_finished(uid)
         collab.post_photo_index.assert_called_once_with(uid, "zip")
+        db.close()
+
+    def test_background_finish_does_not_reselect_old_uid(self, tmp_path):
+        """Background compose/organize must not steal focus from the current specimen."""
+        w, collab, db = self._make_workbench_with_collab(tmp_path)
+        uid = "FJ-XM-B2-DLC001-T95E-20260601"
+        w._sidebar = MagicMock()
+
+        w._on_helicon_finished(uid, select_uid=False)
+        w._on_organize_finished(uid, select_uid=False)
+
+        assert w._sidebar.refresh.call_count == 2
+        w._sidebar.select_uid.assert_not_called()
+        assert [
+            args for args, _kwargs in collab.post_photo_index.call_args_list
+        ] == [(uid, "tiff"), (uid, "zip")]
         db.close()
 
     def test_post_photo_index_no_crash_when_no_collab(self, tmp_path):
@@ -3527,7 +4251,7 @@ class TestSaveButtonPersistsMetadata:
         assert db.execute("SELECT count(*) FROM specimens").fetchone()[0] == 0
         assert warnings
         assert "样地" in warnings[0][2]
-        assert "物种编号" in warnings[0][2]
+        assert "物种缩写" in warnings[0][2]
         assert "保存方式" in warnings[0][2]
 
 
@@ -4723,12 +5447,15 @@ class TestImplicitCompose:
         monkeypatch.setattr(
             w,
             "_compose_group_headless",
-            lambda uid, idx, done: (calls.append((uid, idx)), done(True)),
+            lambda uid, idx, done, **kw: (
+                calls.append((uid, idx, kw.get("background"))),
+                done(True),
+            ),
         )
         w._on_compose_implicit()
-        assert calls == [(self.UID, 0)]
+        assert calls == [(self.UID, 0, False)]
 
-    def test_compose_implicit_organise_with_preview_waits_for_interactive_compose(
+    def test_compose_implicit_organise_runs_in_background_even_with_preview_on(
         self, tmp_path, monkeypatch
     ):
         selected = [str(tmp_path / "a.jpg"), str(tmp_path / "b.jpg")]
@@ -4737,18 +5464,18 @@ class TestImplicitCompose:
         monkeypatch.setattr(w, "_get_active_uid", lambda: self.UID)
         monkeypatch.setattr(w._monitor, "selected_jpg_paths", lambda: selected)
         monkeypatch.setattr(w, "_assign_selected_jpgs_to_uid", lambda uid, paths: None)
-        monkeypatch.setattr(
-            w,
-            "_compose_group_headless",
-            lambda *a, **k: pytest.fail("preview-on compose+organise must not run headless"),
-        )
         calls = []
 
-        def _fake_interactive(uid, idx, **kw):
-            calls.append(("compose-preview", idx, callable(kw.get("on_composed"))))
-            kw["on_composed"](True)
+        def _fake_headless(uid, idx, done, **kw):
+            calls.append(("compose-background", idx, kw.get("background")))
+            done(True)
 
-        monkeypatch.setattr(w, "_on_compose_requested", _fake_interactive)
+        monkeypatch.setattr(w, "_compose_group_headless", _fake_headless)
+        monkeypatch.setattr(
+            w,
+            "_on_compose_requested",
+            lambda *a, **k: pytest.fail("合成+整理应直接后台执行，不应等待预览框"),
+        )
         monkeypatch.setattr(
             w,
             "_on_organise_requested",
@@ -4760,7 +5487,7 @@ class TestImplicitCompose:
         w._on_compose_implicit(organise=True)
 
         assert calls == [
-            ("compose-preview", 0, True),
+            ("compose-background", 0, True),
             ("organise", 0, True, True),
         ]
 
@@ -4786,7 +5513,7 @@ class TestImplicitCompose:
         monkeypatch.setattr(w, "_show_compose_preview", lambda paths: list(paths))
         monkeypatch.setattr(helicon_service, "detect_helicon", lambda: "/fake/Helicon.exe")
 
-        def _fake_stack(jpg_paths, output_path, params, on_finished, on_failed):
+        def _fake_stack(jpg_paths, output_path, params, on_finished, on_failed, **kwargs):
             Path(output_path).parent.mkdir(parents=True, exist_ok=True)
             Path(output_path).write_bytes(b"II*\x00fake")
             on_finished(output_path)
@@ -4851,7 +5578,17 @@ class TestImplicitCompose:
         monkeypatch.setattr(
             w,
             "_compose_group_headless",
-            lambda uid, idx, done: (calls.append(("compose", idx)), done(True)),
+            lambda uid, idx, done, **kw: (
+                calls.append(
+                    (
+                        "compose",
+                        idx,
+                        kw.get("background"),
+                        kw.get("show_progress_dialog"),
+                    )
+                ),
+                done(True),
+            ),
         )
         monkeypatch.setattr(
             w,
@@ -4861,7 +5598,7 @@ class TestImplicitCompose:
             ) or True,
         )
         w._on_compose_implicit(organise=True)
-        assert calls == [("compose", 0), ("organise", 0, True, True)]
+        assert calls == [("compose", 0, True, False), ("organise", 0, True, True)]
 
     def test_compose_implicit_organise_reports_done_after_archive_callback(
         self, tmp_path, monkeypatch
@@ -4875,7 +5612,7 @@ class TestImplicitCompose:
         monkeypatch.setattr(
             w,
             "_compose_group_headless",
-            lambda uid, idx, done: done(True),
+            lambda uid, idx, done, **kw: done(True),
         )
         archive_done = {}
         monkeypatch.setattr(
@@ -4894,6 +5631,76 @@ class TestImplicitCompose:
         assert "合成+整理完成" not in messages
         archive_done["callback"](True)
         assert messages[-1] == "合成+整理完成"
+
+    def test_compose_implicit_organise_archives_and_consumes_selected_jpgs(
+        self, qtbot, tmp_path, monkeypatch
+    ):
+        from app.services import archive_service
+        from app.services.grouping_service import load_grouping
+
+        w, ctx, db = self._make_view(tmp_path, [])
+        project_dir = Path(ctx.current_project_dir)
+        incoming = project_dir / "incoming-jpg"
+        results = project_dir / "results"
+        incoming.mkdir(parents=True, exist_ok=True)
+        results.mkdir(parents=True, exist_ok=True)
+        selected = []
+        for name in ("P6202147-4.JPG", "P6202147.JPG"):
+            path = incoming / name
+            path.write_bytes(b"\xff\xd8\xff\xe0jpg")
+            selected.append(str(path))
+
+        ctx.settings.delete_jpg_after_archive = True
+        ctx.settings.jxl_effort_method = "standard"
+        ctx.settings.jxl_concurrency = 1
+        monkeypatch.setattr(w, "_get_active_uid", lambda: self.UID)
+        monkeypatch.setattr(w._monitor, "selected_jpg_paths", lambda: list(selected))
+        monkeypatch.setattr(w._monitor, "selected_jpg_owner_uids", lambda: [])
+        monkeypatch.setattr(w, "_assign_selected_jpgs_to_uid", lambda uid, paths: None)
+        monkeypatch.setattr(w, "_refresh_monitor", lambda: None)
+        monkeypatch.setattr(w, "_on_helicon_finished", lambda *a, **k: None)
+        monkeypatch.setattr(w, "_on_organize_finished", lambda *a, **k: None)
+        monkeypatch.setattr(archive_service, "has_cjxl", lambda: False)
+        monkeypatch.setattr(archive_service, "has_djxl", lambda: False)
+        messages = []
+        monkeypatch.setattr(w, "_status_message", lambda msg, *a, **k: messages.append(msg))
+
+        def _fake_stack(
+            jpg_paths,
+            output_path,
+            params,
+            on_finished,
+            on_failed,
+            **kwargs,
+        ):
+            assert list(jpg_paths) == selected
+            assert kwargs.get("show_progress_dialog") is False
+            Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+            Path(output_path).write_bytes(b"II*\x00fake-tiff")
+            on_finished(output_path)
+
+        monkeypatch.setattr(w, "_run_helicon_stack", _fake_stack)
+
+        w._on_compose_implicit(organise=True)
+
+        qtbot.waitUntil(
+            lambda: bool(load_grouping(db, self.UID).groups)
+            and load_grouping(db, self.UID).groups[0].status == "organized",
+            timeout=5000,
+        )
+
+        saved = load_grouping(db, self.UID).groups[0]
+        assert saved.archive_zip
+        assert Path(saved.archive_zip).is_file()
+        assert Path(saved.composed_tiff_path).parent == results
+        assert all(not Path(path).exists() for path in selected)
+        assert any("正在整理" in msg for msg in messages)
+        assert messages[-1] == "合成+整理完成"
+        assert w._workflow_notice_text()[0] == "完成"
+        assert w._workflow_notice_text()[1] == "合成+整理完成"
+        assert "JPG 已写入 ZIP" in w._workflow_notice_text()[2]
+        assert getattr(w, "_workflow_notice_panel", None) is None
+        assert not w._monitor._workflow_notice.isVisible()
 
     def test_selected_organise_without_active_keeps_tiff_name(self, tmp_path, monkeypatch):
         from app.services.grouping_service import ADHOC_GROUPING_UID, load_grouping
@@ -5380,6 +6187,68 @@ class TestUndoComposeDeletesTiff:
         g = load_grouping(db, "U1")
         assert len(g.groups) == 1                             # 组还在
 
+    def test_undo_organised_group_restores_jpgs_and_keeps_tiff(
+        self, tmp_path, monkeypatch
+    ):
+        from PyQt6.QtWidgets import QMessageBox
+        from app.services.archive_service import archive_group
+        from app.services.grouping_service import Group, load_grouping, save_grouping
+
+        w, ctx, db = self._make_view(tmp_path)
+        project_dir = Path(ctx.current_project_dir)
+        incoming = project_dir / "incoming-jpg"
+        incoming.mkdir(parents=True, exist_ok=True)
+        tiff = project_dir / "results" / "T.tif"
+        tiff.write_bytes(b"II*\x00")
+        j1 = incoming / "a.jpg"
+        j2 = incoming / "b.jpg"
+        j1.write_bytes(b"\xff\xd8\xff-a")
+        j2.write_bytes(b"\xff\xd8\xff-b")
+
+        archived = archive_group(
+            [str(j1), str(j2)],
+            str(tiff),
+            str(project_dir),
+            delete_jpg=True,
+            output_dir=str(project_dir / "results"),
+        )
+        assert not j1.exists()
+        assert not j2.exists()
+        save_grouping(
+            db,
+            "U1",
+            [
+                Group(
+                    group_index=0,
+                    jpg_paths=[str(j1), str(j2)],
+                    composed_tiff_path=str(tiff),
+                    archive_zip=archived.zip_path,
+                    status="organized",
+                )
+            ],
+            clean_phantoms=False,
+        )
+        monkeypatch.setattr(
+            QMessageBox,
+            "question",
+            lambda *a, **k: QMessageBox.StandardButton.Yes,
+        )
+        monkeypatch.setattr(w, "_refresh_monitor", lambda: None)
+        messages = []
+        monkeypatch.setattr(w, "_status_message", lambda msg, *a, **k: messages.append(msg))
+
+        w._on_undo_compose("U1", 0)
+
+        saved = load_grouping(db, "U1").groups[0]
+        assert tiff.exists()
+        assert j1.read_bytes() == b"\xff\xd8\xff-a"
+        assert j2.read_bytes() == b"\xff\xd8\xff-b"
+        assert saved.status == "composed"
+        assert saved.archive_zip in (None, "")
+        assert not Path(archived.zip_path).exists()
+        assert (project_dir / "_retired-zip" / Path(archived.zip_path).name).exists()
+        assert messages and "撤销整理完成" in messages[-1]
+
 
 # ── 场景6/7：自动归档（默认关；开时可取激活编号未占用 JPG） ────────────────────
 
@@ -5532,8 +6401,8 @@ class TestBatchComposeOrganise:
         self._patch_helicon_present(monkeypatch)
         calls = []
 
-        def _fake_headless(u, idx, on_done):
-            calls.append(("compose", idx))
+        def _fake_headless(u, idx, on_done, **kw):
+            calls.append(("compose", idx, kw.get("background")))
             on_done(True)
 
         def _fake_organise(u, idx, **kw):
@@ -5545,8 +6414,8 @@ class TestBatchComposeOrganise:
         w._start_compose_batch(uid, organise=True)
 
         assert calls == [
-            ("compose", 0), ("organise", 0),
-            ("compose", 1), ("organise", 1),
+            ("compose", 0, True), ("organise", 0),
+            ("compose", 1, True), ("organise", 1),
         ]
         assert w._batch is None  # 队列耗尽 → 状态清空
         db.close()
@@ -5558,7 +6427,10 @@ class TestBatchComposeOrganise:
         calls = []
         monkeypatch.setattr(
             w, "_compose_group_headless",
-            lambda u, idx, on_done: (calls.append(("compose", idx)), on_done(True)),
+            lambda u, idx, on_done, **kw: (
+                calls.append(("compose", idx, kw.get("background"))),
+                on_done(True),
+            ),
         )
         monkeypatch.setattr(
             w, "_on_organise_requested",
@@ -5568,7 +6440,7 @@ class TestBatchComposeOrganise:
         w._start_compose_batch(uid, organise=False)
 
         assert ("organise", 0) not in calls and ("organise", 1) not in calls
-        assert calls == [("compose", 0), ("compose", 1)]
+        assert calls == [("compose", 0, True), ("compose", 1, True)]
         db.close()
 
     def test_compose_batch_only_runs_checked_groups(self, tmp_path, monkeypatch):
@@ -5581,7 +6453,7 @@ class TestBatchComposeOrganise:
         calls = []
         monkeypatch.setattr(
             w, "_compose_group_headless",
-            lambda u, idx, on_done: (calls.append(idx), on_done(True)),
+            lambda u, idx, on_done, **kw: (calls.append(idx), on_done(True)),
         )
 
         w._start_compose_batch(uid, organise=False)
@@ -5597,7 +6469,7 @@ class TestBatchComposeOrganise:
         monkeypatch.setattr(w, "_batch_status", messages.append)
         monkeypatch.setattr(
             w, "_compose_group_headless",
-            lambda u, idx, on_done: on_done(True),
+            lambda u, idx, on_done, **kw: on_done(True),
         )
 
         w._start_compose_batch(uid, organise=False)
@@ -5631,14 +6503,49 @@ class TestBatchComposeOrganise:
         assert calls == [1]
         db.close()
 
+    def test_organise_batch_waits_for_archive_callback_before_next_group(
+        self, tmp_path, monkeypatch
+    ):
+        """批量整理必须串行，避免多个归档 worker 同时写同一个分组状态。"""
+        from app.services.grouping_service import Group, save_grouping
+
+        w, ctx, uid, db = self._build(tmp_path)
+        save_grouping(db, uid, [
+            Group(group_index=0, jpg_paths=self._jpgs[0:2],
+                  composed_tiff_path=str(tmp_path / "a.tif"), status="composed"),
+            Group(group_index=1, jpg_paths=self._jpgs[2:4],
+                  composed_tiff_path=str(tmp_path / "b.tif"), status="composed"),
+        ])
+        callbacks = []
+        calls = []
+
+        def _fake_organise(u, idx, **kw):
+            calls.append((idx, kw.get("silent_batch"), callable(kw.get("on_complete"))))
+            callbacks.append(kw.get("on_complete"))
+            return True
+
+        monkeypatch.setattr(w, "_on_organise_requested", _fake_organise)
+
+        w._organise_all_batch(uid, silent_batch=True)
+
+        assert calls == [(0, True, True)]
+        assert getattr(w, "_organise_batch", None) is not None
+
+        callbacks.pop(0)(True)
+        assert calls == [(0, True, True), (1, True, True)]
+
+        callbacks.pop(0)(True)
+        assert getattr(w, "_organise_batch", None) is None
+        db.close()
+
     def test_failed_group_not_organised_but_batch_continues(self, tmp_path, monkeypatch):
         """某组合成失败(on_done False)→ 该组不整理,但队列继续下一组。"""
         w, ctx, uid, db = self._build(tmp_path)
         self._patch_helicon_present(monkeypatch)
         calls = []
 
-        def _fake_headless(u, idx, on_done):
-            calls.append(("compose", idx))
+        def _fake_headless(u, idx, on_done, **kw):
+            calls.append(("compose", idx, kw.get("background")))
             on_done(idx != 0)  # 组0失败,组1成功
 
         monkeypatch.setattr(w, "_compose_group_headless", _fake_headless)
@@ -5650,8 +6557,8 @@ class TestBatchComposeOrganise:
         w._start_compose_batch(uid, organise=True)
 
         assert calls == [
-            ("compose", 0),           # 组0 合成失败 → 不整理
-            ("compose", 1), ("organise", 1),
+            ("compose", 0, True),           # 组0 合成失败 → 不整理
+            ("compose", 1, True), ("organise", 1),
         ]
         assert w._batch is None
         db.close()
@@ -5667,7 +6574,7 @@ class TestBatchComposeOrganise:
         called = []
         monkeypatch.setattr(
             w, "_compose_group_headless",
-            lambda u, idx, on_done: called.append(idx),
+            lambda u, idx, on_done, **kw: called.append(idx),
         )
         w._start_compose_batch(uid, organise=True)
         assert called == []
@@ -5702,25 +6609,15 @@ class TestBatchComposeOrganise:
         )
         archived_jpgs = []
 
-        class _ArchiveResult:
-            ok = True
-            saved_percent = 20
-            file_count = 4
-            delete_jpg = False
-            requested_delete_jpg = False
-            deletion_skipped_reason = ""
-
         def _fake_archive(
             jpg_paths, tiff_path, project_dir, delete_jpg,
             method="maximum", concurrency=1, progress_callback=None,
-            output_dir=None,
+            cancel_callback=None, output_dir=None,
         ):
             archived_jpgs.extend(jpg_paths)
             assert output_dir == str(tmp_path / "results")
-            result = _ArchiveResult()
-            result.zip_path = str(Path(output_dir) / Path(tiff_path).with_suffix(".zip").name)
-            Path(result.zip_path).write_bytes(b"zip")
-            return result
+            zip_path = str(Path(output_dir) / Path(tiff_path).with_suffix(".zip").name)
+            return _fake_zip_result(jpg_paths, zip_path, saved_percent=20)
 
         monkeypatch.setattr(archive_service, "archive_group", _fake_archive)
 
@@ -5766,21 +6663,11 @@ class TestBatchComposeOrganise:
         ])
         w._grouping.load_grouping(uid, load_grouping(db, uid))
 
-        class _ArchiveResult:
-            ok = True
-            saved_percent = 20
-            file_count = 4
-            delete_jpg = False
-            requested_delete_jpg = False
-            deletion_skipped_reason = ""
-
         def _fake_archive(jpg_paths, tiff_path, project_dir, delete_jpg, **kwargs):
-            assert delete_jpg is True
+            assert delete_jpg is False
             assert kwargs.get("output_dir") == str(tmp_path / "results")
-            result = _ArchiveResult()
-            result.zip_path = str(Path(kwargs["output_dir"]) / Path(tiff_path).with_suffix(".zip").name)
-            Path(result.zip_path).write_bytes(b"zip")
-            return result
+            zip_path = str(Path(kwargs["output_dir"]) / Path(tiff_path).with_suffix(".zip").name)
+            return _fake_zip_result(jpg_paths, zip_path, saved_percent=20)
 
         monkeypatch.setattr(archive_service, "archive_group", _fake_archive)
 
@@ -5822,6 +6709,8 @@ class TestBatchComposeOrganise:
             )
         ])
         w._grouping.load_grouping(uid, load_grouping(db, uid))
+        w._current_uid = "GXFCG-BLW-SC999-R-20260618"
+        w._sidebar = MagicMock()
         monkeypatch.setattr(
             tiff_metadata_service,
             "write_result_tiff_metadata",
@@ -5836,6 +6725,7 @@ class TestBatchComposeOrganise:
         assert Path(saved.composed_tiff_path).is_file()
         assert saved.archive_zip in (None, "")
         assert not tif.exists()
+        w._sidebar.select_uid.assert_not_called()
         db.close()
 
     def test_headless_compose_uses_suggested_name_and_saves(self, tmp_path, monkeypatch):
@@ -5846,7 +6736,7 @@ class TestBatchComposeOrganise:
 
         captured = {}
 
-        def _fake_stack(jpgs, out_path, params, on_finished, on_failed):
+        def _fake_stack(jpgs, out_path, params, on_finished, on_failed, **kwargs):
             captured["out"] = out_path
             captured["jpgs"] = list(jpgs)
             Path(out_path).parent.mkdir(parents=True, exist_ok=True)
@@ -5880,7 +6770,7 @@ class TestBatchComposeOrganise:
         db.commit()
         captured = {}
 
-        def _fake_stack(jpgs, out_path, params, on_finished, on_failed):
+        def _fake_stack(jpgs, out_path, params, on_finished, on_failed, **kwargs):
             captured["out"] = out_path
             Path(out_path).parent.mkdir(parents=True, exist_ok=True)
             Path(out_path).write_bytes(b"II*\x00fake-tiff")
@@ -6018,7 +6908,7 @@ class TestAdhocGrouping:
         w, ctx, db = self._build_adhoc(tmp_path)
         captured = {}
 
-        def _fake_stack(jpgs, out_path, params, on_finished, on_failed):
+        def _fake_stack(jpgs, out_path, params, on_finished, on_failed, **kwargs):
             captured["out"] = out_path
             Path(out_path).parent.mkdir(parents=True, exist_ok=True)
             Path(out_path).write_bytes(b"II*\x00fake-tiff")
@@ -6060,23 +6950,13 @@ class TestAdhocGrouping:
         )
         w._grouping.load_grouping(ADHOC_GROUPING_UID, grouping)
 
-        class _ArchiveResult:
-            ok = True
-            file_count = 2
-            saved_percent = 0
-            delete_jpg = False
-            requested_delete_jpg = False
-            deletion_skipped_reason = ""
-
         captured = {}
 
         def _fake_archive(jpg_paths, tiff_path, project_dir, delete_jpg, **kwargs):
             captured["output_dir"] = kwargs.get("output_dir")
             captured["project_dir"] = project_dir
-            result = _ArchiveResult()
-            result.zip_path = str(Path(kwargs["output_dir"]) / "sample-result.zip")
-            Path(result.zip_path).write_bytes(b"zip")
-            return result
+            zip_path = str(Path(kwargs["output_dir"]) / "sample-result.zip")
+            return _fake_zip_result(jpg_paths, zip_path)
 
         monkeypatch.setattr(archive_service, "archive_group", _fake_archive)
 
@@ -6106,27 +6986,17 @@ class TestAdhocGrouping:
         w, ctx, db = self._build_adhoc(tmp_path)
         self._patch_helicon_present(monkeypatch)
 
-        def _fake_stack(jpgs, out_path, params, on_finished, on_failed):
+        def _fake_stack(jpgs, out_path, params, on_finished, on_failed, **kwargs):
+            assert kwargs.get("show_progress_dialog") is False
             Path(out_path).parent.mkdir(parents=True, exist_ok=True)
             Path(out_path).write_bytes(b"II*\x00fake-tiff")
             on_finished(out_path)
 
         monkeypatch.setattr(w, "_run_helicon_stack", _fake_stack)
 
-        class _R:
-            ok = True
-            file_count = 3
-            saved_percent = 10
-            delete_jpg = False
-            requested_delete_jpg = False
-            deletion_skipped_reason = ""
-
         def _fake_archive(jpg_paths, tiff_path, project_dir, delete_jpg, **kwargs):
             z = str(Path(tiff_path).with_suffix(".zip"))
-            Path(z).write_bytes(b"zip")
-            r = _R()
-            r.zip_path = z
-            return r
+            return _fake_zip_result(jpg_paths, z, saved_percent=10)
 
         monkeypatch.setattr(archive_service, "archive_group", _fake_archive)
 
@@ -6281,6 +7151,30 @@ class TestRestoreLastProject:
         assert ctx.current_project_root == str(root)
         win.refresh_context_bar.assert_called_once()
 
+    def test_restores_workspace_saved_as_wsl_path_on_windows(self, tmp_path, monkeypatch):
+        import main
+        import app.utils.path_utils as path_utils
+        from app.utils.path_utils import windows_to_wsl
+
+        root = tmp_path / "survey"
+        workspace = root / "section-a"
+        (workspace / "_data").mkdir(parents=True)
+        (workspace / "_data" / "project.db").write_bytes(b"x")
+        root_wsl = windows_to_wsl(str(root))
+        workspace_wsl = windows_to_wsl(str(workspace))
+        if not root_wsl or not workspace_wsl:
+            pytest.skip("Requires a Windows drive path")
+
+        monkeypatch.setattr(path_utils.sys, "platform", "win32")
+        ctx = MagicMock()
+        ctx.settings.last_project_dir = workspace_wsl
+        ctx.settings.project_tree_root = root_wsl
+        win = MagicMock()
+
+        assert main._restore_last_project(ctx, win) is True
+        assert ctx.current_project_dir == str(workspace)
+        assert ctx.current_project_root == str(root)
+
     def test_skips_invalid_dir(self, tmp_path):
         import main
         ctx = MagicMock()
@@ -6304,6 +7198,22 @@ class TestRestoreLastProject:
 
 
 class TestAutoGroupOrganize:
+    def test_monitor_legacy_entry_opens_grouping_then_scans(self, qtbot, tmp_path):
+        from app.views.workbench_view import WorkbenchView
+
+        db = _make_db(str(tmp_path / "project.db"))
+        ctx = _make_ctx(str(tmp_path), db)
+        w = WorkbenchView(ctx)
+        qtbot.addWidget(w)
+        calls = []
+        w._on_open_grouping = lambda: calls.append("open")
+        w._on_auto_group_organize = lambda: calls.append("scan")
+
+        w._on_legacy_photo_batch_organize()
+
+        assert calls == ["open", "scan"]
+        db.close()
+
     def test_folder_picker_parents_to_grouping_dialog(self, qtbot, tmp_path):
         from unittest.mock import patch
         from PyQt6.QtWidgets import QDialog

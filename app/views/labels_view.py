@@ -47,6 +47,8 @@ from PyQt6.QtWidgets import (
 from app.config import icons
 from app.config.theme import local_font_css
 from app.views.base_view import BaseView
+from app.services.label_print_executor import LabelPrintExecutor
+from app.services.label_print_batch import LabelPrintBatch
 from app.services.label_service import (
     BUILTIN_TEMPLATES,
     DEFAULT_SIZE_KEY,
@@ -190,6 +192,7 @@ class LabelsView(BaseView):
         }
         self._projects: list[dict] = []
         self._active_bucket = "sample"
+        self._print_batch = LabelPrintBatch()
         self._syncing_specimen_list = False
         self._variant = "studio"
         self._label_edits: dict = {}  # {specimen_idx: {field_key: str}}
@@ -696,6 +699,42 @@ class LabelsView(BaseView):
         for btn in (self._btn_print_sample, self._btn_print_tissue, self._btn_print_both):
             action_row.addWidget(btn)
         print_lay.addLayout(action_row)
+
+        self._batch_summary = QLabel("")
+        self._batch_summary.setObjectName("Muted")
+        self._batch_summary.setWordWrap(True)
+        print_lay.addWidget(self._batch_summary)
+
+        batch_row = QHBoxLayout()
+        batch_row.setSpacing(6)
+        self._btn_add_to_batch = QPushButton("加入批次")
+        self._btn_add_to_batch.setObjectName("GhostBtn")
+        self._btn_add_to_batch.setToolTip("把当前勾选编号加入当前标签类型的待打印批次")
+        icons.set_button_icon(
+            self._btn_add_to_batch, "mdi6.tray-arrow-down", size=15
+        )
+        self._btn_add_to_batch.clicked.connect(self._add_selection_to_batch)
+
+        self._btn_print_batch = QPushButton("打印批次")
+        self._btn_print_batch.setObjectName("PrintBtn")
+        self._btn_print_batch.setToolTip("按当前纸张和拼版设置打印待打印批次")
+        icons.set_button_icon(
+            self._btn_print_batch, "mdi6.printer-pos", color="#ffffff", size=15
+        )
+        self._btn_print_batch.clicked.connect(self._print_batch_job)
+
+        self._btn_clear_batch = QPushButton("清空")
+        self._btn_clear_batch.setObjectName("GhostBtn")
+        self._btn_clear_batch.setToolTip("清空当前标签类型的待打印批次")
+        icons.set_button_icon(self._btn_clear_batch, "mdi6.delete-outline", size=15)
+        self._btn_clear_batch.clicked.connect(self._clear_active_batch)
+        for btn in (
+            self._btn_add_to_batch,
+            self._btn_print_batch,
+            self._btn_clear_batch,
+        ):
+            batch_row.addWidget(btn)
+        print_lay.addLayout(batch_row)
         root.addWidget(print_box)
 
         root.addWidget(QLabel("模板"))
@@ -1056,6 +1095,7 @@ QPushButton#PrintBtn:disabled {{
         self._btn_print_tissue.setEnabled(tissue_n > 0)
         # 一键打两张只在两桶都有内容时才有意义(否则等同于单独打样品瓶)。
         self._btn_print_both.setEnabled(sample_n > 0 and tissue_n > 0)
+        self._refresh_batch_controls()
 
         job = sample_job if self._active_bucket == "sample" else tissue_job
         items = job.get("items") or []
@@ -1455,6 +1495,7 @@ QPushButton#PrintBtn:disabled {{
         self._specimens = specimens
         self._label_edits = {}  # reset per-specimen overrides on project reload
         self._hidden_fields = set()  # reset field-visibility toggles on reload
+        self._print_batch.clear()
         proj = getattr(self.ctx, "current_project_dir", None)
         self._step1.set_project_name(Path(str(proj)).name if proj else "—")
         self._project_hint.setText(f"{len(specimens)} 个标本" if proj else "未选择项目")
@@ -1490,9 +1531,10 @@ QPushButton#PrintBtn:disabled {{
         if not directory:
             return
         try:
-            self.ctx.current_project_dir = str(directory)
+            from app.services.project_service import enter_workspace
+            enter_workspace(self.ctx, str(directory))
         except Exception:
-            setattr(self.ctx, "current_project_dir", str(directory))
+            return
         main_win = self.window()
         if hasattr(main_win, "refresh_context_bar"):
             main_win.refresh_context_bar()
@@ -1555,16 +1597,18 @@ QPushButton#PrintBtn:disabled {{
         Default = active bucket; pass *bucket* for 一键双打 so each job carries
         its own 排版设计 parameters.
         """
-        if bucket is None or bucket == self._active_bucket:
-            imp = self._imposition
-        else:
-            imp = self._impositions.get(bucket) or {}
+        imp = self._imposition_for(bucket)
         out = {}
         for k in self._GRID_OPT_KEYS:
             v = imp.get(k)
             if v is not None:
                 out[k] = v
         return out
+
+    def _imposition_for(self, bucket: Optional[str] = None) -> dict:
+        if bucket is None or bucket == self._active_bucket:
+            return self._imposition
+        return self._impositions.get(bucket) or {}
 
     def _grid_for(self, bucket: str) -> dict:
         """Imposition grid (cols/rows/perPage) for *bucket* on its A4/A5 paper."""
@@ -1577,8 +1621,19 @@ QPushButton#PrintBtn:disabled {{
         return calculate_grid(float(dims["w"]), float(dims["h"]),
                               page_w, page_h, opts=opts)
 
-    def _build_job(self, bucket: str) -> dict:
-        indices = self._step1.selected_indices()
+    def _build_job(
+        self,
+        bucket: str,
+        *,
+        selected_indices: Optional[list[int]] = None,
+        fill_blank: bool = True,
+        include_blank_cells: bool = True,
+    ) -> dict:
+        indices = (
+            self._step1.selected_indices()
+            if selected_indices is None
+            else list(selected_indices)
+        )
         tmpl = resolve_template(self._libs[bucket])
         # batch-wide field-level print on/off (整批统一) — applies to preview & print
         tmpl = apply_field_visibility(
@@ -1593,7 +1648,7 @@ QPushButton#PrintBtn:disabled {{
             edits=self._label_edits or None,
             # no specimen selected → print N blank labels of the bare template
             # ("编号" is supported, not required)
-            fill_blank=True,
+            fill_blank=fill_blank,
         )
         items = job.get("items") or []
         if (
@@ -1608,14 +1663,97 @@ QPushButton#PrintBtn:disabled {{
             job["_previewDemoWhenBlank"] = True
         # sheet-level 空白手写标签：A4/A5 排版时在末尾追加 N 张空白标签（手写）。
         # 预览与打印同读 job["items"]，故只需注入一次。
-        if paper_type in ("a4", "a5") and self._blank_cells > 0:
+        if (
+            paper_type in ("a4", "a5")
+            and include_blank_cells
+            and self._blank_cells > 0
+        ):
             blanks = [{"idx": -1, "data": {}} for _ in range(self._blank_cells)]
             job["items"] = list(job.get("items") or []) + blanks
-            job["labels"] = list(job.get("labels") or []) + [{} for _ in range(self._blank_cells)]
+            job["labels"] = list(job.get("labels") or []) + [
+                {} for _ in range(self._blank_cells)
+            ]
         # 排版设计参数随 job 走（一键双打时各 bucket 各自的拼版、纸向生效）
         if paper_type in ("a4", "a5"):
             job["gridOpts"] = self._grid_opts(bucket)
+            job["cutMarks"] = bool(self._imposition_for(bucket).get("cutMarks"))
         return job
+
+    def _batch_indices_for_bucket(self, bucket: str) -> list[int]:
+        return self._print_batch.indices(bucket)
+
+    def _printable_indices_for_bucket(
+        self, bucket: str, indices: list[int]
+    ) -> list[int]:
+        printable: list[int] = []
+        for idx in indices:
+            if not (0 <= idx < len(self._specimens)):
+                continue
+            if bucket == "tissue" and not has_rna_tissue(self._specimens[idx]):
+                continue
+            printable.append(idx)
+        return printable
+
+    def _build_batch_job(self, bucket: str) -> dict:
+        indices = self._batch_indices_for_bucket(bucket)
+        return self._build_job(
+            bucket,
+            selected_indices=indices,
+            fill_blank=False,
+            include_blank_cells=bool(indices),
+        )
+
+    def _refresh_batch_controls(self) -> None:
+        if not hasattr(self, "_batch_summary"):
+            return
+        bucket = self._active_bucket
+        queued = self._print_batch.count(bucket)
+        job = self._build_batch_job(bucket)
+        labels = len(job.get("labels") or [])
+        bucket_name = "瓶签" if bucket == "sample" else "RNA签"
+        paper_type = self._step3.paper_type(bucket)
+        sheet_note = ""
+        if paper_type in ("a4", "a5"):
+            grid = self._grid_for(bucket)
+            per_page = int(grid.get("perPage") or 0)
+            if per_page > 0:
+                sheet_note = f" · 每页最多 {per_page} 张"
+        self._batch_summary.setText(
+            f"批次：{bucket_name} {queued} 个编号 · 将打印 {labels} 张{sheet_note}"
+        )
+        self._btn_print_batch.setText(f"打印批次 {labels}")
+        self._btn_print_batch.setEnabled(labels > 0)
+        self._btn_clear_batch.setEnabled(queued > 0)
+
+    def _add_selection_to_batch(self) -> None:
+        bucket = self._active_bucket
+        selected = self._printable_indices_for_bucket(
+            bucket, self._step1.selected_indices()
+        )
+        if not selected:
+            QMessageBox.information(
+                self,
+                "加入批次",
+                "当前没有可加入批次的标签。"
+                + (" RNA签只接收 R 前缀标本。" if bucket == "tissue" else ""),
+            )
+            return
+        added = self._print_batch.add(bucket, selected)
+        self._refresh_print_studio()
+        if added <= 0:
+            QMessageBox.information(self, "加入批次", "这些编号已经在当前打印批次中。")
+
+    def _clear_active_batch(self) -> None:
+        self._print_batch.clear(self._active_bucket)
+        self._refresh_print_studio()
+
+    def _print_batch_job(self) -> None:
+        bucket = self._active_bucket
+        job = self._build_batch_job(bucket)
+        if not (job.get("items") or []):
+            QMessageBox.information(self, "打印批次", "当前打印批次为空。")
+            return
+        self._run_print_dialog([job])
 
     # ── Printing (delegates to the shared label_print adapter) ──────────────
 
@@ -1641,59 +1779,96 @@ QPushButton#PrintBtn:disabled {{
         self._run_print_dialog(jobs)
 
     def _run_print_dialog(self, jobs: list[dict]) -> None:
-        """Open PrintJobDialog and paint all *jobs* onto the chosen printer.
-
-        Paper is configured from the first job; subsequent jobs are appended
-        after a page break (see :func:`label_print.paint_jobs`).
-        """
-        from app.utils import windows_print
-        if windows_print.is_available():
-            try:
-                ok, printer_name = windows_print.print_jobs_with_windows_dialog(
-                    jobs,
-                    document_name="标本标签",
-                    cut_marks=bool(self._imposition.get("cutMarks")),
-                    draw_crop_marks=self._draw_crop_marks,
-                )
-            except Exception as exc:
-                QMessageBox.critical(self, "打印失败", str(exc))
-                return
-            if ok:
-                try:
-                    from app.services.activity_audit_service import default_actor, record_print_jobs
-                    record_print_jobs(
-                        self.ctx.get_db(), jobs, actor=default_actor(self.ctx),
-                        printer_name=printer_name or "Windows 打印机",
-                    )
-                except Exception:
-                    pass
+        """Run label jobs through direct or dialog mode from print settings."""
+        settings = self._label_print_settings()
+        if self._label_quick_print_mode(settings) == "direct":
+            self._run_direct_print(jobs, settings)
             return
 
-        dlg = PrintJobDialog(jobs, self)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-
-        printer_name = dlg.selected_printer()
-
-        printer = build_printer(
-            jobs[0], jobs[0].get("gridOpts") or self._grid_opts())
-        if printer_name:
-            printer.setPrinterName(printer_name)
-
-        ok = paint_jobs(
-            printer, jobs,
+        self._label_print_executor().print_with_dialog(
+            jobs,
+            document_name="标本标签",
             grid_opts=self._grid_opts(),
-            cut_marks=bool(self._imposition.get("cutMarks")),
+            cut_marks=any(bool(job.get("cutMarks")) for job in jobs),
             draw_crop_marks=self._draw_crop_marks,
         )
-        if ok:
-            try:
-                from app.services.activity_audit_service import default_actor, record_print_jobs
-                record_print_jobs(
-                    self.ctx.get_db(),
-                    jobs,
-                    actor=default_actor(self.ctx),
-                    printer_name=printer_name or printer.printerName() or "default",
-                )
-            except Exception:
-                pass
+
+    def _label_print_executor(self) -> LabelPrintExecutor:
+        return LabelPrintExecutor(
+            ctx=self.ctx,
+            parent=self,
+            dialog_cls=PrintJobDialog,
+            build_printer_fn=build_printer,
+            paint_jobs_fn=paint_jobs,
+        )
+
+    def _label_print_settings(self) -> dict:
+        from app.services import project_settings_service as pss
+
+        try:
+            db = self.ctx.get_db()
+        except Exception:
+            db = None
+        project_dir = getattr(self.ctx, "current_project_dir", None)
+        project_root = getattr(self.ctx, "current_project_root", None)
+        if not isinstance(project_root, str):
+            project_root = None
+
+        if project_dir:
+            settings = pss.effective_print_settings(
+                str(project_dir), root=project_root
+            )
+        else:
+            settings = dict(pss.DEFAULT_PRINT_SETTINGS)
+
+        if db is not None:
+            local = pss.load_setting_if_present(db, "print_settings")
+            if local is not None:
+                settings = pss.merge_print_settings(settings, local)
+                if "quick_print_mode" not in local and "quick_print" in local:
+                    settings["quick_print_mode"] = (
+                        "direct" if bool(local["quick_print"]) else "dialog"
+                    )
+            settings["_has_print_context"] = True
+        elif project_dir:
+            settings["_has_print_context"] = True
+        else:
+            settings["_has_print_context"] = False
+        return settings
+
+    def _label_quick_print_mode(self, settings: dict) -> str:
+        if not settings.get("_has_print_context"):
+            return "dialog"
+        mode = str(settings.get("quick_print_mode") or "")
+        if not mode:
+            return "direct" if bool(settings.get("quick_print", True)) else "dialog"
+        if mode == "direct" and not bool(settings.get("quick_print", True)):
+            return "dialog"
+        return "direct" if mode == "direct" else "dialog"
+
+    def _run_direct_print(self, jobs: list[dict], settings: dict) -> None:
+        executor = self._label_print_executor()
+        failures: list[str] = []
+        for job in [j for j in jobs if j and (j.get("items") or [])]:
+            bucket = "tissue" if job.get("bucket") == "tissue" else "sample"
+            imposition = self._imposition_for(bucket)
+            printer_name = str(settings.get(f"{bucket}_printer") or "")
+            cut_marks = (
+                bool(job.get("cutMarks"))
+                if "cutMarks" in job
+                else bool(imposition.get("cutMarks"))
+            )
+            result = executor.print_direct(
+                [job],
+                printer_name=printer_name,
+                document_name="标本标签",
+                grid_opts=job.get("gridOpts") or self._grid_opts(bucket),
+                cut_marks=cut_marks,
+                draw_crop_marks=self._draw_crop_marks,
+            )
+            if not result.printed:
+                label = "RNA签" if bucket == "tissue" else "瓶签"
+                detail = result.error or "打印任务发送失败"
+                failures.append(f"{label}: {detail}")
+        if failures:
+            QMessageBox.warning(self, "打印失败", "\n".join(failures))

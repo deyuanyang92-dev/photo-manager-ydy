@@ -41,6 +41,19 @@ def test_root_available_false_for_missing(tmp_path):
     assert project_root_available(str(tmp_path)) is True
 
 
+def test_root_available_accepts_wsl_saved_path_on_windows(tmp_path, monkeypatch):
+    import app.utils.path_utils as path_utils
+    from app.utils.path_utils import windows_to_wsl
+
+    wsl_path = windows_to_wsl(str(tmp_path))
+    if not wsl_path:
+        pytest.skip("Requires a Windows drive path")
+
+    monkeypatch.setattr(path_utils.sys, "platform", "win32")
+
+    assert project_root_available(wsl_path) is True
+
+
 def test_require_root_raises_on_missing(tmp_path):
     with pytest.raises(ProjectUnavailableError):
         require_project_root(_missing(tmp_path))

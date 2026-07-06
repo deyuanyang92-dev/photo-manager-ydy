@@ -1,7 +1,7 @@
 """test_archive_service.py — TDD tests for archive_service.
 
 Tests the full archive pipeline:
-  - high-compression JXL bridge or plain JPG ZIP fallback generation
+  - fast plain JPG ZIP generation and optional high-compression JXL bridge
   - ZIP creation + testzip
   - SHA-256 pre-delete safety checks
   - archive/organise does not auto-delete TIFF
@@ -25,12 +25,15 @@ import pytest
 from PIL import Image
 
 from app.services.archive_service import (
+    ArchiveCancelled,
     archive_group,
+    commit_jpg_deletion_after_archive,
     compress_to_jxl,
     has_cjxl,
     has_djxl,
     reset_tool_cache,
     restore_archive,
+    restore_archive_to_original_paths,
     verify_manifest_complete,
     verify_jpg_zip_complete,
     verify_jxl_recoverable,
@@ -191,6 +194,19 @@ class TestArchiveGroup:
         assert result.delete_jpg is True
         assert not os.path.isfile(jpg)
 
+    def test_commit_jpg_deletion_runs_after_deferred_archive(self):
+        """Two-phase archive: ZIP first, delete JPG only after explicit commit."""
+        jpg = _make_jpg(self.tmpdir, "deferred.jpg")
+        tiff = _make_tiff(self.tmpdir, "deferred.tif")
+        staged = archive_group([jpg], tiff, self.tmpdir, delete_jpg=False)
+        assert staged.ok
+        assert staged.delete_jpg is False
+        assert os.path.isfile(jpg)
+
+        committed = commit_jpg_deletion_after_archive(staged, [jpg])
+        assert committed.delete_jpg is True
+        assert not os.path.isfile(jpg)
+
     def test_archive_group_does_not_auto_delete_tiff(self):
         """archive_group must not auto-delete TIFF while deleting loose JPGs."""
         jpg = _make_jpg(self.tmpdir, "img001.jpg")
@@ -206,20 +222,55 @@ class TestArchiveGroup:
         assert result.ok
         assert os.path.isfile(result.zip_path)
 
-    def test_zip_uses_internal_jxl_when_tools_available(self):
-        """Default archive is high-compression internal JXL when cjxl/djxl exist."""
+    def test_standard_zip_stores_jpg_even_when_jxl_tools_available(self):
+        """Default archive is fast plain JPG ZIP even when cjxl/djxl exist."""
         jpg = _make_jpg(self.tmpdir, "img_manifest.jpg")
         tiff = _make_tiff(self.tmpdir, "result_manifest.tif")
-        result = archive_group([jpg], tiff, self.tmpdir, delete_jpg=False)
+        with patch("app.services.archive_service.has_cjxl", return_value=True):
+            with patch("app.services.archive_service.has_djxl", return_value=True):
+                with patch(
+                    "app.services.archive_service.compress_to_jxl",
+                    side_effect=AssertionError("standard mode must not use JXL"),
+                ):
+                    result = archive_group([jpg], tiff, self.tmpdir, delete_jpg=False)
         with zipfile.ZipFile(result.zip_path, "r") as zf:
             names = zf.namelist()
-        if has_cjxl() and has_djxl():
-            assert "manifest.json" in names
-            assert "img_manifest.jxl" in names
-            assert result.manifest["format"] == "jxl-zip"
-        else:
-            assert names == ["img_manifest.jpg"]
-            assert result.manifest["format"] == "jpg-zip"
+        assert names == ["img_manifest.jpg"]
+        assert result.manifest["format"] == "jpg-zip"
+        assert result.manifest["method"] == "fast-plain-jpg-zip"
+        assert result.manifest["files"][0]["zipCompression"] == "store"
+
+    def test_maximum_archive_uses_internal_jxl_when_tools_available(self):
+        """High-compression mode is explicit because JXL transcode is slow."""
+        jpg = _make_jpg(self.tmpdir, "img_manifest.jpg")
+        tiff = _make_tiff(self.tmpdir, "result_manifest.tif")
+        captured_effort = []
+
+        def fake_compress(_src, dst, effort=9):
+            captured_effort.append(effort)
+            Path(dst).write_bytes(b"fake-jxl")
+
+        with patch("app.services.archive_service.has_cjxl", return_value=True):
+            with patch("app.services.archive_service.has_djxl", return_value=True):
+                with patch("app.services.archive_service.compress_to_jxl", side_effect=fake_compress):
+                    with patch(
+                        "app.services.archive_service._verify_jxl_zip_complete",
+                        return_value=CheckResult(ok=True),
+                    ):
+                        result = archive_group(
+                            [jpg],
+                            tiff,
+                            self.tmpdir,
+                            delete_jpg=False,
+                            method="maximum",
+                        )
+
+        with zipfile.ZipFile(result.zip_path, "r") as zf:
+            names = sorted(zf.namelist())
+        assert names == ["img_manifest.jxl", "manifest.json"]
+        assert captured_effort == [9]
+        assert result.manifest["format"] == "jxl-zip"
+        assert result.manifest["jxlEffort"] == 9
 
     def test_manifest_contains_correct_fields(self):
         """In-memory manifest remains available for UI/status, but is not zipped."""
@@ -227,11 +278,12 @@ class TestArchiveGroup:
         tiff = _make_tiff(self.tmpdir, "result_mfield.tif")
         result = archive_group([jpg], tiff, self.tmpdir, delete_jpg=False)
         manifest = result.manifest
-        assert manifest["format"] in {"jpg-zip", "jxl-zip"}
+        assert manifest["format"] == "jpg-zip"
         assert isinstance(manifest["files"], list)
         assert len(manifest["files"]) == 1
         assert manifest["files"][0]["originalName"] == "img_mfield.jpg"
-        assert manifest["files"][0]["archiveName"] in {"img_mfield.jpg", "img_mfield.jxl"}
+        assert manifest["files"][0]["archiveName"] == "img_mfield.jpg"
+        assert manifest["method"] == "fast-plain-jpg-zip"
 
     def test_tool_unavailable_falls_back_to_plain_jpg_zip_deletion(self):
         """Without JXL tools, fallback plain JPG ZIP still verifies and deletes."""
@@ -255,11 +307,126 @@ class TestArchiveGroup:
                     "app.services.archive_service._verify_jxl_zip_complete",
                     return_value=CheckResult(ok=False, reason="模拟 JXL 校验失败"),
                 ):
-                    result = archive_group([jpg], tiff, self.tmpdir, delete_jpg=True)
+                    result = archive_group(
+                        [jpg],
+                        tiff,
+                        self.tmpdir,
+                        delete_jpg=True,
+                        method="maximum",
+                    )
         assert result.ok
         assert result.manifest["format"] == "jpg-zip"
         assert result.delete_jpg is True
         assert not os.path.isfile(jpg)
+
+    def test_standard_archive_skips_jxl_and_precompression(self):
+        """Fast standard mode should read each JPG once and store it directly."""
+        jpg = _make_jpg(self.tmpdir, "img_fast.jpg")
+        tiff = _make_tiff(self.tmpdir, "result_fast.tif")
+        with patch("app.services.archive_service.has_cjxl", return_value=True):
+            with patch("app.services.archive_service.has_djxl", return_value=True):
+                with patch(
+                    "app.services.archive_service.compress_to_jxl",
+                    side_effect=AssertionError("standard mode must not use JXL"),
+                ):
+                    with patch(
+                        "app.services.archive_service.zlib.compressobj",
+                        side_effect=AssertionError("standard mode must not pre-compress JPG"),
+                    ):
+                        with patch(
+                            "app.services.archive_service._measure_jpg_for_archive",
+                            side_effect=AssertionError("standard mode must stream directly"),
+                        ):
+                            result = archive_group(
+                                [jpg],
+                                tiff,
+                                self.tmpdir,
+                                delete_jpg=False,
+                                method="standard",
+                            )
+        assert result.manifest["format"] == "jpg-zip"
+        assert result.manifest["method"] == "fast-plain-jpg-zip"
+        assert result.manifest["files"][0]["zipCompression"] == "store"
+
+    def test_archive_cancel_keeps_loose_jpgs_before_delete_gate(self):
+        """User cancellation must stop before delete and preserve original JPGs."""
+        jpg_a = _make_jpg(self.tmpdir, "img_cancel_a.jpg")
+        jpg_b = _make_jpg(self.tmpdir, "img_cancel_b.jpg")
+        tiff = _make_tiff(self.tmpdir, "result_cancel.tif")
+        seen_progress = {"value": False}
+
+        def _progress(_current: int, _total: int, _filename: str) -> None:
+            seen_progress["value"] = True
+
+        def _cancel_after_first_write() -> bool:
+            return seen_progress["value"]
+
+        with pytest.raises(ArchiveCancelled):
+            archive_group(
+                [jpg_a, jpg_b],
+                tiff,
+                self.tmpdir,
+                delete_jpg=True,
+                progress_callback=_progress,
+                cancel_callback=_cancel_after_first_write,
+            )
+
+        assert os.path.isfile(jpg_a)
+        assert os.path.isfile(jpg_b)
+        assert os.path.isfile(tiff)
+
+    def test_cancel_after_delete_starts_does_not_half_delete_group(self):
+        """Once deletion starts, finish it instead of reporting a partial cancel."""
+        jpg_a = _make_jpg(self.tmpdir, "img_delete_a.jpg")
+        jpg_b = _make_jpg(self.tmpdir, "img_delete_b.jpg")
+        tiff = _make_tiff(self.tmpdir, "result_delete_atomic.tif")
+        delete_started = {"value": False}
+        deleted: list[str] = []
+        real_unlink = os.unlink
+
+        def _cancel_during_delete() -> bool:
+            return delete_started["value"]
+
+        def _unlink(path: str) -> None:
+            delete_started["value"] = True
+            deleted.append(os.path.basename(path))
+            real_unlink(path)
+
+        with patch("app.services.archive_service.os.unlink", side_effect=_unlink):
+            result = archive_group(
+                [jpg_a, jpg_b],
+                tiff,
+                self.tmpdir,
+                delete_jpg=True,
+                cancel_callback=_cancel_during_delete,
+            )
+
+        assert result.delete_jpg is True
+        assert sorted(deleted) == ["img_delete_a.jpg", "img_delete_b.jpg"]
+        assert not os.path.exists(jpg_a)
+        assert not os.path.exists(jpg_b)
+
+    def test_restore_archive_to_original_paths_recovers_deleted_jpgs(self):
+        """Undo-organise can restore exact JPGs to their original paths."""
+        jpg_a = _make_jpg(self.tmpdir, "img_restore_a.jpg")
+        jpg_b = _make_jpg(self.tmpdir, "img_restore_b.jpg")
+        expected_a = Path(jpg_a).read_bytes()
+        expected_b = Path(jpg_b).read_bytes()
+        tiff = _make_tiff(self.tmpdir, "result_restore.tif")
+
+        archived = archive_group([jpg_a, jpg_b], tiff, self.tmpdir, delete_jpg=True)
+        assert not os.path.exists(jpg_a)
+        assert not os.path.exists(jpg_b)
+
+        restored = restore_archive_to_original_paths(
+            archived.zip_path,
+            [jpg_a, jpg_b],
+        )
+
+        assert restored.ok
+        assert restored.count == 2
+        assert Path(jpg_a).read_bytes() == expected_a
+        assert Path(jpg_b).read_bytes() == expected_b
 
     def test_all_preconditions_met_deletes_jpg(self, tmp_path):
         """All ZIP preconditions satisfied → JPG is deleted."""

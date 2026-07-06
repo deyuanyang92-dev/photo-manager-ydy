@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Optional
 
 from PyQt6.QtCore import Qt, QEvent, QMimeData, QTimer, QUrl, pyqtSignal
-from PyQt6.QtGui import QDrag, QPixmap
+from PyQt6.QtGui import QDrag, QKeySequence, QPixmap, QShortcut
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -52,6 +52,7 @@ from PyQt6.QtWidgets import (
 )
 
 from app.config import icons
+from app.config.theme import TOKENS
 from app.services import grouping_service, activation_service
 from app.services.photo_import_service import is_media_path
 from app.utils.image_thumbnail import decode_image_thumbnail
@@ -74,8 +75,12 @@ _ATTR = {
     "unattributed": "ChipUnattributed",
     "readonly":     "ChipArchived",
 }
-_FILE_THUMB_SIZE = 40
-_FILE_THUMB_DECODE_SIZE = 128
+_FILE_THUMB_SIZE = 92
+_FILE_CARD_HEIGHT = 110
+_FILE_THUMB_DECODE_SIZE = 220
+_FILE_THUMB_MIN_SIZE = 56
+_FILE_THUMB_MAX_SIZE = 180
+_FILE_THUMB_STEP = 16
 _FILE_THUMB_CACHE_LIMIT = 512
 _FILE_THUMB_CACHE: "OrderedDict[tuple[str, int, int], Optional[QPixmap]]" = OrderedDict()
 _FILE_THUMB_ICON_CACHE: dict[str, QPixmap] = {}
@@ -116,6 +121,14 @@ def _fallback_thumb_icon(kind: str) -> QPixmap:
     return pixmap
 
 
+def _clamp_file_thumb_size(size: int) -> int:
+    return max(_FILE_THUMB_MIN_SIZE, min(_FILE_THUMB_MAX_SIZE, int(size)))
+
+
+def _file_card_height_for_thumb(size: int) -> int:
+    return max(68, int(size) + 18)
+
+
 class _FileCard(QFrame):
     """A capture-stream row: file icon + caption + attribution pill.
 
@@ -135,8 +148,10 @@ class _FileCard(QFrame):
                  on_add_to_group: Optional[Callable[[str], None]] = None,
                  on_assign_uid: Optional[Callable[[str], None]] = None,
                  on_unassign: Optional[Callable[[str], None]] = None,
+                 on_workflow_action: Optional[Callable[[str, str], None]] = None,
                  drag_paths_for: Optional[Callable[[str], list[str]]] = None,
-                 defer_thumbnail: bool = False) -> None:
+                 defer_thumbnail: bool = False,
+                 thumb_size: int = _FILE_THUMB_SIZE) -> None:
         super().__init__(parent)
         self.setObjectName("Card")
         self._entry = entry
@@ -148,13 +163,16 @@ class _FileCard(QFrame):
         self._on_add_to_group = on_add_to_group
         self._on_assign_uid = on_assign_uid
         self._on_unassign = on_unassign
+        self._on_workflow_action = on_workflow_action
         self._drag_paths_for = drag_paths_for
+        self._thumb_size = _clamp_file_thumb_size(thumb_size)
         self._press_pos = None
         self._drag_started = False
+        self._context_menu_from_mouse = False
         self._setup_ui()
 
     def _setup_ui(self) -> None:
-        self.setFixedHeight(52)
+        self.setFixedHeight(_file_card_height_for_thumb(self._thumb_size))
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         lay = QHBoxLayout(self)
@@ -179,13 +197,13 @@ class _FileCard(QFrame):
         self._select_mark.setObjectName("FileSelectMark")
         self._select_mark.setProperty("selected", False)
         self._select_mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._select_mark.setFixedSize(16, 38)
+        self._select_mark.setFixedSize(16, self._thumb_size)
         self._select_mark.setToolTip("未选")
         lay.addWidget(self._select_mark)
 
         self._thumb_label = QLabel()
         self._thumb_label.setObjectName("FileThumb")
-        self._thumb_label.setFixedSize(_FILE_THUMB_SIZE, _FILE_THUMB_SIZE)
+        self._thumb_label.setFixedSize(self._thumb_size, self._thumb_size)
         self._thumb_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._thumb_label.setToolTip(getattr(self._entry, "path", ""))
         if self._defer_thumbnail and kind in {"jpg", "tiff"}:
@@ -202,7 +220,7 @@ class _FileCard(QFrame):
 
         name = getattr(self._entry, "name", None) or Path(getattr(self._entry, "path", "")).name
         name_lbl = QLabel(name)
-        name_lbl.setObjectName("Mono")
+        name_lbl.setObjectName("FileName")
         name_lbl.setToolTip(getattr(self._entry, "path", name))
         body_lay.addWidget(name_lbl)
 
@@ -213,19 +231,24 @@ class _FileCard(QFrame):
         if kind == "jpg":
             if uid:
                 attr_lbl = QLabel(uid)
-                attr_lbl.setObjectName(_ATTR["active" if uid == self._active_uid else "attributed"])
+                attr_lbl.setObjectName("FileUidActive" if uid == self._active_uid else "FileUid")
             else:
                 attr_lbl = QLabel("未归属")
-                attr_lbl.setObjectName(_ATTR["unattributed"])
+                attr_lbl.setObjectName("FileUidMissing")
         else:
             attr_lbl = QLabel(uid or "只读")
-            attr_lbl.setObjectName(_ATTR["readonly"])
+            attr_lbl.setObjectName("FileUidMuted")
         attr_lbl.setToolTip(uid or "")
         attr_lbl.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         attr_row.addWidget(attr_lbl)
         c_text, c_obj = _CORNER.get(corner_state, _CORNER["raw"])
         state_lbl = QLabel(c_text)
-        state_lbl.setObjectName(c_obj)
+        state_lbl.setObjectName({
+            "raw": "FileStateRaw",
+            "tiff": "FileStateTiff",
+            "archived": "FileStateArchived",
+            "composed": "FileStateComposed",
+        }.get(corner_state, "FileStateRaw"))
         state_lbl.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         attr_row.addWidget(state_lbl)
         attr_row.addStretch()
@@ -261,8 +284,8 @@ class _FileCard(QFrame):
         if pm is not None and not pm.isNull():
             self._thumb_label.setProperty("hasThumbnail", True)
             self._thumb_label.setPixmap(pm.scaled(
-                _FILE_THUMB_SIZE,
-                _FILE_THUMB_SIZE,
+                self._thumb_size,
+                self._thumb_size,
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation,
             ))
@@ -271,6 +294,19 @@ class _FileCard(QFrame):
             self._thumb_label.setPixmap(_fallback_thumb_icon(kind))
         self._thumb_label.style().unpolish(self._thumb_label)
         self._thumb_label.style().polish(self._thumb_label)
+
+    def set_thumb_size(self, size: int) -> None:
+        size = _clamp_file_thumb_size(size)
+        if size == self._thumb_size:
+            return
+        self._thumb_size = size
+        self.setFixedHeight(_file_card_height_for_thumb(size))
+        self._select_mark.setFixedSize(16, size)
+        self._thumb_label.setFixedSize(size, size)
+        if self._thumbnail_loaded:
+            self._apply_thumbnail(self._thumbnail_kind)
+        else:
+            self._apply_thumbnail_placeholder(self._thumbnail_kind)
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
@@ -289,6 +325,11 @@ class _FileCard(QFrame):
         self._start_file_drag()
 
     def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.RightButton and not self._drag_started:
+            self._context_menu_from_mouse = True
+            self._show_context_menu(self.mapToGlobal(event.position().toPoint()))
+            event.accept()
+            return
         if event.button() == Qt.MouseButton.LeftButton and not self._drag_started:
             path = getattr(self._entry, "path", "")
             self._selected = not self._selected
@@ -331,6 +372,10 @@ class _FileCard(QFrame):
         self._update_selection_style()
 
     def contextMenuEvent(self, event) -> None:
+        if self._context_menu_from_mouse:
+            self._context_menu_from_mouse = False
+            event.accept()
+            return
         self._show_context_menu(event.globalPos())
 
     def _on_jpg_context_menu(self, pos) -> None:
@@ -346,6 +391,26 @@ class _FileCard(QFrame):
 
         show_action = menu.addAction("在文件夹中显示")
         show_action.triggered.connect(lambda: self._show_in_folder(path))
+
+        if kind in ("jpg", "tiff"):
+            menu.addSeparator()
+            compose_action = menu.addAction("合成")
+            organise_action = menu.addAction("整理")
+            compose_organise_action = menu.addAction("合成+整理")
+            if self._on_workflow_action is not None:
+                compose_action.triggered.connect(
+                    lambda: self._on_workflow_action("compose", path)
+                )
+                organise_action.triggered.connect(
+                    lambda: self._on_workflow_action("organise", path)
+                )
+                compose_organise_action.triggered.connect(
+                    lambda: self._on_workflow_action("compose_organise", path)
+                )
+            else:
+                compose_action.setEnabled(False)
+                organise_action.setEnabled(False)
+                compose_organise_action.setEnabled(False)
 
         if kind == "jpg":
             menu.addSeparator()
@@ -418,6 +483,7 @@ class MonitorPanel(QWidget):
     refresh_requested = pyqtSignal()
     add_jpg_requested = pyqtSignal()   # emitted when user clicks "添加照片"
     grouping_requested = pyqtSignal()  # emitted when user clicks "分组工具" (opens popup)
+    legacy_organize_requested = pyqtSignal()  # "旧照片批量整理" from the compact menu
     compose_implicit_requested = pyqtSignal()  # 主界面[合成]
     organise_selected_requested = pyqtSignal()  # 主界面[整理]：选中 JPG+TIFF 直接归档
     compose_implicit_organise_requested = pyqtSignal()  # 主界面[合成+整理]
@@ -445,11 +511,14 @@ class MonitorPanel(QWidget):
         self._card_by_key: dict[str, _FileCard] = {}
         self._card_sig_by_key: dict[str, tuple] = {}
         self._hide_archived: bool = False
-        self._view_mode: str = "list"
+        self._view_mode: str = "tiles"
         self._sort_key: str = "default"
         self._sort_reverse: bool = False
+        self._pending_thumb_size: int = _FILE_THUMB_SIZE
+        self._shortcuts: list[QShortcut] = []
         self._drop_targets: list[QWidget] = []
         self._setup_ui()
+        self._install_shortcuts()
 
     # ── UI ────────────────────────────────────────────────────────────────────
 
@@ -526,7 +595,7 @@ class MonitorPanel(QWidget):
         controls.setContentsMargins(0, 0, 0, 0)
         controls.setSpacing(8)
         title = QLabel("拍摄队列")
-        title.setObjectName("WorkspaceTitle")
+        title.setObjectName("WorkbenchTitle")
         controls.addWidget(title)
         controls.addStretch()
         refresh_btn = QPushButton("刷新")
@@ -608,6 +677,56 @@ class MonitorPanel(QWidget):
         self._raw_count.hide()
         sec.addLayout(controls)
 
+        self._workflow_notice_hidden_by_user = False
+        self._workflow_notice_collapsed = False
+        self._workflow_notice_task_key = ""
+        self._workflow_notice = QFrame()
+        self._workflow_notice.setObjectName("WorkflowNotice")
+        n_lay = QHBoxLayout(self._workflow_notice)
+        n_lay.setContentsMargins(10, 7, 10, 7)
+        n_lay.setSpacing(8)
+        self._workflow_stage = QLabel("进行中")
+        self._workflow_stage.setObjectName("WorkflowNoticeStage")
+        self._workflow_stage.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._workflow_stage.setFixedWidth(54)
+        n_lay.addWidget(self._workflow_stage)
+        notice_text = QWidget()
+        notice_text_lay = QVBoxLayout(notice_text)
+        notice_text_lay.setContentsMargins(0, 0, 0, 0)
+        notice_text_lay.setSpacing(1)
+        self._workflow_title = QLabel("")
+        self._workflow_title.setObjectName("WorkflowNoticeTitle")
+        self._workflow_detail = QLabel("")
+        self._workflow_detail.setObjectName("WorkflowNoticeDetail")
+        self._workflow_detail.setWordWrap(True)
+        notice_text_lay.addWidget(self._workflow_title)
+        notice_text_lay.addWidget(self._workflow_detail)
+        n_lay.addWidget(notice_text, 1)
+        self._workflow_collapse_btn = QPushButton("收起")
+        self._workflow_collapse_btn.setObjectName("Tiny")
+        self._workflow_collapse_btn.setFixedHeight(22)
+        self._workflow_collapse_btn.setToolTip("收起任务详情")
+        icons.set_button_icon(
+            self._workflow_collapse_btn, "mdi6.chevron-up",
+            color=icons.TONE_MUTED, size=13,
+        )
+        self._workflow_collapse_btn.clicked.connect(
+            self._toggle_workflow_notice_collapsed
+        )
+        n_lay.addWidget(self._workflow_collapse_btn)
+        self._workflow_hide_btn = QPushButton("隐藏")
+        self._workflow_hide_btn.setObjectName("Tiny")
+        self._workflow_hide_btn.setFixedHeight(22)
+        self._workflow_hide_btn.setToolTip("隐藏当前任务提示；任务会继续在后台运行")
+        icons.set_button_icon(
+            self._workflow_hide_btn, "mdi6.eye-off-outline",
+            color=icons.TONE_MUTED, size=13,
+        )
+        self._workflow_hide_btn.clicked.connect(self._hide_workflow_notice_for_current_task)
+        n_lay.addWidget(self._workflow_hide_btn)
+        self._workflow_notice.hide()
+        sec.addWidget(self._workflow_notice)
+
         sec.addWidget(_divider())
 
         # Hidden real checkbox kept for state + tests; the visible control is in
@@ -621,17 +740,17 @@ class MonitorPanel(QWidget):
         sh.setContentsMargins(0, 0, 0, 0)
         sh.setSpacing(8)
         sh_title = QLabel("待处理照片")
-        sh_title.setObjectName("Section")
+        sh_title.setObjectName("WorkbenchSubTitle")
         sh.addWidget(sh_title)
         sh_hint = QLabel("单击选择 · 右键处理文件")
-        sh_hint.setObjectName("MutedSmall")
+        sh_hint.setObjectName("WorkbenchHint")
         sh.addWidget(sh_hint)
         sh.addStretch()
-        self._view_btn = QPushButton("列表")
+        self._view_btn = QPushButton("平铺")
         self._view_btn.setObjectName("Ghost")
         self._view_btn.setFixedHeight(26)
         self._view_btn.setToolTip("切换待处理照片的查看方式")
-        icons.set_button_icon(self._view_btn, "mdi6.view-list-outline",
+        icons.set_button_icon(self._view_btn, "mdi6.view-grid-outline",
                               color=icons.TONE_MUTED, size=14)
         self._view_btn.clicked.connect(
             lambda: self._show_view_menu(self._view_btn.mapToGlobal(self._view_btn.rect().bottomLeft()))
@@ -653,12 +772,12 @@ class MonitorPanel(QWidget):
 
         # ── Contextual selection bar: hidden until one or more files selected ──
         self._selection_bar = QFrame()
-        self._selection_bar.setObjectName("Panel")
+        self._selection_bar.setObjectName("WorkbenchSelectionBar")
         sel = QHBoxLayout(self._selection_bar)
         sel.setContentsMargins(10, 6, 10, 6)
         sel.setSpacing(8)
         self._selection_count = QLabel("已选 0 个")
-        self._selection_count.setObjectName("MutedSmall")
+        self._selection_count.setObjectName("WorkbenchSelectionText")
         sel.addWidget(self._selection_count)
         add_group_btn = QPushButton("加入分组")
         add_group_btn.setObjectName("Tiny")
@@ -756,6 +875,14 @@ class MonitorPanel(QWidget):
         self._drop_targets.append(widget)
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802 (Qt override)
+        if (
+            event.type() == QEvent.Type.Wheel
+            and watched in self._drop_targets
+            and event.modifiers() & Qt.KeyboardModifier.ControlModifier
+        ):
+            self._zoom_pending_thumbnails_by_wheel_delta(event.angleDelta().y())
+            event.accept()
+            return True
         if watched in self._drop_targets:
             if event.type() in (
                 QEvent.Type.DragEnter,
@@ -883,6 +1010,98 @@ class MonitorPanel(QWidget):
             "正在把照片复制到待处理目录"
             if busy
             else "把已有照片添加进来（JPG / TIF 进入待处理目录）"
+        )
+
+    def set_workflow_notice(
+        self,
+        title: str,
+        detail: str = "",
+        *,
+        state: str = "busy",
+        force_show: bool = False,
+        task_key: str | None = None,
+    ) -> None:
+        """Show a persistent workflow notice above the pending-photo stream."""
+        key = str(task_key or "")
+        if key and key != self._workflow_notice_task_key:
+            self._workflow_notice_task_key = key
+            self._workflow_notice_hidden_by_user = False
+            self._workflow_notice_collapsed = False
+        if force_show:
+            self._workflow_notice_hidden_by_user = False
+            self._workflow_notice_collapsed = False
+        state = state if state in {"busy", "success", "error", "info"} else "info"
+        bg, fg, border, stage_text = {
+            "busy": ("#e8f4ff", "#0b5cad", "#90cdf4", "进行中"),
+            "success": ("#ecfdf3", TOKENS["success"], "#86efac", "完成"),
+            "error": ("#fff1f0", TOKENS["danger"], "#fca5a5", "失败"),
+            "info": ("#f4f6f8", TOKENS["accent"], TOKENS["border_medium"], "提示"),
+        }[state]
+        self._workflow_notice.setStyleSheet(
+            "QFrame#WorkflowNotice {"
+            f" background:{bg}; border:1px solid {border}; border-radius:8px;"
+            "}"
+            "QLabel#WorkflowNoticeStage {"
+            f" background:{fg}; color:white; border-radius:4px;"
+            " padding:2px 6px; font-size:11px; font-weight:700;"
+            "}"
+            "QLabel#WorkflowNoticeTitle {"
+            f" color:{TOKENS['text']}; font-size:12px; font-weight:700;"
+            "}"
+            "QLabel#WorkflowNoticeDetail {"
+            f" color:{TOKENS['muted']}; font-size:11px;"
+            "}"
+        )
+        detail_text = str(detail or "").strip()
+        self._workflow_stage.setText(stage_text)
+        self._workflow_title.setText(str(title or "").strip())
+        self._workflow_detail.setText(detail_text)
+        self._apply_workflow_notice_presentation()
+        if not self._workflow_notice_hidden_by_user:
+            self._workflow_notice.show()
+
+    def clear_workflow_notice(self) -> None:
+        self._workflow_notice.hide()
+        self._workflow_notice_hidden_by_user = False
+        self._workflow_notice_collapsed = False
+        self._workflow_notice_task_key = ""
+        self._workflow_title.setText("")
+        self._workflow_detail.setText("")
+
+    def _apply_workflow_notice_presentation(self) -> None:
+        detail_text = self._workflow_detail.text().strip()
+        has_detail = bool(detail_text)
+        self._workflow_detail.setVisible(has_detail and not self._workflow_notice_collapsed)
+        self._workflow_collapse_btn.setEnabled(has_detail)
+        if self._workflow_notice_collapsed:
+            self._workflow_collapse_btn.setText("展开")
+            self._workflow_collapse_btn.setToolTip("展开任务详情")
+            icons.set_button_icon(
+                self._workflow_collapse_btn, "mdi6.chevron-down",
+                color=icons.TONE_MUTED, size=13,
+            )
+        else:
+            self._workflow_collapse_btn.setText("收起")
+            self._workflow_collapse_btn.setToolTip("收起任务详情")
+            icons.set_button_icon(
+                self._workflow_collapse_btn, "mdi6.chevron-up",
+                color=icons.TONE_MUTED, size=13,
+            )
+
+    def _toggle_workflow_notice_collapsed(self) -> None:
+        self._workflow_notice_collapsed = not self._workflow_notice_collapsed
+        self._apply_workflow_notice_presentation()
+
+    def _hide_workflow_notice_for_current_task(self) -> None:
+        self._workflow_notice_hidden_by_user = True
+        self._workflow_notice.hide()
+
+    def workflow_notice_text(self) -> tuple[str, str, str]:
+        """Return (stage, title, detail) for tests."""
+        return (
+            self._workflow_stage.text(),
+            self._workflow_title.text(),
+            self._workflow_detail.text(),
         )
 
     def _scan_signature(self, scan_result: "ScanResult"):
@@ -1028,15 +1247,16 @@ class MonitorPanel(QWidget):
             on_add_to_group=self._on_ctx_add_to_group,
             on_assign_uid=self._on_ctx_assign_uid,
             on_unassign=self._on_ctx_unassign,
+            on_workflow_action=self._on_ctx_workflow_action,
             drag_paths_for=self._drag_paths_for,
-            defer_thumbnail=True,
+            defer_thumbnail=False,
+            thumb_size=self._pending_thumb_size,
         )
         card.assign_requested.connect(self.assign_requested)
         card.deactivate_requested.connect(self.unassign_requested)
         card.selection_toggled.connect(self._on_card_selection_toggled)
         card.delete_requested.connect(self._on_delete_single_requested)
         self._register_drop_target(card)
-        self._queue_thumbnail(card)
         return card
 
     def _queue_thumbnail(self, card: "_FileCard") -> None:
@@ -1211,6 +1431,40 @@ class MonitorPanel(QWidget):
     def _set_sort_reverse(self, reverse: bool) -> None:
         self._sort_reverse = bool(reverse)
         self._rebuild_grid()
+
+    def _install_shortcuts(self) -> None:
+        def add(seq, callback) -> None:
+            shortcut = QShortcut(QKeySequence(seq), self)
+            shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            shortcut.activated.connect(callback)
+            self._shortcuts.append(shortcut)
+
+        add("Ctrl+A", self._on_select_all)
+        add("Delete", self._delete_selected_pending_files)
+        add("F5", self._emit_refresh_requested)
+        add("Ctrl++", lambda: self._set_pending_thumb_size(self._pending_thumb_size + _FILE_THUMB_STEP))
+        add("Ctrl+=", lambda: self._set_pending_thumb_size(self._pending_thumb_size + _FILE_THUMB_STEP))
+        add("Ctrl+-", lambda: self._set_pending_thumb_size(self._pending_thumb_size - _FILE_THUMB_STEP))
+        add("Ctrl+0", lambda: self._set_pending_thumb_size(_FILE_THUMB_SIZE))
+
+    def _zoom_pending_thumbnails_by_wheel_delta(self, delta: int) -> None:
+        if delta == 0:
+            return
+        steps = max(1, abs(delta) // 120)
+        direction = 1 if delta > 0 else -1
+        self._set_pending_thumb_size(
+            self._pending_thumb_size + direction * steps * _FILE_THUMB_STEP
+        )
+
+    def _set_pending_thumb_size(self, size: int) -> None:
+        size = _clamp_file_thumb_size(size)
+        if size == self._pending_thumb_size:
+            return
+        self._pending_thumb_size = size
+        for card in self._cards:
+            card.set_thumb_size(size)
+        self._grid.setVerticalSpacing(max(8, min(16, size // 8)))
+        self._grid_widget.updateGeometry()
 
     # ── Selection helpers ─────────────────────────────────────────────────────
 
@@ -1432,6 +1686,18 @@ class MonitorPanel(QWidget):
         grouping_service.remove_jpg_from_all_groups(db, jpg_path)
         self.refresh_requested.emit()
 
+    def _on_ctx_workflow_action(self, action: str, path: str) -> None:
+        if path and path not in self.selected_all_paths():
+            for card in self._cards:
+                card.set_selected(getattr(card._entry, "path", "") == path)
+            self._refresh_selection_bar()
+        if action == "compose":
+            self.compose_implicit_requested.emit()
+        elif action == "organise":
+            self.organise_selected_requested.emit()
+        elif action == "compose_organise":
+            self.compose_implicit_organise_requested.emit()
+
     # ── Slots ─────────────────────────────────────────────────────────────────
 
     def _emit_refresh_requested(self) -> None:
@@ -1509,9 +1775,9 @@ class MonitorPanel(QWidget):
 
         menu.addSeparator()
 
-        scan_action = menu.addAction("扫描旧文件")
-        scan_action.setEnabled(False)
-        scan_action.setToolTip("旧文件扫描在分组工具/批量整理流程中执行")
+        legacy_action = menu.addAction("旧照片批量整理…")
+        legacy_action.setToolTip("选择旧照片文件夹，按时间把 JPG 原片配给后续 TIF，预览确认后归档")
+        legacy_action.triggered.connect(self.legacy_organize_requested.emit)
 
         return menu
 

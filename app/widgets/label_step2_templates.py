@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import copy
 import json
+from collections import defaultdict
 from typing import Optional
 
 from PyQt6.QtCore import Qt, pyqtSignal
@@ -60,7 +61,7 @@ _BUCKET_META = {
 }
 
 _CARD_W, _CARD_H = 260, 146  # preview box (px)
-_CARD_MAX_W = 370
+_CARD_MAX_W = 390
 
 
 _DEMO_SPECIMEN = {
@@ -236,6 +237,20 @@ QLabel#CardPreview {{
     background-color: {_C_PREVIEW_BG}; border: 1px solid {_C_BORDER_STRONG};
     border-radius: 6px;
 }}
+QLabel#TemplateGroupLabel {{
+    background-color: transparent; color: {_C_TEXT_SOFT};
+    font-size: 12px; font-weight: 800; padding: 2px 0 0 2px;
+}}
+QFrame#TemplateSummaryBand {{
+    background-color: {_C_PANEL_2}; border: 1px solid {_C_BORDER};
+    border-radius: 8px;
+}}
+QLabel#TemplateSummaryName {{
+    background-color: transparent; color: {_C_MUTED_DIM}; font-size: 11px;
+}}
+QLabel#TemplateSummaryValue {{
+    background-color: transparent; color: {_C_TEXT}; font-size: 12px; font-weight: 700;
+}}
 QLabel#CardBadge {{
     background-color: {_C_BADGE_BG}; color: {_C_TEXT_SOFT};
     border-radius: 4px; padding: 2px 7px; font-size: 10px;
@@ -273,15 +288,28 @@ class LabelStep2Templates(QWidget):
         self,
         libs: dict[str, LabelTemplateLibrary],
         parent: Optional[QWidget] = None,
+        *,
+        visible_buckets: Optional[list[str]] = None,
+        title: str = "标签模板库",
+        subtitle: Optional[str] = None,
+        manager_mode: bool = False,
     ) -> None:
         super().__init__(parent)
         _refresh_palette()
         self.setStyleSheet(f"background:{_C_BG}; color:{_C_TEXT};" + _template_picker_stylesheet())
         self._libs = libs
+        self._visible_buckets = [
+            b for b in (visible_buckets or [])
+            if b in _BUCKET_META and b in libs
+        ] or None
+        self._title_text = title
+        self._subtitle_text = subtitle
+        self._manager_mode = manager_mode
         self._specimens: list[dict] = []
         self._selected_indices: list[int] = []
         self._cards: dict[str, list[dict]] = {}
         self._header_actions: dict[str, dict] = {}
+        self._summary_labels: dict[str, dict[str, QLabel]] = {}
         self._grid_cols = 0
         self._setup_ui()
 
@@ -295,15 +323,27 @@ class LabelStep2Templates(QWidget):
         trow = QHBoxLayout()
         title_box = QVBoxLayout()
         title_box.setSpacing(2)
-        title = QLabel("标签模板库")
+        title = QLabel(self._title_text)
         title.setStyleSheet(f"color:{_C_TEXT}; font-size:18px; font-weight:800;")
-        hint = QLabel("选择一个内置模板直接打印；点编辑会复制为自定义模板，不污染预设。")
+        hint_text = (
+            self._subtitle_text
+            or "默认模板、实物尺寸预览、自定义模板集中管理。"
+        )
+        hint = QLabel(hint_text)
         hint.setStyleSheet(f"color:{_C_MUTED_DIM}; font-size:11px;")
         title_box.addWidget(title)
         title_box.addWidget(hint)
         trow.addLayout(title_box)
         trow.addStretch()
         root.addLayout(trow)
+
+        self._summary_band = QFrame()
+        self._summary_band.setObjectName("TemplateSummaryBand")
+        self._summary_band.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self._summary_lay = QHBoxLayout(self._summary_band)
+        self._summary_lay.setContentsMargins(12, 9, 12, 9)
+        self._summary_lay.setSpacing(18)
+        root.addWidget(self._summary_band)
 
         # Columns container (sample | tissue)
         self._cols_row = QHBoxLayout()
@@ -349,14 +389,53 @@ class LabelStep2Templates(QWidget):
 
         buckets = self._buckets()
         has_selection = bool(self._selected_indices)
-        self._empty.setVisible(not has_selection)
-        visible_bucket_count = 1 + int(bool(buckets["tissues"]))
+        self._empty.setVisible((not has_selection) and not self._manager_mode)
+        visible_buckets = self._visible_bucket_order(buckets)
+        visible_bucket_count = max(1, len(visible_buckets))
         self._grid_cols = self._grid_cols_for_width(visible_bucket_count)
+        self._sync_summary_band(visible_buckets)
 
-        # Sample column always; tissue only when R-prefix present
-        self._cols_row.addWidget(self._build_column("sample", buckets["samples"]), stretch=1)
-        if buckets["tissues"]:
-            self._cols_row.addWidget(self._build_column("tissue", buckets["tissues"]), stretch=1)
+        for bucket in visible_buckets:
+            self._cols_row.addWidget(
+                self._build_column(bucket, buckets.get("samples" if bucket == "sample" else "tissues", [])),
+                stretch=1,
+            )
+
+    def _visible_bucket_order(self, buckets: dict) -> list[str]:
+        if self._visible_buckets:
+            return list(self._visible_buckets)
+        visible = ["sample"]
+        if buckets.get("tissues"):
+            visible.append("tissue")
+        return visible
+
+    def _sync_summary_band(self, buckets: list[str]) -> None:
+        while self._summary_lay.count():
+            item = self._summary_lay.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+        self._summary_labels = {}
+        for bucket in buckets:
+            lib = self._libs[bucket]
+            tmpl = resolve_template(lib)
+            dims = resolve_dims(lib)
+            box = QWidget()
+            lay = QVBoxLayout(box)
+            lay.setContentsMargins(0, 0, 0, 0)
+            lay.setSpacing(2)
+            name = QLabel(f"{_BUCKET_META[bucket]['title']}默认")
+            name.setObjectName("TemplateSummaryName")
+            value = QLabel(
+                f"{_selected_template_name(lib, tmpl)} · {dims.get('w', '?')}×{dims.get('h', '?')} mm"
+            )
+            value.setObjectName("TemplateSummaryValue")
+            value.setWordWrap(True)
+            lay.addWidget(name)
+            lay.addWidget(value)
+            self._summary_lay.addWidget(box, stretch=1)
+            self._summary_labels[bucket] = {"name": name, "value": value}
+        self._summary_lay.addStretch()
 
     def _build_column(self, bucket: str, items: list) -> QWidget:
         meta = _BUCKET_META[bucket]
@@ -373,7 +452,12 @@ class LabelStep2Templates(QWidget):
         htext.setSpacing(2)
         strong = QLabel(meta["title"])
         strong.setStyleSheet(f"color:{_C_TEXT}; font-size:15px; font-weight:800;")
-        sub = QLabel(f"{len(items)} 个待打印标签 · 模板选择会自动保存")
+        sub_text = (
+            "当前默认模板 · 实物比例预览"
+            if self._manager_mode
+            else f"{len(items)} 个待打印标签 · 模板选择会自动保存"
+        )
+        sub = QLabel(sub_text)
         sub.setStyleSheet(f"color:{_C_MUTED_DIM}; font-size:11px;")
         htext.addWidget(strong)
         htext.addWidget(sub)
@@ -382,7 +466,7 @@ class LabelStep2Templates(QWidget):
 
         btn_new = QPushButton("自由设计")
         btn_import = QPushButton("导入 JSON")
-        btn_manage = QPushButton("模板管理")
+        btn_manage = QPushButton("更多")
         for b, fn in ((btn_new, self._new_custom), (btn_import, self._import_json),
                       (btn_manage, self._manage_menu)):
             b.setObjectName("HeadAction")
@@ -412,54 +496,71 @@ class LabelStep2Templates(QWidget):
         cur_key = self._libs[bucket].selected_key()
 
         self._cards[bucket] = []
-        slot = 0
         is_tissue = bucket == "tissue"
+        row = 0
+        col_idx = 0
+
+        def add_group(title: str, count: int) -> None:
+            nonlocal row, col_idx
+            if col_idx:
+                row += 1
+                col_idx = 0
+            lbl = QLabel(f"{title} · {count}")
+            lbl.setObjectName("TemplateGroupLabel")
+            grid.addWidget(lbl, row, 0, 1, cols)
+            row += 1
+
+        def add_card(frame: QWidget) -> None:
+            nonlocal row, col_idx
+            grid.addWidget(
+                frame,
+                row,
+                col_idx,
+                Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft,
+            )
+            col_idx += 1
+            if col_idx >= cols:
+                row += 1
+                col_idx = 0
 
         # Built-in cards (filtered by flavor; tissueCustom excluded — web parity)
+        grouped_builtins: dict[tuple[int, str], list[tuple[str, dict]]] = defaultdict(list)
         for key, tmpl in BUILTIN_TEMPLATES.items():
             if (tmpl.get("flavor") == "tissue") != is_tissue:
                 continue
             if key == "tissueCustom":
                 continue
-            card = self._make_card(
-                bucket, key, "builtin", tmpl, _template_display_name(key, tmpl),
-                preview_data, dims, selected=(cur_key == key),
-            )
-            grid.addWidget(
-                card["frame"],
-                slot // cols,
-                slot % cols,
-                Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft,
-            )
-            self._cards[bucket].append(card)
-            slot += 1
+            order, group = _template_group(key, tmpl, bucket)
+            grouped_builtins[(order, group)].append((key, tmpl))
 
+        for (_order, group), specs in sorted(grouped_builtins.items(), key=lambda item: item[0]):
+            add_group(group, len(specs))
+            for key, tmpl in specs:
+                card = self._make_card(
+                    bucket, key, "builtin", tmpl, _template_display_name(key, tmpl),
+                    preview_data, dims, selected=(cur_key == key),
+                )
+                add_card(card["frame"])
+                self._cards[bucket].append(card)
+
+        records = self._libs[bucket].records()
+        if records:
+            add_group("自定义模板", len(records))
         # Custom library cards
-        for rec in self._libs[bucket].records():
+        for rec in records:
             rkey = key_from_id(rec["id"])
             tmpl = normalize_template(rec.get("template") or {})
             card = self._make_card(
                 bucket, rkey, "custom", tmpl, rec.get("name", "自定义"),
                 preview_data, dims, selected=(cur_key == rkey), rec_id=rec["id"],
             )
-            grid.addWidget(
-                card["frame"],
-                slot // cols,
-                slot % cols,
-                Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft,
-            )
+            add_card(card["frame"])
             self._cards[bucket].append(card)
-            slot += 1
 
         # 「自由设计」add-card — free-create entry (web oracle app.js:14961)
-        add_card = self._make_add_card(bucket)
-        grid.addWidget(
-            add_card,
-            slot // cols,
-            slot % cols,
-            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft,
-        )
-        slot += 1
+        add_group("创建模板", 1)
+        create_card = self._make_add_card(bucket)
+        add_card(create_card)
 
         return col
 
@@ -487,7 +588,7 @@ class LabelStep2Templates(QWidget):
         frame.setProperty("selected", selected)
         frame.setStyleSheet(_card_css(selected))
         frame.setCursor(Qt.CursorShape.PointingHandCursor)
-        frame.setMinimumHeight(248)
+        frame.setMinimumHeight(264)
         frame.setMaximumWidth(_CARD_MAX_W)
         frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         v = QVBoxLayout(frame)
@@ -515,7 +616,7 @@ class LabelStep2Templates(QWidget):
         text_box.addWidget(nm)
         text_box.addWidget(desc)
         hr.addLayout(text_box, stretch=1)
-        action = QPushButton("管理" if kind == "custom" else "编辑")
+        action = QPushButton("编辑" if kind == "custom" else "编辑副本")
         action.setObjectName("CardAction")
         action.setToolTip(
             "重命名、复制、恢复、删除" if kind == "custom" else "复制为可编辑（不污染预设）"
@@ -538,11 +639,11 @@ class LabelStep2Templates(QWidget):
         size_badge.setObjectName("CardBadge")
         meta_row.addWidget(size_badge)
         if selected:
-            selected_badge = QLabel("✓ 当前使用")
+            selected_badge = QLabel("当前默认")
             selected_badge.setObjectName("SelectedBadge")
             meta_row.addWidget(selected_badge)
         else:
-            choose_btn = QPushButton("选用")
+            choose_btn = QPushButton("设为默认")
             choose_btn.setObjectName("CardChooseBtn")
             choose_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             choose_btn.clicked.connect(
@@ -574,7 +675,7 @@ class LabelStep2Templates(QWidget):
         frame.setObjectName("TmplAddCard")
         frame.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         frame.setCursor(Qt.CursorShape.PointingHandCursor)
-        frame.setMinimumHeight(248)
+        frame.setMinimumHeight(264)
         frame.setMaximumWidth(_CARD_MAX_W)
         frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         v = QVBoxLayout(frame)
@@ -841,6 +942,30 @@ def _template_display_name(key: str, tmpl: dict) -> str:
         "tissueMini": "RNAlater · 极小管",
     }
     return labels.get(key, tmpl.get("name", key))
+
+
+def _selected_template_name(lib: LabelTemplateLibrary, tmpl: dict) -> str:
+    key = lib.selected_key()
+    if is_library_key(key):
+        rec = lib.get_record(id_from_key(key))
+        if rec and rec.get("name"):
+            return str(rec["name"])
+    return str(tmpl.get("name") or tmpl.get("code") or key or "模板")
+
+
+def _template_group(key: str, tmpl: dict, bucket: str) -> tuple[int, str]:
+    if bucket == "tissue":
+        return 10, "RNAlater 组织管"
+    text = f"{key} {tmpl.get('name', '')} {tmpl.get('desc', '')}".lower()
+    if tmpl.get("shape") == "circle" or "cap" in text or "盖" in text:
+        return 40, "管盖圆标"
+    if "cryo" in text or "冻存" in text:
+        return 30, "冻存管"
+    if "falcon" in text:
+        return 50, "Falcon 管"
+    if key == "compact" or "mini" in text or "小标签" in text:
+        return 20, "小标签"
+    return 10, "样品瓶"
 
 
 def _card_css(selected: bool) -> str:

@@ -23,13 +23,13 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import sqlite3
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from PyQt6.QtCore import Qt, QFileSystemWatcher, QTimer
-from PyQt6.QtGui import QColor, QPainter, QPixmap
+from PyQt6.QtCore import QEvent, Qt, QFileSystemWatcher, QTimer, QSize, pyqtSignal
+from PyQt6.QtGui import QColor, QIcon, QKeySequence, QPainter, QPixmap, QShortcut
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -50,6 +50,7 @@ from PyQt6.QtWidgets import (
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -58,7 +59,24 @@ from app.workers.helicon_worker import HeliconWorker
 
 from app.config import icons
 from app.config.theme import TOKENS
+from app.services.compose_workflow_service import (
+    SelectedComposeTarget as _SelectedComposeTarget,
+    detect_external_tiff_candidate,
+    pending_tiff_paths,
+    persist_composed_group,
+    resolve_external_tiff_jpg_source,
+)
+from app.services.organize_workflow_service import (
+    compose_batch_queue,
+    inspect_organize_group,
+    organize_batch_targets,
+    plan_archive_worker,
+    plan_organize_gate_check,
+    prepare_existing_tiff_group,
+)
 from app.utils import ui
+from app.utils.image_thumbnail import decode_image_thumbnail
+from app.utils.path_utils import equivalent_paths
 from app.views.base_view import BaseView
 from app.widgets.grouping_panel import GroupingPanel
 from app.widgets.helicon_params_panel import HeliconParamsPanel
@@ -70,11 +88,951 @@ from app.widgets.taxon_card_panel import TaxonCardPanel
 from app.widgets.specimen_sidebar import SpecimenSidebar
 
 
-@dataclass(frozen=True)
-class _SelectedComposeTarget:
-    uid: str
-    output_name: Optional[str] = None
-    assign_to_uid: bool = False
+class _WorkflowNoticePanel(QFrame):
+    """In-window task progress panel for long-running workbench operations."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._hidden_by_user = False
+        self._collapsed = False
+        self._task_key = ""
+        self._state = "info"
+        self.setObjectName("WorkflowNoticePanel")
+        self.setMinimumWidth(360)
+        self.setMaximumWidth(460)
+        self.setFixedWidth(440)
+        self.hide()
+        self._auto_hide_timer = QTimer(self)
+        self._auto_hide_timer.setSingleShot(True)
+        self._auto_hide_timer.timeout.connect(self._auto_hide_finished_notice)
+        self._launcher = QPushButton("任务", parent) if parent is not None else None
+        if self._launcher is not None:
+            self._launcher.setObjectName("WorkflowTaskLauncher")
+            self._launcher.setFixedHeight(26)
+            self._launcher.clicked.connect(self._restore_from_launcher)
+            self._launcher.hide()
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 10, 12, 10)
+        root.setSpacing(8)
+
+        cap = QHBoxLayout()
+        cap.setContentsMargins(0, 0, 0, 0)
+        cap.setSpacing(8)
+        heading = QLabel("任务进度")
+        heading.setObjectName("WorkflowPanelHeading")
+        cap.addWidget(heading)
+        cap.addStretch()
+        self._collapse_btn = QPushButton("收起")
+        self._collapse_btn.setObjectName("Tiny")
+        self._collapse_btn.setFixedHeight(22)
+        self._collapse_btn.clicked.connect(self._toggle_collapsed)
+        cap.addWidget(self._collapse_btn)
+        self._hide_btn = QPushButton("隐藏")
+        self._hide_btn.setObjectName("Tiny")
+        self._hide_btn.setFixedHeight(22)
+        self._hide_btn.clicked.connect(self._hide_current_task)
+        cap.addWidget(self._hide_btn)
+        root.addLayout(cap)
+
+        head = QHBoxLayout()
+        head.setContentsMargins(0, 0, 0, 0)
+        head.setSpacing(10)
+        self._stage = QLabel("进行中")
+        self._stage.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._stage.setFixedWidth(58)
+        self._stage.setObjectName("WorkflowDialogStage")
+        head.addWidget(self._stage)
+
+        title_box = QVBoxLayout()
+        title_box.setContentsMargins(0, 0, 0, 0)
+        title_box.setSpacing(2)
+        self._title = QLabel("")
+        self._title.setObjectName("WorkflowDialogTitle")
+        self._detail = QLabel("")
+        self._detail.setObjectName("WorkflowDialogDetail")
+        self._detail.setWordWrap(True)
+        title_box.addWidget(self._title)
+        title_box.addWidget(self._detail)
+        head.addLayout(title_box, 1)
+        root.addLayout(head)
+
+    def set_notice(
+        self,
+        title: str,
+        detail: str = "",
+        *,
+        state: str = "busy",
+        force_show: bool = False,
+        task_key: str | None = None,
+    ) -> None:
+        key = str(task_key or "")
+        new_task = False
+        if key and key != self._task_key:
+            self._task_key = key
+            self._hidden_by_user = False
+            self._collapsed = False
+            new_task = True
+        if force_show:
+            self._hidden_by_user = False
+            self._collapsed = False
+        state = state if state in {"busy", "success", "error", "info"} else "info"
+        self._state = state
+        bg, fg, border, stage = {
+            "busy": ("#f7fbff", "#0b5cad", "#90cdf4", "进行中"),
+            "success": ("#f6fef9", TOKENS["success"], "#86efac", "完成"),
+            "error": ("#fffafa", TOKENS["danger"], "#fca5a5", "失败"),
+            "info": ("#f8fafc", TOKENS["accent"], TOKENS["border_medium"], "提示"),
+        }[state]
+        self.setStyleSheet(
+            "QFrame#WorkflowNoticePanel {"
+            f" background:{bg}; border:1px solid {border}; border-radius:8px;"
+            "}"
+            "QLabel#WorkflowPanelHeading {"
+            f" color:{TOKENS['muted']}; font-size:11px; font-weight:700;"
+            "}"
+            "QLabel#WorkflowDialogStage {"
+            f" background:{fg}; color:white; border-radius:4px;"
+            " padding:3px 6px; font-size:11px; font-weight:700;"
+            "}"
+            "QLabel#WorkflowDialogTitle {"
+            f" color:{TOKENS['text']}; font-size:13px; font-weight:700;"
+            "}"
+            "QLabel#WorkflowDialogDetail {"
+            f" color:{TOKENS['muted']}; font-size:12px;"
+            "}"
+        )
+        self._stage.setText(stage)
+        self._title.setText(str(title or "").strip())
+        self._detail.setText(str(detail or "").strip())
+        self._apply_collapsed()
+        self._sync_launcher_style(fg, stage)
+        if self._hidden_by_user:
+            self._show_launcher()
+        elif force_show or new_task or not self.isVisible():
+            self._show_near_parent()
+        else:
+            self.reposition()
+        if state in {"success", "info"}:
+            self._auto_hide_timer.start(6500)
+        else:
+            self._auto_hide_timer.stop()
+
+    def notice_text(self) -> tuple[str, str, str]:
+        return self._stage.text(), self._title.text(), self._detail.text()
+
+    def _apply_collapsed(self) -> None:
+        has_detail = bool(self._detail.text().strip())
+        self._detail.setVisible(has_detail and not self._collapsed)
+        self._collapse_btn.setEnabled(has_detail)
+        self._collapse_btn.setText("展开" if self._collapsed else "收起")
+        self.adjustSize()
+
+    def _toggle_collapsed(self) -> None:
+        self._collapsed = not self._collapsed
+        self._apply_collapsed()
+
+    def _hide_current_task(self) -> None:
+        self._hidden_by_user = True
+        self.hide()
+        self._show_launcher()
+
+    def _show_near_parent(self) -> None:
+        self._hide_launcher()
+        self.reposition()
+        self.show()
+        self.raise_()
+
+    def reposition(self) -> None:
+        parent = self.parentWidget()
+        if parent is None:
+            return
+        try:
+            self.adjustSize()
+            width = min(max(self.width(), 360), min(440, max(260, parent.width() - 48)))
+            self.setFixedWidth(width)
+            self.adjustSize()
+            x = max(12, parent.width() - self.width() - 24)
+            y = max(12, parent.height() - self.height() - 28)
+            self.move(x, y)
+            if self._launcher is not None and self._launcher.isVisible():
+                self._place_launcher()
+        except Exception:
+            pass
+
+    def _sync_launcher_style(self, color: str, stage: str) -> None:
+        if self._launcher is None:
+            return
+        self._launcher.setText(f"任务 · {stage}")
+        self._launcher.setStyleSheet(
+            "QPushButton#WorkflowTaskLauncher {"
+            f" background:{color}; color:white; border:0; border-radius:13px;"
+            " padding:3px 12px; font-size:12px; font-weight:700;"
+            "}"
+        )
+
+    def _show_launcher(self) -> None:
+        if self._launcher is None:
+            return
+        self._place_launcher()
+        self._launcher.show()
+        self._launcher.raise_()
+
+    def _hide_launcher(self) -> None:
+        if self._launcher is not None:
+            self._launcher.hide()
+
+    def _place_launcher(self) -> None:
+        if self._launcher is None:
+            return
+        parent = self.parentWidget()
+        if parent is None:
+            return
+        self._launcher.adjustSize()
+        x = max(12, parent.width() - self._launcher.width() - 24)
+        y = max(12, parent.height() - self._launcher.height() - 28)
+        self._launcher.move(x, y)
+
+    def _restore_from_launcher(self) -> None:
+        self._hidden_by_user = False
+        self._show_near_parent()
+
+    def _auto_hide_finished_notice(self) -> None:
+        if self._state not in {"success", "info"}:
+            return
+        self.hide()
+        self._hide_launcher()
+        self._hidden_by_user = False
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        self._hide_current_task()
+        event.ignore()
+
+
+class _WorkflowDashboard(QFrame):
+    """Compact workbench state strip inspired by project/pipeline desktops."""
+
+    open_project_requested = pyqtSignal()
+    add_photos_requested = pyqtSignal()
+    new_specimen_requested = pyqtSignal()
+    compose_requested = pyqtSignal()
+    organise_requested = pyqtSignal()
+    grouping_requested = pyqtSignal()
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("WorkflowDashboard")
+        root = QHBoxLayout(self)
+        root.setContentsMargins(12, 10, 12, 10)
+        root.setSpacing(12)
+
+        summary = QVBoxLayout()
+        summary.setContentsMargins(0, 0, 0, 0)
+        summary.setSpacing(2)
+        eyebrow = QLabel("工作流")
+        eyebrow.setObjectName("WorkflowDashEyebrow")
+        self._next_title = QLabel("打开项目")
+        self._next_title.setObjectName("WorkflowDashTitle")
+        self._next_detail = QLabel("选择一个工作区后开始处理照片")
+        self._next_detail.setObjectName("WorkflowDashDetail")
+        self._next_detail.setWordWrap(True)
+        summary.addWidget(eyebrow)
+        summary.addWidget(self._next_title)
+        summary.addWidget(self._next_detail)
+        root.addLayout(summary, stretch=2)
+
+        self._project_value = self._add_metric(root, "项目", "未打开")
+        self._uid_value = self._add_metric(root, "编号", "无")
+        self._pending_value = self._add_metric(root, "待处理", "JPG 0 / TIFF 0")
+        self._archive_value = self._add_metric(root, "归档", "0")
+
+        actions = QHBoxLayout()
+        actions.setContentsMargins(0, 0, 0, 0)
+        actions.setSpacing(6)
+        root.addLayout(actions)
+
+        self._open_btn = self._button("打开", "mdi6.folder-open-outline", "Outline")
+        self._open_btn.clicked.connect(self.open_project_requested.emit)
+        actions.addWidget(self._open_btn)
+
+        self._add_btn = self._button("添加照片", "mdi6.image-plus-outline", "Outline")
+        self._add_btn.clicked.connect(self.add_photos_requested.emit)
+        actions.addWidget(self._add_btn)
+
+        self._new_btn = self._button("新编号", "mdi6.plus", "Outline")
+        self._new_btn.clicked.connect(self.new_specimen_requested.emit)
+        actions.addWidget(self._new_btn)
+
+        self._compose_btn = self._button("合成", "mdi6.layers-triple-outline", "Primary")
+        self._compose_btn.clicked.connect(self.compose_requested.emit)
+        actions.addWidget(self._compose_btn)
+
+        self._organise_btn = self._button("整理", "mdi6.folder-zip-outline", "Outline")
+        self._organise_btn.clicked.connect(self.organise_requested.emit)
+        actions.addWidget(self._organise_btn)
+
+        self._group_btn = self._button("分组", "mdi6.view-grid-plus-outline", "Ghost")
+        self._group_btn.clicked.connect(self.grouping_requested.emit)
+        actions.addWidget(self._group_btn)
+
+        self.update_state(
+            project_dir=None,
+            active_uid=None,
+            current_uid=None,
+            scan_result=None,
+        )
+
+    def _add_metric(self, root: QHBoxLayout, label: str, value: str) -> QLabel:
+        wrap = QFrame()
+        wrap.setObjectName("WorkflowDashMetric")
+        lay = QVBoxLayout(wrap)
+        lay.setContentsMargins(10, 0, 10, 0)
+        lay.setSpacing(2)
+        label_w = QLabel(label)
+        label_w.setObjectName("WorkflowDashMetricLabel")
+        value_w = QLabel(value)
+        value_w.setObjectName("WorkflowDashMetricValue")
+        value_w.setMinimumWidth(74)
+        value_w.setWordWrap(False)
+        lay.addWidget(label_w)
+        lay.addWidget(value_w)
+        root.addWidget(wrap)
+        return value_w
+
+    def _button(self, text: str, glyph: str, object_name: str) -> QPushButton:
+        btn = QPushButton(text)
+        btn.setObjectName(object_name)
+        btn.setFixedHeight(28)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        icons.set_button_icon(
+            btn,
+            glyph,
+            color=icons.TONE_ON_ACCENT if object_name == "Primary" else icons.TONE_MUTED,
+            size=14,
+        )
+        return btn
+
+    def update_state(
+        self,
+        *,
+        project_dir: str | None,
+        active_uid: str | None,
+        current_uid: str | None,
+        scan_result,
+    ) -> None:
+        project_name = Path(project_dir).name if project_dir else ""
+        jpg_count = len(getattr(scan_result, "jpg_files", []) or [])
+        tiff_count = len(getattr(scan_result, "tiff_files", []) or [])
+        pending_count = int(
+            getattr(scan_result, "pending_count", jpg_count + tiff_count) or 0
+        )
+        archived_count = int(getattr(scan_result, "archived_jpg_count", 0) or 0)
+        processed_tiff_count = int(getattr(scan_result, "processed_tiff_count", 0) or 0)
+
+        self._project_value.setText(project_name or "未打开")
+        if active_uid:
+            self._uid_value.setText(f"激活 {self._short_uid(active_uid)}")
+        elif current_uid:
+            self._uid_value.setText(f"选中 {self._short_uid(current_uid)}")
+        else:
+            self._uid_value.setText("无")
+        self._pending_value.setText(f"JPG {jpg_count} / TIFF {tiff_count}")
+        self._archive_value.setText(f"JPG {archived_count} / TIFF {processed_tiff_count}")
+
+        has_project = bool(project_dir)
+        if not has_project:
+            title = "打开项目"
+            detail = "选择一个工作区后开始处理照片"
+        elif pending_count <= 0:
+            title = "等待新照片"
+            detail = "可导入 JPG/TIF，或继续完善编号和标签"
+        elif tiff_count and jpg_count:
+            title = "整理 TIFF 与原片"
+            detail = "选择一个 TIFF 和对应 JPG 后整理归档"
+        elif tiff_count:
+            title = "整理外部 TIFF"
+            detail = "选择 TIFF，再选择对应 JPG 作为归档原片"
+        else:
+            title = "选择照片后合成"
+            detail = "手选 JPG 可直接合成；激活编号只是默认归属"
+        self._next_title.setText(title)
+        self._next_detail.setText(detail)
+
+        for btn in (self._add_btn, self._new_btn, self._group_btn):
+            btn.setEnabled(has_project)
+        self._compose_btn.setEnabled(has_project and jpg_count > 0)
+        self._organise_btn.setEnabled(has_project and pending_count > 0)
+        self._open_btn.setEnabled(True)
+
+    @staticmethod
+    def _short_uid(uid: str) -> str:
+        text = str(uid or "").strip()
+        if len(text) <= 22:
+            return text or "无"
+        return f"{text[:10]}...{text[-8:]}"
+
+
+class _ComposeOrganiseProgressDialog(QWidget):
+    """Compose-and-organise progress card with a Geneious-style background entry."""
+
+    cancel_requested = pyqtSignal(str)
+
+    def __init__(self, host: QWidget, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent or host)
+        self._host = host
+        self._hidden_by_user = False
+        self._compact = False
+        self._task_key = ""
+        self._last_title = ""
+        self._overall_stage = "提示"
+        self._primary_action_mode = "close"
+        self._launcher = QPushButton("合成+整理 · 提示", host)
+        self._launcher.setObjectName("ComposeOrganiseLauncher")
+        self._launcher.setFixedHeight(30)
+        self._launcher.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._launcher.clicked.connect(self._restore_from_launcher)
+        self._launcher.hide()
+        self.setObjectName("ComposeOrganiseProgressDialog")
+        self._auto_hide_timer = QTimer(self)
+        self._auto_hide_timer.setSingleShot(True)
+        self._auto_hide_timer.timeout.connect(self._auto_hide_finished_notice)
+        self.setMinimumWidth(500)
+        self.resize(540, 250)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(14, 14, 14, 14)
+        root.setSpacing(0)
+
+        card = QFrame()
+        card.setObjectName("ComposeOrganiseCard")
+        root.addWidget(card)
+
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(18, 16, 18, 16)
+        card_layout.setSpacing(14)
+
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(10)
+        mark = QLabel("合")
+        mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        mark.setFixedSize(34, 34)
+        mark.setObjectName("ComposeOrganiseMark")
+        header.addWidget(mark)
+
+        title_box = QVBoxLayout()
+        title_box.setContentsMargins(0, 0, 0, 0)
+        title_box.setSpacing(2)
+        title = QLabel("合成+整理")
+        title.setObjectName("ComposeOrganiseTitle")
+        self._subtitle = QLabel("等待开始")
+        self._subtitle.setObjectName("ComposeOrganiseSubtitle")
+        title_box.addWidget(title)
+        title_box.addWidget(self._subtitle)
+        header.addLayout(title_box, 1)
+
+        self._overall_badge = QLabel("提示")
+        self._overall_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._overall_badge.setObjectName("ComposeOrganiseOverallBadge")
+        header.addWidget(self._overall_badge)
+
+        self._compact_btn = QToolButton()
+        self._compact_btn.setObjectName("ComposeOrganiseToolButton")
+        self._compact_btn.setText("-")
+        self._compact_btn.setToolTip("转入后台")
+        self._compact_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._compact_btn.setFixedSize(34, 34)
+        icons.set_button_icon(
+            self._compact_btn, "mdi6.window-minimize", TOKENS["muted"], size=14
+        )
+        self._compact_btn.clicked.connect(self._minimize_to_background)
+        header.addWidget(self._compact_btn)
+
+        self._hide_btn = QToolButton()
+        self._hide_btn.setObjectName("ComposeOrganiseToolButton")
+        self._hide_btn.setText("x")
+        self._hide_btn.setToolTip("隐藏窗口")
+        self._hide_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._hide_btn.setFixedSize(34, 34)
+        icons.set_button_icon(
+            self._hide_btn, "mdi6.close", TOKENS["muted"], size=14
+        )
+        self._hide_btn.clicked.connect(self._handle_hide_clicked)
+        header.addWidget(self._hide_btn)
+        card_layout.addLayout(header)
+
+        self._stage_panel = QFrame()
+        self._stage_panel.setObjectName("ComposeOrganiseStagePanel")
+        stage_layout = QVBoxLayout(self._stage_panel)
+        stage_layout.setContentsMargins(12, 10, 12, 10)
+        stage_layout.setSpacing(8)
+        self._compose_row, self._compose_state, self._compose_hint = self._stage_row(
+            "1", "合成 TIFF"
+        )
+        self._organise_row, self._organise_state, self._organise_hint = self._stage_row(
+            "2", "整理归档"
+        )
+        self._stage_hint_by_label = {
+            self._compose_state: (
+                "等待任务调度",
+                "正在生成高景深 TIFF",
+                "TIFF 已生成",
+                "TIFF 未生成",
+                "未开始合成",
+            ),
+            self._organise_state: (
+                "等待 TIFF 完成",
+                "正在打包 JPG 并登记 ZIP",
+                "ZIP 已归档",
+                "整理未完成",
+                "未开始整理",
+            ),
+        }
+        stage_layout.addWidget(self._compose_row)
+        stage_layout.addWidget(self._organise_row)
+        card_layout.addWidget(self._stage_panel)
+
+        self._detail = QLabel("")
+        self._detail.setObjectName("ComposeOrganiseDetail")
+        self._detail.setWordWrap(True)
+        self._detail.setMinimumHeight(40)
+        card_layout.addWidget(self._detail)
+
+        action_row = QHBoxLayout()
+        action_row.setContentsMargins(0, 0, 0, 0)
+        action_row.setSpacing(8)
+        self._cancel_action = QPushButton("取消任务")
+        self._cancel_action.setObjectName("ComposeOrganiseCancelButton")
+        self._cancel_action.setProperty("role", "danger")
+        self._cancel_action.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._cancel_action.clicked.connect(self._request_cancel)
+        action_row.addWidget(self._cancel_action)
+        self._ok_action = QPushButton("确定")
+        self._ok_action.setObjectName("ComposeOrganiseOkButton")
+        self._ok_action.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._ok_action.clicked.connect(self._dismiss_finished_notice)
+        self._ok_action.hide()
+        action_row.addWidget(self._ok_action)
+        action_row.addStretch()
+        self._compact_action = QPushButton("收起详情")
+        self._compact_action.setObjectName("ComposeOrganiseActionButton")
+        self._compact_action.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._compact_action.clicked.connect(self._toggle_compact)
+        action_row.addWidget(self._compact_action)
+        self._hide_action = QPushButton("隐藏窗口")
+        self._hide_action.setObjectName("ComposeOrganiseActionButton")
+        self._hide_action.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._hide_action.clicked.connect(self._handle_hide_clicked)
+        action_row.addWidget(self._hide_action)
+        card_layout.addLayout(action_row)
+
+        self.setStyleSheet(
+            f"QWidget#ComposeOrganiseProgressDialog {{ background:transparent; }}"
+            "QFrame#ComposeOrganiseCard {"
+            f" background:{TOKENS['panel']};"
+            f" border:1px solid {TOKENS['border_medium']};"
+            " border-radius:12px;"
+            "}"
+            "QLabel#ComposeOrganiseMark {"
+            f" background:{TOKENS['accent']}; color:white;"
+            " border-radius:8px; font-size:15px; font-weight:800;"
+            "}"
+            "QLabel#ComposeOrganiseTitle {"
+            f" color:{TOKENS['text']}; font-size:16px; font-weight:800;"
+            "}"
+            "QLabel#ComposeOrganiseSubtitle {"
+            f" color:{TOKENS['muted']}; font-size:12px;"
+            "}"
+            "QLabel#ComposeOrganiseOverallBadge {"
+            " background:transparent; border:0; padding:2px 0;"
+            " font-size:12px; font-weight:800;"
+            "}"
+            "QToolButton#ComposeOrganiseToolButton {"
+            f" background:{TOKENS['panel_2']};"
+            f" border:1px solid {TOKENS['border']};"
+            " border-radius:8px; min-width:28px; min-height:28px;"
+            f" color:{TOKENS['muted']}; font-size:14px; font-weight:800;"
+            "}"
+            "QToolButton#ComposeOrganiseToolButton:hover {"
+            f" background:{TOKENS['panel_inset']};"
+            f" border-color:{TOKENS['border_medium']};"
+            "}"
+            "QPushButton#ComposeOrganiseActionButton {"
+            f" background:{TOKENS['panel_2']};"
+            f" color:{TOKENS['text']};"
+            f" border:1px solid {TOKENS['border']};"
+            " border-radius:8px; padding:6px 12px;"
+            " font-size:12px; font-weight:700;"
+            "}"
+            "QPushButton#ComposeOrganiseActionButton:hover {"
+            f" background:{TOKENS['panel_inset']};"
+            f" border-color:{TOKENS['border_medium']};"
+            "}"
+            "QPushButton#ComposeOrganiseCancelButton[role=\"danger\"] {"
+            " background:#fff7ed;"
+            f" color:{TOKENS['danger']};"
+            " border:1px solid #fed7aa;"
+            " border-radius:8px; padding:6px 12px;"
+            " font-size:12px; font-weight:800;"
+            "}"
+            "QPushButton#ComposeOrganiseCancelButton[role=\"danger\"]:hover {"
+            " background:#ffedd5; border-color:#fdba74;"
+            "}"
+            "QPushButton#ComposeOrganiseCancelButton[role=\"neutral\"] {"
+            f" background:{TOKENS['panel_2']};"
+            f" color:{TOKENS['text']};"
+            f" border:1px solid {TOKENS['border']};"
+            " border-radius:8px; padding:6px 12px;"
+            " font-size:12px; font-weight:800;"
+            "}"
+            "QPushButton#ComposeOrganiseCancelButton[role=\"neutral\"]:hover {"
+            f" background:{TOKENS['panel_inset']};"
+            f" border-color:{TOKENS['border_medium']};"
+            "}"
+            "QPushButton#ComposeOrganiseCancelButton:disabled {"
+            f" color:{TOKENS['muted']}; background:{TOKENS['panel_2']};"
+            f" border-color:{TOKENS['border']};"
+            "}"
+            "QPushButton#ComposeOrganiseOkButton {"
+            f" background:{TOKENS['accent']}; color:white;"
+            " border:0; border-radius:8px; padding:6px 16px;"
+            " font-size:12px; font-weight:800;"
+            "}"
+            "QPushButton#ComposeOrganiseOkButton:hover {"
+            f" background:{TOKENS['accent_hover']};"
+            "}"
+            "QFrame#ComposeOrganiseStagePanel {"
+            f" background:{TOKENS['panel_2']};"
+            f" border:1px solid {TOKENS['border']};"
+            " border-radius:10px;"
+            "}"
+            "QFrame#ComposeOrganiseStageRow {"
+            " background:transparent; border:0;"
+            "}"
+            "QLabel#ComposeOrganiseStepName {"
+            f" color:{TOKENS['text']}; font-size:13px; font-weight:700;"
+            "}"
+            "QLabel#ComposeOrganiseStepHint {"
+            f" color:{TOKENS['muted']}; font-size:11px;"
+            "}"
+            "QLabel#ComposeOrganiseDetail {"
+            f" color:{TOKENS['muted']};"
+            f" background:{TOKENS['panel_inset']};"
+            f" border:1px solid {TOKENS['border']};"
+            " border-radius:8px; padding:8px 10px; font-size:12px;"
+            "}"
+        )
+
+        self._set_stage(self._compose_state, "等待")
+        self._set_stage(self._organise_state, "等待")
+        self._set_overall_badge("提示")
+
+    def _stage_row(self, number: str, label: str) -> tuple[QFrame, QLabel, QLabel]:
+        row_frame = QFrame()
+        row_frame.setObjectName("ComposeOrganiseStageRow")
+        row = QHBoxLayout(row_frame)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(10)
+        index = QLabel(number)
+        index.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        index.setFixedSize(26, 26)
+        index.setObjectName("ComposeOrganiseStepIndex")
+        index.setStyleSheet(
+            f"background:{TOKENS['panel_inset']}; color:{TOKENS['muted']};"
+            f" border:1px solid {TOKENS['border_medium']}; border-radius:12px;"
+            " font-size:12px; font-weight:700;"
+        )
+        text_box = QVBoxLayout()
+        text_box.setContentsMargins(0, 0, 0, 0)
+        text_box.setSpacing(1)
+        name = QLabel(label)
+        name.setObjectName("ComposeOrganiseStepName")
+        hint = QLabel("等待任务调度" if number == "1" else "等待 TIFF 完成")
+        hint.setObjectName("ComposeOrganiseStepHint")
+        text_box.addWidget(name)
+        text_box.addWidget(hint)
+        state = QLabel("等待")
+        state.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        state.setFixedWidth(68)
+        row.addWidget(index)
+        row.addLayout(text_box, 1)
+        row.addWidget(state)
+        return row_frame, state, hint
+
+    def set_notice(
+        self,
+        title: str,
+        detail: str = "",
+        *,
+        state: str = "busy",
+        force_show: bool = False,
+        task_key: str | None = None,
+    ) -> None:
+        key = str(task_key or "")
+        if key and key != self._task_key:
+            self._task_key = key
+            self._hidden_by_user = False
+            self._set_stage(self._compose_state, "等待")
+            self._set_stage(self._organise_state, "等待")
+        if force_show:
+            self._hidden_by_user = False
+
+        text = str(detail or "").strip()
+        state = state if state in {"busy", "success", "error", "info"} else "info"
+        title_text = str(title or "")
+        self._last_title = title_text
+        self._overall_stage = {
+            "busy": "进行中",
+            "success": "完成",
+            "error": "失败",
+            "info": "提示",
+        }[state]
+        self._set_overall_badge(self._overall_stage)
+        cancelling = "正在取消" in title_text
+        if state == "busy":
+            self._sync_action_buttons("cancelling" if cancelling else "cancel")
+        else:
+            self._sync_action_buttons("close")
+        finish_state = state in {"success", "error", "info"}
+        self._hide_btn.setToolTip("关闭窗口" if finish_state else "隐藏窗口")
+        self._hide_action.setText("关闭窗口" if finish_state else "隐藏窗口")
+        self._subtitle.setText(title_text.replace("合成+整理：", "") or self._overall_stage)
+        if state == "success":
+            self._set_stage(self._compose_state, "完成")
+            self._set_stage(self._organise_state, "完成")
+        elif state == "error":
+            if "合成阶段" in text or "没有生成 TIFF" in text:
+                self._set_stage(self._compose_state, "失败")
+                self._set_stage(self._organise_state, "未启动")
+            else:
+                self._set_stage(self._compose_state, "完成")
+                self._set_stage(self._organise_state, "失败")
+        elif "正在整理" in title_text:
+            self._set_stage(self._compose_state, "完成")
+            self._set_stage(self._organise_state, "进行中")
+        elif "正在合成" in title_text:
+            self._set_stage(self._compose_state, "进行中")
+            self._set_stage(self._organise_state, "等待")
+        self._detail.setText(text)
+        if finish_state:
+            self._auto_hide_timer.start(8000)
+        else:
+            self._auto_hide_timer.stop()
+        if not self._hidden_by_user:
+            self._show_near_parent()
+
+    def notice_text(self) -> tuple[str, str, str]:
+        return (
+            self._overall_stage,
+            self._last_title,
+            self._detail.text(),
+        )
+
+    def stage_texts(self) -> tuple[str, str]:
+        return self._compose_state.text(), self._organise_state.text()
+
+    def _set_stage(self, label: QLabel, state: str) -> None:
+        colors = {
+            "等待": (TOKENS["muted"], "#f4f6f8", TOKENS["border_medium"]),
+            "未启动": (TOKENS["muted"], "#f4f6f8", TOKENS["border_medium"]),
+            "进行中": (TOKENS["accent"], "#e8f7f4", "#8bd3c7"),
+            "完成": (TOKENS["success"], "#ecfdf3", "#86efac"),
+            "失败": (TOKENS["danger"], "#fff1f0", "#fca5a5"),
+        }
+        fg, bg, border = colors.get(state, colors["等待"])
+        label.setText(state)
+        label.setStyleSheet(
+            f"background:{bg}; color:{fg}; border:1px solid {border};"
+            " border-radius:10px; padding:4px 8px; font-size:12px; font-weight:800;"
+        )
+        hint = getattr(self, "_stage_hint_by_label", {}).get(label)
+        if hint is not None:
+            waiting, busy, done, failed, not_started = hint
+            label_hint = {
+                "等待": waiting,
+                "进行中": busy,
+                "完成": done,
+                "失败": failed,
+                "未启动": not_started,
+            }.get(state, waiting)
+            if label is self._compose_state:
+                self._compose_hint.setText(label_hint)
+            elif label is self._organise_state:
+                self._organise_hint.setText(label_hint)
+
+    def _set_overall_badge(self, stage: str) -> None:
+        colors = {
+            "进行中": (TOKENS["accent"], "#e8f7f4", "#8bd3c7"),
+            "完成": (TOKENS["success"], "#ecfdf3", "#86efac"),
+            "失败": (TOKENS["danger"], "#fff1f0", "#fca5a5"),
+            "提示": (TOKENS["muted"], "#f4f6f8", TOKENS["border_medium"]),
+        }
+        fg, bg, border = colors.get(stage, colors["提示"])
+        self._overall_badge.setText(f"状态：{stage}")
+        self._overall_badge.setStyleSheet(
+            f"background:transparent; color:{fg}; border:0;"
+            " padding:2px 0; font-size:12px; font-weight:800;"
+        )
+        self._sync_launcher_style(fg, stage)
+
+    def _sync_action_buttons(self, mode: str) -> None:
+        mode = mode if mode in {"cancel", "cancelling", "close"} else "close"
+        self._primary_action_mode = mode
+        if mode == "cancel":
+            self._cancel_action.setText("取消任务")
+            self._cancel_action.setEnabled(True)
+            self._cancel_action.setProperty("role", "danger")
+            self._cancel_action.show()
+            self._ok_action.hide()
+        elif mode == "cancelling":
+            self._cancel_action.setText("正在取消...")
+            self._cancel_action.setEnabled(False)
+            self._cancel_action.setProperty("role", "neutral")
+            self._cancel_action.show()
+            self._ok_action.hide()
+        else:
+            self._cancel_action.hide()
+            self._ok_action.show()
+            self._ok_action.setEnabled(True)
+        self._cancel_action.style().unpolish(self._cancel_action)
+        self._cancel_action.style().polish(self._cancel_action)
+        self._cancel_action.update()
+
+    def _toggle_compact(self) -> None:
+        self._compact = not self._compact
+        self._detail.setVisible(not self._compact)
+        self._compact_action.setText("展开详情" if self._compact else "收起详情")
+        self.adjustSize()
+
+    def _minimize_to_background(self) -> None:
+        self._hide_for_current_task()
+
+    def show(self) -> None:  # noqa: N802
+        self._ensure_on_top()
+
+    def hide(self) -> None:  # noqa: N802
+        super().hide()
+
+    def _ensure_on_top(self) -> None:
+        self._reposition_panel()
+        super().show()
+        self.raise_()
+        if not self._is_running():
+            if self._ok_action.isVisible():
+                self._ok_action.setFocus(Qt.FocusReason.OtherFocusReason)
+            else:
+                self._cancel_action.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def _reposition_panel(self) -> None:
+        host = self._host
+        if host is None:
+            return
+        self.adjustSize()
+        x = max(12, (host.width() - self.width()) // 2)
+        y = max(12, (host.height() - self.height()) // 2)
+        self.move(x, y)
+
+    def _show_near_parent(self) -> None:
+        if self._hidden_by_user:
+            self._show_launcher()
+            return
+        host = self._host
+        if host is not None:
+            for attr in ("_settings_scrim", "_collab_scrim"):
+                scrim = getattr(host, attr, None)
+                if scrim is not None and scrim.isVisible():
+                    scrim.hide()
+        self.adjustSize()
+        self._hide_launcher()
+        self._ensure_on_top()
+
+    def _hide_for_current_task(self) -> None:
+        self._hidden_by_user = True
+        self.hide()
+        self._show_launcher()
+
+    def _dismiss_finished_notice(self) -> None:
+        self._auto_hide_timer.stop()
+        self._hidden_by_user = False
+        self.hide()
+        self._hide_launcher()
+
+    def _auto_hide_finished_notice(self) -> None:
+        if not self._is_running():
+            self._dismiss_finished_notice()
+
+    def _is_running(self) -> bool:
+        return self._primary_action_mode in {"cancel", "cancelling"}
+
+    def _handle_hide_clicked(self) -> None:
+        if self._is_running():
+            self._hide_for_current_task()
+        else:
+            self._dismiss_finished_notice()
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        if self._is_running():
+            self._hide_for_current_task()
+            event.ignore()
+        else:
+            self._dismiss_finished_notice()
+            event.accept()
+
+    def reject(self) -> None:
+        self._handle_hide_clicked()
+
+    def _request_cancel(self) -> None:
+        self._cancel_action.setEnabled(False)
+        self._cancel_action.setText("正在取消...")
+        self._cancel_action.setProperty("role", "neutral")
+        self._cancel_action.style().unpolish(self._cancel_action)
+        self._cancel_action.style().polish(self._cancel_action)
+        self._detail.setText("正在取消当前任务；已写入但未完成的 ZIP 会被清理，JPG 不会删除。")
+        self.cancel_requested.emit(str(self._task_key or ""))
+
+    def _sync_launcher_style(self, color: str, stage: str) -> None:
+        label = "任务 (1 进行中)" if stage == "进行中" else f"任务 · {stage}"
+        self._launcher.setText(label)
+        self._launcher.setToolTip("点击查看后台任务")
+        self._launcher.setStyleSheet(
+            "QPushButton#ComposeOrganiseLauncher {"
+            f" background:{color}; color:white; border:0; border-radius:15px;"
+            " padding:4px 14px; font-size:12px; font-weight:800;"
+            "}"
+        )
+
+    def _show_launcher(self) -> None:
+        self._place_launcher()
+        self._launcher.show()
+        self._launcher.raise_()
+
+    def _hide_launcher(self) -> None:
+        self._launcher.hide()
+
+    def _place_launcher(self) -> None:
+        host = self._host
+        if host is None:
+            return
+        self._launcher.adjustSize()
+        x = max(12, host.width() - self._launcher.width() - 24)
+        y = max(12, host.height() - self._launcher.height() - 28)
+        self._launcher.move(x, y)
+
+    def _restore_from_launcher(self) -> None:
+        self._hidden_by_user = False
+        self._hide_launcher()
+        self._show_near_parent()
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        if event.key() in (
+            Qt.Key.Key_Escape,
+            Qt.Key.Key_Return,
+            Qt.Key.Key_Enter,
+        ) and not self._is_running():
+            self._dismiss_finished_notice()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
 
 class _BatchResultDialog(QDialog):
@@ -215,19 +1173,132 @@ def _free_compose_output_name(incoming_dir: str, user_name: Optional[str]) -> st
     Otherwise auto-generate "自由合成-N.tif" incrementing N until no conflict.
     Oracle: app.js freeComposeSelected(), auto-naming "自由合成-N".
     """
-    import re
-    if user_name:
-        safe = re.sub(r'[\\/:*?"<>|]', "_", user_name.strip())
-        if safe and not safe.lower().endswith(".tif"):
-            safe += ".tif"
-        if safe and not os.path.exists(os.path.join(incoming_dir, safe)):
-            return safe
-    n = 1
-    while True:
-        candidate = f"自由合成-{n}.tif"
-        if not os.path.exists(os.path.join(incoming_dir, candidate)):
-            return candidate
-        n += 1
+    from app.services.compose_workflow_service import free_compose_output_name
+    return free_compose_output_name(incoming_dir, user_name)
+
+
+class _ScaledImagePreview(QLabel):
+    """Scaled image label for the compose result preview."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._source_pixmap: Optional[QPixmap] = None
+        self._scroll_area: Optional[QScrollArea] = None
+        self._fit_to_window = True
+        self._zoom_percent = 100
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setMinimumSize(1, 1)
+        self.setWordWrap(True)
+        self.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+
+    def set_scroll_area(self, scroll_area: QScrollArea) -> None:
+        self._scroll_area = scroll_area
+        scroll_area.viewport().installEventFilter(self)
+
+    def set_preview_pixmap(self, pixmap: Optional[QPixmap]) -> None:
+        if pixmap is None or pixmap.isNull():
+            self._source_pixmap = None
+            self.setPixmap(QPixmap())
+            return
+        self._source_pixmap = QPixmap(pixmap)
+        self._fit_to_window = True
+        self._refresh_scaled_pixmap()
+
+    def set_placeholder(self, text: str) -> None:
+        self._source_pixmap = None
+        self.setPixmap(QPixmap())
+        self.setText(text)
+
+    def source_pixmap(self) -> Optional[QPixmap]:
+        if self._source_pixmap is None:
+            return None
+        return QPixmap(self._source_pixmap)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        if self._fit_to_window:
+            self._refresh_scaled_pixmap()
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802
+        if (
+            self._scroll_area is not None
+            and obj is self._scroll_area.viewport()
+            and event.type() == QEvent.Type.Resize
+            and self._fit_to_window
+        ):
+            self._refresh_scaled_pixmap()
+        if (
+            event.type() == QEvent.Type.Wheel
+            and event.modifiers() & Qt.KeyboardModifier.ControlModifier
+        ):
+            self.zoom_by_wheel_delta(event.angleDelta().y())
+            event.accept()
+            return True
+        return super().eventFilter(obj, event)
+
+    def wheelEvent(self, event) -> None:  # noqa: N802
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            self.zoom_by_wheel_delta(event.angleDelta().y())
+            event.accept()
+            return
+        super().wheelEvent(event)
+
+    def zoom_by_wheel_delta(self, delta: int) -> None:
+        if delta == 0:
+            return
+        steps = max(1, abs(delta) // 120)
+        direction = 1 if delta > 0 else -1
+        self.set_zoom_percent(self._zoom_percent + direction * steps * 10)
+
+    def set_zoom_percent(self, percent: int) -> None:
+        if self._source_pixmap is None or self._source_pixmap.isNull():
+            return
+        self._fit_to_window = False
+        self._zoom_percent = max(25, min(400, int(percent)))
+        self._refresh_scaled_pixmap()
+
+    def fit_to_window(self) -> None:
+        self._fit_to_window = True
+        self._refresh_scaled_pixmap()
+
+    def actual_size(self) -> None:
+        self.set_zoom_percent(100)
+
+    def _refresh_scaled_pixmap(self) -> None:
+        if self._source_pixmap is None or self._source_pixmap.isNull():
+            return
+        source_w = max(1, self._source_pixmap.width())
+        source_h = max(1, self._source_pixmap.height())
+        if self._fit_to_window:
+            if self._scroll_area is not None:
+                area = self._scroll_area.viewport().size()
+                target_w = max(1, area.width() - 24)
+                target_h = max(1, area.height() - 24)
+            else:
+                target_w = max(1, self.width() - 24)
+                target_h = max(1, self.height() - 24)
+            scaled = self._source_pixmap.scaled(
+                target_w,
+                target_h,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            label_w = max(target_w, scaled.width())
+            label_h = max(target_h, scaled.height())
+        else:
+            target_w = max(1, int(source_w * self._zoom_percent / 100))
+            target_h = max(1, int(source_h * self._zoom_percent / 100))
+            scaled = self._source_pixmap.scaled(
+                target_w,
+                target_h,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            label_w = scaled.width()
+            label_h = scaled.height()
+        self.setText("")
+        self.setFixedSize(max(1, label_w), max(1, label_h))
+        self.setPixmap(scaled)
 
 
 class _ComposeWorkbenchDialog(QDialog):
@@ -257,9 +1328,11 @@ class _ComposeWorkbenchDialog(QDialog):
         self._checks: list[tuple[QCheckBox, str]] = []
         self._params_panel = HeliconParamsPanel()
         self._params_panel.set_params(params)
+        self._shortcuts: list[QShortcut] = []
         self.setWindowTitle("合成工作台")
         self.setMinimumSize(920, 560)
         self._build_ui(angle_label)
+        self._install_shortcuts()
 
     def _build_ui(self, angle_label: str) -> None:
         t = TOKENS
@@ -301,6 +1374,10 @@ class _ComposeWorkbenchDialog(QDialog):
             cb = QCheckBox(Path(path).name)
             cb.setChecked(True)
             cb.setToolTip(path)
+            thumb = self._load_source_preview_pixmap(path)
+            if thumb is not None and not thumb.isNull():
+                cb.setIcon(QIcon(thumb))
+                cb.setIconSize(QSize(46, 46))
             self._checks.append((cb, path))
             src_list.setItemWidget(item, cb)
             item.setSizeHint(cb.sizeHint())
@@ -315,20 +1392,47 @@ class _ComposeWorkbenchDialog(QDialog):
         pv_title = QLabel("TIFF 预览")
         pv_title.setStyleSheet(f"font-size: 13px; font-weight: 700; color:{t['text']};")
         pv_lay.addWidget(pv_title)
-        status = QLabel()
+        self._tiff_preview = _ScaledImagePreview()
+        self._tiff_preview.setObjectName("ComposeTiffPreview")
+        self._tiff_preview.setStyleSheet(
+            f"color:{t['muted']}; background:{t['panel_inset']};"
+            f" border:1px dashed {t['border_medium']}; border-radius:8px;"
+            " padding:8px; font-size:12px;"
+        )
+        self._tiff_preview.setToolTip(self._tiff_path)
+        self._preview_scroll = QScrollArea()
+        self._preview_scroll.setWidgetResizable(False)
+        self._preview_scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._preview_scroll.setMinimumSize(360, 300)
+        self._preview_scroll.setStyleSheet(
+            f"QScrollArea {{ background:{t['panel_inset']};"
+            f" border:1px dashed {t['border_medium']}; border-radius:8px; }}"
+        )
+        self._tiff_preview.set_scroll_area(self._preview_scroll)
+        self._preview_scroll.setWidget(self._tiff_preview)
+        meta = QLabel()
+        meta.setObjectName("Muted")
         if os.path.isfile(self._tiff_path):
             size_mb = os.path.getsize(self._tiff_path) / (1024 * 1024)
-            status.setText(f"已生成 TIFF\n{self._tiff_path}\n\n大小：{size_mb:.1f} MB")
+            pixmap = self._load_tiff_preview_pixmap()
+            if pixmap is not None and not pixmap.isNull():
+                self._tiff_preview.set_preview_pixmap(pixmap)
+                meta.setText(
+                    f"已生成 TIFF · {Path(self._tiff_path).name} · "
+                    f"{size_mb:.1f} MB"
+                )
+            else:
+                self._tiff_preview.set_placeholder(
+                    f"无法预览 TIFF\n{self._tiff_path}\n\n大小：{size_mb:.1f} MB"
+                )
+                meta.setText("TIFF 已生成，但当前环境无法解码预览图。")
         else:
-            status.setText(f"未找到 TIFF\n{self._tiff_path}")
-        status.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        status.setWordWrap(True)
-        status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        status.setStyleSheet(
-            f"color:{t['muted']}; background:{t['panel_inset']}; border:1px dashed {t['border_medium']};"
-            " border-radius:8px; padding:28px; font-size:12px;"
-        )
-        pv_lay.addWidget(status, 1)
+            self._tiff_preview.set_placeholder(f"未找到 TIFF\n{self._tiff_path}")
+            meta.setText("输出文件不存在。")
+        meta.setWordWrap(True)
+        meta.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        pv_lay.addWidget(self._preview_scroll, 1)
+        pv_lay.addWidget(meta)
         hint = QLabel("调整右侧参数后可重合成预览；保存后写入当前分组结果。")
         hint.setWordWrap(True)
         hint.setStyleSheet(f"color:{t['muted_dim']}; font-size:11px;")
@@ -354,6 +1458,31 @@ class _ComposeWorkbenchDialog(QDialog):
         save.clicked.connect(self._accept_save_result)
         foot.addWidget(save)
         root.addLayout(foot)
+
+    def _install_shortcuts(self) -> None:
+        def add(seq, callback) -> None:
+            shortcut = QShortcut(QKeySequence(seq), self)
+            shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            shortcut.activated.connect(callback)
+            self._shortcuts.append(shortcut)
+
+        add("Ctrl++", lambda: self._tiff_preview.set_zoom_percent(self._tiff_preview._zoom_percent + 10))
+        add("Ctrl+=", lambda: self._tiff_preview.set_zoom_percent(self._tiff_preview._zoom_percent + 10))
+        add("Ctrl+-", lambda: self._tiff_preview.set_zoom_percent(self._tiff_preview._zoom_percent - 10))
+        add("Ctrl+0", self._tiff_preview.fit_to_window)
+        add("Ctrl+1", self._tiff_preview.actual_size)
+
+    def _load_tiff_preview_pixmap(self) -> Optional[QPixmap]:
+        try:
+            return decode_image_thumbnail(self._tiff_path, max_size=2400, use_cache=False)
+        except Exception:
+            return None
+
+    def _load_source_preview_pixmap(self, path: str) -> Optional[QPixmap]:
+        try:
+            return decode_image_thumbnail(path, max_size=96, use_cache=True)
+        except Exception:
+            return None
 
     def selected_jpgs(self) -> list[str]:
         return [path for cb, path in self._checks if cb.isChecked()]
@@ -503,6 +1632,22 @@ class WorkbenchView(BaseView):
 
     # ── Build UI ──────────────────────────────────────────────────────────────
 
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        panel = getattr(self, "_workflow_notice_panel", None)
+        if panel is not None:
+            try:
+                panel.reposition()
+            except Exception:
+                pass
+        dlg = getattr(self, "_compose_organise_progress_dialog", None)
+        if dlg is not None and dlg.isVisible():
+            try:
+                dlg._place_launcher()
+                dlg._reposition_panel()
+            except Exception:
+                pass
+
     def _setup_ui(self) -> None:
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -590,6 +1735,9 @@ class WorkbenchView(BaseView):
         self._monitor.external_jpgs_dropped.connect(self._on_external_jpgs_dropped)
         self._monitor.clear_pending_requested.connect(self._on_clear_pending_queue)
         self._monitor.grouping_requested.connect(self._on_open_grouping)
+        self._monitor.legacy_organize_requested.connect(
+            self._on_legacy_photo_batch_organize
+        )
         self._monitor.compose_implicit_requested.connect(self._on_compose_implicit)
         self._monitor.organise_selected_requested.connect(self._on_organise_selected)
         self._monitor.compose_implicit_organise_requested.connect(
@@ -794,6 +1942,9 @@ class WorkbenchView(BaseView):
         self._settings_drawer.storages_changed.connect(
             self._naming.refresh_storage_methods
         )
+        self._settings_drawer.naming_rules_changed.connect(
+            self._naming.refresh_naming_rules
+        )
 
         # ── Collab panel drawer (overlay, hidden by default) ───────────────
         from app.widgets.collab_panel import CollabPanel
@@ -838,6 +1989,13 @@ class WorkbenchView(BaseView):
         self._current_uid: Optional[str] = None
         self._pending_grouping = None  # SpecimenGrouping awaiting save
         self.ctx.worms_fill_specimen = self.worms_fill_specimen
+        self._refresh_workflow_dashboard()
+
+        # Pre-create overlay last so it stacks above body / drawer scrims.
+        self._compose_organise_progress_dialog = _ComposeOrganiseProgressDialog(self)
+        self._compose_organise_progress_dialog.cancel_requested.connect(
+            self._cancel_workflow_task
+        )
 
     # ── Header chrome builders ─────────────────────────────────────────────────
 
@@ -928,6 +2086,7 @@ class WorkbenchView(BaseView):
             self._dir_results.setText("results/")
         else:
             self._dir_strip.hide()
+        self._refresh_workflow_dashboard()
 
     # ── BaseView contract ─────────────────────────────────────────────────────
 
@@ -1000,13 +2159,20 @@ class WorkbenchView(BaseView):
         """Cancel an in-flight Helicon compose so its subprocess + QThread
         cannot outlive app exit (orphaned helicon-focus*.exe holds /mnt
         handles → must-reboot lock leak)."""
-        w = getattr(self, "_helicon_worker", None)
-        if w is not None and w.isRunning():
-            try:
-                w.cancel()
-            except Exception:  # noqa: BLE001
-                pass
-            w.wait(3000)
+        workers = list(getattr(self, "_helicon_workers", set()) or [])
+        legacy_worker = getattr(self, "_helicon_worker", None)
+        if legacy_worker is not None and legacy_worker not in workers:
+            workers.append(legacy_worker)
+        for w in workers:
+            if w is not None and w.isRunning():
+                try:
+                    w.cancel()
+                except Exception:  # noqa: BLE001
+                    pass
+                w.wait(3000)
+        for worker in list(getattr(self, "_archive_workers", set()) or []):
+            if worker is not None and worker.isRunning():
+                worker.wait(3000)
         importer = getattr(self, "_photo_import_worker", None)
         if importer is not None and importer.isRunning():
             importer.wait(3000)
@@ -1068,14 +2234,16 @@ class WorkbenchView(BaseView):
             self._results.clear()
             return
         try:
+            project_dirs = equivalent_paths(project_dir)
+            owner_filter = ",".join("?" * len(project_dirs)) or "?"
             rows = db.execute(
-                """
+                f"""
                 SELECT uid
                 FROM specimens
-                WHERE owner_project_dir = ?
+                WHERE owner_project_dir IN ({owner_filter})
                 ORDER BY uid
                 """,
-                (project_dir,),
+                project_dirs or [project_dir],
             ).fetchall()
             uids = [
                 str(row["uid"] if hasattr(row, "keys") else row[0])
@@ -1192,6 +2360,21 @@ class WorkbenchView(BaseView):
         self._monitor.set_batch(batch_uid, active_uid, activated_at)
         if active_uid:
             self._monitor.set_phase(phase)
+        self._refresh_workflow_dashboard()
+
+    def _refresh_workflow_dashboard(self) -> None:
+        panel = getattr(self, "_workflow_dashboard", None)
+        if panel is None:
+            return
+        try:
+            panel.update_state(
+                project_dir=getattr(self.ctx, "current_project_dir", None),
+                active_uid=self._get_active_uid(),
+                current_uid=getattr(self, "_current_uid", None),
+                scan_result=getattr(self, "_last_scan_result", None),
+            )
+        except Exception:
+            pass
 
     def _collab_phase_for(self, uid: str) -> Optional[str]:
         """Return confirmed collab phase from memory first, then project DB."""
@@ -1320,6 +2503,7 @@ class WorkbenchView(BaseView):
             }, override_auto=True)
         except Exception:
             pass
+        self._refresh_workflow_dashboard()
 
     def _apply_draft_project_defaults(self, *, override_auto: bool = False) -> None:
         """把项目默认人员/坐标预填进拍摄界面右栏（仅空字段或自动字段）。
@@ -1675,8 +2859,9 @@ class WorkbenchView(BaseView):
             from app.services import label_service
             from app.services import project_settings_service as pss
             from app.services import rna_label_queue_service as rna_queue
+            from app.services.label_print_executor import LabelPrintExecutor
             from app.utils.label_core import unique_id
-            from app.utils.label_print import build_printer, paint_jobs
+            import app.utils.label_print as label_print
             from app.utils.label_sheet import draw_crop_marks
 
             db = self.ctx.get_db()
@@ -1764,36 +2949,125 @@ class WorkbenchView(BaseView):
             if dlg.action != "print":
                 return
 
-            printer = build_printer(job, grid_opts)
-            printer.setPrinterName(tissue_printer)
-            ok = paint_jobs(
-                printer,
+            result = LabelPrintExecutor(
+                ctx=self.ctx,
+                parent=self,
+                build_printer_fn=label_print.build_printer,
+                paint_jobs_fn=label_print.paint_jobs,
+            ).print_direct(
                 [job],
+                printer_name=tissue_printer,
+                document_name="RNAlater 合版标签",
                 grid_opts=grid_opts,
                 cut_marks=bool(grid_opts.get("cutMarks")),
                 draw_crop_marks=draw_crop_marks,
             )
-            if not ok:
+            if not result.printed:
                 QMessageBox.warning(self, "打印 RNA 合版", "打印任务发送失败。")
                 return
-            try:
-                from app.services.activity_audit_service import default_actor, record_print_jobs
-                record_print_jobs(
-                    db,
-                    [job],
-                    actor=default_actor(self.ctx),
-                    printer_name=tissue_printer,
-                )
-            except Exception:
-                pass
             rna_queue.mark_printed(db, ordered_uids)
             self._sync_rna_queue_count()
-            self._status_message(f"RNAlater 合版已发送到 {tissue_printer} · {len(ordered_uids)} 张")
+            used_printer = result.printer_name or tissue_printer
+            self._status_message(
+                f"RNAlater 合版已发送到 {used_printer} · {len(ordered_uids)} 张"
+            )
         except Exception as exc:
             QMessageBox.warning(self, "打印 RNA 合版", str(exc))
 
     def _status_message(self, text: str, msec: int = 4000) -> None:
         ui.show_status(self, text, msec)
+
+    def _workflow_notice(
+        self,
+        title: str,
+        detail: str = "",
+        *,
+        state: str = "busy",
+        force_show: bool = False,
+        task_key: str | None = None,
+    ) -> None:
+        try:
+            try:
+                self._monitor.clear_workflow_notice()
+            except Exception:
+                pass
+            if str(title or "").startswith("合成+整理"):
+                dlg = getattr(self, "_compose_organise_progress_dialog", None)
+                if dlg is None:
+                    dlg = _ComposeOrganiseProgressDialog(self)
+                    dlg.cancel_requested.connect(self._cancel_workflow_task)
+                    self._compose_organise_progress_dialog = dlg
+                dlg.set_notice(
+                    title,
+                    detail,
+                    state=state,
+                    force_show=force_show,
+                    task_key=task_key,
+                )
+                return
+            dlg = getattr(self, "_workflow_notice_panel", None)
+            if dlg is None:
+                dlg = _WorkflowNoticePanel(self)
+                self._workflow_notice_panel = dlg
+            dlg.set_notice(
+                title,
+                detail,
+                state=state,
+                force_show=force_show,
+                task_key=task_key,
+            )
+        except Exception:
+            pass
+
+    def _workflow_notice_text(self) -> tuple[str, str, str]:
+        dlg = getattr(self, "_compose_organise_progress_dialog", None)
+        if dlg is not None:
+            try:
+                return dlg.notice_text()
+            except Exception:
+                pass
+        dlg = getattr(self, "_workflow_notice_panel", None)
+        if dlg is None:
+            return ("", "", "")
+        try:
+            return dlg.notice_text()
+        except Exception:
+            return ("", "", "")
+
+    def _cancel_workflow_task(self, task_key: str) -> None:
+        key = str(task_key or "")
+        cancelled = False
+        archive_map = getattr(self, "_archive_worker_by_task_key", {})
+        worker = archive_map.get(key) if isinstance(archive_map, dict) else None
+        if worker is not None:
+            try:
+                worker.cancel()
+                cancelled = True
+            except Exception:
+                pass
+        helicon_map = getattr(self, "_helicon_worker_by_task_key", {})
+        hworker = helicon_map.get(key) if isinstance(helicon_map, dict) else None
+        if hworker is not None:
+            try:
+                hworker.cancel()
+                cancelled = True
+            except Exception:
+                pass
+        if cancelled:
+            self._workflow_notice(
+                "合成+整理：正在取消",
+                "正在停止当前后台任务；不会删除 JPG，未完成 ZIP 会被清理。",
+                state="busy",
+                task_key=key,
+            )
+            self._status_message("正在取消当前任务…")
+        else:
+            self._workflow_notice(
+                "合成+整理无法取消",
+                "当前阶段没有可取消的后台任务，可能已经完成或正在收尾登记。",
+                state="info",
+                task_key=key,
+            )
 
     def _on_naming_uid_generated(self, uid: str) -> None:
         """Treat the current/active specimen UID as the row being edited.
@@ -1913,7 +3187,7 @@ class WorkbenchView(BaseView):
         dlg_parent = self._grouping_ui_parent()
         missing_required = [
             field for field in self._naming.missing_required_fields()
-            if field not in ("采集日期", "拍照日期")
+            if field not in ("采集日期", "拍照日期", "拍摄日期")
         ]
         if missing_required:
             self._status_message("编号信息未填写完整：" + "、".join(missing_required))
@@ -2130,7 +3404,7 @@ class WorkbenchView(BaseView):
             self._naming._collection_date.text().strip(),
             self._naming._photo_date.text().strip(),
         )
-        return {
+        values = {
             "province": self._naming._province.text().strip(),
             "site": self._naming._site.text().strip(),
             "station": self._naming._station.text().strip(),
@@ -2140,6 +3414,11 @@ class WorkbenchView(BaseView):
             "collection_date": collection_date,
             "photo_date": photo_date,
         }
+        try:
+            values.update(self._naming.naming_component_values())
+        except Exception:
+            pass
+        return values
 
     def _suggest_current_result_filename(
         self,
@@ -2303,6 +3582,10 @@ class WorkbenchView(BaseView):
             "collectionDate": n._collection_date.text().strip(),
             "photoDate": n._photo_date.text().strip(),
         })
+        try:
+            raw.update(n.naming_extra_field_values())
+        except Exception:
+            pass
         prev = raw.get("previousUniqueIds") or []
         if not isinstance(prev, list):
             prev = []
@@ -2442,6 +3725,11 @@ class WorkbenchView(BaseView):
         dlg.raise_()
         dlg.activateWindow()
 
+    def _on_legacy_photo_batch_organize(self) -> None:
+        """Expose old JPG/TIF folder organising as a first-class monitor action."""
+        self._on_open_grouping()
+        self._on_auto_group_organize()
+
     def _reset_to_unassigned_task(self) -> None:
         """Clear specimen-bound UI after deactivation and start a fresh temp task."""
         self._current_uid = None
@@ -2532,16 +3820,35 @@ class WorkbenchView(BaseView):
             if row:
                 from app.models.specimen import Specimen
                 sp = Specimen.from_row(row)
-                sp_dict = sp.raw or {
+                sp_dict = dict(sp.raw)
+                sp_dict.update({
                     "province": sp.province,
                     "site": sp.site,
                     "station": sp.station,
                     "id": sp.id,
                     "storage": sp.storage,
                     "collection_date": sp.collection_date,
+                    "collectionDate": sp.collection_date,
                     "photo_date": sp.photo_date,
+                    "photoDate": sp.photo_date,
                     "photo_notes": sp.photo_notes,
-                }
+                    "photoNotes": sp.photo_notes,
+                    "collector": sp.collector,
+                    "photographer": sp.photographer,
+                    "identifier": sp.identifier,
+                    "geo_area": sp.geo_area,
+                    "scientific_name": sp.scientific_name,
+                    "scientificName": sp.scientific_name,
+                    "scientific_name_cn": sp.scientific_name_cn,
+                    "scientificNameCn": sp.scientific_name_cn,
+                    "taxon_group": sp.taxon_group,
+                    "taxonGroup": sp.taxon_group,
+                    "order_name": sp.order_name,
+                    "order": sp.order_name,
+                    "family": sp.family,
+                    "genus": sp.genus,
+                    "notes": sp.notes,
+                })
                 sp_dict["uid"] = sp.uid
                 sp_dict.setdefault("photo_notes", sp.photo_notes)
                 self._naming.load_specimen(sp_dict)
@@ -2634,7 +3941,8 @@ class WorkbenchView(BaseView):
         Triggered when the four location keys (地区/样地/站位/采集日期) are
         finished editing or picked from the record menu. Non-destructive: only
         empty fields are filled (collection_record_service.autofill_values).
-        Fields the capture cards lack (生境/潮水/…) stay in the record only.
+        Fields the capture cards lack (生境/潮水/…) stay in the record only,
+        unless the project naming rules expose a matching dynamic naming field.
         """
         db = self.ctx.get_db()
         if not db:
@@ -2646,6 +3954,11 @@ class WorkbenchView(BaseView):
         rec = crs.lookup_record(db, province, site, station, col_date)
         if not rec:
             return
+        dynamic_changed = False
+        try:
+            dynamic_changed = bool(self._naming.apply_dynamic_autofill(rec))
+        except Exception:
+            pass
         # 优先级 项目默认 < 站位记录 < 手动/已存：把「自动填」字段当作空看待，让站位
         # 采集记录能覆盖项目默认坐标；受保护字段（用户手填/加载已存的非空值）保留真实
         # 值 → autofill_values 视为已填、不再返回，从而不被覆盖。
@@ -2657,6 +3970,8 @@ class WorkbenchView(BaseView):
         current["photo_date"] = self._naming._photo_date.text()
         vals = crs.autofill_values(rec, current)
         if not vals:
+            if dynamic_changed and self._current_uid:
+                self._schedule_rail_save()
             return
         if "photo_date" in vals and not self._naming._photo_date.text().strip():
             self._naming._photo_date.setText(str(vals["photo_date"]))
@@ -2697,6 +4012,8 @@ class WorkbenchView(BaseView):
         project_dir = self.ctx.current_project_dir
         if not project_dir:
             self._monitor.clear()
+            self._last_scan_result = None
+            self._refresh_workflow_dashboard()
             return
 
         # Headless tests use mock/in-memory DBs, so keep their existing
@@ -2707,6 +4024,11 @@ class WorkbenchView(BaseView):
 
         worker = self._monitor_scan_worker
         if worker is not None and worker.isRunning():
+            # A refresh requested while a scan is in flight means the in-flight
+            # result is older than the current file/DB state (for example after
+            # archive completion).  Bump the request id now so that stale result
+            # cannot briefly repopulate consumed JPGs before the queued scan runs.
+            self._monitor_scan_request_id += 1
             self._monitor_scan_pending = True
             return
 
@@ -2728,11 +4050,15 @@ class WorkbenchView(BaseView):
         project_dir = self.ctx.current_project_dir
         if not project_dir:
             self._monitor.clear()
+            self._last_scan_result = None
+            self._refresh_workflow_dashboard()
             return
 
         db = self.ctx.get_db()
         if not db:
             self._monitor.clear()
+            self._last_scan_result = None
+            self._refresh_workflow_dashboard()
             return
 
         try:
@@ -2750,8 +4076,12 @@ class WorkbenchView(BaseView):
             self._apply_monitor_scan_result(result)
         except FileNotFoundError:
             self._monitor.clear()
+            self._last_scan_result = None
+            self._refresh_workflow_dashboard()
         except Exception:
             self._monitor.clear()
+            self._last_scan_result = None
+            self._refresh_workflow_dashboard()
 
     def _on_monitor_scan_finished(self, request_id: int, result) -> None:
         worker = self._monitor_scan_worker
@@ -2780,6 +4110,7 @@ class WorkbenchView(BaseView):
             self._monitor_scan_worker = None
         if request_id == self._monitor_scan_request_id and self._last_scan_result is None:
             self._monitor.clear()
+            self._refresh_workflow_dashboard()
         self._run_pending_monitor_scan()
 
     def _run_pending_monitor_scan(self) -> None:
@@ -2791,6 +4122,7 @@ class WorkbenchView(BaseView):
     def _apply_monitor_scan_result(self, result) -> None:
         self._last_scan_result = result
         self._monitor.load_scan(self._monitor_display_scan_result(result))
+        self._refresh_workflow_dashboard()
         self._maybe_auto_process_new_tiff(result)
 
     def _monitor_display_scan_result(self, result):
@@ -2816,11 +4148,7 @@ class WorkbenchView(BaseView):
         return display_result
 
     def _pending_tiff_paths(self, scan_result) -> set[str]:
-        return {
-            str(Path(entry.path).resolve())
-            for entry in getattr(scan_result, "tiff_files", [])
-            if not bool(getattr(entry, "has_zip", False))
-        }
+        return pending_tiff_paths(scan_result)
 
     def _on_auto_compress_toggled(self, on: bool) -> None:
         try:
@@ -2842,31 +4170,47 @@ class WorkbenchView(BaseView):
         self._status_message("合成预览已开启" if on else "合成预览已关闭：将直接合成")
 
     def _maybe_auto_process_new_tiff(self, scan_result) -> None:
-        enabled = self._auto_archive_enabled()
-        current = self._pending_tiff_paths(scan_result)
-        if not enabled:
-            self._auto_known_tiffs = current
+        candidate = detect_external_tiff_candidate(
+            enabled=self._auto_archive_enabled(),
+            current_tiff_paths=self._pending_tiff_paths(scan_result),
+            known_tiff_paths=self._auto_known_tiffs,
+            busy=self._auto_tiff_busy,
+        )
+        if candidate.should_seed_known_tiffs:
+            self._auto_known_tiffs = set(candidate.current_tiff_paths)
             return
-        new_paths = [p for p in sorted(current) if p not in self._auto_known_tiffs]
-        if not new_paths or self._auto_tiff_busy:
+        if not candidate.needs_jpg_source:
             return
 
         uid = self._get_active_uid()
         if uid:
-            jpg_paths = self._unoccupied_jpg_paths(uid, self._get_attributed_jpg_paths(uid))
+            source = resolve_external_tiff_jpg_source(
+                active_uid=uid,
+                active_uid_jpg_paths=self._unoccupied_jpg_paths(
+                    uid,
+                    self._get_attributed_jpg_paths(uid),
+                ),
+            )
         else:
             try:
-                jpg_paths = self._monitor.selected_jpg_paths()
+                selected_jpg_paths = self._monitor.selected_jpg_paths()
             except Exception:
-                jpg_paths = []
-            if not jpg_paths:
-                self._status_message("发现外部 TIF；未激活时请选中对应 JPG 后再自动整理")
-                return
-        if not jpg_paths:
+                selected_jpg_paths = []
+            source = resolve_external_tiff_jpg_source(
+                active_uid=None,
+                selected_jpg_paths=selected_jpg_paths,
+            )
+        if source.reason == "no-selected-jpgs":
+            self._status_message("发现外部 TIF；未激活时请选中对应 JPG 后再自动整理")
+            return
+        if source.reason == "no-active-jpgs":
             self._status_message("发现外部 TIF；当前激活编号没有可整理 JPG")
             return
 
-        target_tiff = new_paths[0]
+        target_tiff = candidate.target_tiff
+        if not source.ready or not target_tiff:
+            return
+        jpg_paths = list(source.jpg_paths)
 
         def _auto_archive_done(ok: bool) -> None:
             self._auto_tiff_busy = False
@@ -3142,6 +4486,7 @@ class WorkbenchView(BaseView):
 
         worker = PhotoImportWorker(list(paths), incoming_dir, parent=self)
         self._photo_import_worker = worker
+        task_key = f"photo-import:{id(worker)}"
 
         def set_photo_import_busy_state(on: bool) -> None:
             try:
@@ -3155,17 +4500,31 @@ class WorkbenchView(BaseView):
                 self._photo_import_worker = None
             worker.deleteLater()
 
-        worker.started_import.connect(
-            lambda count: self._status_message(
-                f"正在导入 {count} 个文件到 {inc}，可继续操作其他区域。"
+        def _import_started(count: int) -> None:
+            self._workflow_notice(
+                f"{source}：正在导入",
+                f"正在复制 {count} 个文件到 {inc}；导入在后台运行，可继续拍摄或整理。",
+                state="busy",
+                force_show=True,
+                task_key=task_key,
             )
-        )
+            self._status_message(f"正在导入 {count} 个文件到 {inc}，可继续操作其他区域。")
+
+        worker.started_import.connect(_import_started)
         worker.completed.connect(
             lambda result: self._on_photo_import_finished(
-                result, source=source, incoming_label=inc, project_dir=project_dir
+                result,
+                source=source,
+                incoming_label=inc,
+                project_dir=project_dir,
+                task_key=task_key,
             )
         )
-        worker.failed.connect(lambda message: self._on_photo_import_failed(source, message))
+        worker.failed.connect(
+            lambda message: self._on_photo_import_failed(
+                source, message, task_key=task_key
+            )
+        )
         worker.finished.connect(_cleanup)
         set_photo_import_busy_state(True)
         worker.start()
@@ -3177,16 +4536,64 @@ class WorkbenchView(BaseView):
         source: str,
         incoming_label: str,
         project_dir: str,
+        task_key: str = "",
     ) -> None:
-        self._handle_media_import_result(
+        imported = self._handle_media_import_result(
             result,
             source=source,
             incoming_label=incoming_label,
             project_dir=project_dir,
         )
+        duplicate_count = len(getattr(result, "skipped_duplicate_paths", []) or [])
+        error_count = len(getattr(result, "errors", []) or [])
+        jpg_count = len(getattr(result, "imported_jpg_paths", []) or [])
+        tiff_count = len(getattr(result, "imported_tiff_paths", []) or [])
+        if imported:
+            parts = []
+            if jpg_count:
+                parts.append(f"{jpg_count} 张 JPG")
+            if tiff_count:
+                parts.append(f"{tiff_count} 个 TIFF")
+            detail = f"已导入 {'，'.join(parts)} 到 {incoming_label}。"
+            if duplicate_count:
+                detail += f" 已跳过 {duplicate_count} 个重复文件。"
+            if error_count:
+                detail += f" 有 {error_count} 个文件失败，请查看弹窗。"
+            self._workflow_notice(
+                f"{source}{'部分完成' if error_count else '完成'}",
+                detail,
+                state="error" if error_count else "success",
+                task_key=task_key,
+            )
+        elif duplicate_count:
+            self._workflow_notice(
+                f"{source}完成",
+                f"未新增文件；已跳过 {duplicate_count} 个重复文件。",
+                state="info",
+                task_key=task_key,
+            )
+        else:
+            self._workflow_notice(
+                f"{source}未导入",
+                "未识别到 JPG/JPEG 或 TIFF 文件。",
+                state="info",
+                task_key=task_key,
+            )
         self._refresh_monitor()
 
-    def _on_photo_import_failed(self, source: str, message: str) -> None:
+    def _on_photo_import_failed(
+        self,
+        source: str,
+        message: str,
+        *,
+        task_key: str = "",
+    ) -> None:
+        self._workflow_notice(
+            f"{source}失败",
+            message or "导入过程出现错误。",
+            state="error",
+            task_key=task_key,
+        )
         QMessageBox.warning(self, f"{source}失败", message or "导入过程出现错误。")
         self._status_message(f"{source}失败。")
 
@@ -3397,14 +4804,16 @@ class WorkbenchView(BaseView):
                 proj,
                 existing_projects=_load_projects(),
             )
-            self.ctx.current_project_dir = directory
-            if not self.ctx.current_project_root:
-                self.ctx.current_project_root = directory
+            from app.services.project_service import enter_workspace
+            enter_workspace(self.ctx, directory)
             self.on_activate()
         except Exception as exc:
             ui.warn(parent, "打开项目失败", str(exc))
             return None
         return directory
+
+    def _on_dashboard_open_project(self) -> None:
+        self._open_project_via_dialog(self)
 
     def _pick_auto_group_source_folder(self, parent: QWidget) -> str:
         """Prompt folder vs project, then return the directory to scan."""
@@ -3627,15 +5036,27 @@ class WorkbenchView(BaseView):
                     from app.models.specimen import Specimen
 
                     sp = Specimen.from_row(row)
-                    sp_dict = sp.raw or {
+                    sp_dict = dict(sp.raw)
+                    sp_dict.update({
                         "province": sp.province,
                         "site": sp.site,
                         "station": sp.station,
                         "id": sp.id,
                         "storage": sp.storage,
                         "collection_date": sp.collection_date,
+                        "collectionDate": sp.collection_date,
                         "photo_date": sp.photo_date,
-                    }
+                        "photoDate": sp.photo_date,
+                        "collector": sp.collector,
+                        "photographer": sp.photographer,
+                        "identifier": sp.identifier,
+                        "geo_area": sp.geo_area,
+                        "taxon_group": sp.taxon_group,
+                        "scientific_name": sp.scientific_name,
+                        "scientific_name_cn": sp.scientific_name_cn,
+                        "notes": sp.notes,
+                        "photo_notes": sp.photo_notes,
+                    })
                     specimen_values = component_values_from_specimen(sp_dict)
 
             if explicit_paths:
@@ -3932,10 +5353,24 @@ class WorkbenchView(BaseView):
             output_name = os.path.basename(output_path)
 
             params = self._helicon_params.get_params()
+            task_key = f"compose:{uid}:{group.group_index}:{output_name}"
+            self._workflow_notice(
+                "合成：正在生成 TIFF",
+                f"正在合成 {len(group.jpg_paths)} 张 JPG → {output_name}。完成后会进入预览确认。",
+                state="busy",
+                force_show=True,
+                task_key=task_key,
+            )
 
             def _run_interactive_compose_with_preview(jpg_paths, out_path, cur_params):
                 def _open_compose_review_after_helicon_success(tiff_path):
                     if not os.path.isfile(out_path):
+                        self._workflow_notice(
+                            "合成失败",
+                            "Helicon 执行后未生成输出文件。",
+                            state="error",
+                            task_key=task_key,
+                        )
                         QMessageBox.warning(self, "合成失败", "Helicon 执行后未生成输出文件。")
                         _notify_composed(False)
                         return
@@ -3966,25 +5401,23 @@ class WorkbenchView(BaseView):
                         return
 
                     # Save to result: persist grouping only after preview approval.
-                    from datetime import datetime, timezone
-                    now = datetime.now(tz=timezone.utc).isoformat()
-                    group.composed_tiff_path = out_path
-                    group.status = "composed"
-                    group.updated_at = now
-                    group.result_sequence = _seq
-                    self._save_grouping_for_uid(uid, grouping.groups)
-
-                    if db is not None:
-                        try:
-                            from app.services.organize_service import _bump_seq_hint
-                            if _seq is not None:
-                                _bump_seq_hint(db, uid, _seq)
-                        except Exception:
-                            pass
-
-                    self._grouping.load_grouping(uid, grouping)
-                    self._refresh_results_column(uid, grouping)
+                    persisted = persist_composed_group(
+                        db,
+                        uid,
+                        grouping,
+                        group.group_index,
+                        tiff_path=out_path,
+                        result_sequence=_seq,
+                    )
+                    self._grouping.load_grouping(uid, persisted.grouping)
+                    self._refresh_results_column(uid, persisted.grouping)
                     self._on_helicon_finished(uid)
+                    self._workflow_notice(
+                        "合成完成",
+                        f"TIFF 已生成：{output_name}。JPG 尚未整理；需要归档时请继续点击整理。",
+                        state="success",
+                        task_key=task_key,
+                    )
                     if callable(on_composed):
                         on_composed(True)
                         return
@@ -3995,6 +5428,13 @@ class WorkbenchView(BaseView):
 
                 def _report_interactive_compose_failure(msg: str):
                     if msg != "用户取消":
+                        self._workflow_notice(
+                            "合成失败",
+                            msg,
+                            state="error",
+                            task_key=task_key,
+                        )
+                    if msg != "用户取消":
                         QMessageBox.warning(self, "合成失败", msg)
                     _notify_composed(False)
 
@@ -4004,6 +5444,7 @@ class WorkbenchView(BaseView):
                     cur_params,
                     _open_compose_review_after_helicon_success,
                     _report_interactive_compose_failure,
+                    workflow_task_key=task_key,
                 )
 
             _run_interactive_compose_with_preview(group.jpg_paths, output_path, params)
@@ -4060,8 +5501,11 @@ class WorkbenchView(BaseView):
         params: dict,
         on_finished,
         on_failed,
+        *,
+        show_progress_dialog: bool = True,
+        workflow_task_key: str = "",
     ) -> None:
-        """Launch HeliconWorker (non-blocking) with a cancellable progress dialog.
+        """Launch HeliconWorker (non-blocking), optionally with Helicon progress UI.
 
         *on_finished(tiff_path: Path)* is called on success.
         *on_failed(msg: str)* is called on error or cancel.
@@ -4090,43 +5534,86 @@ class WorkbenchView(BaseView):
             on_failed(str(exc))
             return
 
-        progress = QProgressDialog(
-            f"正在合成 {len(jpg_paths)} 张 JPG…",
-            "取消",
-            0,
-            0,
-            self,
-        )
-        progress.setWindowModality(Qt.WindowModality.WindowModal)
-        progress.setWindowTitle("Helicon 合成")
+        progress = None
+        if show_progress_dialog:
+            progress = QProgressDialog(
+                f"正在合成 {len(jpg_paths)} 张 JPG…",
+                "取消",
+                0,
+                0,
+                self,
+            )
+            progress.setWindowModality(Qt.WindowModality.NonModal)
+            progress.setWindowTitle("Helicon 合成")
+            progress.setMinimumDuration(0)
 
         worker = HeliconWorker(cmd=cmd, output_path=output_path, parent=self)
-        self._helicon_worker = worker  # keep reference alive
+        if not hasattr(self, "_helicon_workers"):
+            self._helicon_workers = set()
+        if not hasattr(self, "_helicon_progress_dialogs"):
+            self._helicon_progress_dialogs = set()
+        if not hasattr(self, "_helicon_worker_by_task_key"):
+            self._helicon_worker_by_task_key = {}
+        self._helicon_workers.add(worker)
+        task_key = str(workflow_task_key or "")
+        if task_key:
+            self._helicon_worker_by_task_key[task_key] = worker
+        if progress is not None:
+            self._helicon_progress_dialogs.add(progress)
+        self._helicon_worker = worker  # legacy single-worker reference
+        callback_sent = {"value": False}
+
+        def _release_helicon_worker() -> None:
+            if progress is not None:
+                progress.close()
+            self._helicon_workers.discard(worker)
+            if progress is not None:
+                self._helicon_progress_dialogs.discard(progress)
+            if getattr(self, "_helicon_worker", None) is worker:
+                self._helicon_worker = None
+            for key, mapped in list(getattr(self, "_helicon_worker_by_task_key", {}).items()):
+                if mapped is worker:
+                    self._helicon_worker_by_task_key.pop(key, None)
+            if progress is not None and getattr(self, "_helicon_progress", None) is progress:
+                self._helicon_progress = None
+            worker.deleteLater()
 
         def _handle_helicon_worker_finished(tiff_path):
-            progress.close()
+            _release_helicon_worker()
+            if callback_sent["value"]:
+                return
+            callback_sent["value"] = True
             on_finished(tiff_path)
 
         def _handle_helicon_worker_failed(msg: str):
-            progress.close()
+            _release_helicon_worker()
+            if callback_sent["value"]:
+                return
+            callback_sent["value"] = True
             on_failed(msg)
 
-        def _cancel_running_helicon_worker():
-            worker.cancel()
-            on_failed("用户取消")
+        if progress is not None:
+            def _cancel_running_helicon_worker():
+                worker.cancel()
+                progress.setLabelText("正在取消 Helicon 合成…")
+                if not callback_sent["value"]:
+                    callback_sent["value"] = True
+                    on_failed("用户取消")
 
         worker.finished.connect(_handle_helicon_worker_finished)
         worker.failed.connect(_handle_helicon_worker_failed)
-        progress.canceled.connect(_cancel_running_helicon_worker)
+        if progress is not None:
+            progress.canceled.connect(_cancel_running_helicon_worker)
 
-        progress.show()
+        if progress is not None:
+            progress.show()
+            self._helicon_progress = progress  # legacy single-progress reference
         worker.start()
-        self._helicon_progress = progress  # keep reference alive
 
     # ── 批量[合成]/[合成+整理] 顺序队列 ────────────────────────────────────────
-    # 合成是异步(HeliconWorker QThread,回调完成),整理是同步。批量绝不能紧循环
-    # emit——会同时启动多个 worker 互相覆盖,且整理会在合成完成前读到空 composed。
-    # 故由 workbench 串行驱动:合成完成(异步回调)→ 同步整理该组 → 下一组。
+    # 合成与整理都在后台 worker 完成。批量绝不能紧循环 emit——会同时启动
+    # 多个 worker 互相覆盖,且整理会在合成完成前读到空 composed。
+    # 故由 workbench 串行驱动:合成完成(异步回调)→ 后台整理该组 → 下一组。
     # 批量时走 `_compose_group_headless`(无预览/结果确认框),满足"一键直合"。
 
     def _resolve_compose_output_name(self, db, uid, group, results_dir, incoming_dir):
@@ -4138,19 +5625,8 @@ class WorkbenchView(BaseView):
           ③ 无编号(临时分组 ad-hoc) → 组序.tif(组0→1.tif, 组1→2.tif)
         seq:真编号取 preview.next_seq;ad-hoc 取 group_index+1。
         """
-        from app.services.grouping_service import ADHOC_GROUPING_UID
-        is_adhoc = (uid == ADHOC_GROUPING_UID) or db is None
-        seq = (group.group_index + 1) if is_adhoc else None
-        if is_adhoc:
-            if getattr(group, "output_name", None):
-                return Path(group.output_name).stem + ".tif", seq
-            return f"{group.group_index + 1}.tif", seq
-        # 真编号:用 organize_preview 取建议名 + 序号
-        from app.services.organize_service import organize_preview
-        preview = organize_preview(db, uid, results_dir, incoming_dir)
-        if getattr(group, "output_name", None):
-            return Path(group.output_name).stem + ".tif", preview.next_seq
-        return preview.suggested_tiff_name, preview.next_seq
+        from app.services.compose_workflow_service import resolve_compose_output_name
+        return resolve_compose_output_name(db, uid, group, results_dir, incoming_dir)
 
     def _start_compose_batch(self, uid: str, organise: bool) -> None:
         """启动批量合成队列。organise=True 时每组合成完后立即整理该组。"""
@@ -4162,17 +5638,24 @@ class WorkbenchView(BaseView):
             selected = set(self._grouping.selected_group_indexes())
         except Exception:
             selected = set()
-        queue = [
-            g.group_index for g in grouping.groups
-            if not g.composed_tiff_path
-            and (not selected or g.group_index in selected)
-        ]
+        queue = list(compose_batch_queue(grouping, selected))
         if not queue:
             # 无待合成组:合成+整理 → 退而整理已合成组;纯合成 → 状态栏提示。
             if organise:
-                self._organise_all_batch(uid, silent_batch=True)
+                self._organise_all_batch(
+                    uid,
+                    silent_batch=True,
+                    workflow_label="批量合成+整理",
+                )
             else:
                 self._batch_status("无待合成组。")
+                self._workflow_notice(
+                    "批量合成无需处理",
+                    "没有待合成的分组。",
+                    state="info",
+                    force_show=True,
+                    task_key=f"batch-compose-empty:{uid}",
+                )
             return
         # 只有确实存在待合成组时才需要 Helicon。已有 TIF 的组点
         # [合成+整理]应直接进入归档，不能被合成工具检测提前拦截。
@@ -4183,14 +5666,32 @@ class WorkbenchView(BaseView):
                 "未找到 Helicon Focus，无法批量合成。请安装并设置 "
                 "HELICON_FOCUS_PATH 环境变量。",
             )
+            self._workflow_notice(
+                "批量合成失败",
+                "未找到 Helicon Focus，无法批量合成。",
+                state="error",
+                force_show=True,
+                task_key=f"batch-compose-no-helicon:{uid}",
+            )
             return
+        label = "批量合成+整理" if organise else "批量合成"
+        task_key = f"batch-compose:{uid}:{'organise' if organise else 'compose'}"
         self._batch = {
             "uid": uid,
             "queue": queue,
             "organise": organise,
             "total": len(queue),
             "done": 0,
+            "label": label,
+            "task_key": task_key,
         }
+        self._workflow_notice(
+            f"{label}：准备开始",
+            f"共 {len(queue)} 组，将按顺序在后台处理。",
+            state="busy",
+            force_show=True,
+            task_key=task_key,
+        )
         self._compose_next_in_batch()
 
     def _compose_next_in_batch(self) -> None:
@@ -4199,16 +5700,38 @@ class WorkbenchView(BaseView):
         if not b:
             return
         if not b["queue"]:
+            label = str(b.get("label") or "批量合成")
+            total = int(b.get("total", 0))
+            task_key = str(b.get("task_key") or "")
             self._batch = None
             self._batch_status("批量合成完成。")
+            self._workflow_notice(
+                f"{label}完成",
+                f"已处理 {total} 组。",
+                state="success",
+                task_key=task_key,
+            )
             return
         uid = b["uid"]
         idx = b["queue"].pop(0)
         done = int(b.get("done", 0))
         total = int(b.get("total", done + 1))
+        label = str(b.get("label") or "批量合成")
+        task_key = str(b.get("task_key") or "")
         self._batch_status(f"批量合成 {done + 1}/{total}：组 {idx}")
+        self._workflow_notice(
+            f"{label}：正在合成",
+            f"第 {done + 1}/{total} 组：组 {idx}。",
+            state="busy",
+            task_key=task_key,
+        )
         self._compose_group_headless(
-            uid, idx, lambda ok: self._batch_group_done(ok, uid, idx)
+            uid,
+            idx,
+            lambda ok: self._batch_group_done(ok, uid, idx),
+            background=True,
+            show_progress_dialog=not bool(b.get("organise")),
+            workflow_task_key=task_key,
         )
 
     def _batch_group_done(self, success: bool, uid: str, group_index: int) -> None:
@@ -4223,6 +5746,8 @@ class WorkbenchView(BaseView):
                 uid,
                 group_index,
                 silent_batch=True,
+                workflow_task_key=str(self._batch.get("task_key") or ""),
+                workflow_label=str(self._batch.get("label") or "批量合成+整理"),
                 on_complete=lambda _ok: self._compose_next_in_batch(),
             )
             if not started:
@@ -4231,7 +5756,15 @@ class WorkbenchView(BaseView):
         elif not success:
             done = int(self._batch.get("done", 0))
             total = int(self._batch.get("total", done))
+            label = str(self._batch.get("label") or "批量合成")
+            task_key = str(self._batch.get("task_key") or "")
             self._batch_status(f"组 {group_index} 合成失败，继续下一组（{done}/{total}）")
+            self._workflow_notice(
+                f"{label}：合成失败，继续下一组",
+                f"组 {group_index} 合成失败；已完成 {done}/{total}。",
+                state="error",
+                task_key=task_key,
+            )
         self._compose_next_in_batch()
 
     def _batch_status(self, msg: str) -> None:
@@ -4241,7 +5774,16 @@ class WorkbenchView(BaseView):
         except Exception:
             pass
 
-    def _compose_group_headless(self, uid: str, group_index: int, on_done) -> None:
+    def _compose_group_headless(
+        self,
+        uid: str,
+        group_index: int,
+        on_done,
+        *,
+        background: bool = False,
+        show_progress_dialog: bool = True,
+        workflow_task_key: str = "",
+    ) -> None:
         """批量用:无确认框合成单组。完成调 on_done(success: bool)。
 
         复刻 `_on_compose_requested` 成功路径的保存块,但剥掉预览框/结果框
@@ -4272,26 +5814,23 @@ class WorkbenchView(BaseView):
             params = self._helicon_params.get_params()
 
             def _save_headless_compose_result(tiff_path):
-                if not os.path.isfile(output_path):
+                try:
+                    persisted = persist_composed_group(
+                        db,
+                        uid,
+                        grouping,
+                        group.group_index,
+                        tiff_path=output_path,
+                        result_sequence=_seq,
+                    )
+                except Exception:
                     on_done(False)
                     return
-                from datetime import datetime, timezone
-                now = datetime.now(tz=timezone.utc).isoformat()
-                group.composed_tiff_path = output_path
-                group.status = "composed"
-                group.updated_at = now
-                group.result_sequence = _seq
-                self._save_grouping_for_uid(uid, grouping.groups)
-                if db is not None:
-                    try:
-                        from app.services.organize_service import _bump_seq_hint
-                        if _seq is not None:
-                            _bump_seq_hint(db, uid, _seq)
-                    except Exception:
-                        pass
-                self._grouping.load_grouping(uid, grouping)
-                self._refresh_results_column(uid, grouping)
-                self._on_helicon_finished(uid)
+                panel_uid = getattr(self._grouping, "_uid", None)
+                if not background or self._current_uid == uid or panel_uid == uid:
+                    self._grouping.load_grouping(uid, persisted.grouping)
+                    self._refresh_results_column(uid, persisted.grouping)
+                self._on_helicon_finished(uid, select_uid=not background)
                 on_done(True)
 
             def _mark_headless_compose_failed(msg: str):
@@ -4303,27 +5842,120 @@ class WorkbenchView(BaseView):
                 params,
                 _save_headless_compose_result,
                 _mark_headless_compose_failed,
+                show_progress_dialog=show_progress_dialog,
+                workflow_task_key=workflow_task_key,
             )
         except Exception:
             on_done(False)
 
-    def _organise_all_batch(self, uid: str, silent_batch: bool = False) -> None:
-        """[🗜整理] 批量:逐组同步整理「已合成未归档」组(整理本身是同步阻塞)。"""
+    def _organise_all_batch(
+        self,
+        uid: str,
+        silent_batch: bool = False,
+        workflow_label: str | None = None,
+    ) -> None:
+        """[整理] 批量串行归档已合成未归档组。"""
         if not uid:
             return
+        label = workflow_label or "批量整理"
         grouping = self._get_grouping_for_uid(uid)
         selected = set()
         try:
             selected = set(self._grouping.selected_group_indexes())
         except Exception:
             selected = set()
-        targets = [
-            g.group_index for g in grouping.groups
-            if g.composed_tiff_path and g.status != "organized"
-            and (not selected or g.group_index in selected)
-        ]
-        for idx in targets:
-            self._on_organise_requested(uid, idx, silent_batch=silent_batch)
+        targets = organize_batch_targets(grouping, selected)
+        if not targets:
+            self._batch_status("无可整理组。")
+            self._workflow_notice(
+                f"{label}无需处理",
+                "没有可整理的已合成分组。",
+                state="info",
+                force_show=True,
+                task_key=f"organise-batch-empty:{uid}:{label}",
+            )
+            return
+        if getattr(self, "_organise_batch", None) is not None:
+            self._batch_status("整理队列正在运行，请稍候。")
+            self._workflow_notice(
+                f"{label}已在运行",
+                "整理队列正在运行，请等待当前任务完成。",
+                state="info",
+                force_show=True,
+                task_key=f"organise-batch-running:{uid}:{label}",
+            )
+            return
+        task_key = f"organise-batch:{uid}:{label}"
+        self._organise_batch = {
+            "uid": uid,
+            "queue": list(targets),
+            "silent_batch": silent_batch,
+            "total": len(targets),
+            "done": 0,
+            "label": label,
+            "task_key": task_key,
+        }
+        self._workflow_notice(
+            f"{label}：准备开始",
+            f"共 {len(targets)} 组，将按顺序后台整理。",
+            state="busy",
+            force_show=True,
+            task_key=task_key,
+        )
+        self._organise_next_in_batch()
+
+    def _organise_next_in_batch(self) -> None:
+        """Run the next archive job after the previous worker has finished."""
+        b = getattr(self, "_organise_batch", None)
+        if not b:
+            return
+        if not b["queue"]:
+            label = str(b.get("label") or "批量整理")
+            total = int(b.get("total", 0))
+            task_key = str(b.get("task_key") or "")
+            self._organise_batch = None
+            self._batch_status("批量整理完成。")
+            self._workflow_notice(
+                f"{label}完成",
+                f"已整理 {total} 组。",
+                state="success",
+                task_key=task_key,
+            )
+            return
+        uid = b["uid"]
+        idx = b["queue"].pop(0)
+        done = int(b.get("done", 0))
+        total = int(b.get("total", done + 1))
+        label = str(b.get("label") or "批量整理")
+        task_key = str(b.get("task_key") or "")
+        self._batch_status(f"批量整理 {done + 1}/{total}：组 {idx}")
+        self._workflow_notice(
+            f"{label}：正在整理",
+            f"第 {done + 1}/{total} 组：组 {idx}。",
+            state="busy",
+            task_key=task_key,
+        )
+        callback_sent = {"value": False}
+
+        def _done(_ok: bool) -> None:
+            if callback_sent["value"]:
+                return
+            callback_sent["value"] = True
+            current = getattr(self, "_organise_batch", None)
+            if current is not None:
+                current["done"] = int(current.get("done", 0)) + 1
+            self._organise_next_in_batch()
+
+        started = self._on_organise_requested(
+            uid,
+            idx,
+            silent_batch=bool(b.get("silent_batch")),
+            workflow_task_key=task_key,
+            workflow_label=label,
+            on_complete=_done,
+        )
+        if not started:
+            _done(False)
 
     def _on_organise_selected(self) -> None:
         """整理监控区选中的 JPG + TIFF，不重新合成。
@@ -4359,28 +5991,13 @@ class WorkbenchView(BaseView):
         if not db or not project_dir:
             self._status_message("请先打开项目")
             return False
-        from app.services.grouping_service import (
-            ADHOC_GROUPING_UID,
-            Group,
-            load_grouping,
-            save_grouping,
-        )
-        from app.services.organize_service import organize_preview, rename_tiff
 
         active_uid = self._get_active_uid()
-        uid = active_uid or ADHOC_GROUPING_UID
-
+        incoming_subdir = "incoming-jpg"
+        results_subdir = "results"
         if active_uid:
             try:
-                inc, res = self._resolve_capture_subdirs()
-                preview = organize_preview(
-                    db,
-                    active_uid,
-                    os.path.join(project_dir, res),
-                    os.path.join(project_dir, inc),
-                )
-                if Path(tiff_path).name != preview.suggested_tiff_name:
-                    tiff_path = rename_tiff(tiff_path, preview.suggested_tiff_name)
+                incoming_subdir, results_subdir = self._resolve_capture_subdirs()
             except Exception as exc:
                 if silent:
                     self._status_message(f"TIFF 按编号命名失败：{exc}")
@@ -4388,23 +6005,31 @@ class WorkbenchView(BaseView):
                     QMessageBox.warning(self, "整理", f"TIFF 按编号命名失败：{exc}")
                 return False
 
-        grouping = load_grouping(db, uid)
-        next_idx = max([g.group_index for g in grouping.groups], default=-1) + 1
-        grouping.groups.append(
-            Group(
-                group_index=next_idx,
+        try:
+            prepared = prepare_existing_tiff_group(
+                db,
+                active_uid=active_uid,
                 jpg_paths=jpg_paths,
-                composed_tiff_path=tiff_path,
-                status="composed",
+                tiff_path=tiff_path,
+                project_dir=project_dir,
+                incoming_subdir=incoming_subdir,
+                results_subdir=results_subdir,
             )
-        )
-        save_grouping(db, uid, grouping.groups, clean_phantoms=False)
-        self._grouping.load_grouping(uid, grouping)
+        except Exception as exc:
+            prefix = "TIFF 按编号命名失败" if active_uid else "整理准备失败"
+            if silent:
+                self._status_message(f"{prefix}：{exc}")
+            else:
+                QMessageBox.warning(self, "整理", f"{prefix}：{exc}")
+            return False
+
+        self._grouping.load_grouping(prepared.uid, prepared.grouping)
         return bool(self._on_organise_requested(
-            uid,
-            next_idx,
+            prepared.uid,
+            prepared.group_index,
             silent_batch=silent,
             allow_single_jpg=True,
+            workflow_label="整理",
             on_complete=on_complete,
         ))
 
@@ -4674,6 +6299,8 @@ class WorkbenchView(BaseView):
         project_dir: str,
         has_project: bool,
         silent_batch: bool,
+        workflow_task_key: str = "",
+        workflow_label: str = "整理",
         on_complete=None,
     ) -> bool:
         """Register an existing TIFF to the current specimen without JPG ZIP."""
@@ -4684,6 +6311,12 @@ class WorkbenchView(BaseView):
         ):
             if not silent_batch:
                 ui.warn(dlg_parent, "整理", "找不到该组 TIFF 文件。")
+            self._workflow_notice(
+                f"{workflow_label}失败",
+                "找不到该组 TIFF 文件。",
+                state="error",
+                task_key=workflow_task_key,
+            )
             if on_complete is not None:
                 on_complete(False)
             return False
@@ -4711,10 +6344,11 @@ class WorkbenchView(BaseView):
         ):
             self._status_message(f"TIFF 元数据未写入：{result.metadata.skipped}")
 
-        self._grouping.load_grouping(uid, grouping)
         self._refresh_monitor()
-        self._refresh_results_column(uid, grouping)
-        self._on_organize_finished(uid)
+        if not silent_batch or self._current_uid == uid:
+            self._grouping.load_grouping(uid, grouping)
+            self._refresh_results_column(uid, grouping)
+        self._on_organize_finished(uid, select_uid=not silent_batch)
 
         if not silent_batch:
             ui.info(
@@ -4726,6 +6360,12 @@ class WorkbenchView(BaseView):
             )
         else:
             self._batch_status(f"TIF 已整理：{Path(result.tiff_path).name}")
+        self._workflow_notice(
+            f"{workflow_label}完成",
+            f"TIFF 已登记：{Path(result.tiff_path).name}。该组没有 JPG 原片，未生成 ZIP。",
+            state="success",
+            task_key=workflow_task_key,
+        )
         if on_complete is not None:
             on_complete(True)
         return True
@@ -4736,6 +6376,8 @@ class WorkbenchView(BaseView):
         group_index: int,
         silent_batch: bool = False,
         allow_single_jpg: bool = False,
+        workflow_task_key: str = "",
+        workflow_label: str | None = None,
         on_complete=None,
     ) -> bool:
         """Organise (archive) the composed group.
@@ -4759,10 +6401,27 @@ class WorkbenchView(BaseView):
         db = self.ctx.get_db()
         project_dir = self.ctx.current_project_dir
         has_project = bool(db and project_dir)
+        notice_label = workflow_label or ("合成+整理" if silent_batch else "整理")
+        notice_task_key = workflow_task_key or f"organise:{uid}:{group_index}:{notice_label}"
+
+        def _organise_not_started(message: str) -> bool:
+            text = str(message or "整理条件未通过").strip()
+            self._last_organise_failure_reason = text
+            self._workflow_notice(
+                f"{notice_label}失败",
+                text,
+                state="error",
+                task_key=notice_task_key,
+            )
+            if silent_batch:
+                self._status_message(f"整理未启动：{text}")
+            return False
+
+        self._last_organise_failure_reason = ""
         if not uid:
             if not silent_batch:
                 ui.warn(dlg_parent, "整理", "请先打开分组后再整理。")
-            return False
+            return _organise_not_started("没有打开分组或编号")
 
         try:
             from app.services.organize_service import _check_organize_gate, OrganizeGateError
@@ -4771,31 +6430,36 @@ class WorkbenchView(BaseView):
             self._flush_grouping_save()
 
             grouping = self._get_grouping_for_uid(uid)
-            group = next(
-                (g for g in grouping.groups if g.group_index == group_index), None
-            )
-            if group is None:
+            group_state = inspect_organize_group(grouping, group_index)
+            group = group_state.group
+            if group_state.reason == "missing-group":
                 if not silent_batch:
                     ui.warn(
                         dlg_parent,
                         "整理",
                         f"找不到组{group_index + 1}。请关闭分组工具后重新打开再试。",
                 )
-                return False
+                return _organise_not_started(f"找不到组{group_index + 1}")
 
-            if getattr(group, "archive_zip", None) and getattr(group, "status", None) == "organized":
+            if group_state.already_organized:
                 if not silent_batch:
                     self._status_message("该组已整理，有 ZIP 归档，无需再次整理。")
+                self._workflow_notice(
+                    f"{notice_label}无需处理",
+                    "该组已整理，有 ZIP 归档，无需再次整理。",
+                    state="info",
+                    task_key=notice_task_key,
+                )
                 if on_complete is not None:
                     on_complete(True)
                 return True
 
-            if not group.composed_tiff_path:
+            if group_state.reason == "missing-tiff" or group is None:
                 if not silent_batch:
                     ui.warn(
                         dlg_parent, "整理", "该组尚未合成，请先合成 TIFF 再整理。"
                     )
-                return False
+                return _organise_not_started("该组尚未合成 TIFF")
 
             # 整理前：若合成 TIFF 名不符成果命名规范（多见于导入的外部 Helicon TIFF），
             # 弹「TIFF 命名需确认」框，按本组编号成果名建议改名（守 S5：默认本组号、可改）。
@@ -4806,18 +6470,27 @@ class WorkbenchView(BaseView):
             ) is False:
                 return False
 
-            is_tif_only_group = bool(group.composed_tiff_path) and not bool(group.jpg_paths)
-
-            # Gate check (uid must be active)。silent_batch=允许未激活(临时分组/一条龙)。
-            if not has_project:
-                pass
-            elif allow_single_jpg or is_tif_only_group:
-                if not silent_batch:
-                    try:
-                        _check_organize_gate(
-                            db, uid, [{"jpgPaths": [1, 2]}], allow_inactive=False
+            gate_plan = plan_organize_gate_check(
+                grouping,
+                group,
+                has_project=has_project,
+                allow_single_jpg=allow_single_jpg,
+                silent_batch=silent_batch,
+            )
+            if gate_plan.required:
+                try:
+                    _check_organize_gate(
+                        db,
+                        uid,
+                        list(gate_plan.groups_as_dicts),
+                        allow_inactive=gate_plan.allow_inactive,
+                    )
+                except OrganizeGateError as e:
+                    if gate_plan.silent_skip_on_error:
+                        return _organise_not_started(
+                            str(e) or "JPG 不足或整理条件未通过"
                         )
-                    except OrganizeGateError as e:
+                    if gate_plan.prompt_on_error:
                         reply = ui.question(
                             dlg_parent,
                             "整理确认",
@@ -4825,25 +6498,17 @@ class WorkbenchView(BaseView):
                         )
                         if reply != QMessageBox.StandardButton.Yes:
                             return False
-            else:
-                try:
-                    groups_as_dicts = [
-                        {"jpgPaths": g.jpg_paths} for g in grouping.groups
-                    ]
-                    _check_organize_gate(db, uid, groups_as_dicts,
-                                         allow_inactive=silent_batch)
-                except OrganizeGateError as e:
-                    if silent_batch:
-                        return False  # 静默跳过(如 JPG 不足),不弹框
-                    reply = ui.question(
-                        dlg_parent,
-                        "整理确认",
-                        f"{e}\n\n是否跳过激活检查继续整理？",
-                    )
-                    if reply != QMessageBox.StandardButton.Yes:
-                        return False
+                    else:
+                        return _organise_not_started(str(e) or "整理条件未通过")
 
-            if not group.jpg_paths:
+            if group_state.is_tif_only:
+                self._workflow_notice(
+                    f"{notice_label}：正在登记 TIFF",
+                    f"正在登记 TIFF：{Path(group.composed_tiff_path).name}",
+                    state="busy",
+                    force_show=not bool(workflow_task_key),
+                    task_key=notice_task_key,
+                )
                 return self._organize_tif_only_group(
                     uid,
                     grouping,
@@ -4852,6 +6517,8 @@ class WorkbenchView(BaseView):
                     project_dir=project_dir,
                     has_project=has_project,
                     silent_batch=silent_batch,
+                    workflow_task_key=notice_task_key,
+                    workflow_label=notice_label,
                     on_complete=on_complete,
                 )
 
@@ -4865,26 +6532,45 @@ class WorkbenchView(BaseView):
             except Exception:
                 pass
 
+            if group.jpg_paths:
+                from app.services.organize_workflow_service import resolve_group_jpg_paths
+
+                resolved_jpgs, missing_jpgs = resolve_group_jpg_paths(group.jpg_paths)
+                if missing_jpgs:
+                    sample = "\n".join(missing_jpgs[:5])
+                    extra = f"\n…等 {len(missing_jpgs)} 个" if len(missing_jpgs) > 5 else ""
+                    message = (
+                        f"以下 JPG 在磁盘上找不到：\n{sample}{extra}\n\n"
+                        "请确认照片仍在 incoming-jpg 目录；WSL 下请用 /mnt/n/... 打开项目。"
+                    )
+                    if silent_batch:
+                        return _organise_not_started(message)
+                    ui.warn(dlg_parent, "整理失败", message)
+                    return False
+                group.jpg_paths = resolved_jpgs
+
             # 有项目：归档直接进入当前项目 results/。
             # 无项目：就地整理，ZIP 放在 TIFF 同目录，文件名等于 TIFF 基础名。
             res = "results"
             if has_project:
                 _inc, res = self._resolve_capture_subdirs()
-            from app.services.capture_workflow_service import plan_archive_target
-            archive_target = plan_archive_target(
-                project_dir if has_project else "",
-                res,
-                group.composed_tiff_path,
+            archive_plan = plan_archive_worker(
+                project_dir=project_dir if has_project else "",
+                results_subdir=res,
+                tiff_path=group.composed_tiff_path,
+                delete_jpg_after_archive=delete_jpg,
             )
-            archive_output_dir = archive_target.output_dir
+            archive_output_dir = archive_plan.archive_output_dir
             os.makedirs(archive_output_dir, exist_ok=True)
 
             # ── Collision guard: if ZIP already exists at the target path,  #cursor
             #    warn and let user choose overwrite / skip. ──────────────
-            existing_zip = archive_target.existing_zip
-            if os.path.isfile(existing_zip):
+            existing_zip = archive_plan.existing_zip
+            if archive_plan.existing_zip_exists:
                 if silent_batch:
-                    return False  # 已有同名归档 → 静默跳过(不静默覆盖)
+                    return _organise_not_started(
+                        f"同名 ZIP 已存在：{Path(existing_zip).name}，为避免覆盖已跳过"
+                    )
                 reply_col = ui.question(
                     dlg_parent,
                     "归档文件已存在",
@@ -4900,20 +6586,17 @@ class WorkbenchView(BaseView):
             # still in progress.
             from app.workers.supp_compression_worker import SuppCompressionWorker
 
-            progress = QProgressDialog(
-                "准备打包 JPG…", "", 0, len(group.jpg_paths), dlg_parent
-            )
-            progress.setWindowTitle("整理 JPG 原片")
-            progress.setCancelButton(None)
-            progress.setWindowModality(Qt.WindowModality.NonModal)
-            progress.setMinimumDuration(0)
-            progress.setValue(0)
+            # Progress is now shown in the unified background-task window.  Do
+            # not open a second per-action dialog for archive jobs.
+            progress = None
 
+            # Two-phase archive: ZIP first, DB finalize, then delete JPGs.
+            request_delete_jpg = archive_plan.delete_jpg
             worker = SuppCompressionWorker(
                 jpg_paths=group.jpg_paths,
                 tiff_path=group.composed_tiff_path,
                 project_dir=project_dir or archive_output_dir,
-                delete_jpg=delete_jpg,
+                delete_jpg=False,
                 method=getattr(self.ctx.settings, "jxl_effort_method", "standard"),
                 concurrency=getattr(self.ctx.settings, "jxl_concurrency", 4),
                 output_dir=archive_output_dir,
@@ -4921,27 +6604,81 @@ class WorkbenchView(BaseView):
             )
             if not hasattr(self, "_archive_workers"):
                 self._archive_workers = set()
+            if not hasattr(self, "_archive_worker_by_task_key"):
+                self._archive_worker_by_task_key = {}
             self._archive_workers.add(worker)
+            self._archive_worker_by_task_key[notice_task_key] = worker
+            self._workflow_notice(
+                f"{notice_label}：正在整理",
+                f"正在把 {len(group.jpg_paths)} 张 JPG 写入 ZIP：{Path(group.composed_tiff_path).name}",
+                state="busy",
+                force_show=not bool(workflow_task_key),
+                task_key=notice_task_key,
+            )
+            if silent_batch:
+                self._status_message(
+                    f"正在整理：{Path(group.composed_tiff_path).name}，打包 {len(group.jpg_paths)} 张 JPG…"
+                )
 
             def _release_worker() -> None:
-                progress.close()
+                if progress is not None:
+                    progress.close()
                 self._archive_workers.discard(worker)
+                for key, mapped in list(getattr(self, "_archive_worker_by_task_key", {}).items()):
+                    if mapped is worker:
+                        self._archive_worker_by_task_key.pop(key, None)
                 worker.deleteLater()
 
             def _archive_progress(current: int, total: int, filename: str) -> None:
-                progress.setMaximum(total)
-                progress.setValue(max(0, current - 1))
-                progress.setLabelText(
-                    f"正在打包第 {current}/{total} 张\n{filename}"
+                verifying = str(filename or "") == "__verify_zip__"
+                detail = (
+                    "正在校验 ZIP 内容；校验通过后才会删除待处理区散落 JPG。"
+                    if verifying
+                    else f"正在打包第 {current}/{total} 张 JPG：{filename}"
+                )
+                if progress is not None:
+                    progress.setMaximum(total)
+                    progress.setValue(max(0, current - 1))
+                    progress.setLabelText(
+                        "正在校验 ZIP\n请稍候"
+                        if verifying
+                        else f"正在打包第 {current}/{total} 张\n{filename}"
+                    )
+                self._workflow_notice(
+                    f"{notice_label}：正在整理",
+                    detail,
+                    state="busy",
+                    task_key=notice_task_key,
                 )
 
             def _archive_failed(message: str) -> None:
                 _release_worker()
+                self._last_organise_failure_reason = message or "归档过程出现错误。"
+                self._workflow_notice(
+                    f"{notice_label}失败",
+                    self._last_organise_failure_reason,
+                    state="error",
+                    task_key=notice_task_key,
+                )
                 self._batch_status(f"整理失败：{message}")
                 if not silent_batch:
                     ui.warn(
                         dlg_parent, "整理失败", message or "归档过程出现错误。"
                     )
+                if on_complete is not None:
+                    on_complete(False)
+
+            def _archive_cancelled(message: str) -> None:
+                _release_worker()
+                reason = message or "用户取消"
+                self._last_organise_failure_reason = reason
+                self._workflow_notice(
+                    f"{notice_label}已取消",
+                    "整理归档已取消。JPG 没有删除，未完成 ZIP 已清理；已生成的 TIFF 仍保留在待处理区。",
+                    state="info",
+                    task_key=notice_task_key,
+                )
+                self._status_message("整理归档已取消，JPG 已保留。")
                 if on_complete is not None:
                     on_complete(False)
 
@@ -4967,13 +6704,31 @@ class WorkbenchView(BaseView):
                         project_root=project_root,
                     )
                 except Exception as exc:  # noqa: BLE001
-                    message = f"归档已生成，但成果登记失败：{exc}"
+                    message = (
+                        f"归档 ZIP 已生成，但成果登记失败：{exc}\n\n"
+                        "JPG 原片仍保留在待处理区，可修正问题后重新整理。"
+                    )
+                    self._last_organise_failure_reason = message
+                    self._workflow_notice(
+                        f"{notice_label}失败",
+                        message,
+                        state="error",
+                        task_key=notice_task_key,
+                    )
                     self._batch_status(f"整理失败：{message}")
                     if not silent_batch:
                         ui.warn(dlg_parent, "整理失败", message)
                     if on_complete is not None:
                         on_complete(False)
                     return
+
+                if request_delete_jpg and group.jpg_paths:
+                    from app.services.archive_service import commit_jpg_deletion_after_archive
+
+                    result = commit_jpg_deletion_after_archive(
+                        result,
+                        list(group.jpg_paths),
+                    )
                 if organized.metadata.error:
                     self._status_message(f"TIFF 元数据写入失败：{organized.metadata.error}")
                 elif (
@@ -4982,45 +6737,74 @@ class WorkbenchView(BaseView):
                 ):
                     self._status_message(f"TIFF 元数据未写入：{organized.metadata.skipped}")
 
-                self._grouping.load_grouping(uid, grouping)
-                self._refresh_monitor()
-                self._refresh_results_column(uid, grouping)
-                self._on_organize_finished(uid)
-
                 msg = (
                     f"归档完成：{Path(group.archive_zip).name}\n"
                     "ZIP 内为原始 JPG，可直接解压使用。\n"
                 )
                 if result.delete_jpg:
                     msg += "JPG 原片已删除。"
+                    finish_detail = (
+                        f"已生成 {Path(group.archive_zip).name}；"
+                        f"{result.file_count} 张 JPG 已写入 ZIP 并从待处理区删除。"
+                    )
                 elif result.requested_delete_jpg and not result.delete_jpg:
                     msg += f"JPG 保留（{result.deletion_skipped_reason}）。"
+                    finish_detail = (
+                        f"已生成 {Path(group.archive_zip).name}；JPG 已写入 ZIP，"
+                        f"但删除前校验未通过，文件保留：{result.deletion_skipped_reason}"
+                    )
+                else:
+                    finish_detail = (
+                        f"已生成 {Path(group.archive_zip).name}；JPG 已写入 ZIP，"
+                        "按当前设置保留在磁盘，但不再作为待处理照片显示。"
+                    )
+                self._workflow_notice(
+                    f"{notice_label}完成",
+                    finish_detail,
+                    state="success",
+                    task_key=notice_task_key,
+                )
+                if on_complete is not None:
+                    on_complete(True)
                 if not silent_batch:
                     ui.info(dlg_parent, "整理完成", msg)
                 else:
                     self._batch_status(
                         f"整理完成：{Path(group.archive_zip).name}（{result.file_count} 张 JPG）"
                     )
-                if on_complete is not None:
-                    on_complete(True)
+
+                def _deferred_refresh() -> None:
+                    self._refresh_monitor()
+                    panel_uid = getattr(self._grouping, "_uid", None)
+                    if not silent_batch or self._current_uid == uid or panel_uid == uid:
+                        self._grouping.load_grouping(uid, grouping)
+                        self._refresh_results_column(uid, grouping)
+                    self._on_organize_finished(uid, select_uid=not silent_batch)
+                    dlg = getattr(self, "_compose_organise_progress_dialog", None)
+                    if dlg is not None and dlg.isVisible():
+                        dlg._ensure_on_top()
+
+                QTimer.singleShot(0, _deferred_refresh)
 
             worker.progress.connect(_archive_progress)
             worker.finished.connect(_archive_finished)
+            worker.cancelled.connect(_archive_cancelled)
             worker.failed.connect(_archive_failed)
-            progress.show()
-            ui.center_on(progress, dlg_parent)
-            progress.raise_()
+            if progress is not None:
+                progress.show()
+                ui.center_on(progress, dlg_parent)
+                progress.raise_()
             worker.start()
             return True
 
         except FileNotFoundError as exc:
             if not silent_batch:
                 ui.warn(dlg_parent, "整理失败", f"文件不存在：{exc}")
-            return False
+            return _organise_not_started(f"文件不存在：{exc}")
         except Exception as exc:
             if not silent_batch:
                 ui.warn(dlg_parent, "整理失败", f"意外错误：{exc}")
-            return False
+            return _organise_not_started(f"意外错误：{exc}")
 
     # ── 补处理 (supplementary archival) ────────────────────────────────────────
     #   Archive a selected JPG + TIFF bundle WITHOUT requiring an active specimen.
@@ -5156,12 +6940,27 @@ class WorkbenchView(BaseView):
             output_dir=str(results_dir),
             parent=self,
         )
+        self._supp_task_key = f"supplementary:{tiff_stem}:{id(self._supp_worker)}"
+        self._workflow_notice(
+            "补处理：准备整理",
+            f"正在把 {len(grp.jpg_paths)} 张 JPG 写入 ZIP：{tiff_stem}.zip",
+            state="busy",
+            force_show=True,
+            task_key=self._supp_task_key,
+        )
         self._supp_worker.started_archiving.connect(self._on_supp_started)
+        self._supp_worker.progress.connect(self._on_supp_progress)
         self._supp_worker.finished.connect(self._on_supp_finished)
         self._supp_worker.failed.connect(self._on_supp_failed)
         self._supp_worker.start()
 
     def _on_supp_started(self, jpg_count: int, tiff_stem: str) -> None:
+        self._workflow_notice(
+            "补处理：正在整理",
+            f"正在归档 {jpg_count} 张原片 → {tiff_stem}.zip",
+            state="busy",
+            task_key=str(getattr(self, "_supp_task_key", "") or ""),
+        )
         try:
             win = self.window()
             bar = win.statusBar() if hasattr(win, "statusBar") else None
@@ -5170,13 +6969,29 @@ class WorkbenchView(BaseView):
         except Exception:
             pass
 
+    def _on_supp_progress(self, current: int, total: int, filename: str) -> None:
+        self._workflow_notice(
+            "补处理：正在整理",
+            f"正在打包第 {current}/{total} 张 JPG：{filename}",
+            state="busy",
+            task_key=str(getattr(self, "_supp_task_key", "") or ""),
+        )
+
     def _on_supp_finished(self, result) -> None:
         """Move TIFF + ZIP into results/ (decision①), then refresh + toast."""
         from app.utils import ui
         grp = getattr(self, "_supp_pending", None)
+        task_key = str(getattr(self, "_supp_task_key", "") or "")
         self._supp_pending = None
+        self._supp_task_key = ""
         project_dir = self.ctx.current_project_dir
         if not result or not getattr(result, "ok", False) or grp is None:
+            self._workflow_notice(
+                "补处理失败",
+                "归档过程出现错误。",
+                state="error",
+                task_key=task_key,
+            )
             ui.warn(self, "补处理", "归档过程出现错误。")
             return
 
@@ -5193,6 +7008,12 @@ class WorkbenchView(BaseView):
                 results_subdir=res,
             )
         except Exception as exc:
+            self._workflow_notice(
+                "补处理失败",
+                f"归档已生成，但成果移动失败：{exc}",
+                state="error",
+                task_key=task_key,
+            )
             ui.warn(self, "补处理", f"归档已生成，但成果移动失败：{exc}")
             return
 
@@ -5214,15 +7035,41 @@ class WorkbenchView(BaseView):
         )
         if result.delete_jpg:
             msg += "JPG 原片已删除。"
+            finish_detail = (
+                f"已生成 {Path(finalized.zip_path).name}；"
+                f"{result.file_count} 张 JPG 已写入 ZIP 并从待处理区删除。"
+            )
         elif result.requested_delete_jpg and not result.delete_jpg:
             msg += f"JPG 保留（{result.deletion_skipped_reason}）。"
+            finish_detail = (
+                f"已生成 {Path(finalized.zip_path).name}；JPG 已写入 ZIP，"
+                f"但删除前校验未通过，文件保留：{result.deletion_skipped_reason}"
+            )
         else:
             msg += "JPG 原片已保留。"
+            finish_detail = (
+                f"已生成 {Path(finalized.zip_path).name}；JPG 已写入 ZIP，"
+                "按当前设置保留在磁盘，但不再作为待处理照片显示。"
+            )
+        self._workflow_notice(
+            "补处理完成",
+            finish_detail,
+            state="success",
+            task_key=task_key,
+        )
         ui.info(self, "补处理完成", msg)
 
     def _on_supp_failed(self, message: str) -> None:
         from app.utils import ui
+        task_key = str(getattr(self, "_supp_task_key", "") or "")
         self._supp_pending = None
+        self._supp_task_key = ""
+        self._workflow_notice(
+            "补处理失败",
+            message or "归档失败。",
+            state="error",
+            task_key=task_key,
+        )
         ui.warn(self, "补处理", f"归档失败: {message}")
 
     # ── 还原归档 JPG ──────────────────────────────────────────────────────────
@@ -5422,8 +7269,12 @@ class WorkbenchView(BaseView):
             QMessageBox.warning(self, "关联成果", f"关联失败：{exc}")
 
     def _on_undo_compose(self, uid: str, group_index: int) -> None:
-        """撤销合成 = 删除这张合成 TIFF + 把关联 JPG 解组放回自由池。
+        """Undo the latest group step.
 
+        Organized group: undo organise first by restoring JPGs from ZIP and
+        returning the group to composed/pending-organise state.
+
+        Composed group: 删除这张合成 TIFF + 把关联 JPG 解组放回自由池。
         用户选定语义（拍照区核心 = 中间 JPG ↔ 对应 TIFF 的关联）：TIFF 一旦删除，
         关联失去意义 → 这组 JPG 退出分组、回到监控自由池（未分组，可重新分组/重拍）。
         因删 TIFF 不可恢复 → 删前弹确认框（默认否）。取消则全保留、原样不动。
@@ -5439,6 +7290,10 @@ class WorkbenchView(BaseView):
             None,
         )
         if target is None:
+            return
+
+        if getattr(target, "archive_zip", None):
+            self._on_undo_organise(uid, grouping, target)
             return
 
         reply = QMessageBox.question(
@@ -5469,6 +7324,66 @@ class WorkbenchView(BaseView):
         except Exception:
             pass
 
+    def _on_undo_organise(self, uid: str, grouping, target) -> None:
+        """Undo organise: restore JPGs from ZIP, keep TIFF, clear archive state."""
+        db = self.ctx.get_db()
+        if not db:
+            return
+        zip_path = str(getattr(target, "archive_zip", "") or "")
+        jpg_paths = [str(p) for p in list(getattr(target, "jpg_paths", []) or [])]
+        if not zip_path or not os.path.isfile(zip_path):
+            QMessageBox.warning(self, "撤销整理", "找不到该组 ZIP，无法恢复 JPG。")
+            return
+        if not jpg_paths:
+            QMessageBox.warning(self, "撤销整理", "该组没有记录原 JPG 路径，无法自动恢复。")
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "撤销整理",
+            "将从 ZIP 还原原始 JPG 到原位置，并把该组退回“已合成、待整理”。\n\n"
+            "TIFF 不会删除；项目内 ZIP 会移到 _retired-zip 作为备份。确认？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        from app.services.archive_service import restore_archive_to_original_paths
+        from app.services.grouping_service import _utc_now_iso, save_grouping
+
+        result = restore_archive_to_original_paths(
+            zip_path,
+            jpg_paths,
+            overwrite=False,
+        )
+        if not getattr(result, "ok", False):
+            reason = getattr(result, "reason", "") or "；".join(result.failures[:3])
+            QMessageBox.warning(self, "撤销整理失败", reason or "部分 JPG 未能恢复。")
+            return
+
+        retired_zip = self._retire_zip(zip_path)
+        target.archive_zip = None
+        target.status = "composed"
+        target.updated_at = _utc_now_iso()
+        try:
+            save_grouping(db, uid, grouping.groups, clean_phantoms=False)
+            self._grouping.load_grouping(uid, grouping)
+            self._refresh_monitor()
+            self._refresh_results_column(uid, grouping)
+            restored_count = getattr(result, "count", 0)
+            skipped_count = len(getattr(result, "skipped", []) or [])
+            detail = f"已恢复 {restored_count} 张 JPG"
+            if skipped_count:
+                detail += f"，{skipped_count} 张原位置已有文件已跳过"
+            if retired_zip:
+                detail += f"；ZIP 已移到 {Path(retired_zip).parent.name}/"
+            else:
+                detail += "；ZIP 已取消登记，磁盘文件保留原处"
+            self._status_message(f"撤销整理完成：{detail}")
+        except Exception as exc:
+            QMessageBox.warning(self, "撤销整理", f"状态更新失败：{exc}")
+
     def _retire_tiff(self, tiff_path: str) -> None:
         """Move a TIFF to the project's _retired-tiff/ directory."""
         try:
@@ -5492,6 +7407,34 @@ class WorkbenchView(BaseView):
             shutil.move(str(src), str(dest))
         except Exception:
             pass
+
+    def _retire_zip(self, zip_path: str) -> str:
+        """Move a project-managed ZIP to _retired-zip; leave external ZIPs alone."""
+        try:
+            src = Path(zip_path)
+            if not src.is_file():
+                return ""
+            project_dir = getattr(self.ctx, "current_project_dir", None)
+            if not project_dir:
+                return ""
+            project_root = Path(project_dir).resolve()
+            try:
+                src.resolve().relative_to(project_root)
+            except ValueError:
+                return ""
+            retired_dir = project_root / "_retired-zip"
+            retired_dir.mkdir(exist_ok=True)
+            dest = retired_dir / src.name
+            if dest.exists():
+                stem, suffix = src.stem, src.suffix
+                i = 1
+                while dest.exists():
+                    dest = retired_dir / f"{stem}_{i}{suffix}"
+                    i += 1
+            shutil.move(str(src), str(dest))
+            return str(dest)
+        except Exception:
+            return ""
 
     def _on_grouping_changed(self) -> None:
         """Debounce-save grouping to DB after edits."""
@@ -5572,6 +7515,26 @@ class WorkbenchView(BaseView):
                 f"UPDATE specimens SET {set_clauses}, lon = ?, lat = ? WHERE uid = ?",
                 values + [lon_val, lat_val, uid],
             )
+            try:
+                extra = naming.naming_extra_field_values()
+            except Exception:
+                extra = {}
+            if extra:
+                row = db.execute(
+                    "SELECT raw_json FROM specimens WHERE uid = ?",
+                    (uid,),
+                ).fetchone()
+                try:
+                    raw = json.loads(row["raw_json"] or "{}") if row else {}
+                    if not isinstance(raw, dict):
+                        raw = {}
+                except Exception:
+                    raw = {}
+                raw.update(extra)
+                db.execute(
+                    "UPDATE specimens SET raw_json = ? WHERE uid = ?",
+                    (json.dumps(raw, ensure_ascii=False), uid),
+                )
             if commit:
                 db.commit()
         except Exception:
@@ -5644,11 +7607,12 @@ class WorkbenchView(BaseView):
 
     # ── Collab photo-index hooks ──────────────────────────────────────────────
 
-    def _on_helicon_finished(self, uid: str) -> None:
+    def _on_helicon_finished(self, uid: str, *, select_uid: bool = True) -> None:
         """Broadcast tiff photo-index to collab peers (oracle: collabPostPhotoIndex)."""
         try:
             self._sidebar.refresh()
-            self._sidebar.select_uid(uid)
+            if select_uid:
+                self._sidebar.select_uid(uid)
         except Exception:
             pass
         svc = getattr(self.ctx, "collab_service", None)
@@ -5658,11 +7622,12 @@ class WorkbenchView(BaseView):
             except Exception:
                 pass
 
-    def _on_organize_finished(self, uid: str) -> None:
+    def _on_organize_finished(self, uid: str, *, select_uid: bool = True) -> None:
         """Broadcast zip photo-index to collab peers (oracle: collabPostPhotoIndex)."""
         try:
             self._sidebar.refresh()
-            self._sidebar.select_uid(uid)
+            if select_uid:
+                self._sidebar.select_uid(uid)
         except Exception:
             pass
         svc = getattr(self.ctx, "collab_service", None)
@@ -5737,24 +7702,23 @@ class WorkbenchView(BaseView):
         db = self.ctx.get_db()
         if not db or not uid:
             return None
-        from app.services.grouping_service import load_grouping, save_grouping, Group
-        attributed = list(jpg_paths) if jpg_paths is not None else self._get_attributed_jpg_paths(uid)
-        un_occupied = self._unoccupied_jpg_paths(uid, attributed)
-        if len(un_occupied) < 2:
-            return None
-        grouping = load_grouping(db, uid)
-        next_idx = max([g.group_index for g in grouping.groups], default=-1) + 1
-        grouping.groups.append(
-            Group(
-                group_index=next_idx,
-                jpg_paths=un_occupied,
-                status="pending",
-                output_name=(output_name or None),
-            )
+        from app.services.compose_workflow_service import create_implicit_group
+
+        candidates = (
+            list(jpg_paths)
+            if jpg_paths is not None
+            else self._get_attributed_jpg_paths(uid)
         )
-        save_grouping(db, uid, grouping.groups, clean_phantoms=False)
-        self._grouping.load_grouping(uid, grouping)
-        return next_idx
+        result = create_implicit_group(
+            db,
+            uid,
+            candidates,
+            output_name=output_name,
+        )
+        if result.group_index is None or result.grouping is None:
+            return None
+        self._grouping.load_grouping(uid, result.grouping)
+        return result.group_index
 
     def _unoccupied_jpg_paths(self, uid: str, jpg_paths: list[str]) -> list[str]:
         """Filter out JPGs already present in any group for this UID."""
@@ -5762,26 +7726,10 @@ class WorkbenchView(BaseView):
         if not db or not uid:
             return []
         try:
-            from app.services.grouping_service import load_grouping
-            grouping = load_grouping(db, uid)
+            from app.services.compose_workflow_service import unoccupied_jpg_paths
+            return unoccupied_jpg_paths(db, uid, jpg_paths)
         except Exception:
             return list(jpg_paths)
-        occupied: set[str] = set()
-        for group in grouping.groups:
-            for path in group.jpg_paths:
-                try:
-                    occupied.add(str(Path(path).resolve()))
-                except Exception:
-                    occupied.add(path)
-        unoccupied: list[str] = []
-        for path in jpg_paths:
-            try:
-                key = str(Path(path).resolve())
-            except Exception:
-                key = path
-            if key not in occupied:
-                unoccupied.append(path)
-        return unoccupied
 
     def _default_selected_compose_uid(self) -> str:
         candidates = []
@@ -5888,19 +7836,13 @@ class WorkbenchView(BaseView):
         if not project_dir or not db or not uid or not jpg_paths:
             return
         try:
-            from app.services.activation_service import manual_assign
-            from app.services.grouping_service import (
-                remove_explicit_unassign,
-                remove_jpg_from_all_groups,
-            )
-
-            for path in jpg_paths:
-                remove_jpg_from_all_groups(db, path)
-            manual_assign(project_dir, uid, jpg_paths)
-            for path in jpg_paths:
-                remove_explicit_unassign(db, path)
+            from app.services.compose_workflow_service import assign_selected_jpgs_to_uid
+            assign_selected_jpgs_to_uid(project_dir, db, uid, jpg_paths)
         except Exception:
-            pass
+            import logging
+            logging.getLogger(__name__).warning(
+                "JPG 归属写入失败 (uid=%s)", uid, exc_info=True,
+            )
 
     def _resolve_implicit_compose_target(
         self,
@@ -5921,22 +7863,31 @@ class WorkbenchView(BaseView):
         Existing JPG attribution only pre-fills the prompt when no UID is active.
         It never overrides an active UID and never silently decides a filename.
         """
-        if selected_jpgs:
-            if active_uid:
-                return _SelectedComposeTarget(uid=active_uid, assign_to_uid=True)
+        owners = []
+        if selected_jpgs and not active_uid:
             try:
                 owners = self._monitor.selected_jpg_owner_uids()
             except Exception:
                 owners = []
-            return self._prompt_selected_compose_target(
-                len(selected_jpgs),
-                organise=organise,
-                default_uid=owners[0] if len(owners) == 1 else "",
-            )
-        if active_uid and self._auto_archive_enabled():
-            return _SelectedComposeTarget(uid=active_uid, assign_to_uid=False)
-        self._status_message("请先选中要合成的 JPG；或激活编号并开启自动归档。")
-        return None
+
+        from app.services.compose_workflow_service import resolve_implicit_compose_target
+
+        target = resolve_implicit_compose_target(
+            selected_jpgs,
+            active_uid,
+            auto_archive_enabled=self._auto_archive_enabled(),
+            selected_owner_uids=owners,
+            prompt_target=lambda jpg_count, default_uid: (
+                self._prompt_selected_compose_target(
+                    jpg_count,
+                    organise=organise,
+                    default_uid=default_uid,
+                )
+            ),
+        )
+        if target is None and not selected_jpgs:
+            self._status_message("请先选中要合成的 JPG；或激活编号并开启自动归档。")
+        return target
 
     def _auto_archive_enabled(self) -> bool:
         """Return true for the user's explicit incoming auto-archive mode."""
@@ -5981,42 +7932,131 @@ class WorkbenchView(BaseView):
             self._status_message("没有可合成的未占用 JPG（至少 2 张）")
             return
         silent = bool(getattr(self.ctx.settings, "silent_compose", False))
-        if organise and not silent:
-            self._on_compose_requested(
-                uid,
-                idx,
-                on_composed=lambda ok: self._implicit_compose_done(
-                    ok, uid, idx, organise
-                ),
+        task_key = f"implicit-compose:{uid}:{idx}:{'organise' if organise else 'compose'}"
+        if organise:
+            jpg_count = len(selected) if selected else len(self._get_attributed_jpg_paths(uid))
+            self._workflow_notice(
+                "合成+整理：正在合成 TIFF",
+                f"已接收 {jpg_count} 张 JPG。合成完成后会自动整理、生成 ZIP，并从待处理队列移出这些 JPG。",
+                state="busy",
+                force_show=True,
+                task_key=task_key,
             )
-            return
-        if silent or organise:
+            self._status_message("合成+整理已转入后台，可继续拍摄或新增编号。")
             self._compose_group_headless(
                 uid,
                 idx,
-                lambda ok: self._implicit_compose_done(ok, uid, idx, organise),
+                lambda ok: self._implicit_compose_done(ok, uid, idx, organise, task_key),
+                background=True,
+                show_progress_dialog=False,
+                workflow_task_key=task_key,
+            )
+            return
+        if silent:
+            jpg_count = len(selected) if selected else len(self._get_attributed_jpg_paths(uid))
+            self._workflow_notice(
+                "合成：正在生成 TIFF",
+                f"已接收 {jpg_count} 张 JPG。合成完成后 TIFF 会留在待处理区，JPG 仍需整理归档。",
+                state="busy",
+                force_show=True,
+                task_key=task_key,
+            )
+            self._compose_group_headless(
+                uid,
+                idx,
+                lambda ok: self._implicit_compose_done(ok, uid, idx, organise, task_key),
+                background=False,
+                workflow_task_key=task_key,
             )
             return
         self._on_compose_requested(uid, idx)
 
     def _implicit_compose_done(
-        self, success: bool, uid: str, group_index: int, organise: bool
+        self,
+        success: bool,
+        uid: str,
+        group_index: int,
+        organise: bool,
+        task_key: str = "",
     ) -> None:
         if not success:
+            if organise:
+                self._workflow_notice(
+                    "合成+整理失败",
+                    "合成阶段没有生成 TIFF，因此整理没有启动。",
+                    state="error",
+                    task_key=task_key,
+                )
+            else:
+                self._workflow_notice(
+                    "合成失败",
+                    "合成阶段没有生成 TIFF。",
+                    state="error",
+                    task_key=task_key,
+                )
             self._status_message("合成失败或未生成成果")
             return
         if organise:
+            self._workflow_notice(
+                "合成+整理：正在整理",
+                "TIFF 已生成，正在打包 JPG 原片并登记 ZIP。",
+                state="busy",
+                task_key=task_key,
+            )
+            self._status_message("合成完成，正在整理并打包 JPG…")
+            def _done(ok: bool) -> None:
+                if ok:
+                    self._status_message("合成+整理完成")
+                else:
+                    reason = str(
+                        getattr(self, "_last_organise_failure_reason", "") or ""
+                    ).strip()
+                    detail = reason or "整理或归档没有完成。"
+                    self._workflow_notice(
+                        "合成+整理失败",
+                        detail,
+                        state="error",
+                        task_key=task_key,
+                    )
+                    self._status_message("合成完成，但整理失败或未完成")
+
             started = self._on_organise_requested(
                 uid,
                 group_index,
                 silent_batch=True,
-                on_complete=lambda ok: self._status_message(
-                    "合成+整理完成" if ok else "合成完成，但整理失败或未完成"
-                ),
+                workflow_task_key=task_key,
+                workflow_label="合成+整理",
+                on_complete=_done,
             )
             if not started:
-                self._status_message("合成完成，但整理未启动")
+                reason = str(getattr(self, "_last_organise_failure_reason", "") or "").strip()
+                suffix = f"：{reason}" if reason else ""
+                self._workflow_notice(
+                    "合成+整理失败",
+                    reason or "整理没有启动。",
+                    state="error",
+                    task_key=task_key,
+                )
+                self._status_message(f"合成完成，但整理未启动{suffix}")
         else:
+            detail = "TIFF 已生成在待处理区；JPG 尚未整理归档。"
+            try:
+                grouping = self._get_grouping_for_uid(uid)
+                group = next(
+                    (g for g in grouping.groups if g.group_index == group_index),
+                    None,
+                )
+                tiff_path = getattr(group, "composed_tiff_path", "") if group else ""
+                if tiff_path:
+                    detail = f"TIFF 已生成：{Path(tiff_path).name}。JPG 尚未整理归档。"
+            except Exception:
+                pass
+            self._workflow_notice(
+                "合成完成",
+                detail,
+                state="success",
+                task_key=task_key,
+            )
             self._status_message("合成完成，成果已生成在 incoming")
 
     def _show_compose_preview(self, jpg_paths: list[str]) -> Optional[list[str]]:
@@ -6102,9 +8142,13 @@ class WorkbenchView(BaseView):
         svc = getattr(self.ctx, "collab_service", None)
         if svc is None or not svc.is_running() or not svc.group_code:
             return []
+        local_project_id = str(getattr(svc, "project_id", "") or "")
+        if not local_project_id:
+            return []
         return [
             peer for peer in svc.peers()
             if getattr(peer, "group_code", "") == svc.group_code
+            and str(getattr(peer, "project_id", "") or "") == local_project_id
         ]
 
     def _on_sync_selected_uid(self, mode: str = "smart") -> None:
@@ -6127,9 +8171,30 @@ class WorkbenchView(BaseView):
         if svc is None or not svc.is_running() or not svc.group_code:
             QMessageBox.information(self, "照片同步", "请先启用局域网协作并设置协作组码。")
             return
+        project_id = str(getattr(svc, "project_id", "") or "")
+        if not project_id:
+            QMessageBox.information(
+                self,
+                "照片同步",
+                "当前项目还没有可用于照片同步的项目同步码。请重新打开项目后再同步照片。",
+            )
+            return
+        same_group_peers = [
+            peer for peer in svc.peers()
+            if getattr(peer, "group_code", "") == svc.group_code
+        ]
         peers = self._collab_file_sync_peers()
         if not peers:
-            QMessageBox.information(self, "照片同步", "没有同组在线设备，无法同步照片。")
+            if same_group_peers:
+                QMessageBox.information(
+                    self,
+                    "照片同步",
+                    "当前在线设备没有使用同一个项目同步码。\n\n"
+                    "任务状态可以跨项目查看；照片/TIF/ZIP 只允许同项目同步码设备同步。\n"
+                    "请到协作中心点击“绑定同一项目”，由确认是同一项目的一台电脑分享项目码。",
+                )
+            else:
+                QMessageBox.information(self, "照片同步", "没有同组在线设备，无法同步照片。")
             return
         current_worker = getattr(self, "_collab_file_sync_worker", None)
         if current_worker is not None and current_worker.isRunning():
@@ -6150,17 +8215,13 @@ class WorkbenchView(BaseView):
 
         from app.workers.collab_file_sync_worker import CollabFileSyncWorker
 
-        progress = QProgressDialog("正在准备同步...", None, 0, 0, self)
-        progress.setWindowTitle(title)
-        progress.setWindowModality(Qt.WindowModality.WindowModal)
-        progress.setMinimumDuration(0)
-        progress.setCancelButton(None)
-        progress.setValue(0)
+        progress = None
 
         worker = CollabFileSyncWorker(
             project_dir=project_dir,
             peers=peers,
             group_code=svc.group_code,
+            project_id=project_id,
             uids=uids,
             mode=mode,
             max_workers=4,
@@ -6168,14 +8229,30 @@ class WorkbenchView(BaseView):
         )
         self._collab_file_sync_worker = worker
         self._collab_file_sync_progress = progress
+        task_key = f"collab-sync:{title}:{id(worker)}"
+        self._workflow_notice(
+            f"{title}：准备同步",
+            f"正在连接 {len(peers)} 台同项目设备；同步在后台运行。",
+            state="busy",
+            force_show=True,
+            task_key=task_key,
+        )
 
         def _on_progress(current: int, total: int, rel: str) -> None:
-            progress.setMaximum(max(1, total))
-            progress.setValue(min(current, max(1, total)))
-            progress.setLabelText(f"正在同步 {current}/{total}\n{rel}")
+            if progress is not None:
+                progress.setMaximum(max(1, total))
+                progress.setValue(min(current, max(1, total)))
+                progress.setLabelText(f"正在同步 {current}/{total}\n{rel}")
+            self._workflow_notice(
+                f"{title}：正在同步",
+                f"正在同步 {current}/{total}：{rel}",
+                state="busy",
+                task_key=task_key,
+            )
 
         def _finish(summary) -> None:
-            progress.close()
+            if progress is not None:
+                progress.close()
             self._collab_file_sync_worker = None
             self._collab_file_sync_progress = None
             try:
@@ -6187,7 +8264,15 @@ class WorkbenchView(BaseView):
                 pass
             msg = (
                 f"照片同步完成：下载 {summary.downloaded}，跳过 {summary.skipped}，"
-                f"冲突 {summary.conflicts}，失败 {summary.failed}。"
+                f"冲突 {summary.conflicts}，失败 {summary.failed}"
+                f"，同步码不同跳过 {getattr(summary, 'incompatible_peers', 0)}。"
+            )
+            state = "error" if summary.conflicts or summary.failed else "success"
+            self._workflow_notice(
+                f"{title}完成",
+                msg,
+                state=state,
+                task_key=task_key,
             )
             self._status_message(msg)
             if summary.conflicts or summary.failed:
@@ -6205,9 +8290,16 @@ class WorkbenchView(BaseView):
                 QMessageBox.warning(self, "照片同步完成但有问题", detail or msg)
 
         def _fail(message: str) -> None:
-            progress.close()
+            if progress is not None:
+                progress.close()
             self._collab_file_sync_worker = None
             self._collab_file_sync_progress = None
+            self._workflow_notice(
+                f"{title}失败",
+                message or "未知错误",
+                state="error",
+                task_key=task_key,
+            )
             QMessageBox.warning(self, "照片同步失败", message or "未知错误")
 
         worker.progress.connect(_on_progress)
@@ -6215,7 +8307,8 @@ class WorkbenchView(BaseView):
         worker.failed.connect(_fail)
         worker.finished.connect(worker.deleteLater)
         worker.start()
-        progress.show()
+        if progress is not None:
+            progress.show()
 
     def _collab_operator(self) -> str | None:
         """Current operator name (for task assignee), read safely from settings."""
@@ -6280,6 +8373,7 @@ class WorkbenchView(BaseView):
 
     def _show_no_project(self) -> None:
         self._sidebar.refresh()  # clears list
+        self._last_scan_result = None
         self._monitor.clear()
         self._grouping.clear()
         self._results.clear()
@@ -6288,4 +8382,5 @@ class WorkbenchView(BaseView):
         self._naming.load_specimen({})  # 清命名卡残留字段
         self._current_uid = None
         self._refresh_header()
+        self._refresh_workflow_dashboard()
         self._no_project_banner.show()

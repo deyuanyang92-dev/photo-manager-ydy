@@ -116,6 +116,7 @@ class SyncSummary:
     skipped: int = 0
     conflicts: int = 0
     failed: int = 0
+    incompatible_peers: int = 0
     bytes_downloaded: int = 0
     peers: int = 0
     conflict_paths: list[str] = field(default_factory=list)
@@ -127,6 +128,7 @@ class SyncSummary:
         self.skipped += other.skipped
         self.conflicts += other.conflicts
         self.failed += other.failed
+        self.incompatible_peers += other.incompatible_peers
         self.bytes_downloaded += other.bytes_downloaded
         self.peers += other.peers
         self.conflict_paths.extend(other.conflict_paths)
@@ -312,10 +314,12 @@ def manifest_payload(
     db=None,
     uids: Optional[Iterable[str]] = None,
     device_id: str = "",
+    project_id: str = "",
 ) -> dict:
     files = build_project_manifest(project_dir, db=db, uids=uids, device_id=device_id)
     return {
         "projectDirName": Path(project_dir).name,
+        "projectId": project_id,
         "deviceId": device_id,
         "generatedAt": datetime.now(timezone.utc).isoformat(),
         "files": [entry.to_dict() for entry in files],
@@ -350,6 +354,7 @@ def _download_one(
     project_dir: str,
     peer_base_url: str,
     group_code: str,
+    project_id: str,
     remote: FileManifestEntry,
     mode: str,
 ) -> tuple[str, int, str]:
@@ -373,7 +378,11 @@ def _download_one(
         with httpx.stream(
             "GET",
             f"{peer_base_url}/api/collab/files/download",
-            params={"path": remote.relative_path, "groupCode": group_code},
+            params={
+                "path": remote.relative_path,
+                "groupCode": group_code,
+                "projectId": project_id,
+            },
             timeout=timeout,
             trust_env=False,
         ) as resp:
@@ -403,10 +412,15 @@ def _download_one(
         return "failed", 0, remote.relative_path
 
 
-def fetch_peer_manifest(peer_base_url: str, group_code: str, uids: Optional[Iterable[str]] = None) -> list[FileManifestEntry]:
+def fetch_peer_manifest(
+    peer_base_url: str,
+    group_code: str,
+    project_id: str,
+    uids: Optional[Iterable[str]] = None,
+) -> list[FileManifestEntry]:
     try:
         import httpx
-        params = {"groupCode": group_code}
+        params = {"groupCode": group_code, "projectId": project_id}
         uid_list = [str(u) for u in (uids or []) if str(u).strip()]
         if uid_list:
             params["uids"] = ",".join(uid_list)
@@ -434,6 +448,7 @@ def sync_from_peer(
     project_dir: str,
     peer_base_url: str,
     group_code: str,
+    project_id: str,
     uids: Optional[Iterable[str]] = None,
     mode: str = "smart",
     max_workers: int = DEFAULT_MAX_WORKERS,
@@ -448,7 +463,9 @@ def sync_from_peer(
     """
     if mode not in {"smart", "missing", "overwrite"}:
         mode = "smart"
-    remote_files = fetch_peer_manifest(peer_base_url, group_code, uids=uids)
+    if not project_id:
+        return SyncSummary(failed=1)
+    remote_files = fetch_peer_manifest(peer_base_url, group_code, project_id, uids=uids)
     summary = SyncSummary(planned=len(remote_files), peers=1 if remote_files else 0)
     if not remote_files:
         return summary
@@ -462,6 +479,7 @@ def sync_from_peer(
                 project_dir=project_dir,
                 peer_base_url=peer_base_url,
                 group_code=group_code,
+                project_id=project_id,
                 remote=entry,
                 mode=mode,
             )
@@ -491,6 +509,7 @@ def sync_from_peers(
     project_dir: str,
     peers: Iterable,
     group_code: str,
+    project_id: str,
     uids: Optional[Iterable[str]] = None,
     mode: str = "smart",
     max_workers: int = DEFAULT_MAX_WORKERS,
@@ -501,10 +520,15 @@ def sync_from_peers(
         peer_group = getattr(peer, "group_code", "")
         if not group_code or peer_group != group_code:
             continue
+        peer_project = str(getattr(peer, "project_id", "") or "")
+        if not project_id or peer_project != project_id:
+            summary.incompatible_peers += 1
+            continue
         peer_summary = sync_from_peer(
             project_dir=project_dir,
             peer_base_url=getattr(peer, "base_url"),
             group_code=group_code,
+            project_id=project_id,
             uids=uids,
             mode=mode,
             max_workers=max_workers,

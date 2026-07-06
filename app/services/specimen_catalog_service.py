@@ -18,6 +18,7 @@ from app.services.project_service import (
 )
 from app.services.project_tree_service import discover_workspaces
 from app.utils.naming import normalize_uid
+from app.utils.path_utils import localize_path, normalize_path
 
 
 @dataclass(frozen=True)
@@ -60,9 +61,9 @@ def known_workspace_dirs(
         if not path:
             return
         try:
-            resolved = str(Path(path).resolve())
+            resolved = normalize_path(path)
         except OSError:
-            resolved = str(path)
+            resolved = localize_path(str(path))
         if resolved not in ordered:
             ordered.append(resolved)
 
@@ -88,7 +89,7 @@ def known_workspace_dirs(
 def _lookup_uid_in_project(project_dir: str, uid: str) -> Optional[SpecimenUidHit]:
     """Read one workspace DB for UID existence without running migrations."""
     try:
-        resolved = str(Path(project_dir).resolve())
+        resolved = normalize_path(project_dir)
         db_path = Path(resolved) / "_data" / "project.db"
         if not db_path.exists():
             return None
@@ -174,9 +175,9 @@ def conflicting_uid_hits(
     current_resolved = ""
     if current_project_dir:
         try:
-            current_resolved = str(Path(current_project_dir).resolve())
+            current_resolved = normalize_path(current_project_dir)
         except OSError:
-            current_resolved = str(current_project_dir)
+            current_resolved = localize_path(str(current_project_dir))
 
     conflicts: list[SpecimenUidHit] = []
     for hit in find_uid(

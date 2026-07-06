@@ -57,9 +57,9 @@ class _LazyViewClasses(Sequence[type]):
 
 
 # Order = nav order (mirrors web prototype topbar exactly)
-# CollabView is NOT a nav tab — collaboration lives inline in the workbench sidebar.
 ALL_VIEW_SPECS: tuple[LazyViewSpec, ...] = (
     LazyViewSpec("workbench", "照片工作区", "app.views.workbench_view", "WorkbenchView"),
+    LazyViewSpec("collab", "协作", "app.views.collab_view", "CollabView"),
     LazyViewSpec("overview", "最近使用", "app.views.overview_view", "OverviewView"),
     LazyViewSpec("project_tree", "项目树", "app.views.project_tree_view", "ProjectTreeView"),
     LazyViewSpec("labels", "标签打印", "app.views.labels_view", "LabelsView"),

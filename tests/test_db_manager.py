@@ -51,6 +51,40 @@ class TestOpenProjectDb:
         row = conn.execute("PRAGMA journal_mode").fetchone()
         assert row[0] == "wal"
 
+    def test_wal_disk_io_error_falls_back_to_delete_journal(self, tmp_project, monkeypatch):
+        real_connect = sqlite3.connect
+        attempts = {"wal": 0, "delete": 0}
+
+        class ConnectionProxy:
+            def __init__(self, conn):
+                object.__setattr__(self, "_conn", conn)
+
+            def execute(self, sql, *args, **kwargs):
+                normalized = " ".join(str(sql).lower().split())
+                if normalized == "pragma journal_mode=wal":
+                    attempts["wal"] += 1
+                    raise sqlite3.OperationalError("disk I/O error")
+                if normalized == "pragma journal_mode=delete":
+                    attempts["delete"] += 1
+                return self._conn.execute(sql, *args, **kwargs)
+
+            def __getattr__(self, name):
+                return getattr(self._conn, name)
+
+            def __setattr__(self, name, value):
+                setattr(self._conn, name, value)
+
+        monkeypatch.setattr(
+            db_manager.sqlite3,
+            "connect",
+            lambda *args, **kwargs: ConnectionProxy(real_connect(*args, **kwargs)),
+        )
+
+        conn = db_manager.open_project_db(tmp_project, create=True)
+
+        assert conn is not None
+        assert attempts == {"wal": 1, "delete": 1}
+
     def test_busy_timeout_set(self, tmp_project):
         conn = db_manager.open_project_db(tmp_project, create=True)
         row = conn.execute("PRAGMA busy_timeout").fetchone()

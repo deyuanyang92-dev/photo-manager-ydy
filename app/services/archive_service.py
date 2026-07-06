@@ -8,10 +8,8 @@ Safety invariants (hard rules — must never be violated):
        a. ZIP file exists and size > 32 bytes.
        b. ZIP integrity check passes.
        c. each archived JPG matches original name/size/SHA-256.
-  4. When cjxl/djxl are available, new archives use internal JXL lossless-JPEG
-     transcode for higher compression. The software restores/presents JPGs.
-     If the JXL bridge is unavailable or fails verification, fallback is exact
-     plain-JPG ZIP.
+  4. Standard archives store exact JPG bytes in a normal ZIP for speed. Optional
+     high-compression mode may use internal JXL lossless-JPEG transcode.
 
 ZipResult fields mirror archive.js archiveJpgGroup return value.
 """
@@ -34,8 +32,10 @@ from typing import Callable, Optional
 # ── JXL bridge compatibility knobs ───────────────────────────────────────────
 
 EFFORT_MAP = {
-    "standard": {"jxl": 7},
-    "maximum":  {"jxl": 9},
+    # Daily organise must be fast: JPG is already compressed, so the standard
+    # archive stores exact JPG bytes in a normal ZIP and verifies before delete.
+    "standard": {"jxl": None},
+    "maximum": {"jxl": 9},
 }
 
 
@@ -53,10 +53,16 @@ def _sha256_file(path: str) -> str:
     return digest.hexdigest()
 
 
-def _measure_jpg_for_archive(path: str) -> tuple[int, str, int]:
+def _measure_jpg_for_archive(path: str, *, adaptive: bool = False) -> tuple[int, str, int]:
     """Return size, SHA-256, and the best ZIP method for one JPG."""
     original_size = os.path.getsize(path)
     digest = hashlib.sha256()
+    if not adaptive:
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return original_size, digest.hexdigest(), zipfile.ZIP_STORED
+
     compressor = zlib.compressobj(level=9, wbits=-15)
     compressed_size = 0
     with open(path, "rb") as fh:
@@ -125,7 +131,9 @@ def _archive_group_as_jxl_zip(
     tiff_basename: str,
     *,
     delete_jpg: bool,
+    effort: int = 9,
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
+    cancel_callback: Optional[Callable[[], bool]] = None,
 ) -> ZipResult:
     """Archive JPGs as internal JXL, with software restore back to JPG."""
     os.makedirs(str(Path(zip_path).parent), exist_ok=True)
@@ -137,12 +145,14 @@ def _archive_group_as_jxl_zip(
     total_files = len(jpg_paths)
     try:
         for index, jpg_path in enumerate(jpg_paths, start=1):
+            _raise_if_cancelled(cancel_callback)
             original_name = os.path.basename(jpg_path)
             archive_name = _reserve_unique_archive_name(original_name, used_names, suffix=".jxl")
             original_size = os.path.getsize(jpg_path)
             original_sha256 = _sha256_file(jpg_path)
             jxl_path = os.path.join(temp_dir, archive_name)
-            compress_to_jxl(jpg_path, jxl_path, effort=9)
+            compress_to_jxl(jpg_path, jxl_path, effort=effort)
+            _raise_if_cancelled(cancel_callback)
             compressed_size = os.path.getsize(jxl_path)
             manifest_files.append({
                 "originalName": original_name,
@@ -164,6 +174,7 @@ def _archive_group_as_jxl_zip(
             "tiffBasename": tiff_basename,
             "format": "jxl-zip",
             "method": "jpeg-xl-lossless-transcode",
+            "jxlEffort": effort,
             "files": [
                 {k: v for k, v in f.items() if k != "jxlPath"}
                 for f in manifest_files
@@ -173,6 +184,7 @@ def _archive_group_as_jxl_zip(
         }
 
         with zipfile.ZipFile(zip_path, "w") as zf:
+            _raise_if_cancelled(cancel_callback)
             zf.writestr(
                 "manifest.json",
                 json.dumps(manifest, ensure_ascii=False, indent=2),
@@ -180,6 +192,7 @@ def _archive_group_as_jxl_zip(
                 compresslevel=9,
             )
             for f in manifest_files:
+                _raise_if_cancelled(cancel_callback)
                 zf.write(
                     f["jxlPath"],
                     f["archiveName"],
@@ -197,6 +210,7 @@ def _archive_group_as_jxl_zip(
         actual_delete = bool(delete_jpg)
         deletion_skipped_reason = ""
         if actual_delete:
+            _raise_if_cancelled(cancel_callback)
             for p in jpg_paths:
                 os.unlink(p)
 
@@ -387,9 +401,6 @@ def verify_jpg_zip_complete(
 
     try:
         with zipfile.ZipFile(zip_path, "r") as zf:
-            bad = zf.testzip()
-            if bad:
-                return CheckResult(ok=False, reason=f"ZIP 内部文件损坏: {bad}")
             names = zf.namelist()
             if len(names) != len(manifest_files):
                 return CheckResult(ok=False, reason="ZIP 文件数量不一致")
@@ -408,7 +419,7 @@ def verify_jpg_zip_complete(
                         digest.update(chunk)
                 if digest.hexdigest() != f["originalSha256"]:
                     return CheckResult(ok=False, reason="ZIP 内 JPG 哈希不一致：" + archive_name)
-    except (OSError, zipfile.BadZipFile) as exc:
+    except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
         return CheckResult(ok=False, reason=f"ZIP 校验失败：{exc}")
 
     return CheckResult(ok=True)
@@ -431,6 +442,61 @@ class ZipResult:
     ok: bool = True
 
 
+class ArchiveCancelled(RuntimeError):
+    """Raised when the user cancels an in-progress archive before deletion."""
+
+
+def _raise_if_cancelled(cancel_callback: Optional[Callable[[], bool]] = None) -> None:
+    if cancel_callback is not None and bool(cancel_callback()):
+        raise ArchiveCancelled("用户取消")
+
+
+def commit_jpg_deletion_after_archive(
+    result: ZipResult,
+    jpg_paths: list[str],
+    *,
+    cancel_callback: Optional[Callable[[], bool]] = None,
+) -> ZipResult:
+    """Delete loose JPGs only after archive ZIP is verified and DB state is saved.
+
+    Modern two-phase archive: build ZIP first, persist workflow state, then delete
+    originals only when every safety gate still passes.
+    """
+    from dataclasses import replace
+
+    if result.delete_jpg or not jpg_paths:
+        return result
+
+    manifest = dict(result.manifest or {})
+    manifest_files = list(manifest.get("files") or [])
+    fmt = str(manifest.get("format") or "")
+
+    if fmt == "jxl-zip":
+        zip_check = _verify_jxl_zip_complete(result.zip_path, manifest_files)
+    else:
+        zip_check = verify_jpg_zip_complete(result.zip_path, manifest_files)
+
+    if not zip_check.ok:
+        return replace(
+            result,
+            delete_jpg=False,
+            requested_delete_jpg=True,
+            deletion_skipped_reason=zip_check.reason or "删除前校验失败，已保留 JPG",
+        )
+
+    _raise_if_cancelled(cancel_callback)
+    for path in jpg_paths:
+        if os.path.isfile(path):
+            os.unlink(path)
+
+    return replace(
+        result,
+        delete_jpg=True,
+        requested_delete_jpg=True,
+        deletion_skipped_reason="",
+    )
+
+
 # ── archive_group ─────────────────────────────────────────────────────────────
 
 def archive_group(
@@ -441,6 +507,7 @@ def archive_group(
     method: str = "standard",
     concurrency: int = 4,
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
+    cancel_callback: Optional[Callable[[], bool]] = None,
     output_dir: Optional[str] = None,
 ) -> ZipResult:
     """Archive original JPGs, verify, maybe delete loose JPGs.
@@ -449,9 +516,9 @@ def archive_group(
       - Archive/organise never auto-deletes TIFF.
       - delete_jpg defaults to True, but verification failure always keeps JPGs.
       - Deletion only happens after ZIP integrity + per-file SHA-256 checks pass.
-      - With cjxl/djxl, ZIP may contain internal JXL to improve compression.
-        Software restore/presentation always converts back to original JPG.
-      - Without working JXL tools, fallback ZIP stores exact JPGs directly.
+      - Standard mode stores exact JPGs directly for speed.
+      - Optional high-compression mode may use internal JXL; restore converts
+        back to original JPG bytes.
 
     Oracle: archive.js:67-190.
 
@@ -460,7 +527,9 @@ def archive_group(
         tiff_path:   Path to the composed TIFF (used for naming; not deleted by archive).
         project_dir: Project root (ZIP placed in results/ subdir or same dir as TIFF).
         delete_jpg:  If True, delete JPGs after all safety checks pass.
-        method:      Legacy compatibility argument; ignored for new plain-JPG ZIPs.
+        method:      "standard" stores JPGs directly; "maximum" enables JXL
+                     high-compression when tools are available; "adaptive"
+                     keeps the legacy per-file ZIP deflate decision.
         output_dir:  Optional explicit ZIP directory.  With an open project,
                      callers pass project results/ so archives never land in
                      the source photo folder.
@@ -477,16 +546,26 @@ def archive_group(
     tiff_basename = Path(tiff_path).stem
     zip_dir = str(Path(output_dir) if output_dir else Path(tiff_path).parent)
     zip_path = os.path.join(zip_dir, tiff_basename + ".zip")
+    _raise_if_cancelled(cancel_callback)
 
-    if has_cjxl() and has_djxl():
+    method_key = str(method or "standard").strip().lower()
+    use_jxl = method_key in {"maximum", "jxl", "jpeg-xl", "high", "high-compression"}
+    adaptive_zip = method_key in {"adaptive", "legacy-adaptive", "compat"}
+
+    if use_jxl and has_cjxl() and has_djxl():
         try:
+            effort = int(EFFORT_MAP.get("maximum", {"jxl": 9}).get("jxl") or 9)
             return _archive_group_as_jxl_zip(
                 jpg_paths,
                 zip_path,
                 tiff_basename,
                 delete_jpg=delete_jpg,
+                effort=effort,
                 progress_callback=progress_callback,
+                cancel_callback=cancel_callback,
             )
+        except ArchiveCancelled:
+            raise
         except Exception:
             # If the high-compression transcode fails on a malformed/unsupported
             # JPG, keep the workflow usable and fall back to exact plain JPG ZIP.
@@ -511,9 +590,21 @@ def archive_group(
 
     total_files = len(jpg_paths)
     for index, jpg_path in enumerate(jpg_paths, start=1):
+        _raise_if_cancelled(cancel_callback)
         original_name = os.path.basename(jpg_path)
         archive_name = _unique_archive_name(original_name)
-        original_size, original_sha256, zip_method = _measure_jpg_for_archive(jpg_path)
+        if adaptive_zip:
+            original_size, original_sha256, zip_method = _measure_jpg_for_archive(
+                jpg_path,
+                adaptive=True,
+            )
+            mtime_ns = getattr(os.stat(jpg_path), "st_mtime_ns", 0)
+        else:
+            stat = os.stat(jpg_path)
+            original_size = stat.st_size
+            original_sha256 = ""
+            zip_method = zipfile.ZIP_STORED
+            mtime_ns = getattr(stat, "st_mtime_ns", 0)
         manifest_files.append({
             "originalName": original_name,
             "archiveName": archive_name,
@@ -524,9 +615,10 @@ def archive_group(
                 "deflate9" if zip_method == zipfile.ZIP_DEFLATED else "store"
             ),
             "_zipMethod": zip_method,
+            "_mtimeNs": mtime_ns,
         })
         total_original += original_size
-        if progress_callback is not None:
+        if adaptive_zip and progress_callback is not None:
             progress_callback(index, total_files, original_name)
 
     manifest = {
@@ -534,7 +626,7 @@ def archive_group(
         "createdAt": _utc_now_iso(),
         "tiffBasename": tiff_basename,
         "format": "jpg-zip",
-        "method": "adaptive-plain-jpg-zip",
+        "method": "adaptive-plain-jpg-zip" if adaptive_zip else "fast-plain-jpg-zip",
         "files": [],
         "totalOriginal": total_original,
         "totalCompressed": 0,
@@ -542,23 +634,40 @@ def archive_group(
 
     os.makedirs(zip_dir, exist_ok=True)
     with zipfile.ZipFile(zip_path, "w") as zf:
-        for jpg_path, f in zip(jpg_paths, manifest_files):
+        for index, (jpg_path, f) in enumerate(zip(jpg_paths, manifest_files), start=1):
+            _raise_if_cancelled(cancel_callback)
             zip_method = int(f["_zipMethod"])
-            zf.write(
-                jpg_path,
-                f["archiveName"],
-                compress_type=zip_method,
-                compresslevel=9 if zip_method == zipfile.ZIP_DEFLATED else None,
-            )
+            if adaptive_zip:
+                zf.write(
+                    jpg_path,
+                    f["archiveName"],
+                    compress_type=zip_method,
+                    compresslevel=9 if zip_method == zipfile.ZIP_DEFLATED else None,
+                )
+            else:
+                digest = hashlib.sha256()
+                written = 0
+                with open(jpg_path, "rb") as src:
+                    with zf.open(f["archiveName"], "w", force_zip64=True) as dst:
+                        for chunk in iter(lambda: src.read(1024 * 1024), b""):
+                            _raise_if_cancelled(cancel_callback)
+                            digest.update(chunk)
+                            written += len(chunk)
+                            dst.write(chunk)
+                if written != f["originalSize"]:
+                    raise RuntimeError("JPG 归档过程中大小发生变化：" + f["originalName"])
+                after_stat = os.stat(jpg_path)
+                if getattr(after_stat, "st_mtime_ns", 0) != f.get("_mtimeNs"):
+                    raise RuntimeError("JPG 归档过程中被修改：" + f["originalName"])
+                f["originalSha256"] = digest.hexdigest()
+            if progress_callback is not None:
+                progress_callback(index, total_files, f["originalName"])
 
     zip_size = os.path.getsize(zip_path)
     if zip_size < 32:
         raise RuntimeError("ZIP 生成失败或体积异常")
 
     with zipfile.ZipFile(zip_path, "r") as zf:
-        bad = zf.testzip()
-        if bad:
-            raise RuntimeError(f"ZIP 内部文件损坏: {bad}")
         total_compressed = 0
         for f in manifest_files:
             compressed_size = zf.getinfo(f["archiveName"]).compress_size
@@ -581,6 +690,9 @@ def archive_group(
     deletion_skipped_reason = ""
 
     if delete_jpg:
+        _raise_if_cancelled(cancel_callback)
+        if progress_callback is not None:
+            progress_callback(total_files, total_files, "__verify_zip__")
         zip_check = verify_jpg_zip_complete(zip_path, manifest_files)
         if zip_check.ok:
             actual_delete = True
@@ -588,6 +700,7 @@ def archive_group(
             deletion_skipped_reason = zip_check.reason or "删除前校验失败，已保留 JPG"
 
     if actual_delete:
+        _raise_if_cancelled(cancel_callback)
         for p in jpg_paths:
             os.unlink(p)
 
@@ -753,5 +866,136 @@ def restore_archive(
             ok=(len(failures) == 0),
         )
 
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def restore_archive_to_original_paths(
+    zip_path: str,
+    original_paths: list[str],
+    overwrite: bool = False,
+) -> RestoreResult:
+    """Restore archived JPGs back to their original paths.
+
+    This is the rollback path for "undo organise": it reads the verified ZIP,
+    writes JPGs back to the paths still recorded on the group, and deletes
+    nothing. Existing files are skipped unless overwrite=True.
+    """
+    if not os.path.isfile(zip_path):
+        raise FileNotFoundError(f"归档文件不存在: {zip_path}")
+    targets = [str(p) for p in original_paths if str(p or "").strip()]
+    if not targets:
+        return RestoreResult(
+            output_dir="",
+            ok=False,
+            reason="没有可恢复的 JPG 原路径",
+            failures=["没有可恢复的 JPG 原路径"],
+        )
+
+    temp_dir = tempfile.mkdtemp(prefix="specimen-restore-original-")
+    restored: list[str] = []
+    skipped: list[str] = []
+    failures: list[str] = []
+    output_dir = str(Path(targets[0]).parent) if targets else ""
+
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            names = [n for n in zf.namelist() if n != "manifest.json"]
+            zf.extractall(temp_dir)
+
+        manifest_path = os.path.join(temp_dir, "manifest.json")
+        entries: list[tuple[str, Optional[int], Optional[str]]] = []
+        if os.path.isfile(manifest_path):
+            with open(manifest_path, "r", encoding="utf-8") as fh:
+                manifest = json.load(fh)
+            entries = [
+                (
+                    f["archiveName"],
+                    f.get("originalSize"),
+                    f.get("originalSha256"),
+                )
+                for f in manifest.get("files", [])
+            ]
+        else:
+            entries = [(name, None, None) for name in names]
+
+        if len(entries) != len(targets):
+            return RestoreResult(
+                output_dir=output_dir,
+                restored=restored,
+                skipped=skipped,
+                failures=[
+                    f"ZIP 内 JPG 数量与分组记录不一致（{len(entries)}≠{len(targets)}）"
+                ],
+                count=0,
+                ok=False,
+                reason="ZIP 内 JPG 数量与分组记录不一致",
+            )
+
+        needs_djxl = any(name.lower().endswith(".jxl") for name, _, _ in entries)
+        if needs_djxl and not has_djxl():
+            return RestoreResult(
+                output_dir=output_dir,
+                ok=False,
+                reason="缺少 djxl 解码工具，无法还原 JXL，未输出任何文件",
+                failures=["缺少 djxl 解码工具"],
+            )
+
+        for (archive_name, original_size, original_sha256), dst in zip(entries, targets):
+            src = os.path.join(temp_dir, archive_name)
+            if not os.path.isfile(src):
+                failures.append(f"{archive_name}：归档内缺失")
+                continue
+            if os.path.isfile(dst) and not overwrite:
+                skipped.append(dst)
+                continue
+
+            os.makedirs(str(Path(dst).parent), exist_ok=True)
+            try:
+                if archive_name.lower().endswith(".jxl"):
+                    subprocess.run(
+                        ["djxl", src, dst],
+                        check=True,
+                        capture_output=True,
+                        timeout=120,
+                    )
+                else:
+                    shutil.copy2(src, dst)
+
+                if not os.path.isfile(dst) or os.path.getsize(dst) <= 0:
+                    failures.append(f"{Path(dst).name}：还原输出异常")
+                    if os.path.isfile(dst):
+                        os.unlink(dst)
+                    continue
+                if original_size is not None and os.path.getsize(dst) != original_size:
+                    failures.append(
+                        f"{Path(dst).name}：大小与清单不一致"
+                        f"（{os.path.getsize(dst)}≠{original_size}）"
+                    )
+                    os.unlink(dst)
+                    continue
+                if original_sha256 and _sha256_file(dst) != original_sha256:
+                    failures.append(f"{Path(dst).name}：SHA-256 与清单不一致")
+                    os.unlink(dst)
+                    continue
+                restored.append(dst)
+            except Exception as exc:  # noqa: BLE001
+                failures.append(f"{Path(dst).name}：{exc}")
+                if os.path.isfile(dst):
+                    try:
+                        os.unlink(dst)
+                    except OSError:
+                        pass
+
+        complete = len(restored) + len(skipped) == len(targets)
+        return RestoreResult(
+            output_dir=output_dir,
+            restored=restored,
+            skipped=skipped,
+            failures=failures,
+            count=len(restored),
+            ok=complete and not failures,
+            reason="" if complete and not failures else "部分 JPG 未能恢复",
+        )
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
