@@ -645,9 +645,9 @@ QListWidget#GroupDropZone {
 QLabel#GroupChip0, QLabel#GroupChip1, QLabel#GroupChip2, QLabel#GroupChip3 {
     border-radius: 999px;
     font-size: 11px;
-    font-weight: 600;
+    font-weight: 500;
     padding: 2px 10px;
-    letter-spacing: 0.2px;
+    letter-spacing: 0;
 }
 QLabel#GroupChip0 { background-color: rgba(37,99,235,0.10); color: #2563eb; }
 QLabel#GroupChip1 { background-color: rgba(21,128,61,0.11); color: #15803d; }
