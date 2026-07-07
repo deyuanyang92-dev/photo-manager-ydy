@@ -808,7 +808,7 @@ class MainWindow(QMainWindow):
                 return
         self.statusBar().showMessage(tr("未找到页面: {}").format(view_id), 4000)
 
-    def _activate_index(self, idx: int) -> None:
+    def _activate_index(self, idx: int, *, persist: bool = True) -> None:
         if idx < 0 or idx >= len(self._view_classes):
             return
         btn = self._nav_buttons[idx]
@@ -825,7 +825,8 @@ class MainWindow(QMainWindow):
             if view:
                 self._stack.setCurrentWidget(view)
                 view.on_activate()
-        self.ctx.settings.last_nav_index = idx
+        if persist:
+            self.ctx.settings.last_nav_index = idx
         self.refresh_context_bar()
         self.statusBar().showMessage(tr("已打开: {}").format(tr(self._view_ref_title(view_cls))), 1800)
 
@@ -915,11 +916,11 @@ class MainWindow(QMainWindow):
         from app.views.project_dialog import ProjectDialog
         from app.services.project_service import (
             default_user_projects_json_path,
+            load_user_projects,
             save_project_descriptor,
         )
-        from app.views.overview_view import _load_projects
 
-        existing = _load_projects()
+        existing = load_user_projects()
         team_projects: list[dict] = []
         svc = getattr(self.ctx, "collab_service", None)
         if mode == "new" and svc is not None and getattr(svc, "group_code", ""):
@@ -1126,19 +1127,26 @@ class MainWindow(QMainWindow):
 
     # ── Persistence ───────────────────────────────────────────────────────
 
-    def restore_state(self) -> None:
-        """Restore window geometry and last nav selection from QSettings."""
+    def restore_state(self, *, activate_last_view: bool = True) -> None:
+        """Restore window geometry and a startup page from QSettings.
+
+        Startup uses ``activate_last_view=False`` so a previous heavy page
+        (collab/project tree/map) cannot block the first window paint.
+        """
         geom = self.ctx.settings.restore_geometry()
         if geom:
             self.restoreGeometry(geom)
         state = self.ctx.settings.restore_window_state()
         if state:
             self.restoreState(state)
-        last_idx = self.ctx.settings.last_nav_index
-        if 0 <= last_idx < len(self._view_classes):
-            self._activate_index(last_idx)
-        elif self._view_classes:
-            self._activate_index(0)
+        if not self._view_classes:
+            return
+        if activate_last_view:
+            last_idx = self.ctx.settings.last_nav_index
+            if 0 <= last_idx < len(self._view_classes):
+                self._activate_index(last_idx)
+                return
+        self._activate_index(0, persist=False)
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self.ctx.settings.save_geometry(self.saveGeometry())

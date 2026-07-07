@@ -42,17 +42,11 @@ detection, task state-machine, sync merge) run offline with mocks.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
-import os
 import socket
 import threading
 import time
-import uuid
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -63,825 +57,48 @@ from app.models.activity_log import ActivityEntry, ActivityLog
 logger = logging.getLogger(__name__)
 
 
-# ── Module-level helpers (defined early — used in dataclass field defaults) ───
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _get_local_ip() -> str:
-    """Best-effort LAN IP (not loopback).  Falls back to 127.0.0.1."""
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
-    except OSError:
-        return "127.0.0.1"
-
-
-# ── Task state machine ────────────────────────────────────────────────────────
-
-class TaskStatus(str, Enum):
-    """Collab task states (mirrors server.js COLLAB_STATUSES)."""
-    CREATED    = "created"
-    ASSIGNED   = "assigned"
-    SHOOTING   = "shooting"
-    SHOT_DONE  = "shot_done"
-    ORGANIZING = "organizing"
-    DONE       = "done"
-    VOID       = "void"
-    CONFLICT   = "conflict"
-
-
-_VALID_TRANSITIONS: dict[TaskStatus, set[TaskStatus]] = {
-    TaskStatus.CREATED:    {TaskStatus.ASSIGNED, TaskStatus.SHOOTING, TaskStatus.VOID, TaskStatus.CONFLICT},
-    TaskStatus.ASSIGNED:   {TaskStatus.SHOOTING, TaskStatus.VOID, TaskStatus.CONFLICT},
-    TaskStatus.SHOOTING:   {TaskStatus.SHOT_DONE, TaskStatus.VOID, TaskStatus.CONFLICT},
-    TaskStatus.SHOT_DONE:  {TaskStatus.ORGANIZING, TaskStatus.VOID, TaskStatus.CONFLICT},
-    TaskStatus.ORGANIZING: {TaskStatus.DONE, TaskStatus.VOID, TaskStatus.CONFLICT},
-    TaskStatus.DONE:       {TaskStatus.VOID},
-    TaskStatus.VOID:       set(),
-    TaskStatus.CONFLICT:   {TaskStatus.CREATED, TaskStatus.VOID},
-}
-
-
-def is_valid_transition(from_status: TaskStatus, to_status: TaskStatus) -> bool:
-    """Return True if the state transition is allowed."""
-    return to_status in _VALID_TRANSITIONS.get(from_status, set())
-
-
-# ── Data structures ───────────────────────────────────────────────────────────
-
-@dataclass
-class TaskRecord:
-    """Minimal task record synced across peers."""
-    uid: str
-    status: TaskStatus = TaskStatus.CREATED
-    assignee: Optional[str] = None          # operator name
-    device_id: Optional[str] = None
-    project_name: Optional[str] = None
-    created_at: str = field(default_factory=lambda: _now_iso())
-    updated_at: str = field(default_factory=lambda: _now_iso())
-
-    def to_dict(self) -> dict:
-        return {
-            "uid":         self.uid,
-            "status":      self.status.value,
-            "assignee":    self.assignee,
-            "deviceId":    self.device_id,
-            "projectName": self.project_name,
-            "createdAt":   self.created_at,
-            "updatedAt":   self.updated_at,
-        }
-
-    @staticmethod
-    def from_dict(d: dict) -> "TaskRecord":
-        return TaskRecord(
-            uid=d["uid"],
-            status=TaskStatus(d.get("status", "created")),
-            assignee=d.get("assignee"),
-            device_id=d.get("deviceId"),
-            project_name=d.get("projectName"),
-            created_at=d.get("createdAt", _now_iso()),
-            updated_at=d.get("updatedAt", _now_iso()),
-        )
-
-
-@dataclass
-class PeerInfo:
-    """Discovered or manually added LAN peer."""
-    ip: str
-    port: int
-    hostname: str = ""
-    project_name: str = ""
-    project_id: str = ""
-    group_code: str = ""          # session code; only matching peers sync
-    session_name: str = ""        # human-readable session label, e.g. "张三的会话"
-    last_seen: float = field(default_factory=time.time)
-    latency_ms: Optional[float] = None
-    clock_skew_ms: Optional[float] = None   # local_time - peer serverTime (ms)
-    reachable: Optional[bool] = None        # can I reach this peer?
-    reachback_ok: Optional[bool] = None     # can this peer reach me back?
-    manual: bool = False          # True = added via manual IP, not mDNS
-
-    @property
-    def base_url(self) -> str:
-        return f"http://{self.ip}:{self.port}"
-
-
-# ── Self-diagnostics ──────────────────────────────────────────────────────────
-
-@dataclass
-class Diagnostic:
-    """One collaboration health finding, novice-readable (Chinese)."""
-    code: str                       # machine key, e.g. "deps_missing"
-    level: str                      # "ok" | "warn" | "error"
-    title: str                      # short Chinese title
-    detail: str = ""                # what / why
-    fix: str = ""                   # how to fix (plain Chinese)
-    action: Optional[str] = None    # optional one-click action key
-
-
-def _missing_deps() -> list[str]:
-    """Return the collaboration packages that are not importable."""
-    import importlib.util
-    need = ["fastapi", "uvicorn", "zeroconf", "httpx"]
-    return [n for n in need if importlib.util.find_spec(n) is None]
-
-
-# ── In-memory task store (single project scope) ───────────────────────────────
-
-class TaskStore:
-    """Thread-safe in-memory store for collab tasks.
-
-    Used both by the FastAPI server (background thread) and the Qt UI (main
-    thread).  All mutations are protected by a threading.Lock.
-    """
-
-    def __init__(self) -> None:
-        self._tasks: dict[str, TaskRecord] = {}
-        self._lock = threading.Lock()
-
-    # ── Queries ───────────────────────────────────────────────────────────
-
-    def list_tasks(self) -> list[TaskRecord]:
-        with self._lock:
-            return list(self._tasks.values())
-
-    def get_task(self, uid: str) -> Optional[TaskRecord]:
-        with self._lock:
-            return self._tasks.get(uid)
-
-    def exists(self, uid: str) -> bool:
-        with self._lock:
-            return uid in self._tasks
-
-    # ── Mutations ─────────────────────────────────────────────────────────
-
-    def create(self, uid: str, assignee: Optional[str] = None,
-               device_id: Optional[str] = None,
-               project_name: Optional[str] = None) -> TaskRecord:
-        """Create task.  Raises ValueError if UID already exists (local 409).
-
-        Callers broadcasting to remote peers must also check each peer.
-        """
-        with self._lock:
-            if uid in self._tasks:
-                raise ValueError(f"409: UID '{uid}' already exists locally")
-            task = TaskRecord(
-                uid=uid,
-                assignee=assignee,
-                device_id=device_id,
-                project_name=project_name,
-            )
-            self._tasks[uid] = task
-            return task
-
-    def update_status(self, uid: str, to_status: TaskStatus,
-                      assignee: Optional[str] = None,
-                      force: bool = False) -> TaskRecord:
-        """Update task status.  Raises ValueError on invalid transition or unknown UID.
-
-        ``force=True`` bypasses the state machine — for explicit human marking
-        (sidebar phase dots / batch-bar pills), which mirrors the web oracle's
-        free assignment (app.js:3303).  Programmatic/auto callers keep the
-        default strict transition checking.
-        """
-        with self._lock:
-            task = self._tasks.get(uid)
-            if task is None:
-                raise ValueError(f"Unknown UID: {uid}")
-            if not force and not is_valid_transition(task.status, to_status):
-                raise ValueError(
-                    f"Invalid transition: {task.status} → {to_status}"
-                )
-            task.status = to_status
-            if assignee is not None:
-                task.assignee = assignee
-            task.updated_at = _now_iso()
-            return task
-
-    def merge_from_peer(self, remote_tasks: list[dict],
-                        overwrites_out: list | None = None) -> int:
-        """Merge peer task list; newer updated_at wins.  Returns changed count.
-
-        If *overwrites_out* is supplied, dicts describing each case where a
-        local task's status was silently replaced by a remote value are
-        appended: ``{"uid": ..., "old_status": ..., "new_status": ...}``.
-        """
-        changed = 0
-        with self._lock:
-            for rd in remote_tasks:
-                uid = rd.get("uid")
-                if not uid:
-                    continue
-                remote = TaskRecord.from_dict(rd)
-                local = self._tasks.get(uid)
-                if local is None or remote.updated_at > local.updated_at:
-                    if (
-                        overwrites_out is not None
-                        and local is not None
-                        and local.status != remote.status
-                    ):
-                        overwrites_out.append({
-                            "uid": uid,
-                            "old_status": local.status.value,
-                            "new_status": remote.status.value,
-                        })
-                    self._tasks[uid] = remote
-                    changed += 1
-        return changed
-
-    def delete(self, uid: str) -> None:
-        """Remove a task entirely so its UID becomes reclaimable.  Idempotent."""
-        with self._lock:
-            self._tasks.pop(uid, None)
-
-    def replace_all(self, tasks: list[TaskRecord]) -> None:
-        """Overwrite store (used in tests or full-sync scenarios)."""
-        with self._lock:
-            self._tasks = {t.uid: t for t in tasks}
-
-    def clear(self) -> None:
-        with self._lock:
-            self._tasks.clear()
-
-
-# ── FastAPI application ───────────────────────────────────────────────────────
-
-def _build_fastapi_app(store: TaskStore, node_info_fn: Callable[[], dict],
-                       activity_log: Optional[ActivityLog] = None,
-                       file_manifest_fn: Optional[Callable[[Optional[list[str]]], dict]] = None,
-                       file_path_fn: Optional[Callable[[str], Path]] = None,
-                       pairing_request_fn: Optional[Callable[[str, str, str], None]] = None,
-                       pairing_accept_fn: Optional[Callable[[str, str], None]] = None,
-                       specimen_provider_fn: Optional[Callable[[Optional[str]], list]] = None,
-                       specimen_writer_fn: Optional[Callable[[list], int]] = None) -> Any:
-    """Build and return the FastAPI app.  Imported lazily to avoid startup cost.
-
-    The fastapi names are bound into module globals (``global`` below) so that
-    the nested endpoint functions' ``request: Request`` annotations resolve via
-    ``typing.get_type_hints`` (which reads the function's ``__globals__``).
-    A purely function-local import leaves them unresolvable and FastAPI then
-    mis-reads ``request`` as a query parameter → every POST 422s.
-    """
-    global FastAPI, HTTPException, Request, JSONResponse, FileResponse
-    try:
-        from fastapi import FastAPI, HTTPException, Request
-        from fastapi.responses import FileResponse, JSONResponse
-    except ImportError as exc:
-        raise ImportError("fastapi is required for CollabService") from exc
-
-    app = FastAPI(title="Specimen Collab Node", version="1.0.0")
-
-    @app.get("/api/node/health")
-    async def health() -> dict:
-        return {"ok": True}
-
-    @app.get("/api/node/info")
-    async def node_info() -> dict:
-        return node_info_fn()
-
-    @app.get("/api/collab/tasks")
-    async def list_tasks() -> list:
-        return [t.to_dict() for t in store.list_tasks()]
-
-    @app.post("/api/collab/tasks/create")
-    async def create_task(request: Request) -> JSONResponse:
-        body = await request.json()
-        uid = body.get("uid")
-        if not uid:
-            raise HTTPException(status_code=400, detail="uid required")
-        # Group guard: only accept claims from our own collaboration group.
-        # Empty local group = not participating → reject everyone.
-        local_group = node_info_fn().get("groupCode", "")
-        if not local_group or body.get("groupCode", "") != local_group:
-            raise HTTPException(status_code=403, detail="collaboration group mismatch")
-        try:
-            task = store.create(
-                uid=uid,
-                assignee=body.get("assignee"),
-                device_id=body.get("deviceId"),
-                project_name=body.get("projectName"),
-            )
-        except ValueError as exc:
-            # Local 409 — UID exists on this node
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        return JSONResponse(content=task.to_dict(), status_code=201)
-
-    @app.post("/api/collab/tasks/update-status")
-    async def update_task_status(request: Request) -> dict:
-        body = await request.json()
-        uid = body.get("uid")
-        status_raw = body.get("status")
-        if not uid or not status_raw:
-            raise HTTPException(status_code=400, detail="uid and status required")
-        local_group = node_info_fn().get("groupCode", "")
-        if not local_group or body.get("groupCode", "") != local_group:
-            raise HTTPException(status_code=403, detail="collaboration group mismatch")
-        try:
-            to_status = TaskStatus(status_raw)
-            task = store.update_status(uid, to_status, assignee=body.get("assignee"))
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        return task.to_dict()
-
-    @app.post("/api/node/reachback")
-    async def reachback(request: Request) -> dict:
-        """Test whether the *caller* is reachable from this node's side.
-
-        The caller passes its own {ip, port}; we try to GET its /api/node/health
-        and report back.  Lets a peer detect a one-way firewall block (it can
-        reach us, but we cannot reach it).
-        """
-        body = await request.json()
-        ip = body.get("ip")
-        port = body.get("port")
-        if not ip or not port:
-            raise HTTPException(status_code=400, detail="ip and port required")
-        reachable = False
-        try:
-            import httpx
-            r = httpx.get(f"http://{ip}:{port}/api/node/health", timeout=3.0)
-            reachable = r.status_code == 200
-        except Exception:  # noqa: BLE001
-            reachable = False
-        return {"reachable": reachable}
-
-    @app.post("/api/collab/tasks/release")
-    async def release_task(request: Request) -> dict:
-        """Release (delete) a UID claim so it becomes reclaimable by anyone."""
-        body = await request.json()
-        uid = body.get("uid")
-        if not uid:
-            raise HTTPException(status_code=400, detail="uid required")
-        local_group = node_info_fn().get("groupCode", "")
-        if not local_group or body.get("groupCode", "") != local_group:
-            raise HTTPException(status_code=403, detail="collaboration group mismatch")
-        store.delete(uid)
-        return {"ok": True, "uid": uid}
-
-    # ── Pairing (zero-config peer connection) ────────────────────────────────
-
-    @app.post("/api/collab/pairing/request")
-    async def pairing_request(request: Request) -> dict:
-        """Incoming pairing request from another device.
-
-        Body: {fromIp, fromHostname, groupCode}
-        The receiving app shows a confirmation dialog; if accepted the devices
-        adopt a shared group code and begin syncing.
-        """
-        body = await request.json()
-        from_ip = body.get("fromIp", "")
-        from_hostname = body.get("fromHostname", "未知设备")
-        their_code = body.get("groupCode", "")
-        if pairing_request_fn is not None:
-            pairing_request_fn(from_ip, from_hostname, their_code)
-        return {"ok": True, "status": "pending"}
-
-    @app.post("/api/collab/pairing/accept")
-    async def pairing_accept(request: Request) -> dict:
-        """Notification that the remote device has accepted our pairing request."""
-        body = await request.json()
-        from_ip = body.get("fromIp", "")
-        from_hostname = body.get("fromHostname", "未知设备")
-        adopted_code = body.get("groupCode", "")
-        if adopted_code:
-            node_info_fn()  # ensure state is current
-        if pairing_accept_fn is not None:
-            pairing_accept_fn(from_ip, from_hostname)
-        return {"ok": True, "groupCode": adopted_code}
-
-    @app.post("/api/collab/photo-index")
-    async def receive_photo_index(request: Request) -> dict:
-        """Receive photo-index report from a peer after helicon/archive completion.
-
-        Mirrors web collabPostPhotoIndex — peers call this to inform us that
-        their specimen has jpg/tiff/zip files ready.  We acknowledge and let
-        the UI subscribe to signals for richer handling.
-        """
-        body = await request.json()
-        local_group = node_info_fn().get("groupCode", "")
-        if not local_group or body.get("groupCode", "") != local_group:
-            raise HTTPException(status_code=403, detail="collaboration group mismatch")
-        uid = body.get("uid", "")
-        kind = body.get("kind", "")
-        count = int(body.get("count", 0))
-        logger.debug("collab: photo-index received uid=%s kind=%s count=%d",
-                     uid, kind, count)
-        return {"ok": True, "uid": uid, "kind": kind, "count": count}
-
-    @app.get("/api/collab/files/manifest")
-    async def file_manifest(groupCode: str = "", projectId: str = "", uids: str = "") -> dict:
-        """Return project media manifest for selected UIDs or the whole project."""
-        local_group = node_info_fn().get("groupCode", "")
-        if not local_group or groupCode != local_group:
-            raise HTTPException(status_code=403, detail="collaboration group mismatch")
-        local_project = str(node_info_fn().get("projectId", "") or "")
-        if not local_project or projectId != local_project:
-            raise HTTPException(status_code=403, detail="project identity mismatch")
-        if file_manifest_fn is None:
-            return {"files": []}
-        uid_list = [u.strip() for u in str(uids or "").split(",") if u.strip()]
-        try:
-            return file_manifest_fn(uid_list or None)
-        except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-    @app.get("/api/collab/files/download")
-    async def download_file(path: str = "", groupCode: str = "", projectId: str = "") -> Any:
-        """Download one project-relative media file."""
-        local_group = node_info_fn().get("groupCode", "")
-        if not local_group or groupCode != local_group:
-            raise HTTPException(status_code=403, detail="collaboration group mismatch")
-        local_project = str(node_info_fn().get("projectId", "") or "")
-        if not local_project or projectId != local_project:
-            raise HTTPException(status_code=403, detail="project identity mismatch")
-        if file_path_fn is None:
-            raise HTTPException(status_code=404, detail="file sync unavailable")
-        try:
-            resolved = file_path_fn(path)
-        except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        if not resolved.is_file():
-            raise HTTPException(status_code=404, detail="file not found")
-        return FileResponse(str(resolved), filename=resolved.name)
-
-    @app.post("/api/collab/specimens/push")
-    async def receive_specimen_push(request: Request) -> dict:
-        """Accept specimen records pushed from a peer; writes to local DB."""
-        body = await request.json()
-        local_group = node_info_fn().get("groupCode", "")
-        if not local_group or body.get("groupCode", "") != local_group:
-            raise HTTPException(status_code=403, detail="collaboration group mismatch")
-        specimens = body.get("specimens", [])
-        if not isinstance(specimens, list):
-            raise HTTPException(status_code=400, detail="specimens must be a list")
-        written = 0
-        if specimen_writer_fn is not None and specimens:
-            written = specimen_writer_fn(specimens)
-        logger.debug("collab: received %d specimen(s) from peer", written)
-        return {"ok": True, "written": written}
-
-    @app.get("/api/collab/specimens")
-    async def list_specimens() -> list:
-        """Return local specimen records for peer sync."""
-        if specimen_provider_fn is None:
-            return []
-        return specimen_provider_fn(None)
-
-    @app.get("/api/collab/activity")
-    async def get_activity() -> list:
-        """Return recent activity entries from this node."""
-        if activity_log is None:
-            return []
-        return activity_log.to_dicts()
-
-    @app.post("/api/collab/activity")
-    async def receive_activity(request: Request) -> dict:
-        """Receive an activity entry pushed from a peer (best-effort).
-
-        Double guard: LAN IP check (defense-in-depth) + matching groupCode.
-        """
-        if activity_log is None:
-            return {"ok": True}
-        client_host = request.client.host if request.client else ""
-        import ipaddress
-        try:
-            addr = ipaddress.ip_address(client_host)
-            if not addr.is_private and client_host not in ("127.0.0.1", "::1"):
-                raise HTTPException(status_code=403, detail="sender not in LAN")
-        except ValueError:
-            raise HTTPException(status_code=403, detail="invalid sender address")
-        body = await request.json()
-        local_group = node_info_fn().get("groupCode", "")
-        if not local_group or body.get("groupCode", "") != local_group:
-            raise HTTPException(status_code=403, detail="collaboration group mismatch")
-        entry = ActivityEntry.from_dict(body)
-        activity_log.append(entry)
-        return {"ok": True}
-
-    return app
-
-
-# ── Server thread ─────────────────────────────────────────────────────────────
-
-class CollabServerThread(QThread):
-    """Runs FastAPI + uvicorn in a background QThread.
-
-    Signals
-    -------
-    started_on_port(int):   emitted when server is listening.
-    server_error(str):      emitted if startup fails.
-    """
-
-    started_on_port = pyqtSignal(int)
-    server_error = pyqtSignal(str)
-
-    def __init__(self, store: TaskStore, node_info_fn: Callable[[], dict],
-                 preferred_port: int = 5050,
-                 activity_log: Optional[ActivityLog] = None,
-                 file_manifest_fn: Optional[Callable[[Optional[list[str]]], dict]] = None,
-                 file_path_fn: Optional[Callable[[str], Path]] = None,
-                 pairing_request_fn: Optional[Callable[[str, str, str], None]] = None,
-                 pairing_accept_fn: Optional[Callable[[str, str], None]] = None,
-                 specimen_provider_fn: Optional[Callable[[Optional[str]], list]] = None,
-                 specimen_writer_fn: Optional[Callable[[list], int]] = None) -> None:
-        super().__init__()
-        self._store = store
-        self._node_info_fn = node_info_fn
-        self._preferred_port = preferred_port
-        self._activity_log = activity_log
-        self._file_manifest_fn = file_manifest_fn
-        self._file_path_fn = file_path_fn
-        self._pairing_request_fn = pairing_request_fn
-        self._pairing_accept_fn = pairing_accept_fn
-        self._specimen_provider_fn = specimen_provider_fn
-        self._specimen_writer_fn = specimen_writer_fn
-        self._actual_port: Optional[int] = None
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
-        self._server: Optional[Any] = None  # uvicorn.Server, set in run()
-
-    @property
-    def actual_port(self) -> Optional[int]:
-        return self._actual_port
-
-    def _find_free_port(self, start: int) -> int:
-        port = start
-        while port < start + 20:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                if s.connect_ex(("127.0.0.1", port)) != 0:
-                    return port
-            port += 1
-        raise OSError("No free port found near %d" % start)
-
-    def run(self) -> None:
-        try:
-            import uvicorn
-        except ImportError:
-            self.server_error.emit("uvicorn not installed")
-            return
-
-        try:
-            port = self._find_free_port(self._preferred_port)
-        except OSError as exc:
-            self.server_error.emit(str(exc))
-            return
-
-        self._actual_port = port
-        app = _build_fastapi_app(
-            self._store,
-            self._node_info_fn,
-            self._activity_log,
-            file_manifest_fn=self._file_manifest_fn,
-            file_path_fn=self._file_path_fn,
-            pairing_request_fn=self._pairing_request_fn,
-            pairing_accept_fn=self._pairing_accept_fn,
-            specimen_provider_fn=self._specimen_provider_fn,
-            specimen_writer_fn=self._specimen_writer_fn,
-        )
-
-        self._loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self._loop)
-
-        config = uvicorn.Config(
-            app,
-            host="0.0.0.0",
-            port=port,
-            loop="asyncio",
-            log_level="warning",
-        )
-        server = uvicorn.Server(config)
-        self._server = server
-
-        # Emit port once server startup is complete (uvicorn calls startup first)
-        async def _serve() -> None:
-            await server.serve()
-
-        async def _runner() -> None:
-            # Small delay then emit so callers know the port
-            serve_task = self._loop.create_task(_serve())  # type: ignore[union-attr]
-            await asyncio.sleep(0.3)
-            self.started_on_port.emit(port)
-            await serve_task
-
-        try:
-            self._loop.run_until_complete(_runner())
-        except Exception as exc:  # noqa: BLE001
-            self.server_error.emit(str(exc))
-        finally:
-            self._loop.close()
-
-    def stop(self) -> None:
-        # Ask uvicorn to shut down gracefully (closes its listening sockets +
-        # in-flight handlers via should_exit). Force-stopping the asyncio loop
-        # instead strands the serve() coroutine and can leave the socket in
-        # CLOSE_WAIT — and on Windows that can keep this QThread alive long
-        # enough to hold the SQLite DB handle past exit. Fallback to a hard
-        # loop.stop() only if the server never started.
-        srv = getattr(self, "_server", None)
-        loop = self._loop
-        if srv is not None and loop is not None and not loop.is_closed():
-            try:
-                loop.call_soon_threadsafe(setattr, srv, "should_exit", True)
-            except RuntimeError:  # loop closed between the check and the call
-                pass
-        elif loop is not None and not loop.is_closed():
-            loop.call_soon_threadsafe(loop.stop)
-        self.quit()
-        self.wait(5000)
-        # Last-resort hard stop: if uvicorn ignored should_exit for 5+ s (stuck
-        # handler / CLOSE_WAIT socket on Windows), terminate so this QThread
-        # cannot keep the python process alive past app.exit() — which would
-        # re-introduce the must-reboot lock leak. The DB itself is not held by
-        # this thread, so terminate() here only risks an orphaned uvicorn task.
-        if self.isRunning():
-            self.terminate()
-            self.wait(1000)
-
-
-# ── mDNS discovery thread ─────────────────────────────────────────────────────
-
-_MDNS_SERVICE_TYPE = "_specimen._tcp.local."
-
-
-class CollabDiscoveryThread(QThread):
-    """Registers this node's mDNS service and discovers peers.
-
-    Signals
-    -------
-    peer_found(str, int, str):    ip, port, hostname
-    peer_lost(str, int):          ip, port
-    """
-
-    peer_found = pyqtSignal(str, int, str)    # ip, port, hostname
-    peer_lost  = pyqtSignal(str, int)         # ip, port
-    discovery_error = pyqtSignal(str)         # mDNS unavailable / register failed
-
-    def __init__(self, hostname: str, port: int) -> None:
-        super().__init__()
-        self._hostname = hostname
-        self._port = port
-        self._zc: Any = None
-        self._info: Any = None
-        self._browser: Any = None
-
-    def run(self) -> None:
-        try:
-            from zeroconf import ServiceBrowser, ServiceInfo, Zeroconf
-            import ipaddress
-        except ImportError:
-            logger.warning("zeroconf not installed — mDNS discovery disabled")
-            self.discovery_error.emit("未安装 zeroconf")
-            return
-
-        local_ip = _get_local_ip()
-        name = f"{self._hostname}.{_MDNS_SERVICE_TYPE}"
-
-        try:
-            addr_bytes = socket.inet_aton(local_ip)
-        except OSError:
-            addr_bytes = socket.inet_aton("127.0.0.1")
-
-        self._info = ServiceInfo(
-            _MDNS_SERVICE_TYPE,
-            name,
-            addresses=[addr_bytes],
-            port=self._port,
-            properties={"hostname": self._hostname.encode()},
-        )
-
-        self._zc = Zeroconf()
-
-        try:
-            self._zc.register_service(self._info)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("collab: mDNS register failed: %s", exc)
-            self.discovery_error.emit(f"注册失败:{exc}")
-
-        handler = _BrowserHandler(
-            local_ip=local_ip,
-            local_port=self._port,
-            on_found=lambda ip, port, hn: self.peer_found.emit(ip, port, hn),
-            on_lost=lambda ip, port: self.peer_lost.emit(ip, port),
-        )
-        self._browser = ServiceBrowser(self._zc, _MDNS_SERVICE_TYPE, handler)
-
-        # Block until stop() is called
-        self._browser._handlers_lock = getattr(self._browser, "_handlers_lock", threading.Event())
-        while not self.isInterruptionRequested():
-            time.sleep(0.5)
-
-    def stop(self) -> None:
-        self.requestInterruption()
-        if self._zc:
-            try:
-                if self._info:
-                    self._zc.unregister_service(self._info)
-                self._zc.close()
-            except Exception:  # noqa: BLE001
-                pass
-        self.quit()
-        self.wait(3000)
-
-
-class _BrowserHandler:
-    """zeroconf ServiceBrowser callback adapter."""
-
-    def __init__(self, local_ip: str, local_port: int,
-                 on_found: Callable, on_lost: Callable) -> None:
-        self._local_ip = local_ip
-        self._local_port = local_port
-        self._on_found = on_found
-        self._on_lost = on_lost
-
-    def add_service(self, zeroconf: Any, service_type: str, name: str) -> None:
-        info = zeroconf.get_service_info(service_type, name)
-        if not info:
-            return
-        ips = info.parsed_scoped_addresses()
-        if not ips:
-            return
-        ip = ips[0]
-        port = info.port
-        # A host may have another/stale app instance listening on a neighbouring
-        # port (for example current=5051 while an old process still owns 5050).
-        # It is still this machine, not a collaboration peer.
-        if ip == self._local_ip:
-            return   # skip self on every port
-        hostname = (info.properties.get(b"hostname") or b"").decode("utf-8", errors="replace")
-        self._on_found(ip, port, hostname)
-
-    def update_service(self, *_: Any) -> None:
-        pass
-
-    def remove_service(self, zeroconf: Any, service_type: str, name: str) -> None:
-        info = zeroconf.get_service_info(service_type, name)
-        if info:
-            ips = info.parsed_scoped_addresses()
-            if ips:
-                self._on_lost(ips[0], info.port)
+# ── Split modules (re-exported for backward compatibility) ────────────────────
+# Datatypes / helpers   → app.services.collab_types
+# In-memory task store  → app.services.collab_store
+# FastAPI endpoints     → app.services.collab_api
+# Server + mDNS threads → app.services.collab_net
+# External code (views, tests) may keep importing everything from here.
+
+from app.services.collab_types import (  # noqa: F401
+    Diagnostic,
+    OfflineDraft,
+    PeerInfo,
+    PhotoIndexRecord,
+    TaskRecord,
+    TaskStatus,
+    _VALID_TRANSITIONS,
+    _get_local_ip,
+    _missing_deps,
+    _now_iso,
+    is_valid_transition,
+)
+from app.services.collab_store import TaskStore  # noqa: F401
+from app.services.collab_api import _build_fastapi_app  # noqa: F401
+from app.services.collab_net import (  # noqa: F401
+    CollabDiscoveryThread,
+    CollabServerThread,
+    _MDNS_SERVICE_TYPE,
+    _BrowserHandler,
+)
+from app.services.collab_diagnostics import (  # noqa: F401
+    CLOCK_SKEW_THRESHOLD_MS,
+    build_diagnostics,
+    overall_health as _overall_health,
+)
+from app.services.collab_specimen_sync import (  # noqa: F401
+    SPEC_SYNC_COLS,
+    get_local_specimens,
+    stamp_specimen,
+    write_specimens_to_local_db,
+)
 
 
 # ── Main service object ───────────────────────────────────────────────────────
-
-@dataclass
-class OfflineDraft:
-    """Queued create-task that failed to reach at least one peer (network unavailable).
-
-    Mirrors web ``collabMarkOfflineDraft`` / ``collabRetryOfflineDrafts``:
-        loadCollabOfflineDrafts()   → CollabService.load_offline_drafts()
-        saveCollabOfflineDrafts()   → CollabService.save_offline_drafts()
-        collabMarkOfflineDraft()    → CollabService.mark_offline_draft()
-        collabRetryOfflineDrafts()  → CollabService.retry_offline_drafts()
-    """
-    uid: str
-    assignee: Optional[str]
-    device_id: Optional[str]
-    queued_at: str = field(default_factory=_now_iso)
-
-    def to_dict(self) -> dict:
-        return {
-            "uid":       self.uid,
-            "assignee":  self.assignee,
-            "deviceId":  self.device_id,
-            "queuedAt":  self.queued_at,
-        }
-
-    @staticmethod
-    def from_dict(d: dict) -> "OfflineDraft":
-        return OfflineDraft(
-            uid=d["uid"],
-            assignee=d.get("assignee"),
-            device_id=d.get("deviceId"),
-            queued_at=d.get("queuedAt", _now_iso()),
-        )
-
-
-@dataclass
-class PhotoIndexRecord:
-    """Photo-index entry reported after helicon/archive completion.
-
-    Mirrors web ``collabPostPhotoIndex(uid, kind)``:
-        kind = "jpg" | "tiff" | "zip"
-    """
-    uid: str
-    kind: str          # "jpg" | "tiff" | "zip"
-    count: int = 0
-    reported_at: str = field(default_factory=_now_iso)
-    device_id: str = ""
-
-    def to_dict(self) -> dict:
-        return {
-            "uid":        self.uid,
-            "kind":       self.kind,
-            "count":      self.count,
-            "reportedAt": self.reported_at,
-            "deviceId":   self.device_id,
-        }
-
 
 class CollabService(QObject):
     """Top-level collaboration service owned by the main window / AppContext.
@@ -895,6 +112,8 @@ class CollabService(QObject):
     server_ready(int):        FastAPI server is up, listening on given port
     offline_drafts_changed(): offline draft queue updated
     """
+
+    _SPEC_SYNC_COLS = SPEC_SYNC_COLS
 
     peers_changed    = pyqtSignal()
     tasks_changed    = pyqtSignal()
@@ -910,6 +129,7 @@ class CollabService(QObject):
     pairing_accepted  = pyqtSignal(str, str)       # ip, hostname
     specimens_updated = pyqtSignal()               # local DB got new/updated specimens
     project_bind_suggested = pyqtSignal(str, str, str)  # peer_hostname, project_name, sync_code
+    photo_index_received = pyqtSignal(str, str, int, str)  # uid, kind, count, device_id
 
     def __init__(self, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
@@ -921,6 +141,7 @@ class CollabService(QObject):
         self._port: Optional[int] = None
         self._project_name: str = ""
         self._project_id: str = ""
+        self._shared_project_dirs: set[str] = set()
         self._project_dir: str = ""
         self._group_code: str = ""
         self._session_name: str = ""   # human-readable session label
@@ -978,6 +199,7 @@ class CollabService(QObject):
         # (persisted team code is passed in by callers from settings).
         if group_code:
             self._group_code = group_code.strip()
+        self.reload_shared_project_dirs()
         self._running = True
 
         self._server_thread = CollabServerThread(
@@ -991,6 +213,7 @@ class CollabService(QObject):
             pairing_accept_fn=self._on_pairing_accept_received,
             specimen_provider_fn=self._get_local_specimens,
             specimen_writer_fn=self._write_specimens_to_local_db,
+            photo_index_fn=self._on_photo_index_received,
         )
         self._server_thread.started_on_port.connect(self._on_server_started)
         self._server_thread.server_error.connect(
@@ -1044,6 +267,49 @@ class CollabService(QObject):
         """True between start() and stop()."""
         return self._running
 
+    def ensure_running(self, ctx=None) -> bool:
+        """Start the embedded server when a team code exists but service is idle.
+
+        Called from协作中心 / 协作面板 / 照片同步 so users are not stuck on
+        「协作未启动」 after saving a team code or reopening the app.
+        """
+        if self._running:
+            return True
+
+        code = (self._group_code or "").strip()
+        project_dir = self._project_dir or self._project_name or ""
+        settings = getattr(ctx, "settings", None) if ctx is not None else None
+
+        if not code and settings is not None:
+            raw_code = getattr(settings, "team_code", "")
+            if isinstance(raw_code, str):
+                code = raw_code.strip()
+                if code:
+                    self._group_code = code
+
+        if not code:
+            return False
+
+        if ctx is not None:
+            raw_dir = getattr(ctx, "current_project_dir", None)
+            if isinstance(raw_dir, str) and raw_dir.strip():
+                project_dir = raw_dir.strip()
+            elif settings is not None:
+                raw_last = getattr(settings, "last_project_dir", "")
+                if isinstance(raw_last, str) and raw_last.strip():
+                    project_dir = raw_last.strip()
+
+        try:
+            self.start(
+                project_name=project_dir,
+                group_code=code,
+                project_dir=project_dir,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("collab ensure_running failed: %s", exc)
+            return False
+        return self._running
+
     @property
     def project_name(self) -> str:
         """Current project label advertised to collaboration peers."""
@@ -1065,28 +331,63 @@ class CollabService(QObject):
         )
 
     def discover_team_projects(self) -> list[dict]:
-        """List distinct projects currently open by same-team peers.
-
-        Each entry: ``{"name": str, "code": str, "peer_count": int}`` where
-        *code* is a ready-to-apply project sync code (see
-        ``apply_project_sync_code``).  Used by "新建项目" to offer "加入团队
-        现有项目" instead of guessing by name.
-        """
+        """List distinct projects teammates advertise (incl. multi-project share list)."""
+        from app.services.collab_share_registry import iter_peer_shared_projects
         from app.services.project_identity_service import project_sync_code
 
         with self._peers_lock:
             peers = [p for p in self._peers.values() if self._group_matches(p)]
         by_id: dict[str, dict] = {}
         for p in peers:
-            if not p.project_id:
-                continue
-            entry = by_id.setdefault(p.project_id, {
-                "name": Path(str(p.project_name or "")).name or p.project_id,
-                "code": project_sync_code(p.project_id, project_name=Path(str(p.project_name or "")).name),
-                "peer_count": 0,
-            })
-            entry["peer_count"] += 1
+            for pid, name in iter_peer_shared_projects(p):
+                entry = by_id.setdefault(pid, {
+                    "name": name or pid,
+                    "code": project_sync_code(pid, project_name=name),
+                    "peer_count": 0,
+                })
+                entry["peer_count"] += 1
         return sorted(by_id.values(), key=lambda e: e["name"])
+
+    def set_shared_project_dirs(self, directories) -> None:
+        """Persist and advertise which local workspaces are shared with the team."""
+        normalised: set[str] = set()
+        for item in directories or []:
+            text = str(item or "").strip()
+            if not text:
+                continue
+            try:
+                normalised.add(str(Path(text).resolve()))
+            except OSError:
+                normalised.add(text)
+        self._shared_project_dirs = normalised
+        try:
+            from PyQt6.QtCore import QSettings
+            from app.config.settings import _APP, _ORG
+            from app.services.collab_share_registry import save_shared_dirs
+            save_shared_dirs(QSettings(_ORG, _APP), normalised)
+        except Exception:  # noqa: BLE001
+            pass
+        if self._project_dir:
+            try:
+                current = str(Path(self._project_dir).resolve())
+            except OSError:
+                current = self._project_dir
+            if current in self._shared_project_dirs and not self._project_id:
+                self._project_id = self._ensure_project_id(current)
+        self.peers_changed.emit()
+
+    def reload_shared_project_dirs(self, settings_qs=None) -> None:
+        """Load saved share ticks; default to the active workspace."""
+        from app.services.collab_share_registry import default_shared_dirs, load_shared_dirs
+
+        if settings_qs is None:
+            from PyQt6.QtCore import QSettings
+            from app.config.settings import _APP, _ORG
+            settings_qs = QSettings(_ORG, _APP)
+        current = str(self._project_dir or "")
+        saved = load_shared_dirs(settings_qs)
+        dirs = saved if saved else default_shared_dirs(settings_qs, current_directory=current or None)
+        self.set_shared_project_dirs(dirs)
 
     def apply_project_sync_code(self, code: str) -> str:
         """Adopt a project sync code after the UI has asked for confirmation."""
@@ -1171,6 +472,7 @@ class CollabService(QObject):
         self._session_name = name or f"{self._hostname}的会话"
         self._log_activity("session", detail=f"新建协作会话：{self._session_name}（{code}）")
         self.peers_changed.emit()
+        self.ensure_running()
         return code
 
     def join_session(self, session_code: str, session_name: str = "") -> None:
@@ -1186,6 +488,7 @@ class CollabService(QObject):
         self._session_name = session_name or f"加入了 {code}"
         self._log_activity("session", detail=f"加入协作会话：{code}")
         self.peers_changed.emit()
+        self.ensure_running()
         # Pull task records immediately
         QTimer.singleShot(100, self._sync_all_peers)
         # Pull specimen records (full dataset from all peers in this session)
@@ -1239,6 +542,15 @@ class CollabService(QObject):
         """Team membership: both sides share a non-empty team code."""
         return bool(self._group_code) and peer.group_code == self._group_code
 
+    def _task_sync_allowed(self, peer: PeerInfo) -> bool:
+        """Task/UID coordination is team-scoped.
+
+        A team may have several projects open at once.  UID claims, task status,
+        assignment, release, and conflict checks stay shared across the whole
+        team, while specimen rows and media files remain project-scoped.
+        """
+        return self._group_matches(peer)
+
     @staticmethod
     def _normalize_project_label(name: str) -> str:
         """Normalise a project name/path for cross-device comparison.
@@ -1277,9 +589,12 @@ class CollabService(QObject):
         return mine == theirs
 
     def _data_sync_allowed(self, peer: PeerInfo) -> bool:
-        """Data (tasks + specimens) flows only within the same team AND the
-        same project.  Team members on other projects stay visible but their
-        data never mixes into ours."""
+        """Project-scoped data flows only within the same team and project.
+
+        This gates specimen metadata and media-related notifications.  Do not
+        use it for UID claims/status; those are intentionally team-scoped via
+        ``_task_sync_allowed``.
+        """
         return self._group_matches(peer) and self._project_matches(peer)
 
     def _check_project_bind_suggestions(self, peers: list[PeerInfo]) -> None:
@@ -1322,8 +637,6 @@ class CollabService(QObject):
 
     # ── Self-diagnostics ──────────────────────────────────────────────────
 
-    CLOCK_SKEW_THRESHOLD_MS = 5_000
-
     def diagnostics(self) -> list[Diagnostic]:
         """Return the last computed diagnostics list."""
         return list(self._diagnostics)
@@ -1334,93 +647,18 @@ class CollabService(QObject):
         Network probes (reachability, clock skew measurement) run separately in
         a background worker and call this again once peer attributes are updated.
         """
-        diags: list[Diagnostic] = []
-        diags += self._diag_deps()
-        diags += self._diag_config()
-        diags += self._diag_mdns()
-        diags += self._diag_group_mismatch()
-        diags += self._diag_clock_skew()
-        diags += self._diag_reachability()
-        if not diags:
-            diags = [Diagnostic("ok", "ok", "协作正常", "未发现配置问题。")]
-        self._diagnostics = diags
+        self._diagnostics = build_diagnostics(
+            group_code=self._group_code,
+            discovery_error=self._discovery_error,
+            peers=self.peers(),
+            port=self._port,
+        )
         self.diagnostics_changed.emit()
-        return diags
+        return self._diagnostics
 
     def overall_health(self) -> str:
         """Roll up to a traffic-light colour: red > yellow > green."""
-        if any(d.level == "error" for d in self._diagnostics):
-            return "red"
-        if any(d.level == "warn" for d in self._diagnostics):
-            return "yellow"
-        return "green"
-
-    def _diag_deps(self) -> list[Diagnostic]:
-        missing = _missing_deps()
-        if missing:
-            return [Diagnostic(
-                "deps_missing", "error", "缺少协作组件",
-                f"未安装:{', '.join(missing)}。协作功能无法运行。",
-                f"运行 pip install {' '.join(missing)}")]
-        return []
-
-    def _diag_config(self) -> list[Diagnostic]:
-        if not self._group_code:
-            return [Diagnostic(
-                "config_no_group", "warn", "未设置协作组码",
-                "未填写协作组码,不会与任何设备同步标本编号。",
-                "在「设置 → 协作」里给同组每台设备填写相同的协作组码。")]
-        return []
-
-    def _diag_group_mismatch(self) -> list[Diagnostic]:
-        if not self._group_code:
-            return []
-        others = sorted({
-            p.group_code for p in self.peers()
-            if p.group_code and p.group_code != self._group_code
-        })
-        if others:
-            return [Diagnostic(
-                "group_mismatch", "warn", "发现组码不同的设备",
-                f"同网段设备的组码为:{', '.join(others)};你的组码是 {self._group_code}。"
-                "组码不同的设备不会互相同步,可能各自占用了相同编号。",
-                "若你们应在同一组,请核对并统一组码。",
-                action="adopt_group")]
-        return []
-
-    def _diag_clock_skew(self) -> list[Diagnostic]:
-        bad = [p for p in self.peers()
-               if p.clock_skew_ms is not None
-               and abs(p.clock_skew_ms) > self.CLOCK_SKEW_THRESHOLD_MS]
-        if bad:
-            worst = max(abs(p.clock_skew_ms) for p in bad)  # type: ignore[arg-type]
-            return [Diagnostic(
-                "clock_skew", "warn", "设备时间不一致",
-                f"与队友的系统时间相差约 {round(worst / 1000)} 秒。"
-                "同步按修改时间先后合并,时间不准会导致较新的修改被覆盖。",
-                "请校准各设备的系统时间(建议开启「自动设置时间」)。")]
-        return []
-
-    def _diag_mdns(self) -> list[Diagnostic]:
-        if self._discovery_error:
-            return [Diagnostic(
-                "mdns_unavailable", "warn", "局域网自动发现不可用",
-                f"无法启动自动发现({self._discovery_error})。",
-                "改用「搜索局域网」或「配对码」连接队友。")]
-        return []
-
-    def _diag_reachability(self) -> list[Diagnostic]:
-        blocked = [p for p in self.peers()
-                   if p.reachable is True and p.reachback_ok is False]
-        if blocked:
-            port = self._port or 5050
-            return [Diagnostic(
-                "firewall_blocked", "error", "队友连不到你",
-                f"你能看到队友,但他们无法连回你(端口 {port})。"
-                "很可能是本机防火墙挡住了入站连接。",
-                f"放行端口 {port} 的入站连接。",
-                action="open_firewall")]
-        return []
+        return _overall_health(self._diagnostics)
 
     # ── Network probes (run off the main thread) ──────────────────────────
 
@@ -1549,6 +787,9 @@ class CollabService(QObject):
                     peer.clock_skew_ms = (time.time() - float(st)) * 1000.0
                 peer.project_name = data.get("projectName", peer.project_name)
                 peer.project_id = data.get("projectId", peer.project_id)
+                raw_shared = data.get("sharedProjects")
+                if isinstance(raw_shared, list):
+                    peer.shared_projects = raw_shared
                 if not peer.group_code:
                     peer.group_code = data.get("groupCode", "")
                 if data.get("sessionName"):
@@ -1761,12 +1002,16 @@ class CollabService(QObject):
         dicts ``{uid, old_status, new_status}`` for tasks whose local status was
         silently replaced by a newer remote value.
         """
-        if not self._data_sync_allowed(peer):
+        if not self._task_sync_allowed(peer):
             return 0, []
         try:
             import httpx
             t0 = time.monotonic()
-            resp = httpx.get(f"{peer.base_url}/api/collab/tasks", timeout=4.0)
+            resp = httpx.get(
+                f"{peer.base_url}/api/collab/tasks",
+                params={"groupCode": self._group_code},
+                timeout=4.0,
+            )
             peer.latency_ms = (time.monotonic() - t0) * 1000
             peer.last_seen = time.time()
             if resp.status_code == 200:
@@ -1824,7 +1069,7 @@ class CollabService(QObject):
         # 3. Broadcast to peers; roll back local + remote claims on conflict.
         peers_snapshot: list[PeerInfo]
         with self._peers_lock:
-            peers_snapshot = [p for p in self._peers.values() if self._data_sync_allowed(p)]
+            peers_snapshot = [p for p in self._peers.values() if self._task_sync_allowed(p)]
 
         claimed_peers: list[PeerInfo] = []
         unreachable_peers: list[PeerInfo] = []
@@ -2022,7 +1267,7 @@ class CollabService(QObject):
     def _retry_offline_draft(self, draft: OfflineDraft) -> tuple[bool, str]:
         """Push an already-created local draft to currently reachable peers."""
         with self._peers_lock:
-            peers_snapshot = [p for p in self._peers.values() if self._data_sync_allowed(p)]
+            peers_snapshot = [p for p in self._peers.values() if self._task_sync_allowed(p)]
         if not peers_snapshot:
             return False, "no peers online"
 
@@ -2058,77 +1303,20 @@ class CollabService(QObject):
 
     # ── Specimen data sync (L2: metadata replication) ────────────────────
 
-    #: Columns synced between peers (excludes large/derived columns)
-    _SPEC_SYNC_COLS = (
-        "uid", "province", "site", "station", "id", "storage",
-        "collectionDate", "photoDate", "collector", "photographer",
-        "identifier", "geoArea", "taxonGroup", "orderName", "family",
-        "genus", "scientificName", "scientificNameCn", "notes",
-        "photoNotes", "lon", "lat", "habitat", "raw_json",
-    )
-
     def _get_local_specimens(self, uid: Optional[str] = None) -> list[dict]:
         """Read specimen records from local project DB (used by FastAPI endpoint)."""
-        if not self._project_dir:
-            return []
-        try:
-            from app.db.db_manager import open_project_db_private
-            db = open_project_db_private(self._project_dir)
-            cols = ", ".join(self._SPEC_SYNC_COLS)
-            try:
-                if uid:
-                    rows = db.execute(
-                        f"SELECT {cols} FROM specimens WHERE uid=?", (uid,)
-                    ).fetchall()
-                else:
-                    rows = db.execute(
-                        f"SELECT {cols} FROM specimens"
-                    ).fetchall()
-                return [dict(zip(self._SPEC_SYNC_COLS, row)) for row in rows]
-            finally:
-                db.close()
-        except Exception as exc:
-            logger.debug("collab: _get_local_specimens error: %s", exc)
-            return []
+        return get_local_specimens(self._project_dir, uid)
 
     def _write_specimens_to_local_db(self, specimens: list[dict]) -> int:
-        """Upsert incoming specimen records into local project DB.
+        """Merge incoming specimen records into local project DB (LWW)."""
+        written = write_specimens_to_local_db(self._project_dir, specimens)
+        if written:
+            self.specimens_updated.emit()
+        return written
 
-        Uses INSERT OR REPLACE so incoming records overwrite local ones with
-        the same UID.  In normal field use each person works on distinct UIDs,
-        so conflicts are rare.
-        """
-        if not self._project_dir or not specimens:
-            return 0
-        try:
-            from app.db.db_manager import open_project_db_private
-            db = open_project_db_private(self._project_dir)
-            written = 0
-            try:
-                for spec in specimens:
-                    uid = spec.get("uid")
-                    if not uid:
-                        continue
-                    cols = [c for c in self._SPEC_SYNC_COLS if c in spec]
-                    if "uid" not in cols:
-                        continue
-                    placeholders = ", ".join(f":{c}" for c in cols)
-                    col_str = ", ".join(cols)
-                    db.execute(
-                        f"INSERT OR REPLACE INTO specimens ({col_str}) "
-                        f"VALUES ({placeholders})",
-                        {c: spec.get(c) for c in cols},
-                    )
-                    written += 1
-                db.commit()
-            finally:
-                db.close()
-            if written:
-                self.specimens_updated.emit()
-            return written
-        except Exception as exc:
-            logger.debug("collab: _write_specimens error: %s", exc)
-            return 0
+    def _stamp_specimen(self, uid: str) -> None:
+        """Write a fresh LWW timestamp onto a local record before pushing."""
+        stamp_specimen(self._project_dir, uid)
 
     def push_specimen(self, uid: str) -> None:
         """Push one specimen record from local DB to all session peers.
@@ -2136,6 +1324,9 @@ class CollabService(QObject):
         Call this after saving a specimen so other devices see the update
         immediately (< 1 s) without waiting for the 5 s pull sync.
         """
+        # Stamp even when no peers are online: the fresh timestamp makes the
+        # later pull-sync merge correctly once peers appear.
+        self._stamp_specimen(uid)
         with self._peers_lock:
             peers = [p for p in self._peers.values() if self._data_sync_allowed(p)]
         if not peers:
@@ -2149,7 +1340,11 @@ class CollabService(QObject):
                 import httpx
             except ImportError:
                 return
-            payload = {"specimens": specs, "groupCode": self._group_code}
+            payload = {
+                "specimens": specs,
+                "groupCode": self._group_code,
+                "projectId": self._project_id,
+            }
             for peer in peers:
                 try:
                     httpx.post(
@@ -2172,7 +1367,14 @@ class CollabService(QObject):
             return 0
         try:
             import httpx
-            resp = httpx.get(f"{peer.base_url}/api/collab/specimens", timeout=8.0)
+            resp = httpx.get(
+                f"{peer.base_url}/api/collab/specimens",
+                params={
+                    "groupCode": self._group_code,
+                    "projectId": self._project_id,
+                },
+                timeout=8.0,
+            )
             if resp.status_code == 200:
                 specimens = resp.json()
                 if isinstance(specimens, list) and specimens:
@@ -2264,14 +1466,19 @@ class CollabService(QObject):
     # ── Status broadcast (push to peers immediately) ──────────────────────
 
     def broadcast_status_update(self, uid: str, status: str,
-                                assignee: Optional[str] = None) -> None:
+                                assignee: Optional[str] = None,
+                                force: bool = True) -> None:
         """Push a task status change to all online peers (fire-and-forget).
 
         Runs in a background thread so the UI is never blocked.
         Falls back gracefully when httpx is not installed.
+
+        ``force=True`` (default) mirrors manual human marking — remote peers
+        accept out-of-order / backward transitions the same way the oracle
+        does (app.js:3303).
         """
         with self._peers_lock:
-            peers = [p for p in self._peers.values() if self._data_sync_allowed(p)]
+            peers = [p for p in self._peers.values() if self._task_sync_allowed(p)]
         if not peers:
             return
         payload = {
@@ -2280,6 +1487,7 @@ class CollabService(QObject):
             "assignee":   assignee,
             "deviceId":   self._hostname,
             "groupCode":  self._group_code,
+            "force":      force,
         }
 
         def _send() -> None:
@@ -2299,6 +1507,23 @@ class CollabService(QObject):
 
         import threading
         threading.Thread(target=_send, daemon=True, name="collab-push").start()
+
+    def _on_photo_index_received(self, uid: str, kind: str,
+                                 count: int, device_id: str) -> None:
+        """Handle incoming photo-index from a peer (FastAPI callback thread).
+
+        Logs activity and emits ``photo_index_received`` so UI layers can
+        refresh task tables / prompt file sync.
+        """
+        kind_labels = {"jpg": "JPG", "tiff": "TIFF", "zip": "ZIP"}
+        label = kind_labels.get(kind, kind.upper() or "文件")
+        who = device_id or "队友"
+        detail = f"{who} 的编号 {uid} 已有 {label}"
+        if count > 1:
+            detail += f" ×{count}"
+        self._log_activity("photo_index", uid, detail=detail)
+        self.photo_index_received.emit(uid, kind, count, device_id)
+        self.tasks_changed.emit()
 
     # ── Photo-index reporting ─────────────────────────────────────────────
     # Mirrors: collabPostPhotoIndex(uid, kind)
@@ -2321,7 +1546,7 @@ class CollabService(QObject):
         No return value — fire-and-forget.
         """
         with self._peers_lock:
-            peers_snapshot = list(self._peers.values())
+            peers_snapshot = [p for p in self._peers.values() if self._data_sync_allowed(p)]
 
         if not peers_snapshot:
             return
@@ -2331,6 +1556,8 @@ class CollabService(QObject):
             kind=kind,
             count=count,
             device_id=self._hostname,
+            group_code=self._group_code,
+            project_id=self._project_id,
         )
         payload = record.to_dict()
 
@@ -2352,6 +1579,14 @@ class CollabService(QObject):
     # ── Node info ─────────────────────────────────────────────────────────
 
     def _node_info(self) -> dict:
+        from app.services.collab_share_registry import build_shared_projects_payload
+
+        share_dirs = set(self._shared_project_dirs)
+        if self._project_dir:
+            try:
+                share_dirs.add(str(Path(self._project_dir).resolve()))
+            except OSError:
+                share_dirs.add(str(self._project_dir))
         return {
             "hostname":    self._hostname,
             "projectName": self._project_name,
@@ -2361,6 +1596,7 @@ class CollabService(QObject):
             "serverTime":  time.time(),
             "lanIp":       _get_local_ip(),
             "port":        self._port,
+            "sharedProjects": build_shared_projects_payload(share_dirs),
         }
 
     def _file_manifest_payload(self, uids: Optional[list[str]] = None) -> dict:
@@ -2405,14 +1641,21 @@ class CollabService(QObject):
         and emits tasks_changed.  Logs a warning when the transition is invalid.
         """
         try:
-            self.store.update_status(uid, TaskStatus.ASSIGNED, assignee=operator)
+            self.store.update_status(
+                uid, TaskStatus.ASSIGNED, assignee=operator, force=True,
+            )
             self.tasks_changed.emit()
+            self.specimen_status_changed.emit(uid)
+            self.broadcast_status_update(uid, "assigned", assignee=operator)
+            self._log_activity("status_changed", uid,
+                               detail=f"编号 {uid} 分配给 {operator}")
         except ValueError as exc:
             logger.warning("assign_task failed uid=%s: %s", uid, exc)
 
     def update_task_status(self, uid: str, status: str,
                            seed_status: Optional[str] = None,
-                           force: bool = False) -> tuple[bool, str]:
+                           force: bool = False,
+                           broadcast: bool = False) -> tuple[bool, str]:
         """Set task *uid* to *status* — UI entry for the workbench phase pills.
 
         Mirrors oracle ensureCollabTask + /api/collab/tasks/update-status
@@ -2449,6 +1692,8 @@ class CollabService(QObject):
         self.specimen_status_changed.emit(uid)
         self._log_activity("status_changed", uid,
                            detail=f"编号 {uid} 阶段 → {to_status.value}")
+        if broadcast:
+            self.broadcast_status_update(uid, status, force=force)
         return (True, "ok")
 
     def release_task(self, uid: str) -> None:
@@ -2462,7 +1707,7 @@ class CollabService(QObject):
         self.store.delete(uid)
 
         with self._peers_lock:
-            peers_snapshot = [p for p in self._peers.values() if self._data_sync_allowed(p)]
+            peers_snapshot = [p for p in self._peers.values() if self._task_sync_allowed(p)]
 
         if peers_snapshot:
             try:

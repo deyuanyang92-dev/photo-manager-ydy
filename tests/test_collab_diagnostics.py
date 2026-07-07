@@ -14,7 +14,7 @@ import pytest
 
 from PyQt6.QtWidgets import QApplication
 
-import app.services.collab_service as cs
+import app.services.collab_diagnostics as collab_diag
 from app.services.collab_service import CollabService, Diagnostic, PeerInfo
 
 
@@ -93,7 +93,7 @@ class TestClockSkew:
 
 class TestDepsCheck:
     def test_missing_deps_is_error(self, monkeypatch):
-        monkeypatch.setattr(cs, "_missing_deps", lambda: ["httpx"])
+        monkeypatch.setattr(collab_diag, "_missing_deps", lambda: ["httpx"])
         svc = CollabService()
         svc.set_group_code("G1")
         diags = svc.run_diagnostics()

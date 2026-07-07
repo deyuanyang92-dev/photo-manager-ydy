@@ -27,6 +27,7 @@ save_requested()
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
@@ -88,6 +89,8 @@ class TaxonCardPanel(QWidget):
         self._show_cn = True
         self._active_db: Optional[str] = None
         self._collapsed = False
+        self._extra_identifications_original: list[dict[str, str]] = []
+        self._extra_identifications_text_at_load = ""
 
         # Taxonomy service (graceful: None if seed files missing)
         self._svc: Optional[TaxonomyService] = None
@@ -231,6 +234,21 @@ class TaxonCardPanel(QWidget):
 
         self._root.addLayout(self._grid)
 
+        extra_hdr = QLabel("附加鉴定 / 混合样")
+        extra_hdr.setObjectName("CardTitle")
+        self._root.addWidget(extra_hdr)
+        self._extra_identifications = QTextEdit()
+        self._extra_identifications.setObjectName("TaxonExtraIdentifications")
+        self._extra_identifications.setFixedHeight(76)
+        self._extra_identifications.setPlaceholderText(
+            "一行一个分类：拉丁名 | 中文名 | 科 | 属 | 备注\n"
+            "例：Limnodrilus hoffmeisteri | 霍氏水丝蚓 | Naididae | Limnodrilus | 5 个"
+        )
+        self._extra_identifications.textChanged.connect(
+            lambda: self.taxon_changed.emit("additional_identifications", "")
+        )
+        self._root.addWidget(self._extra_identifications)
+
         # 备注标签 — web renderTaxonNotesCard tail (app.js:10184).  The notes
         # field lives in 卡2 (not 卡3) to mirror the web right rail.
         notes_hdr = QLabel("备注标签")
@@ -270,6 +288,18 @@ class TaxonCardPanel(QWidget):
         out["notes"] = self._notes.toPlainText().strip()
         return out
 
+    def additional_identifications(self) -> list[dict[str, str]]:
+        """Return extra mixed-sample identifications from the free-form editor."""
+        text = self._extra_identifications.toPlainText().strip()
+        if text == self._extra_identifications_text_at_load:
+            return [dict(row) for row in self._extra_identifications_original]
+        rows: list[dict[str, str]] = []
+        for line in text.splitlines():
+            row = self._parse_extra_identification_line(line)
+            if self._has_taxon_identity(row):
+                rows.append(row)
+        return rows
+
     def load_specimen(self, sp: "Specimen") -> None:
         def _set_taxon_line_edit_without_signals(edit, val):
             edit.blockSignals(True)
@@ -288,6 +318,7 @@ class TaxonCardPanel(QWidget):
         self._notes.blockSignals(True)
         self._notes.setPlainText(sp.notes or "")
         self._notes.blockSignals(False)
+        self._set_additional_identifications(self._stored_additional_identifications(sp.raw))
         self._refresh_validation()
 
     def apply_values(self, values: dict[str, str]) -> None:
@@ -309,10 +340,108 @@ class TaxonCardPanel(QWidget):
         self._notes.blockSignals(True)
         self._notes.clear()
         self._notes.blockSignals(False)
+        self._set_additional_identifications([])
         self._warn.hide()
         self._popup.hide()
 
     # ── Autocomplete flow (mirrors TaxonomyInputPanel) ────────────────────────
+    def _set_additional_identifications(self, rows: list[dict]) -> None:
+        normalised = [
+            row for row in (self._normalise_extra_identification(item) for item in rows)
+            if self._has_taxon_identity(row)
+        ]
+        text = "\n".join(self._format_extra_identification(row) for row in normalised)
+        self._extra_identifications.blockSignals(True)
+        self._extra_identifications.setPlainText(text)
+        self._extra_identifications.blockSignals(False)
+        self._extra_identifications_original = [dict(row) for row in normalised]
+        self._extra_identifications_text_at_load = text
+
+    @staticmethod
+    def _first_text(data: dict, *keys: str) -> str:
+        for key in keys:
+            value = data.get(key)
+            if value not in (None, ""):
+                return str(value).strip()
+        return ""
+
+    @classmethod
+    def _normalise_extra_identification(cls, item) -> dict[str, str]:
+        if isinstance(item, str):
+            return cls._parse_extra_identification_line(item)
+        if not isinstance(item, dict):
+            return {}
+        row = {
+            "scientific_name": cls._first_text(
+                item, "scientific_name", "scientificName", "scientificname", "species"
+            ),
+            "scientific_name_cn": cls._first_text(
+                item, "scientific_name_cn", "scientificNameCn", "speciesCn", "name_cn"
+            ),
+            "taxon_group": cls._first_text(
+                item, "taxon_group", "taxonGroup", "class", "class_name"
+            ),
+            "order_name": cls._first_text(item, "order_name", "order", "orderName"),
+            "family": cls._first_text(item, "family", "family_name"),
+            "genus": cls._first_text(item, "genus", "genus_name"),
+            "notes": cls._first_text(item, "notes", "note", "remark", "remarks"),
+        }
+        return {key: value for key, value in row.items() if value}
+
+    @classmethod
+    def _parse_extra_identification_line(cls, line: str) -> dict[str, str]:
+        text = line.strip()
+        if not text:
+            return {}
+        parts = [part.strip() for part in re.split(r"\t+|\s*\|\s*", text) if part.strip()]
+        if not parts:
+            return {}
+        if len(parts) == 1:
+            key = "scientific_name_cn" if re.search(r"[\u4e00-\u9fff]", parts[0]) else "scientific_name"
+            return {key: parts[0]}
+        fields = ("scientific_name", "scientific_name_cn", "family", "genus", "notes")
+        return {field: parts[i] for i, field in enumerate(fields) if i < len(parts) and parts[i]}
+
+    @staticmethod
+    def _has_taxon_identity(row: dict) -> bool:
+        return any(
+            str(row.get(key) or "").strip()
+            for key in (
+                "scientific_name",
+                "scientific_name_cn",
+                "taxon_group",
+                "order_name",
+                "family",
+                "genus",
+            )
+        )
+
+    @staticmethod
+    def _format_extra_identification(row: dict[str, str]) -> str:
+        parts = [
+            row.get("scientific_name", ""),
+            row.get("scientific_name_cn", ""),
+            row.get("family", ""),
+            row.get("genus", ""),
+            row.get("notes", ""),
+        ]
+        while parts and not parts[-1]:
+            parts.pop()
+        return " | ".join(parts)
+
+    @classmethod
+    def _stored_additional_identifications(cls, raw: dict) -> list[dict[str, str]]:
+        if not isinstance(raw, dict):
+            return []
+        for key in ("additional_identifications", "additionalIdentifications"):
+            value = raw.get(key)
+            if isinstance(value, list):
+                return [
+                    row for row in (cls._normalise_extra_identification(item) for item in value)
+                    if cls._has_taxon_identity(row)
+                ]
+        return []
+
     def _current_context(self) -> dict[str, str]:
         ctx: dict[str, str] = {}
         for sp_key, lv in _BY_SP.items():

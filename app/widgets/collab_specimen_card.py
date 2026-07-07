@@ -263,14 +263,9 @@ class CollabSpecimenCard(QWidget):
         svc = getattr(self.ctx, "collab_service", None)
         if svc is None or not self._uid:
             return
-        try:
-            from app.services.collab_service import TaskStatus
-            svc.store.update_status(self._uid, TaskStatus(new_status))
-            svc._log_activity(
-                "status_changed", self._uid,
-                detail=f"编号 {self._uid} 状态变为 {_STATUS_LABEL.get(new_status, new_status)}",
-            )
-            svc.specimen_status_changed.emit(self._uid)
-        except ValueError:
+        ok, _ = svc.update_task_status(
+            self._uid, new_status, force=True, broadcast=True,
+        )
+        if not ok:
             pass
         self._refresh_collab_task_state()

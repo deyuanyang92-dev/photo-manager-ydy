@@ -147,7 +147,7 @@ class CollabDiagnosticsDialog(QDialog):
             if not others:
                 return None
             target = others[0]
-            btn = QPushButton(f"改用组码「{target}」")
+            btn = QPushButton(f"改用团队永久码「{target}」")
             btn.clicked.connect(lambda: self._confirm_adopt(target))
             return btn
         if action == "open_firewall":
@@ -167,8 +167,8 @@ class CollabDiagnosticsDialog(QDialog):
 
     def _confirm_adopt(self, code: str) -> None:
         reply = QMessageBox.question(
-            self, "改用组码",
-            f"确定把本机协作组码改为「{code}」吗?\n改后将与该组设备同步。",
+            self, "改用团队永久码",
+            f"确定把本机团队永久码改为「{code}」吗?\n改后将与该团队设备同步。",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
         if reply == QMessageBox.StandardButton.Yes:
             self._adopt_group(code)

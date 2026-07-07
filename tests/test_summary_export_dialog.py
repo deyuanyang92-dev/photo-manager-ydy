@@ -52,15 +52,17 @@ class TestSummaryExportDialog:
         assert len(dirs) == 1
         assert os.path.normpath(resolved_root) == os.path.normpath(str(root))
 
-    def test_mode_a_export_writes_three_outputs(self, tmp_path, monkeypatch):
+    def test_mode_a_export_writes_default_outputs(self, tmp_path, monkeypatch):
         root = tmp_path / "survey"
         _make_workspace(root / "断面A")
         _make_workspace(root / "断面B")
 
         d = _dlg(initial_root=str(root))
-        # All three outputs checked by default.
+        # All default outputs checked by default.
         assert d._cb_specimen.isChecked()
         assert d._cb_collection.isChecked()
+        assert d._cb_station_species.isChecked()
+        assert d._cb_sample_processing.isChecked()
         assert d._cb_qc.isChecked()
 
         # Modal message boxes block under offscreen — stub them out.
@@ -75,8 +77,9 @@ class TestSummaryExportDialog:
         exports = root / "_data" / "exports"
         assert exports.is_dir()
         written = sorted(p.name for p in exports.iterdir())
-        # specimen xlsx + collection xlsx + qc html + qc xlsx = 4 files
-        assert len(written) >= 3
+        # specimen xlsx + collection xlsx + taxon checklist xlsx
+        # + sample processing xlsx + qc html/xlsx
+        assert len(written) >= 5
         assert any(name.endswith(".xlsx") for name in written)
         assert any(name.endswith(".html") for name in written)
 

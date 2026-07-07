@@ -187,7 +187,9 @@ def register_workspace(
     )
 
     try:
-        rel = os.path.relpath(workspace, root)
+        # Catalog paths are stored POSIX-style so a survey folder can move
+        # across OSes (Windows relpath yields backslashes).
+        rel = os.path.relpath(workspace, root).replace(os.sep, "/")
     except ValueError:
         rel = workspace.name
     ts = _utc_now_iso()

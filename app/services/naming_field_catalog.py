@@ -26,7 +26,7 @@ NAMING_FIELDS: tuple[NamingField, ...] = (
     NamingField("province", "地区", "地区", default_component=True, default_required=True),
     NamingField("site", "样地", "样地", default_component=True, default_required=True),
     NamingField("station", "站位", "站位", default_component=True),
-    NamingField("species_id", "物种缩写", "编号", default_component=True, default_required=True),
+    NamingField("species_id", "样品/物种标签", "编号", default_component=True, default_required=True),
     NamingField("storage", "保存方式", "保存", default_component=True, default_required=True),
     NamingField("date_seg", "日期段", "日期", required=False, default_component=True, panel_input=False),
     NamingField("collection_date", "采集日期", "采集日期", component=False, default_required=True),

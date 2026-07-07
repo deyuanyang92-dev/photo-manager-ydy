@@ -375,12 +375,25 @@ class MetadataPanel(QWidget):
             self._geo_status.setText("")
             return
         self._geo_status.setText("查询中…")
+        # Stale-response guard: quick lon/lat edits can leave multiple workers
+        # in flight; only the LATEST request may fill 采集地理区.
+        token = getattr(self, "_geocode_token", 0) + 1
+        self._geocode_token = token
         self._geocode_worker = _NominatimWorker(lat, lon)
-        self._geocode_worker.result_ready.connect(self._on_geocode_result)
-        self._geocode_worker.error_occurred.connect(self._on_geocode_error)
+        self._geocode_worker.result_ready.connect(
+            lambda name, t=token: self._on_geocode_result(name, t)
+        )
+        self._geocode_worker.error_occurred.connect(
+            lambda msg, t=token: self._on_geocode_error(msg, t)
+        )
         self._geocode_worker.start()
 
-    def _on_geocode_result(self, name: str) -> None:
+    def _is_stale_geocode_response(self, token) -> bool:
+        return token is not None and token != getattr(self, "_geocode_token", 0)
+
+    def _on_geocode_result(self, name: str, token=None) -> None:
+        if self._is_stale_geocode_response(token):
+            return
         if name:
             self._geo_area.blockSignals(True)
             self._geo_area.setText(name)
@@ -391,8 +404,10 @@ class MetadataPanel(QWidget):
         else:
             self._geo_status.setText("未找到地名，可手填")
 
-    def _on_geocode_error(self, msg: str) -> None:
+    def _on_geocode_error(self, msg: str, token=None) -> None:
         # Inline status only — never a blocking popup.
+        if self._is_stale_geocode_response(token):
+            return
         self._geo_status.setText("反查失败，可手填")
 
     def _on_map_pick(self) -> None:

@@ -506,14 +506,13 @@ class CollabManagerDialog(QDialog):
     def _on_update_status(self, uid: str, new_status: str) -> None:
         if self._svc is None:
             return
-        try:
-            from app.services.collab_service import TaskStatus
-            self._svc.store.update_status(uid, TaskStatus(new_status))
-            # Broadcast to online peers via simple update call
-            self._broadcast_status_update(uid, new_status)
-            self._refresh_task_table()
-        except ValueError as exc:
-            self._show_banner(f"状态更新失败：{exc}")
+        ok, msg = self._svc.update_task_status(
+            uid, new_status, force=True, broadcast=True,
+        )
+        if not ok:
+            self._show_banner(f"状态更新失败：{msg}")
+            return
+        self._refresh_task_table()
 
     def _broadcast_status_update(self, uid: str, new_status: str) -> None:
         """POST status update to all online peers (best-effort, silent on error)."""

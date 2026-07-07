@@ -112,7 +112,7 @@ class TestLoading:
         svc = TaxonomyService(seed_p, user_p)
         svc.seed_count()  # trigger load
         assert user_p.exists()
-        data = json.loads(user_p.read_text())
+        data = json.loads(user_p.read_text(encoding="utf-8"))
         assert data == []
 
     def test_seed_absent_returns_empty(self, tmp_dirs):
@@ -260,7 +260,7 @@ class TestLearn:
             "class": "Polychaeta", "order": "Phyllodocida",
             "family": "Polynoidae", "species": "Halosydna brevisetosa",
         })
-        data = json.loads(user_p.read_text())
+        data = json.loads(user_p.read_text(encoding="utf-8"))
         assert len(data) == 1
         assert data[0]["class"] == "Polychaeta"
 
@@ -287,13 +287,13 @@ class TestLearn:
 
     def test_learn_does_not_overwrite_seed(self, svc, tmp_dirs):
         seed_p, _ = tmp_dirs
-        original_seed = seed_p.read_text()
+        original_seed = seed_p.read_text(encoding="utf-8")
         svc.learn({
             "class": "Polychaeta", "order": "Phyllodocida",
             "family": "Polynoidae", "species": "Halosydna brevisetosa",
         })
         # Seed file must be byte-for-byte identical
-        assert seed_p.read_text() == original_seed
+        assert seed_p.read_text(encoding="utf-8") == original_seed
 
     def test_learn_user_record_has_record_id(self, svc):
         result = svc.learn({
@@ -338,19 +338,19 @@ class TestUpdate:
         records, _ = svc.all_records(source_filter="user")
         rec_id = records[0]["recordId"]
         svc.update_user_record(rec_id, {"orderCn": "叶须虫目_new"})
-        data = json.loads(user_p.read_text())
+        data = json.loads(user_p.read_text(encoding="utf-8"))
         assert data[0]["orderCn"] == "叶须虫目_new"
 
     def test_update_does_not_overwrite_seed(self, svc, tmp_dirs):
         seed_p, _ = tmp_dirs
-        original = seed_p.read_text()
+        original = seed_p.read_text(encoding="utf-8")
         svc.learn({
             "class": "Polychaeta", "order": "Phyllodocida",
             "family": "Polynoidae", "species": "Halosydna brevisetosa",
         })
         records, _ = svc.all_records(source_filter="user")
         svc.update_user_record(records[0]["recordId"], {"classCn": "x"})
-        assert seed_p.read_text() == original
+        assert seed_p.read_text(encoding="utf-8") == original
 
 
 # ── Delete ────────────────────────────────────────────────────────────────────
@@ -377,19 +377,19 @@ class TestDelete:
         })
         records, _ = svc.all_records(source_filter="user")
         svc.delete_user_record(records[0]["recordId"])
-        data = json.loads(user_p.read_text())
+        data = json.loads(user_p.read_text(encoding="utf-8"))
         assert data == []
 
     def test_delete_does_not_overwrite_seed(self, svc, tmp_dirs):
         seed_p, _ = tmp_dirs
-        original = seed_p.read_text()
+        original = seed_p.read_text(encoding="utf-8")
         svc.learn({
             "class": "Polychaeta", "order": "Phyllodocida",
             "family": "Polynoidae", "species": "Halosydna brevisetosa",
         })
         records, _ = svc.all_records(source_filter="user")
         svc.delete_user_record(records[0]["recordId"])
-        assert seed_p.read_text() == original
+        assert seed_p.read_text(encoding="utf-8") == original
 
 
 # ── Seed never overwritten ────────────────────────────────────────────────────
@@ -411,9 +411,9 @@ class TestSeedImmutability:
 
     def test_seed_unchanged_after_learn_update_delete(self, svc, tmp_dirs):
         seed_p, user_p = tmp_dirs
-        original = seed_p.read_text()
+        original = seed_p.read_text(encoding="utf-8")
         self._run_all_mutations(svc, seed_p, user_p)
-        assert seed_p.read_text() == original
+        assert seed_p.read_text(encoding="utf-8") == original
 
 
 # ── all_records / pagination ──────────────────────────────────────────────────
@@ -492,7 +492,7 @@ class TestHistory:
         records, _ = svc.all_records(source_filter="user")
         rec_id = records[0]["recordId"]
         svc.update_user_record(rec_id, {"orderCn": "叶须虫目_new"})
-        data = json.loads(user_p.read_text())
+        data = json.loads(user_p.read_text(encoding="utf-8"))
         hist = data[0].get("history", [])
         assert len(hist) == 1
         assert hist[0]["before"]["orderCn"] == ""

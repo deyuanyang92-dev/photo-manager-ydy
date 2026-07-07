@@ -194,7 +194,7 @@ def test_collab_status_bar_uses_shared_status():
 
         svc._running = True
         win._refresh_collab_status()
-        assert "未设置协作组码" in win._status_collab.text()
+        assert "未配对团队" in win._status_collab.text()
 
         svc.set_group_code("TEAM-1")
         win._refresh_collab_status()
@@ -204,8 +204,11 @@ def test_collab_status_bar_uses_shared_status():
         win.close()
 
 
-def test_workspace_actions_are_integrated_into_breadcrumb():
-    win = _fresh_window()
+def test_workspace_actions_are_integrated_into_breadcrumb(tmp_path):
+    ctx = AppContext()
+    ctx.current_project_dir = str(tmp_path / "demo")
+    win = MainWindow(ctx)
+    win.refresh_context_bar()
     folder_btn = win._project_switcher._btn_folder
     actions = [a.text() for a in folder_btn.menu().actions()]
 
@@ -244,7 +247,8 @@ def test_navigate_to_shows_page_and_activates():
 def test_context_bar_no_project():
     win = _fresh_window()
     win.refresh_context_bar()
-    assert "（未选）" in win._project_switcher.text()
+    assert "选择工作区" in win._project_switcher.text()
+    assert win._project_switcher._btn_folder is None
     assert win._active_badge.objectName() == "ActiveBadgeOff"
     # Quick actions (智能压缩 / 🎬Helicon) disabled without a project.
     assert not win._btn_compress.isEnabled()
@@ -422,6 +426,26 @@ def test_restore_state_selects_default():
     win.restore_state()
     # At least one segment is checked after restore.
     assert any(b.isChecked() for b in win._nav_buttons)
+
+
+def test_restore_state_fast_startup_skips_last_heavy_page():
+    win = _fresh_window()
+
+    class _Second(_DummyView):
+        view_id = "dummy2"
+        nav_title = "第二页"
+
+    win.register_view(_DummyView)
+    win.register_view(_Second)
+    win.ctx.settings.last_nav_index = 1
+
+    win.restore_state(activate_last_view=False)
+
+    assert win._nav_buttons[0].isChecked()
+    assert not win._nav_buttons[1].isChecked()
+    assert "dummy" in win._views
+    assert "dummy2" not in win._views
+    assert win.ctx.settings.last_nav_index == 1
 
 
 # ── Full registry boots through the new chrome ─────────────────────────────

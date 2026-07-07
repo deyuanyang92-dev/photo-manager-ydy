@@ -61,6 +61,47 @@ class TestWormsButton:
 
 # ── 2-D: _NominatimWorker emits zh result ─────────────────────────────────────
 
+class TestTaxonCardAdditionalIdentifications:
+    def test_extra_identifications_parse_free_form_rows(self, qtbot):
+        from app.widgets.taxon_card_panel import TaxonCardPanel
+
+        panel = TaxonCardPanel(_make_ctx())
+        qtbot.addWidget(panel)
+        panel._extra_identifications.setPlainText(
+            "Taxon alpha | 中文甲 | FamA | GenusA | 3 ind\n"
+            "中文乙"
+        )
+
+        rows = panel.additional_identifications()
+
+        assert rows[0]["scientific_name"] == "Taxon alpha"
+        assert rows[0]["scientific_name_cn"] == "中文甲"
+        assert rows[0]["family"] == "FamA"
+        assert rows[0]["genus"] == "GenusA"
+        assert rows[0]["notes"] == "3 ind"
+        assert rows[1]["scientific_name_cn"] == "中文乙"
+
+    def test_extra_identifications_load_from_raw_json(self, qtbot):
+        from app.models.specimen import Specimen
+        from app.widgets.taxon_card_panel import TaxonCardPanel
+
+        panel = TaxonCardPanel(_make_ctx())
+        qtbot.addWidget(panel)
+        sp = Specimen(
+            uid="U1",
+            raw_json=json.dumps({
+                "additional_identifications": [
+                    {"scientificName": "Taxon beta", "family": "FamB"},
+                ],
+            }, ensure_ascii=False),
+        )
+
+        panel.load_specimen(sp)
+
+        rows = panel.additional_identifications()
+        assert rows == [{"scientific_name": "Taxon beta", "family": "FamB"}]
+
+
 class TestGeoWorker:
     """_NominatimWorker emits nominatim_to_zh result via result_ready signal."""
 

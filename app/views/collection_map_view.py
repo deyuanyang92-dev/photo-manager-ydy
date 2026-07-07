@@ -820,9 +820,9 @@ class CollectionMapView(BaseView):
     def _on_add_project(self) -> None:
         """新建项目；建完刷新列表并选中，停留在采集地图（不跳工作区）。"""
         from app.views.project_dialog import ProjectDialog
-        from app.views.overview_view import _load_projects
+        from app.services.project_service import load_user_projects
 
-        existing = _load_projects()
+        existing = load_user_projects()
         dlg = ProjectDialog(mode="new", existing_projects=existing, parent=self, light=True)
         if dlg.exec() != ProjectDialog.DialogCode.Accepted:
             return
@@ -843,15 +843,15 @@ class CollectionMapView(BaseView):
             return
         from app.services.project_service import (
             default_user_projects_json_path,
+            load_user_projects,
             save_project_descriptor,
         )
-        from app.views.overview_view import _load_projects
         try:
             d = proj.get("directory")
             save_project_descriptor(
                 default_user_projects_json_path(),
                 proj,
-                existing_projects=_load_projects(),
+                existing_projects=load_user_projects(),
             )
             from app.services.project_service import enter_workspace
             enter_workspace(self.ctx, d, projects_json_path=default_user_projects_json_path())
@@ -992,14 +992,14 @@ class CollectionMapView(BaseView):
         new_name, ok = QInputDialog.getText(self, "重命名项目", "新名称", text=old_name)
         if not ok or not new_name.strip() or new_name.strip() == old_name:
             return
-        from app.views.overview_view import _load_projects, _save_projects
+        from app.services.project_service import load_user_projects, save_user_projects
         try:
-            all_projects = _load_projects()
+            all_projects = load_user_projects()
             for p in all_projects:
                 if (p.get("directory") or p.get("dir")) == directory:
                     p["name"] = new_name.strip()
                     break
-            _save_projects(all_projects)
+            save_user_projects(all_projects)
             self._populate_projects()
         except Exception as exc:
             ui.warn(self, "重命名失败", str(exc))
@@ -1012,12 +1012,12 @@ class CollectionMapView(BaseView):
                        f"确定将「{name}」从列表中移除？\n（不会删除项目文件）") \
                 != QMessageBox.StandardButton.Yes:
             return
-        from app.views.overview_view import _load_projects, _save_projects
+        from app.services.project_service import load_user_projects, save_user_projects
         try:
-            all_projects = _load_projects()
+            all_projects = load_user_projects()
             all_projects = [p for p in all_projects
                             if (p.get("directory") or p.get("dir")) != directory]
-            _save_projects(all_projects)
+            save_user_projects(all_projects)
             if self._project_filter == directory:
                 self._project_filter = None
             self._populate_projects()

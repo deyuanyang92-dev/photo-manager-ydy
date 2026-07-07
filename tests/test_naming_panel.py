@@ -222,7 +222,7 @@ def test_date_section_visible_for_input(panel):
 def test_required_fields_marked(panel):
     """标本 UID 必填字段带红*; 站位/成果序号/拍照备注 选填(无*)。
 
-    必填(红*): 地区/样地/物种缩写/保存方式/采集日期/拍摄日期
+    必填(红*): 地区/样地/样品/物种标签/保存方式/采集日期/拍摄日期
       - 地区/样地虽由项目级默认预填, 仍标必填(值须存在)
       - 拍摄日期 2026-06-14 改定必填(原选填)
     """
@@ -233,7 +233,7 @@ def test_required_fields_marked(panel):
         assert matches, f"{kw} field label not found"
         return "*" in matches[0].text()
 
-    for kw in ("地区", "样地", "物种缩写", "保存方式", "采集日期", "拍摄日期"):
+    for kw in ("地区", "样地", "样品/物种标签", "保存方式", "采集日期", "拍摄日期"):
         assert has_star(kw), f"{kw} should be required (*)"
     # 站位选填(缺则 UID 少一段, 非 bug)
     station = [l for l in labels if "站位" in l.text()]
@@ -298,7 +298,7 @@ def test_storage_combo_shows_unlisted_storage_code(panel):
 
 
 def test_uid_code_fields_auto_uppercase(panel):
-    """地区/样地/站位/物种缩写输入小写时，控件和 UID 预览都自动转大写。"""
+    """地区/样地/站位/样品标签输入小写时，控件和 UID 预览都自动转大写。"""
     panel._province.setText("fj")
     panel._site.setText("d")
     panel._station.setText("f")
@@ -312,6 +312,20 @@ def test_uid_code_fields_auto_uppercase(panel):
     assert panel._station.text() == "F"
     assert panel._species_id.text() == "DD001"
     assert panel.current_uid() == "FJ-D-F-DD001-T95E-20260612-0613"
+
+
+def test_field_sample_label_does_not_trigger_species_code_warning(panel):
+    panel._province.setText("FJ")
+    panel._site.setText("S1")
+    panel._station.setText("A")
+    panel._species_id.setText("MIX01")
+    panel._storage.setText("T95E")
+    panel._collection_date.setText("20260612")
+    panel._photo_date.setText("20260612")
+
+    panel._check_compliance(panel.current_uid())
+
+    assert panel._compliance_warn.isHidden()
 
 
 def test_project_naming_rules_control_required_stars_and_warning(qapp):

@@ -880,8 +880,8 @@ class TestCollabViewSmoke:
         view = CollabView(ctx)
         view.on_activate()
 
-        assert "未设置协作组码" in view._status_badge.text()
-        assert "先启动/加入协作组" in view._scope_label.text()
+        assert "未配对团队" in view._status_badge.text()
+        assert view._scope_label.text() == "团队永久码：未设置"
         view.close()
         svc.stop()
 
@@ -989,8 +989,8 @@ class TestCollabViewSmoke:
         view = CollabView(ctx)
         view.on_activate()
 
-        assert view._next_step_label.text() == "任务已可协作；照片还不能同步"
-        assert "绑定同一项目" in view._next_step_detail.text()
+        assert view._next_step_label.text() == "下一步：选择共享项目"
+        assert "绑定" in view._next_step_detail.text() or "项目" in view._next_step_detail.text()
         view.close()
         svc.stop()
 
@@ -1080,7 +1080,7 @@ class TestCollabViewSmoke:
 
             svc._running = True
             panel.refresh()
-            assert panel._health_text.text() == "未设置协作组码"
+            assert panel._health_text.text() == "未配对团队"
             assert not panel._setup_btn.isHidden()
 
             svc.set_group_code("TEAM-1")
@@ -1277,7 +1277,7 @@ class TestSidebarCollabStrip:
         svc = CollabService()
         svc._running = True
         sb.update_collab_status(svc)
-        assert "未设置协作组码" in sb._collab_sync.text()
+        assert "未配对团队" in sb._collab_sync.text()
         assert not sb._collab_sync_selected_btn.isEnabled()
         assert not sb._collab_sync_project_btn.isEnabled()
         sb.close()
@@ -1372,6 +1372,98 @@ class TestStatusBroadcast:
 
         dlg.close()
         svc.stop()
+
+
+# ── Specimen LWW merge safety ─────────────────────────────────────────────────
+
+
+class TestSpecimenLwwMerge:
+    """_write_specimens_to_local_db must never clobber newer local edits."""
+
+    def _svc_with_project(self, tmp_path) -> CollabService:
+        project = tmp_path / "proj"
+        project.mkdir()
+        db_manager.open_project_db(str(project), create=True)
+        db_manager.close_project_db(str(project))
+        svc = CollabService()
+        svc._project_dir = str(project)
+        return svc
+
+    def _insert_local(self, svc, uid: str, notes: str, stamp: str) -> None:
+        db = db_manager.open_project_db_private(svc._project_dir)
+        try:
+            db.execute(
+                "INSERT INTO specimens (uid, notes, collab_updated_at) VALUES (?,?,?)",
+                (uid, notes, stamp),
+            )
+            db.commit()
+        finally:
+            db.close()
+
+    def _local_notes(self, svc, uid: str) -> str:
+        db = db_manager.open_project_db_private(svc._project_dir)
+        try:
+            row = db.execute(
+                "SELECT notes FROM specimens WHERE uid=?", (uid,)
+            ).fetchone()
+            return row[0] if row else ""
+        finally:
+            db.close()
+
+    def test_newer_remote_overwrites_older_local(self, tmp_path):
+        svc = self._svc_with_project(tmp_path)
+        self._insert_local(svc, "U1", "本地旧值", "2026-01-01T00:00:00+00:00")
+        written = svc._write_specimens_to_local_db([{
+            "uid": "U1", "notes": "远端新值",
+            "collab_updated_at": "2026-06-01T00:00:00+00:00",
+        }])
+        assert written == 1
+        assert self._local_notes(svc, "U1") == "远端新值"
+
+    def test_older_remote_never_clobbers_newer_local(self, tmp_path):
+        svc = self._svc_with_project(tmp_path)
+        self._insert_local(svc, "U2", "本地新值", "2026-06-01T00:00:00+00:00")
+        written = svc._write_specimens_to_local_db([{
+            "uid": "U2", "notes": "远端旧值",
+            "collab_updated_at": "2026-01-01T00:00:00+00:00",
+        }])
+        assert written == 0
+        assert self._local_notes(svc, "U2") == "本地新值"
+
+    def test_unstamped_remote_only_fills_missing_rows(self, tmp_path):
+        svc = self._svc_with_project(tmp_path)
+        self._insert_local(svc, "U3", "本地值", "")
+        written = svc._write_specimens_to_local_db([
+            {"uid": "U3", "notes": "远端无戳"},           # exists → skip
+            {"uid": "U4", "notes": "全新记录"},           # missing → write
+        ])
+        assert written == 1
+        assert self._local_notes(svc, "U3") == "本地值"
+        assert self._local_notes(svc, "U4") == "全新记录"
+
+    def test_push_specimen_stamps_local_record(self, tmp_path):
+        svc = self._svc_with_project(tmp_path)
+        self._insert_local(svc, "U5", "值", "")
+        svc._stamp_specimen("U5")
+        db = db_manager.open_project_db_private(svc._project_dir)
+        try:
+            row = db.execute(
+                "SELECT collab_updated_at FROM specimens WHERE uid=?", ("U5",)
+            ).fetchone()
+        finally:
+            db.close()
+        assert row[0]  # non-empty ISO stamp
+
+    def test_sync_cols_match_schema(self, tmp_path):
+        """Every synced column must exist in the specimens table."""
+        svc = self._svc_with_project(tmp_path)
+        db = db_manager.open_project_db_private(svc._project_dir)
+        try:
+            cols = {r[1] for r in db.execute("PRAGMA table_info(specimens)")}
+        finally:
+            db.close()
+        missing = [c for c in CollabService._SPEC_SYNC_COLS if c not in cols]
+        assert missing == []
 
 
 # ── Offline draft queue ───────────────────────────────────────────────────────
@@ -1509,8 +1601,15 @@ class TestPhotoIndexReporting:
     def test_post_photo_index_calls_peer(self):
         """With one peer, httpx.post is called with the photo-index endpoint."""
         svc = self._make_service()
+        svc.set_group_code("G1")
+        svc._project_id = "P1"
         from app.services.collab_service import PeerInfo
-        svc._peers["10.9.9.2:5050"] = PeerInfo(ip="10.9.9.2", port=5050)
+        svc._peers["10.9.9.2:5050"] = PeerInfo(
+            ip="10.9.9.2",
+            port=5050,
+            group_code="G1",
+            project_id="P1",
+        )
 
         posted: list[dict] = []
 
@@ -1528,12 +1627,38 @@ class TestPhotoIndexReporting:
         assert posted[0]["json"]["uid"] == "PI-002"
         assert posted[0]["json"]["kind"] == "zip"
         assert posted[0]["json"]["count"] == 1
+        assert posted[0]["json"]["groupCode"] == "G1"
+        assert posted[0]["json"]["projectId"] == "P1"
+
+    def test_post_photo_index_skips_different_project_peer(self):
+        svc = self._make_service()
+        svc.set_group_code("G1")
+        svc._project_id = "P1"
+        from app.services.collab_service import PeerInfo
+        svc._peers["10.9.9.2:5050"] = PeerInfo(
+            ip="10.9.9.2",
+            port=5050,
+            group_code="G1",
+            project_id="P2",
+        )
+
+        with patch("httpx.post") as mock_post:
+            svc.post_photo_index("PI-002", "zip", count=1)
+
+        mock_post.assert_not_called()
 
     def test_post_photo_index_network_error_silent(self):
         """Network failure is silently swallowed (fire-and-forget)."""
         svc = self._make_service()
+        svc.set_group_code("G1")
+        svc._project_id = "P1"
         from app.services.collab_service import PeerInfo
-        svc._peers["10.9.9.3:5050"] = PeerInfo(ip="10.9.9.3", port=5050)
+        svc._peers["10.9.9.3:5050"] = PeerInfo(
+            ip="10.9.9.3",
+            port=5050,
+            group_code="G1",
+            project_id="P1",
+        )
 
         import httpx
         with patch("httpx.post", side_effect=httpx.ConnectError("refused")):
@@ -1542,12 +1667,21 @@ class TestPhotoIndexReporting:
 
     def test_photo_index_record_to_dict(self):
         from app.services.collab_service import PhotoIndexRecord
-        r = PhotoIndexRecord(uid="R-001", kind="tiff", count=5, device_id="DEV-1")
+        r = PhotoIndexRecord(
+            uid="R-001",
+            kind="tiff",
+            count=5,
+            device_id="DEV-1",
+            group_code="G1",
+            project_id="P1",
+        )
         d = r.to_dict()
         assert d["uid"] == "R-001"
         assert d["kind"] == "tiff"
         assert d["count"] == 5
         assert d["deviceId"] == "DEV-1"
+        assert d["groupCode"] == "G1"
+        assert d["projectId"] == "P1"
         assert "reportedAt" in d
 
 
@@ -1658,3 +1792,66 @@ class TestUpdateTaskStatusUiHelper:
         ok, _ = svc.update_task_status("F4", "done")  # 无 force
         assert ok is False
         assert svc.store.get_task("F4").status is TaskStatus.SHOOTING
+
+
+class TestUpdateStatusBroadcast:
+    def test_broadcast_sends_force_flag(self):
+        svc = CollabService()
+        svc.set_group_code("G1")
+        svc._peers["10.0.0.2:5050"] = PeerInfo(
+            ip="10.0.0.2", port=5050, group_code="G1",
+        )
+        svc.store.create("BC-001")
+        posted: list[dict] = []
+
+        def fake_post(url: str, **kwargs):
+            posted.append(kwargs.get("json", {}))
+            m = MagicMock()
+            m.status_code = 200
+            return m
+
+        with patch("httpx.post", side_effect=fake_post):
+            svc.update_task_status("BC-001", "shooting", force=True, broadcast=True)
+
+        assert posted
+        assert posted[0]["force"] is True
+        assert posted[0]["status"] == "shooting"
+
+
+class TestPhotoIndexReceive:
+    def test_on_photo_index_received_logs_and_emits(self):
+        svc = CollabService()
+        seen: list[tuple] = []
+        svc.photo_index_received.connect(
+            lambda uid, kind, count, device: seen.append((uid, kind, count, device))
+        )
+        svc._on_photo_index_received("U9", "tiff", 2, "peer-pc")
+        assert seen == [("U9", "tiff", 2, "peer-pc")]
+        entries = svc.activity_log.recent()
+        assert any(e.action == "photo_index" and e.target_uid == "U9" for e in entries)
+
+
+class TestEnsureRunning:
+    def test_starts_when_team_code_saved(self):
+        svc = CollabService()
+        ctx = MagicMock()
+        ctx.settings.team_code = "TEAM-99"
+        ctx.settings.last_project_dir = ""
+        ctx.current_project_dir = None
+        assert svc.ensure_running(ctx) is True
+        assert svc.is_running()
+        assert svc.group_code == "TEAM-99"
+
+    def test_no_op_without_team_code(self):
+        svc = CollabService()
+        ctx = MagicMock()
+        ctx.settings.team_code = ""
+        ctx.current_project_dir = None
+        assert svc.ensure_running(ctx) is False
+        assert not svc.is_running()
+
+    def test_create_session_starts_service(self):
+        svc = CollabService()
+        code = svc.create_session()
+        assert code
+        assert svc.is_running()

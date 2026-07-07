@@ -233,8 +233,10 @@ _LEGACY_SHORT_DATE_RE = re.compile(r"^\d{6}$")
 # Storage code: alphanumeric (e.g. T95E, RD75E, D70E)
 _STORAGE_RE = r"([A-Za-z0-9]+)"
 
-# Species ID: alphanumeric (e.g. DLC001)
-_SPECIES_ID_RE = r"([A-Za-z0-9]+)"
+# Sample/specimen label: one non-dash segment. Existing DLC001-style codes still
+# work, but field survey labels such as MIX01, BOTTLE_A, or Chinese tube labels
+# should remain parseable after safe_uid_segment() normalizes spaces/dashes.
+_SPECIES_ID_RE = r"([^-]+)"
 
 # Station: alphanumeric (e.g. B2, S3)
 _STATION_RE = r"([A-Za-z0-9]+)"
@@ -269,13 +271,19 @@ _LEGACY_RE = re.compile(
     + _SPECIES_ID_RE + r"-" + _STORAGE_RE + r"-" + _DATE_SEG_RE + r"$"
 )
 
-_SPECIES_ID_FULL_RE = re.compile(r"^[A-Za-z]+\d+$")
 _STORAGE_CODE_FULL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]*$", re.IGNORECASE)
 
 
 def _valid_parsed_species_id(value: str) -> bool:
-    """Species codes are voucher prefixes with a numeric suffix, e.g. DLC001."""
-    return bool(_SPECIES_ID_FULL_RE.fullmatch(str(value or "")))
+    """Accept a non-empty sample/specimen label, not a pure sequence/date token."""
+    s = str(value or "").strip()
+    if not s or "-" in s:
+        return False
+    if s.isdigit():
+        return False
+    if _DATE_SEG_FULL_RE.fullmatch(s) or _LEGACY_SHORT_DATE_RE.fullmatch(s):
+        return False
+    return True
 
 
 def _valid_parsed_storage(value: str) -> bool:

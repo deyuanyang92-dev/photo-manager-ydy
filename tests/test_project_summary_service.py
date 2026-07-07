@@ -339,6 +339,194 @@ def test_collect_specimen_summary_rows_includes_result_file_counts(tmp_path):
 
 # ── collection summary ─────────────────────────────────────────────────────────
 
+def test_taxon_checklist_groups_only_identified_taxa(tmp_path):
+    root = tmp_path / "survey"
+    root.mkdir()
+    dir_a, conn_a = _make_workspace(root, "transect-a")
+    _insert_record(
+        conn_a,
+        province="FJ",
+        site="S1",
+        station="A",
+        collection_date="20260601",
+        station_label="Station A",
+        lon=119.5,
+        lat=26.1,
+        geo_area="bay",
+        collection_time="09:30",
+        habitat="mudflat",
+        method="grab",
+    )
+
+    _insert_specimen(
+        conn_a,
+        "FJ-S1-A-DLC001-T95E-20260601",
+        id="DLC001",
+        province="FJ",
+        site="S1",
+        station="A",
+        collection_date="20260601",
+        scientific_name="Taxon alpha",
+        scientific_name_cn="Alpha",
+        family="FamA",
+        genus="GenA",
+    )
+    _insert_specimen(
+        conn_a,
+        "FJ-S1-A-DLC002-T95E-20260601",
+        id="DLC002",
+        province="FJ",
+        site="S1",
+        station="A",
+        collection_date="20260601",
+        scientific_name="Taxon alpha",
+        scientific_name_cn="Alpha",
+        family="FamA",
+        genus="GenA",
+    )
+    _insert_specimen(
+        conn_a,
+        "FJ-S1-A-MIX01-T95E-20260601",
+        id="MIX01",
+        province="FJ",
+        site="S1",
+        station="A",
+        collection_date="20260601",
+        notes="field mixed tube",
+    )
+
+    rows = pss.collect_taxon_checklist([dir_a], str(root))
+    by_name = {row["scientific_name"] or row["scientific_name_cn"]: row for row in rows}
+
+    alpha = by_name["Taxon alpha"]
+    assert alpha["evidence_count"] == 2
+    assert "DLC001" in alpha["sample_labels"]
+    assert "DLC002" in alpha["sample_labels"]
+    assert alpha["station"] == "A"
+    assert alpha["station_label"] == "Station A"
+    assert alpha["collection_date"] == "20260601"
+    assert alpha["collection_time"] == "09:30"
+    assert alpha["lon"] == 119.5
+    assert alpha["lat"] == 26.1
+    assert alpha["geo_area"] == "bay"
+    assert alpha["habitat"] == "mudflat"
+    assert alpha["method"] == "grab"
+    assert "未鉴定/混合样" not in by_name
+
+
+def test_sample_processing_summary_keeps_unidentified_mixed_samples(tmp_path):
+    root = tmp_path / "survey"
+    root.mkdir()
+    dir_a, conn_a = _make_workspace(root, "transect-a")
+
+    _insert_specimen(
+        conn_a,
+        "FJ-S1-A-MIX01-T95E-20260601",
+        id="MIX01",
+        province="FJ",
+        site="S1",
+        station="A",
+        collection_date="20260601",
+        notes="field mixed tube",
+    )
+    _insert_grouping(conn_a, "FJ-S1-A-MIX01-T95E-20260601", 0, "organized")
+    _insert_grouping(conn_a, "FJ-S1-A-MIX01-T95E-20260601", 1, "pending")
+    _insert_grouping(conn_a, "FJ-S1-MIX02-20260601", 0, "organized")
+
+    rows = pss.collect_sample_processing_summary([dir_a], str(root))
+    row = next(r for r in rows if r["sample_label"] == "MIX01")
+    assert row["taxonomy_status"] == "未鉴定"
+    assert row["group_count"] == 2
+    assert row["done_group_count"] == 1
+    assert row["pending_group_count"] == 1
+    legacy = next(r for r in rows if r["sample_label"] == "MIX02")
+    assert legacy["site"] == "S1"
+    assert legacy["collection_date"] == "20260601"
+
+
+def test_taxon_checklist_reads_multi_taxa_from_raw_json(tmp_path):
+    root = tmp_path / "survey"
+    root.mkdir()
+    dir_a, conn_a = _make_workspace(root, "transect-a")
+
+    raw = {
+        "identifications": [
+            {"scientificName": "Taxon alpha", "family": "FamA"},
+            {"scientificName": "Taxon beta", "family": "FamB"},
+        ]
+    }
+    _insert_specimen(
+        conn_a,
+        "FJ-S1-A-MIX01-T95E-20260601",
+        id="MIX01",
+        province="FJ",
+        site="S1",
+        station="A",
+        raw_json=json.dumps(raw, ensure_ascii=False),
+    )
+
+    rows = pss.collect_taxon_checklist([dir_a], str(root))
+    names = {row["scientific_name"] for row in rows}
+    assert names == {"Taxon alpha", "Taxon beta"}
+    assert all(row["evidence_count"] == 1 for row in rows)
+    assert all(row["sample_labels"] == "MIX01" for row in rows)
+    assert not any(row["scientific_name_cn"] == "未鉴定/混合样" for row in rows)
+
+
+def test_taxon_checklist_combines_primary_and_additional_identifications(tmp_path):
+    root = tmp_path / "survey"
+    root.mkdir()
+    dir_a, conn_a = _make_workspace(root, "transect-a")
+
+    raw = {
+        "additional_identifications": [
+            {"scientificName": "Taxon beta", "family": "FamB"},
+            {"notes": "field mixed tube only"},
+        ]
+    }
+    _insert_specimen(
+        conn_a,
+        "FJ-S1-A-MIX01-T95E-20260601",
+        id="MIX01",
+        province="FJ",
+        site="S1",
+        station="A",
+        scientific_name="Taxon alpha",
+        family="FamA",
+        raw_json=json.dumps(raw, ensure_ascii=False),
+    )
+
+    rows = pss.collect_taxon_checklist([dir_a], str(root))
+    by_name = {row["scientific_name"]: row for row in rows}
+
+    assert set(by_name) == {"Taxon alpha", "Taxon beta"}
+    assert by_name["Taxon alpha"]["family"] == "FamA"
+    assert by_name["Taxon beta"]["family"] == "FamB"
+    assert all(row["sample_labels"] == "MIX01" for row in rows)
+
+
+def test_taxon_checklist_export_writes_excel(tmp_path):
+    root = tmp_path / "survey"
+    root.mkdir()
+    dir_a, conn_a = _make_workspace(root, "transect-a")
+    _insert_specimen(
+        conn_a,
+        "FJ-S1-A-DLC001-T95E-20260601",
+        id="DLC001",
+        province="FJ",
+        site="S1",
+        station="A",
+        scientific_name="Taxon alpha",
+    )
+
+    out = pss.export_taxon_checklist([dir_a], str(root))
+    assert out.exists()
+    wb = openpyxl.load_workbook(str(out))
+    ws = wb["分类名录"]
+    assert ws.cell(1, 1).value == "断面/来源"
+    assert ws.cell(2, 18).value == "Taxon alpha"
+
+
 def test_collection_summary_merges_and_labels(tmp_path):
     root = tmp_path / "survey"
     root.mkdir()

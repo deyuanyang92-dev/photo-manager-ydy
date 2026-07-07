@@ -767,6 +767,23 @@ QFrame#CollabStepPanel {
     border: 1px solid rgba(15,23,42,0.08);
     border-radius: 8px;
 }
+QFrame#CollabStepPanel[role="entry"] {
+    border-color: rgba(15,118,110,0.24);
+}
+QFrame#CollabOptionalPanel {
+    background-color: #f8fafc;
+    border: 1px solid rgba(15,23,42,0.08);
+    border-radius: 8px;
+}
+QLabel#CollabEntryBadge {
+    color: #0f766e;
+    background-color: rgba(15,118,110,0.11);
+    border: 1px solid rgba(15,118,110,0.24);
+    border-radius: 6px;
+    padding: 2px 7px;
+    font-size: 12px;
+    font-weight: 700;
+}
 QLabel#CollabStepBadge {
     color: #0f766e;
     background-color: rgba(15,118,110,0.11);
@@ -1097,7 +1114,34 @@ QScrollArea#RightRailScroll QScrollBar::handle:vertical:hover {
 }
 
 /* ── Splitter ────────────────────────────────────────────────────── */
-QSplitter#WorkbenchSplitter::handle { background: transparent; }
+QSplitter#WorkbenchSplitter::handle:horizontal {
+    width: 14px;
+    background-color: #eef2f6;
+    border-left: 1px solid rgba(15,23,42,0.13);
+    border-right: 1px solid rgba(15,23,42,0.13);
+}
+QSplitter#WorkbenchSplitter::handle:horizontal:hover {
+    background-color: rgba(15,118,110,0.11);
+    border-left-color: rgba(15,118,110,0.24);
+    border-right-color: rgba(15,118,110,0.24);
+}
+QSplitter#WorkbenchSplitter::handle:horizontal:pressed {
+    background-color: rgba(15,118,110,0.24);
+}
+QSplitter#WorkbenchVerticalSplitter::handle:vertical {
+    height: 14px;
+    background-color: #eef2f6;
+    border-top: 1px solid rgba(15,23,42,0.13);
+    border-bottom: 1px solid rgba(15,23,42,0.13);
+}
+QSplitter#WorkbenchVerticalSplitter::handle:vertical:hover {
+    background-color: rgba(15,118,110,0.11);
+    border-top-color: rgba(15,118,110,0.24);
+    border-bottom-color: rgba(15,118,110,0.24);
+}
+QSplitter#WorkbenchVerticalSplitter::handle:vertical:pressed {
+    background-color: rgba(15,118,110,0.24);
+}
 QSplitter::handle { background-color: transparent; }
 QSplitter::handle:hover { background-color: rgba(15,118,110,0.06); border-radius: 2px; }
 QSplitter::handle:horizontal { width: 12px; }

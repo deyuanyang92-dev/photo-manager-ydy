@@ -188,7 +188,7 @@ class TestCollabTab:
 
         view._refresh_collab_health(recompute=True)
 
-        assert view._collab_health_text.text() == "未设置协作组码"
+        assert view._collab_health_text.text() == "未配对团队"
         svc.stop()
 
     def test_health_status_uses_shared_no_peers_state(self, view: SettingsView) -> None:

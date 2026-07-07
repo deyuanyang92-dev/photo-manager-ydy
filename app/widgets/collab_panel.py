@@ -307,7 +307,7 @@ class CollabPanel(QWidget):
 
         # ── 协作会话区 ──────────────────────────────────────────────────────
         sess_row = QHBoxLayout()
-        self._session_status_label = QLabel("未加入团队")
+        self._session_status_label = QLabel("未配对团队")
         self._session_status_label.setObjectName("MutedSmall")
         sess_row.addWidget(self._session_status_label, 1)
         self._new_session_btn = QPushButton("新建团队")
@@ -385,6 +385,8 @@ class CollabPanel(QWidget):
         svc.pairing_requested.connect(self._on_pairing_requested)
         svc.pairing_accepted.connect(self._on_pairing_accepted)
         svc.project_bind_suggested.connect(self._on_project_bind_suggested)
+        if hasattr(svc, "photo_index_received"):
+            svc.photo_index_received.connect(self._on_photo_index_received)
 
     # ── Refresh slots ──────────────────────────────────────────────────────
 
@@ -398,9 +400,9 @@ class CollabPanel(QWidget):
         if in_session and name:
             self._session_status_label.setText(f"团队：{name}（{code}）")
         elif in_session:
-            self._session_status_label.setText(f"团队码：{code}")
+            self._session_status_label.setText(f"团队永久码：{code}")
         else:
-            self._session_status_label.setText("未加入团队")
+            self._session_status_label.setText("未配对团队")
 
         self._new_session_btn.setVisible(not in_session)
         self._leave_session_btn.setVisible(in_session)
@@ -483,16 +485,15 @@ class CollabPanel(QWidget):
             if peer in syncing:
                 status_item = _ro_item("● 同步中")
                 status_item.setForeground(QColor("#2e7d32"))
-                status_item.setToolTip("同团队且打开同名项目，数据实时同步。")
+                status_item.setToolTip("同团队且同项目；编号任务、标本记录和照片同步可用。")
                 self._device_table.setItem(row, 2, status_item)
                 self._device_table.setCellWidget(row, 3, None)
             elif peer in teammates:
                 proj = _project_display(peer.project_name) or "其他项目"
-                status_item = _ro_item(f"◐ {proj}")
+                status_item = _ro_item(f"◐ 仅任务 · {proj}")
                 status_item.setForeground(QColor("#f9a825"))
                 status_item.setToolTip(
-                    "同团队队友，但当前打开的项目不同——仅显示在线状态，"
-                    "数据不互通。对方切到同名项目后自动开始同步。"
+                    "同团队但项目不同；编号任务和进度可见，标本记录和照片/TIF/ZIP不互通。"
                 )
                 self._device_table.setItem(row, 2, status_item)
                 self._device_table.setCellWidget(row, 3, None)
@@ -627,6 +628,10 @@ class CollabPanel(QWidget):
 
     # ── Slot handlers ──────────────────────────────────────────────────────
 
+    def close_panel(self) -> None:
+        """Public API: dismiss the panel (hide + emit ``closed``)."""
+        self._on_close()
+
     def _on_close(self) -> None:
         self.hide()
         self.closed.emit()
@@ -704,18 +709,13 @@ class CollabPanel(QWidget):
     def _on_update_status(self, uid: str, new_status: str) -> None:
         if self._svc is None:
             return
-        try:
-            from app.services.collab_service import TaskStatus
-            self._svc.store.update_status(uid, TaskStatus(new_status))
-            self._broadcast_status_update(uid, new_status)
-            self._svc._log_activity(
-                "status_changed", uid,
-                detail=f"编号 {uid} 状态变为 {_STATUS_LABEL.get(new_status, new_status)}",
-            )
-            self._svc.specimen_status_changed.emit(uid)
-            self._refresh_tasks()
-        except ValueError as exc:
-            logger.warning("status update failed: %s", exc)
+        ok, msg = self._svc.update_task_status(
+            uid, new_status, force=True, broadcast=True,
+        )
+        if not ok:
+            logger.warning("status update failed uid=%s: %s", uid, msg)
+            return
+        self._refresh_tasks()
 
     def _on_assign(self, uid: str) -> None:
         if self._svc is None:
@@ -728,16 +728,7 @@ class CollabPanel(QWidget):
         if not ok or not name.strip():
             return
         name = name.strip()
-        try:
-            from app.services.collab_service import TaskStatus
-            self._svc.store.update_status(uid, TaskStatus.ASSIGNED, assignee=name)
-        except ValueError:
-            t = self._svc.store.get_task(uid)
-            if t:
-                t.assignee = name
-        self._broadcast_status_update(uid, "assigned")
-        self._svc._log_activity("status_changed", uid, detail=f"编号 {uid} 分配给 {name}")
-        self._svc.specimen_status_changed.emit(uid)
+        self._svc.assign_task(uid, name)
         self._refresh_tasks()
 
     def _on_void(self, uid: str) -> None:
@@ -784,7 +775,7 @@ class CollabPanel(QWidget):
         self._refresh_devices()
         from app.utils import ui
         ui.info(self, "协作团队已创建",
-                f"团队码：<b>{code}</b>\n\n"
+                f"团队永久码：<b>{code}</b>\n\n"
                 "同事打开协作面板后会看到你的团队，点「加入」即可。\n"
                 "加入一次永久有效，重启软件自动重连；\n"
                 "之后团队成员打开同名项目就会自动同步数据。")
@@ -938,7 +929,7 @@ class CollabPanel(QWidget):
             return
         current = svc.group_code
         code, ok = QInputDialog.getText(
-            self, "修改协作组码", "协作组码:", text=current
+            self, "修改团队永久码", "团队永久码:", text=current
         )
         if not ok:
             return
@@ -1004,10 +995,10 @@ class CollabPanel(QWidget):
                 current = svc.group_code
                 if current and current != info.group_code:
                     reply = QMessageBox.question(
-                        self, "确认组码",
-                        f"配对码携带的协作组码为「{info.group_code}」\n"
-                        f"你当前的组码为「{current}」\n\n"
-                        f"是否将组码改为「{info.group_code}」？",
+                        self, "确认团队永久码",
+                        f"连接码携带的团队永久码为「{info.group_code}」\n"
+                        f"你当前的团队永久码为「{current}」\n\n"
+                        f"是否将团队永久码改为「{info.group_code}」？",
                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                     )
                     if reply != QMessageBox.StandardButton.Yes:
@@ -1100,8 +1091,14 @@ class CollabPanel(QWidget):
         self._svc = getattr(self.ctx, "collab_service", None)
         self._refresh_all()
 
+    def _on_photo_index_received(self, uid: str, kind: str, count: int, device_id: str) -> None:
+        self._refresh_tasks()
+        self._refresh_activity()
+
     def _refresh_all(self) -> None:
         svc = self._svc
+        if svc is not None:
+            svc.ensure_running(self.ctx)
         self._refresh_health()
         if svc is None:
             return

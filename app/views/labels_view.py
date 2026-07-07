@@ -1503,8 +1503,8 @@ QPushButton#PrintBtn:disabled {{
 
     def _refresh_project_combo(self) -> None:
         try:
-            from app.views.overview_view import _load_projects
-            self._projects = _load_projects()
+            from app.services.project_service import load_user_projects
+            self._projects = load_user_projects()
         except Exception:
             self._projects = []
         cur_dir = getattr(self.ctx, "current_project_dir", None) or ""

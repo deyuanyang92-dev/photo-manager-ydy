@@ -55,7 +55,7 @@ class TestRetry:
     def test_retry_success_removes_draft(self, queue):
         queue.mark_draft("uid-1", "shooting")
         svc = MagicMock()
-        svc.update_task_status.return_value = None
+        svc.update_task_status.return_value = (True, "ok")
         sent, remaining = queue.retry_all(svc)
         assert sent == 1
         assert remaining == 0
@@ -64,7 +64,7 @@ class TestRetry:
     def test_retry_failure_keeps_draft(self, queue):
         queue.mark_draft("uid-1", "shooting")
         svc = MagicMock()
-        svc.update_task_status.side_effect = Exception("network error")
+        svc.update_task_status.return_value = (False, "network error")
         sent, remaining = queue.retry_all(svc)
         assert sent == 0
         assert remaining == 1
@@ -74,9 +74,10 @@ class TestRetry:
         queue.mark_draft("uid-1", "shooting")
         queue.mark_draft("uid-2", "done")
 
-        def _side_effect(uid, status):
+        def _side_effect(uid, status, **kwargs):
             if uid == "uid-1":
-                raise Exception("fail")
+                return (False, "fail")
+            return (True, "ok")
 
         svc = MagicMock()
         svc.update_task_status.side_effect = _side_effect

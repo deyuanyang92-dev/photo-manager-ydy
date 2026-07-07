@@ -624,8 +624,11 @@ def main() -> int:
     # 启动自动恢复上次项目——免得每次重启都回到 "(未选)" 空项目,用户得重选。
     _restore_last_project(ctx, win)
 
-    # Restore last nav selection and saved docking state.
-    win.restore_state()
+    # Restore geometry/state, but do not rebuild the previous page before the
+    # first paint. Heavy pages such as collaboration/project tree can scan local
+    # workspaces and open SQLite databases; doing that here made Windows
+    # launches feel frozen.
+    win.restore_state(activate_last_view=False)
     # WSLg multi-monitor ordering is unstable across boots and Windows display
     # changes.  The old nearest-to-(0,0) rule often opened the app on a monitor
     # the user was not looking at.  Prefer Qt primary, then cursor screen, and

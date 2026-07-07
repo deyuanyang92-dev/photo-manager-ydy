@@ -2,8 +2,8 @@
 
 显示「根 / 断面A / ◀ 📁 B2 ▾ ▶」：
   - 祖先段可点 → 跳项目树页（远跳走树）。
-  - 叶子下拉  → 当前工作区 / 项目目录树 / 最近使用 / 新建文件夹分组。
-                项目目录树菜单中 📷 = 已是工作区；新建在当前工作区父目录下建
+  - 叶子下拉  → 当前工作区 / 本项目内 / 磁盘上的其他项目 / 最近使用 / 新建文件夹分组。
+                项目目录树菜单中「· 工作区」= 已是工作区；新建在当前工作区父目录下建
                 新文件夹并进入，名字预填 YYYYMMDD(。
   - ◀ ▶      → 访问历史后退/前进（浏览器式）—— 野外跨断面来回。
                 走 project_service.enter_workspace（与项目树同一统一入口，含盘未挂载
@@ -261,16 +261,15 @@ class WorkspaceBreadcrumb(QWidget):
         self._build_chain(chain)
 
     def _build_placeholder(self) -> None:
-        btn = QPushButton(tr("（未选）"))
-        btn.setObjectName("ProjectSwitcher")
-        btn.setToolTip(tr("切换当前工作区项目"))
+        btn = QPushButton(tr("选择工作区 ▾"))
+        btn.setObjectName("CrumbLeaf")
+        btn.setToolTip(tr("最近使用 / 打开文件夹 / 新建工作区"))
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         icons.set_button_icon(btn, "mdi6.folder-outline",
                               color=icons.TONE_MUTED, size=15)
-        btn.clicked.connect(lambda: self.navigate_requested.emit("overview"))
+        btn.clicked.connect(self._show_placeholder_menu)
         self._lay.addWidget(btn)
         self._placeholder_btn = btn
-        self._add_workspace_folder_button()
 
     def _build_chain(self, chain: List[Tuple[str, str]]) -> None:
         # 折叠：根 / … / 父 / 叶（中间层只在项目树里看）
@@ -319,7 +318,9 @@ class WorkspaceBreadcrumb(QWidget):
 
         leaf = QPushButton(leaf_name)
         leaf.setObjectName("CrumbLeaf")
-        leaf.setToolTip(leaf_path + "\n" + tr("点击切换同目录文件夹或新建文件夹"))
+        leaf.setToolTip(
+            leaf_path + "\n" + tr("切换本项目内的文件夹，或打开其他项目")
+        )
         leaf.setCursor(Qt.CursorShape.PointingHandCursor)
         icons.set_button_icon(leaf, "mdi6.folder-outline",
                               color=icons.TONE_MUTED, size=15)
@@ -343,7 +344,7 @@ class WorkspaceBreadcrumb(QWidget):
         menu_btn.setObjectName("WorkspaceMenuButton")
         menu_btn.setText("▾")
         menu_btn.setFixedSize(30, 30)
-        menu_btn.setToolTip(tr("项目目录和最近使用"))
+        menu_btn.setToolTip(tr("本项目内切换 / 其他项目 / 最近使用"))
         menu_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         menu_btn.clicked.connect(self._show_sibling_menu)
         self._lay.addWidget(menu_btn)
@@ -457,6 +458,16 @@ class WorkspaceBreadcrumb(QWidget):
         ws = getattr(self._ctx, "current_project_dir", None)
         return Path(ws).name if ws else ""
 
+    def _workspace_entry_label(self, path: str) -> str:
+        """Human-readable menu label for a directory entry."""
+        from app.services.project_tree_service import is_workspace, is_workspace_candidate
+        name = os.path.basename(path.rstrip("\\/")) or path
+        if is_workspace(path):
+            return f"{name} · 工作区"
+        if is_workspace_candidate(path):
+            return f"{name} · 可导入"
+        return name
+
     def _build_sibling_menu(self) -> QMenu:
         workspace = getattr(self._ctx, "current_project_dir", None)
         if workspace:
@@ -471,63 +482,99 @@ class WorkspaceBreadcrumb(QWidget):
         menu = QMenu(self)
         cur_name = self._current_workspace_name()
         if cur_name:
+            ws = getattr(self._ctx, "current_project_dir", None)
             cur = menu.addAction(f"当前：{cur_name}")
             cur.setEnabled(False)
+            if ws:
+                cur.setToolTip(str(Path(ws).resolve()))
             menu.addSeparator()
-        self._add_peer_dirs_flat(menu)
-        self._add_siblings_menu(menu)
+        self._add_project_tree_menu(menu)
+        self._add_peer_projects_menu(menu)
         self._add_recent_menu(menu)
         menu.addSeparator()
         new_act = menu.addAction(f"➕ {tr('新建文件夹…')}")
         new_act.triggered.connect(self._on_new_section)
         return menu
 
-    def _add_peer_dirs_flat(self, menu: QMenu) -> None:
-        """同盘兄弟项目(原「同级目录」子菜单)平铺到顶层。
-
-        点当前号即可直接见 ceshi5/ceshi6 等兄弟项目,无需再钻一层子菜单
-        (docs/design/workspace_navigator_prototype.py 的 project_menu 同款取舍)。
-        """
-        from app.services.project_tree_service import is_workspace, is_workspace_candidate
-        root = getattr(self._ctx, "current_project_root", None)
-        current_root = str(Path(root).resolve()) if root else ""
-        header = menu.addAction(tr("同盘项目"))
-        header.setEnabled(False)
-        for path in self._peer_dirs:
-            name = os.path.basename(path)
-            if is_workspace(path):
-                label = f"📷 {name}"
-            elif is_workspace_candidate(path):
-                label = f"📁 {name} · 可导入"
-            else:
-                label = f"📁 {name}"
-            act = menu.addAction(label)
-            act.setToolTip(path)
-            act.setCheckable(True)
-            act.setChecked(bool(current_root) and path == current_root)
-            act.triggered.connect(
-                lambda _=False, p=path: self._switch_to_peer_root(p))
+    def _build_placeholder_menu(self) -> QMenu:
+        menu = QMenu(self)
+        self._add_recent_menu(menu)
         menu.addSeparator()
+        overview_act = menu.addAction(
+            icons.icon("mdi6.view-dashboard-outline", color=icons.TONE_MUTED),
+            tr("项目总览"),
+        )
+        overview_act.triggered.connect(
+            lambda _=False: self.navigate_requested.emit("overview"))
+        open_act = menu.addAction(
+            icons.icon("mdi6.folder-open-outline", color=icons.TONE_MUTED),
+            tr("打开文件夹…"),
+        )
+        open_act.triggered.connect(lambda _=False: self.open_workspace_requested.emit())
+        new_act = menu.addAction(
+            icons.icon("mdi6.plus", color=icons.TONE_MUTED),
+            tr("新建工作区…"),
+        )
+        new_act.triggered.connect(lambda _=False: self.new_workspace_requested.emit())
+        return menu
 
-    def _add_siblings_menu(self, menu: QMenu) -> None:
+    def _add_project_tree_menu(self, menu: QMenu) -> None:
+        """Submenu: folders inside the current project root."""
         from app.services.project_tree_service import is_workspace, is_workspace_candidate
         root = getattr(self._ctx, "current_project_root", None)
-        sib_menu = menu.addMenu("项目目录")
-        sib_menu.setEnabled(bool(self._siblings))
+        tree_menu = menu.addMenu(tr("本项目内"))
+        tree_menu.setEnabled(bool(self._siblings))
+        if not self._siblings:
+            empty = tree_menu.addAction(tr("（无子文件夹）"))
+            empty.setEnabled(False)
+            return
         for path in self._siblings:
             name = self._menu_path_label(path, root)
             if is_workspace(path):
-                label = f"📷 {name}"
+                label = f"{name} · 工作区"
             elif is_workspace_candidate(path):
-                label = f"📁 {name} · 可导入"
+                label = f"{name} · 可导入"
             else:
-                label = f"📁 {name}"
-            act = sib_menu.addAction(label)
+                label = name
+            act = tree_menu.addAction(label)
             act.setCheckable(True)
             act.setChecked(path == self._siblings[self._sib_index]
                            if self._sib_index >= 0 else False)
+            act.setToolTip(path)
             act.triggered.connect(
                 lambda _=False, p=path: self._switch_to(p))
+
+    def _add_peer_projects_menu(self, menu: QMenu) -> None:
+        """Submenu: other project folders sitting beside the current root on disk."""
+        current_root = str(
+            Path(getattr(self._ctx, "current_project_root", "") or "").resolve()
+        )
+        current_ws = str(
+            Path(getattr(self._ctx, "current_project_dir", "") or "").resolve()
+        )
+        entries: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for path in self._peer_dirs:
+            if current_root and path == current_root:
+                continue
+            try:
+                resolved = str(Path(path).resolve())
+            except OSError:
+                resolved = path
+            if resolved == current_ws or resolved in seen:
+                continue
+            seen.add(resolved)
+            entries.append((self._workspace_entry_label(path), path))
+
+        if not entries:
+            return
+        entries.sort(key=lambda item: item[0].casefold())
+        peer_menu = menu.addMenu(tr("磁盘上的其他项目"))
+        for label, path in entries:
+            act = peer_menu.addAction(label)
+            act.setToolTip(path)
+            act.triggered.connect(
+                lambda _=False, p=path: self._switch_to_peer_root(p))
 
     def _switch_to_peer_root(self, path: str) -> None:
         """Switch to a sibling project folder and make it its own root."""
@@ -581,10 +628,13 @@ class WorkspaceBreadcrumb(QWidget):
 
     def _add_recent_menu(self, menu: QMenu) -> None:
         recent = self._recent_workspaces()
-        recent_menu = menu.addMenu("最近使用")
-        recent_menu.setEnabled(bool(recent))
+        recent_menu = menu.addMenu(tr("最近使用"))
+        if not recent:
+            empty = recent_menu.addAction(tr("（暂无记录）"))
+            empty.setEnabled(False)
+            return
         for item in recent:
-            label = f"🕘 {self._recent_label(item)}"
+            label = self._recent_label(item)
             act = recent_menu.addAction(label)
             act.setToolTip(item["directory"])
             act.triggered.connect(
@@ -607,6 +657,13 @@ class WorkspaceBreadcrumb(QWidget):
         menu = self._build_sibling_menu()
         menu.exec(self._leaf_btn.mapToGlobal(
             self._leaf_btn.rect().bottomLeft()))
+
+    def _show_placeholder_menu(self) -> None:
+        if self._placeholder_btn is None:
+            return
+        menu = self._build_placeholder_menu()
+        menu.exec(self._placeholder_btn.mapToGlobal(
+            self._placeholder_btn.rect().bottomLeft()))
 
     def _new_section_parent(self) -> Optional[Path]:
         """新建文件夹的父目录.

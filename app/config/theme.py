@@ -1830,6 +1830,75 @@ QFrame#CollabStepPanel {{
     border: 1px solid {t["border"]};
     border-radius: {t["radius"]};
 }}
+QFrame#CollabStepPanel[role="entry"] {{
+    border-color: {t["accent_glow"]};
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 {t["panel"]}, stop:1 {t["panel_2"]});
+}}
+QFrame#CollabStatsBar {{
+    background-color: {t["panel_2"]};
+    border: 1px solid {t["border"]};
+    border-radius: {t["radius"]};
+}}
+QFrame#CollabActivityHub {{
+    background-color: {t["panel"]};
+    border: 1px solid {t["border"]};
+    border-radius: {t["radius"]};
+}}
+QLabel#CollabHubTitle {{
+    color: {t["text"]};
+    font-size: {t["font_md"]};
+    font-weight: 700;
+}}
+QFrame#CollabEmptyBanner {{
+    background-color: {t["panel_2"]};
+    border: 1px dashed {t["border"]};
+    border-radius: {t["radius"]};
+}}
+QLabel#CollabEmptyIcon {{
+    font-size: 28px;
+}}
+QLabel#CollabEmptyTitle {{
+    color: {t["text"]};
+    font-size: {t["font_md"]};
+    font-weight: 700;
+}}
+QLabel#CollabEmptyDetail {{
+    color: {t["muted"]};
+    font-size: {t["font_sm"]};
+}}
+QFrame#CollabActivityPane {{
+    background: transparent;
+    border: none;
+}}
+QLabel#CollabScopeState {{
+    color: {t["text_soft"]};
+    font-size: {t["font_sm"]};
+    padding: 6px 10px;
+    background-color: {t["panel_inset"]};
+    border-radius: {t["radius_sm"]};
+}}
+QTableWidget#CollabDeviceTable,
+QTableWidget#CollabTaskTable {{
+    background-color: {t["panel"]};
+    border: 1px solid {t["border"]};
+    border-radius: {t["radius_sm"]};
+    gridline-color: {t["border"]};
+}}
+QFrame#CollabOptionalPanel {{
+    background-color: {t["panel_2"]};
+    border: 1px solid {t["border"]};
+    border-radius: {t["radius"]};
+}}
+QLabel#CollabEntryBadge {{
+    color: {t["accent"]};
+    background-color: {t["accent_soft"]};
+    border: 1px solid {t["accent_glow"]};
+    border-radius: {t["radius_sm"]};
+    padding: 2px 7px;
+    font-size: {t["font_sm"]};
+    font-weight: 700;
+}}
 QLabel#CollabStepBadge {{
     color: {t["accent"]};
     background-color: {t["accent_soft"]};
@@ -2160,7 +2229,34 @@ QScrollArea#RightRailScroll QScrollBar::handle:vertical:hover {{
 }}
 
 /* ── Splitter ────────────────────────────────────────────────────── */
-QSplitter#WorkbenchSplitter::handle {{ background: transparent; }}
+QSplitter#WorkbenchSplitter::handle:horizontal {{
+    width: 14px;
+    background-color: {t["panel_inset"]};
+    border-left: 1px solid {t["border_medium"]};
+    border-right: 1px solid {t["border_medium"]};
+}}
+QSplitter#WorkbenchSplitter::handle:horizontal:hover {{
+    background-color: {t["accent_soft"]};
+    border-left-color: {t["accent_glow"]};
+    border-right-color: {t["accent_glow"]};
+}}
+QSplitter#WorkbenchSplitter::handle:horizontal:pressed {{
+    background-color: {t["accent_glow"]};
+}}
+QSplitter#WorkbenchVerticalSplitter::handle:vertical {{
+    height: 14px;
+    background-color: {t["panel_inset"]};
+    border-top: 1px solid {t["border_medium"]};
+    border-bottom: 1px solid {t["border_medium"]};
+}}
+QSplitter#WorkbenchVerticalSplitter::handle:vertical:hover {{
+    background-color: {t["accent_soft"]};
+    border-top-color: {t["accent_glow"]};
+    border-bottom-color: {t["accent_glow"]};
+}}
+QSplitter#WorkbenchVerticalSplitter::handle:vertical:pressed {{
+    background-color: {t["accent_glow"]};
+}}
 QSplitter::handle {{ background-color: transparent; }}
 QSplitter::handle:hover {{ background-color: {t["accent_softer"]}; border-radius: 2px; }}
 QSplitter::handle:horizontal {{ width: 12px; }}

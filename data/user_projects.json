@@ -42,6 +42,18 @@
       "dateRange": "20260622",
       "incomingJpgSubdir": "incoming-jpg",
       "resultsSubdir": "results"
+    },
+    {
+      "id": "250a7f82-140d-400a-8b6b-6803b1989976",
+      "name": "proj_x",
+      "directory": "/tmp/pytest-of-root/pytest-2/test_add_project_persists_sele0/proj_x",
+      "dir": "/tmp/pytest-of-root/pytest-2/test_add_project_persists_sele0/proj_x"
+    },
+    {
+      "id": "2ad2731d-79ff-4b03-9d5a-770aa802406e",
+      "name": "proj_x",
+      "directory": "/tmp/pytest-of-root/pytest-4/test_add_project_persists_sele0/proj_x",
+      "dir": "/tmp/pytest-of-root/pytest-4/test_add_project_persists_sele0/proj_x"
     }
   ]
 }

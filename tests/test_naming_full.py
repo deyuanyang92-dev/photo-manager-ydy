@@ -95,6 +95,19 @@ class TestParseUidUniqueId:
         assert r["speciesId"] == "DLC001"
         assert r["storage"] == "R"
 
+    def test_allows_field_mixed_sample_label(self):
+        uid = "FJ-S1-A-MIX01-T95E-20260601"
+        r = parse_uid(uid)
+        assert r is not None
+        assert r["speciesId"] == "MIX01"
+        assert r["storage"] == "T95E"
+
+    def test_allows_normalized_free_sample_label(self):
+        uid = "FJ-S1-A-BOTTLE_A-T95E-20260601"
+        r = parse_uid(uid)
+        assert r is not None
+        assert r["speciesId"] == "BOTTLE_A"
+
 
 # ── parse_uid — v002 legacy (no station) ─────────────────────────────────
 

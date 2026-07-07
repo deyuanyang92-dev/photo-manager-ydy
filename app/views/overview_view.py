@@ -65,37 +65,22 @@ if TYPE_CHECKING:
     from app.app_context import AppContext
 
 
-# ── Resolve the shared data directory (mirrors taxonomy_view pattern) ──────────
-_HERE = Path(__file__).resolve()
-_PROJECT_ROOT = _HERE.parent.parent.parent          # photo-platform-ydy-v3/
-_GLOBAL_DATA_DIR = _PROJECT_ROOT / "data"
-_USER_PROJECTS_JSON = _GLOBAL_DATA_DIR / "user_projects.json"
-
-# ── Fallback to the web-prototype data dir (same network drive) ───────────────
-_WEB_PROTO_DIR = _PROJECT_ROOT.parent / "photo-platform-ydy" / "prototype-photo-gui" / "data"
-_WEB_PROJECTS_JSON = _WEB_PROTO_DIR / "user_projects.json"
+# ── user_projects.json access — real logic lives in project_service ──────────
+# These thin wrappers are kept so existing imports (and test monkeypatches of
+# _resolve_projects_json) keep working; new code should import
+# load_user_projects / save_user_projects from app.services.project_service.
 
 
 def _resolve_projects_json() -> Path:
-    """Return the user_projects.json path we should read.
-
-    Priority:
-      1. ``data/user_projects.json`` alongside this repo (writable app data)
-      2. The web-prototype ``data/user_projects.json`` (real working data)
-    Falls back to (1) even if it doesn't exist yet (returns the path).
-    """
-    if _USER_PROJECTS_JSON.exists():
-        return _USER_PROJECTS_JSON
-    if _WEB_PROJECTS_JSON.exists():
-        return _WEB_PROJECTS_JSON
-    return _USER_PROJECTS_JSON
+    """Return the user_projects.json path we should read (tests patch this)."""
+    from app.services.project_service import resolve_user_projects_json
+    return Path(resolve_user_projects_json())
 
 
 def _load_projects() -> list[dict]:
     """Load the project list from user_projects.json.  Returns [] on any error."""
-    from app.services.project_service import list_projects
-    path = _resolve_projects_json()
-    return list_projects(str(path))
+    from app.services.project_service import load_user_projects
+    return load_user_projects(path=_resolve_projects_json())
 
 
 def _project_directory(proj: dict) -> str:
@@ -108,11 +93,8 @@ def _project_directory(proj: dict) -> str:
 
 def _save_projects(projects: list[dict]) -> None:
     """Persist the project list to the app-local user_projects.json."""
-    _GLOBAL_DATA_DIR.mkdir(parents=True, exist_ok=True)
-    data = {"version": 1, "projects": projects}
-    _USER_PROJECTS_JSON.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    from app.services.project_service import save_user_projects
+    save_user_projects(projects)
 
 
 # ── Lightbox dialog ───────────────────────────────────────────────────────────

@@ -13,12 +13,15 @@ Constants mirrored from project-paths.js:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import uuid
 from pathlib import Path
 from typing import Optional
 
 from app.utils.path_utils import default_registry, localize_path, normalize_path
+
+logger = logging.getLogger(__name__)
 
 # ── Directory name constants ───────────────────────────────────────────────────
 # Mirrors project-paths.js constants
@@ -241,7 +244,7 @@ def open_project(directory: str) -> dict:
         from app.services.grouping_service import backfill_archive_zips
         backfill_archive_zips(db)
     except Exception:
-        pass
+        logger.debug("archive_zip 回填失败（忽略，不阻塞打开工作区）", exc_info=True)
 
     # Register the project root so assert_safe() passes for its children
     default_registry.register_root(resolved)
@@ -327,6 +330,41 @@ def default_user_projects_json_path() -> str:
     recent-workspaces list shared by 项目树 and 项目总览)."""
     repo_root = Path(__file__).resolve().parents[2]
     return str(repo_root / "data" / "user_projects.json")
+
+
+def resolve_user_projects_json() -> str:
+    """Return the ``user_projects.json`` path to READ.
+
+    Priority:
+      1. app-local ``data/user_projects.json`` (writable app data)
+      2. the web-prototype ``data/user_projects.json`` (real working data)
+    Falls back to (1) even if it doesn't exist yet.
+    """
+    app_local = Path(default_user_projects_json_path())
+    if app_local.exists():
+        return str(app_local)
+    web_proto = (
+        app_local.parents[2]
+        / "photo-platform-ydy" / "prototype-photo-gui" / "data" / "user_projects.json"
+    )
+    if web_proto.exists():
+        return str(web_proto)
+    return str(app_local)
+
+
+def load_user_projects(path: str | Path | None = None) -> list[dict]:
+    """Load the recent-projects list from user_projects.json.  [] on any error."""
+    return list_projects(str(path or resolve_user_projects_json()))
+
+
+def save_user_projects(projects: list[dict]) -> None:
+    """Persist the project list to the app-local user_projects.json."""
+    out = Path(default_user_projects_json_path())
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(
+        json.dumps({"version": 1, "projects": projects}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
 
 def _workspace_display_name(resolved: str, root: Optional[str]) -> str:

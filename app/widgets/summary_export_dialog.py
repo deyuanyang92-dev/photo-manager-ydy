@@ -143,8 +143,16 @@ class SummaryExportDialog(QDialog):
         out_row.setSpacing(16)
         self._cb_specimen = QCheckBox("标本汇总 Excel")
         self._cb_collection = QCheckBox("采集站位汇总 Excel")
+        self._cb_station_species = QCheckBox("分类名录 Excel")
+        self._cb_sample_processing = QCheckBox("样品处理概况 Excel")
         self._cb_qc = QCheckBox("质控报告 (HTML+Excel)")
-        for cb in (self._cb_specimen, self._cb_collection, self._cb_qc):
+        for cb in (
+            self._cb_specimen,
+            self._cb_collection,
+            self._cb_station_species,
+            self._cb_sample_processing,
+            self._cb_qc,
+        ):
             cb.setChecked(True)
             out_row.addWidget(cb)
         out_row.addStretch()
@@ -284,7 +292,10 @@ class SummaryExportDialog(QDialog):
             return
         if not root:
             root = str(Path(dirs[0]).resolve())
-        if not (self._cb_specimen.isChecked() or self._cb_collection.isChecked()
+        if not (self._cb_specimen.isChecked()
+                or self._cb_collection.isChecked()
+                or self._cb_station_species.isChecked()
+                or self._cb_sample_processing.isChecked()
                 or self._cb_qc.isChecked()):
             ui.warn(self, "汇总导出", "请至少勾选一种输出。")
             return
@@ -304,6 +315,18 @@ class SummaryExportDialog(QDialog):
                 written.append(str(p))
             except Exception as exc:  # noqa: BLE001
                 errors.append(f"采集站位汇总：{exc}")
+        if self._cb_station_species.isChecked():
+            try:
+                p = pss.export_taxon_checklist(dirs, root)
+                written.append(str(p))
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"分类名录：{exc}")
+        if self._cb_sample_processing.isChecked():
+            try:
+                p = pss.export_sample_processing_summary(dirs, root)
+                written.append(str(p))
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"样品处理概况：{exc}")
         if self._cb_qc.isChecked():
             try:
                 html_p, xlsx_p = pss.export_qc_report(dirs, root)

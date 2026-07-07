@@ -24,6 +24,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QMenu,
     QPushButton,
+    QGridLayout,
     QSplitter,
     QTreeWidget,
     QTreeWidgetItem,
@@ -189,6 +190,7 @@ class ProjectTreeView(BaseView):
         self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._tree.customContextMenuRequested.connect(self._show_tree_context_menu)
         tl.addWidget(self._tree, 1)
+        tree_panel.setMinimumWidth(360)
         split.addWidget(tree_panel)
 
         detail = QFrame()
@@ -248,6 +250,31 @@ class ProjectTreeView(BaseView):
         self._stats_row = QHBoxLayout()
         self._stats_row.setSpacing(10)
         dl.addLayout(self._stats_row)
+        self._media_block = QFrame()
+        self._media_block.setObjectName("MediaPreviewBlock")
+        media_l = QVBoxLayout(self._media_block)
+        media_l.setContentsMargins(12, 10, 12, 10)
+        media_l.setSpacing(8)
+        media_head = QHBoxLayout()
+        media_head.setSpacing(8)
+        media_title = QLabel("最近影像")
+        media_title.setObjectName("Section")
+        media_head.addWidget(media_title)
+        self._media_count_lbl = QLabel("")
+        self._media_count_lbl.setObjectName("MutedSmall")
+        self._media_count_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        media_head.addWidget(self._media_count_lbl, 1)
+        media_l.addLayout(media_head)
+        self._media_grid = QGridLayout()
+        self._media_grid.setHorizontalSpacing(8)
+        self._media_grid.setVerticalSpacing(8)
+        media_l.addLayout(self._media_grid)
+        self._media_empty_lbl = QLabel("当前节点还没有可预览影像。")
+        self._media_empty_lbl.setObjectName("MediaEmpty")
+        self._media_empty_lbl.setWordWrap(True)
+        media_l.addWidget(self._media_empty_lbl)
+        self._media_block.hide()
+        dl.addWidget(self._media_block)
         self._info_block = QFrame()
         self._info_block.setObjectName("ProjectInfoBlock")
         info_l = QVBoxLayout(self._info_block)
@@ -303,6 +330,16 @@ class ProjectTreeView(BaseView):
         self._btn_summary.setEnabled(False)
         self._btn_summary.clicked.connect(self._open_summary_export)
         tool_row.addWidget(self._btn_summary)
+        self._btn_station_species = QPushButton("分类名录…")
+        self._btn_station_species.setObjectName("Outline")
+        self._btn_station_species.setToolTip("查看真正的分类名录，并分开展示样品处理概况")
+        self._btn_station_species.setFixedHeight(34)
+        self._btn_station_species.setCursor(Qt.CursorShape.PointingHandCursor)
+        icons.set_button_icon(self._btn_station_species, "mdi6.format-list-bulleted",
+                              color=icons.TONE_MUTED, size=15)
+        self._btn_station_species.setEnabled(False)
+        self._btn_station_species.clicked.connect(self._open_station_species_summary)
+        tool_row.addWidget(self._btn_station_species)
         self._btn_station_import = QPushButton("导入站位总表…")
         self._btn_station_import.setObjectName("Outline")
         self._btn_station_import.setToolTip("把站位坐标和采集信息导入选中文件夹")
@@ -315,8 +352,9 @@ class ProjectTreeView(BaseView):
         tool_row.addWidget(self._btn_station_import)
         dl.addLayout(tool_row)
         dl.addStretch()
+        detail.setMinimumWidth(560)
         split.addWidget(detail)
-        split.setSizes([520, 560])
+        split.setSizes([420, 720])
 
         root.addWidget(split, 1)
 
@@ -407,6 +445,17 @@ class ProjectTreeView(BaseView):
             f"border-radius:8px;padding:22px 24px;font-size:12px;line-height:1.5;}}"
             f"QFrame#ProjectInfoBlock{{background:{panel_2};border:1px solid {border};"
             f"border-radius:8px;}}"
+            f"QFrame#MediaPreviewBlock{{background:{panel_2};border:1px solid {border};"
+            f"border-radius:8px;}}"
+            f"QFrame#MediaPreviewCard{{background:{panel};border:1px solid {border};"
+            f"border-radius:8px;}}"
+            f"QFrame#MediaPreviewCard:hover{{background:{accent_softer};border-color:{border_medium};}}"
+            f"QLabel#MediaThumb{{background:{panel_inset};border:1px solid {border};"
+            f"border-radius:6px;color:{muted_dim};font-size:10px;font-weight:800;}}"
+            f"QLabel#MediaName{{color:{text_soft};font-size:11px;font-weight:800;}}"
+            f"QLabel#MediaMeta{{color:{muted_dim};font-size:10px;font-weight:700;}}"
+            f"QLabel#MediaEmpty{{color:{muted};background:{panel};border:1px dashed {border_medium};"
+            f"border-radius:7px;padding:12px 14px;font-size:12px;}}"
             f"QLabel#InfoKey{{color:{muted_dim};font-size:11px;font-weight:700;}}"
             f"QLabel#InfoValue{{color:{text_soft};font-size:12px;font-weight:600;}}"
             f"QPushButton{{background:{panel};color:{text_soft};border:1px solid {border_medium};"
@@ -492,6 +541,7 @@ class ProjectTreeView(BaseView):
         self._update_tree_metrics()
         self._btn_enter.setEnabled(False)
         self._btn_summary.setEnabled(False)
+        self._btn_station_species.setEnabled(False)
         self._btn_station_import.setEnabled(False)
         self._btn_open_dir.setEnabled(False)
         self._btn_copy_path.setEnabled(False)
@@ -499,6 +549,7 @@ class ProjectTreeView(BaseView):
         self._info_block.hide()
         self._child_block.hide()
         self._clear_child_preview()
+        self._clear_media_preview()
         self._clear_stats()
         if self._root and Path(self._root).is_dir():
             # ── Rooted scan mode (unchanged): one survey root, recursive tree ──
@@ -899,6 +950,7 @@ class ProjectTreeView(BaseView):
     def _show_no_match_state(self) -> None:
         self._btn_enter.setEnabled(False)
         self._btn_summary.setEnabled(False)
+        self._btn_station_species.setEnabled(False)
         self._btn_station_import.setEnabled(False)
         self._btn_open_dir.setEnabled(False)
         self._btn_copy_path.setEnabled(False)
@@ -909,6 +961,7 @@ class ProjectTreeView(BaseView):
         self._info_block.hide()
         self._child_block.hide()
         self._clear_child_preview()
+        self._clear_media_preview()
         self._clear_stats()
         self._set_enter_action_style("Primary", "进入工作区拍照", "mdi6.camera-outline")
         self._empty_state.setText("没有匹配的节点。请调整搜索词或类型筛选。")
@@ -919,6 +972,7 @@ class ProjectTreeView(BaseView):
         if not path:
             self._btn_enter.setEnabled(False)
             self._btn_summary.setEnabled(False)
+            self._btn_station_species.setEnabled(False)
             self._btn_station_import.setEnabled(False)
             self._btn_open_dir.setEnabled(False)
             self._btn_copy_path.setEnabled(False)
@@ -927,6 +981,7 @@ class ProjectTreeView(BaseView):
             self._info_block.hide()
             self._child_block.hide()
             self._clear_child_preview()
+            self._clear_media_preview()
             self._clear_stats()
             self._set_enter_action_style("Primary", "进入工作区拍照", "mdi6.camera-outline")
             self._empty_state.setText("选择左侧文件夹后，可进入工作区、汇总导出或导入站位表。")
@@ -936,6 +991,7 @@ class ProjectTreeView(BaseView):
         self._btn_newsub.setEnabled(True)
         self._btn_enter.setEnabled(True)
         self._btn_summary.setEnabled(True)
+        self._btn_station_species.setEnabled(True)
         self._btn_station_import.setEnabled(True)
         self._btn_open_dir.setEnabled(True)
         self._btn_copy_path.setEnabled(True)
@@ -981,6 +1037,7 @@ class ProjectTreeView(BaseView):
         self._info_block.show()
         self._render_child_preview(current_item)
         self._render_stats(path)
+        self._render_media_preview(path)
 
     def _set_enter_action_style(
         self,
@@ -1018,6 +1075,18 @@ class ProjectTreeView(BaseView):
                 w.hide()
                 w.setParent(None)
                 w.deleteLater()
+
+    def _clear_media_preview(self) -> None:
+        while self._media_grid.count():
+            it = self._media_grid.takeAt(0)
+            if it.widget():
+                w = it.widget()
+                w.hide()
+                w.setParent(None)
+                w.deleteLater()
+        self._media_empty_lbl.show()
+        self._media_count_lbl.setText("")
+        self._media_block.hide()
 
     def _render_child_preview(self, item: Optional[QTreeWidgetItem]) -> None:
         self._clear_child_preview()
@@ -1118,6 +1187,130 @@ class ProjectTreeView(BaseView):
             cl.addWidget(t)
             self._stats_row.addWidget(card, 1)
 
+    def _render_media_preview(self, path: str) -> None:
+        self._clear_media_preview()
+        media = self._collect_media_preview(path)
+        self._media_block.show()
+        self._media_count_lbl.setText(f"{len(media)} 个" if media else "0 个")
+        if not media:
+            self._media_empty_lbl.setText("当前节点还没有 JPG / TIFF / PNG 影像预览。")
+            self._media_empty_lbl.show()
+            return
+        self._media_empty_lbl.hide()
+        for idx, item in enumerate(media[:6]):
+            self._media_grid.addWidget(
+                self._make_media_preview_card(item),
+                idx // 3,
+                idx % 3,
+            )
+
+    def _collect_media_preview(self, path: str, limit: int = 6) -> list[Path]:
+        root = Path(path)
+        if not root.exists():
+            return []
+        image_exts = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
+        found: list[Path] = []
+        queue: list[tuple[Path, int]] = [(root, 0)]
+        seen: set[str] = set()
+        inspected = 0
+        max_depth = 4
+        max_inspected = 700
+        while queue and inspected < max_inspected and len(found) < limit * 3:
+            current, depth = queue.pop(0)
+            try:
+                resolved = str(current.resolve())
+            except OSError:
+                resolved = str(current)
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            try:
+                entries = sorted(
+                    current.iterdir(),
+                    key=lambda p: p.stat().st_mtime if p.exists() else 0,
+                    reverse=True,
+                )
+            except OSError:
+                continue
+            for entry in entries:
+                inspected += 1
+                if inspected >= max_inspected:
+                    break
+                if entry.name.startswith("."):
+                    continue
+                if entry.is_file() and entry.suffix.lower() in image_exts:
+                    found.append(entry)
+                    if len(found) >= limit * 3:
+                        break
+                elif entry.is_dir() and depth < max_depth:
+                    if entry.name in pts.RESERVED_DIR_NAMES and entry.name not in {
+                        "incoming-jpg",
+                        "新拍JPG",
+                        "results",
+                    }:
+                        continue
+                    queue.append((entry, depth + 1))
+        found.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
+        return found[:limit]
+
+    def _make_media_preview_card(self, path: Path) -> QWidget:
+        card = QFrame()
+        card.setObjectName("MediaPreviewCard")
+        card.setToolTip(str(path))
+        card.setCursor(Qt.CursorShape.PointingHandCursor)
+        card.mousePressEvent = lambda event, p=path: self._open_directory(str(p.parent))
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(8, 8, 8, 8)
+        lay.setSpacing(6)
+        thumb = QLabel()
+        thumb.setObjectName("MediaThumb")
+        thumb.setFixedSize(112, 78)
+        thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        pm = None
+        try:
+            from app.utils.image_thumbnail import decode_image_thumbnail
+            pm = decode_image_thumbnail(str(path), max_size=150)
+        except Exception:
+            pm = None
+        if pm is not None and not pm.isNull():
+            thumb.setPixmap(
+                pm.scaled(
+                    thumb.size(),
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
+        else:
+            thumb.setText(path.suffix.upper().lstrip(".") or "FILE")
+        lay.addWidget(thumb)
+        name = QLabel()
+        name.setObjectName("MediaName")
+        name.setFixedWidth(112)
+        name.setToolTip(path.name)
+        name.setText(name.fontMetrics().elidedText(
+            path.name,
+            Qt.TextElideMode.ElideMiddle,
+            112,
+        ))
+        lay.addWidget(name)
+        meta = QLabel(self._media_file_meta(path))
+        meta.setObjectName("MediaMeta")
+        lay.addWidget(meta)
+        return card
+
+    def _media_file_meta(self, path: Path) -> str:
+        try:
+            size = path.stat().st_size
+        except OSError:
+            return path.suffix.upper().lstrip(".")
+        if size >= 1024 * 1024:
+            size_text = f"{size / (1024 * 1024):.1f} MB"
+        elif size >= 1024:
+            size_text = f"{size / 1024:.0f} KB"
+        else:
+            size_text = f"{size} B"
+        return f"{path.suffix.upper().lstrip('.')} · {size_text}"
+
     # ── Cross-workspace tools (append-only launchers) ──────────────────────────
     def _open_summary_export(self) -> None:
         """Open the cross-workspace summary export, rooted at the selected node."""
@@ -1127,6 +1320,18 @@ class ProjectTreeView(BaseView):
             return
         from app.widgets.summary_export_dialog import SummaryExportDialog
         dlg = SummaryExportDialog(ctx=self.ctx, initial_root=path, parent=self)
+        dlg.exec()
+
+    def _open_station_species_summary(self) -> None:
+        """Open station-level taxa and pending mixed-sample summary."""
+        path = self._selected_path()
+        if not path:
+            ui.info(self, "分类名录", "请先选择一个文件夹。")
+            return
+        from app.widgets.station_species_summary_dialog import (
+            StationSpeciesSummaryDialog,
+        )
+        dlg = StationSpeciesSummaryDialog(ctx=self.ctx, initial_root=path, parent=self)
         dlg.exec()
 
     def _open_station_import(self) -> None:
@@ -1169,10 +1374,10 @@ class ProjectTreeView(BaseView):
         try:
             from app.services.project_service import (
                 default_user_projects_json_path,
+                load_user_projects,
                 save_project_descriptor,
                 seed_region_settings,
             )
-            from app.views.overview_view import _load_projects
             seed_region_settings(
                 directory,
                 collector=proj.get("collector", ""),
@@ -1187,7 +1392,7 @@ class ProjectTreeView(BaseView):
             save_project_descriptor(
                 default_user_projects_json_path(),
                 proj,
-                existing_projects=_load_projects(),
+                existing_projects=load_user_projects(),
             )
         except Exception as exc:  # pragma: no cover - defensive
             ui.warn(self, "新建调查区域", f"创建失败：{exc}")

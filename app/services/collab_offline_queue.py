@@ -46,8 +46,13 @@ class OfflineDraftQueue:
         sent = 0
         for d in drafts:
             try:
-                svc.update_task_status(d["uid"], d["status"])
-                sent += 1
+                ok, _ = svc.update_task_status(
+                    d["uid"], d["status"], force=True, broadcast=True,
+                )
+                if ok:
+                    sent += 1
+                else:
+                    remaining.append(d)
             except Exception:
                 remaining.append(d)
         self._save_drafts_to_settings(remaining)

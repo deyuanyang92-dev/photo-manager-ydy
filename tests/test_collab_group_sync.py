@@ -155,6 +155,188 @@ class TestFileEndpointGroupGuard:
         assert seen == ["incoming-jpg/a.jpg"]
 
 
+# ── Photo-index endpoint guard ────────────────────────────────────────────────
+
+class TestPhotoIndexEndpointGuard:
+    def test_photo_index_requires_same_group_and_project(self):
+        app = _build_fastapi_app(
+            TaskStore(),
+            lambda: {"groupCode": "G1", "projectId": "P1"},
+        )
+
+        ok = _post(app, "/api/collab/photo-index", {
+            "uid": "U1",
+            "kind": "tiff",
+            "count": 1,
+            "groupCode": "G1",
+            "projectId": "P1",
+        })
+        bad_group = _post(app, "/api/collab/photo-index", {
+            "uid": "U1",
+            "kind": "tiff",
+            "groupCode": "G2",
+            "projectId": "P1",
+        })
+        bad_project = _post(app, "/api/collab/photo-index", {
+            "uid": "U1",
+            "kind": "tiff",
+            "groupCode": "G1",
+            "projectId": "P2",
+        })
+
+        assert ok.status_code == 200
+        assert bad_group.status_code == 403
+        assert bad_project.status_code == 403
+
+    def test_photo_index_invokes_callback(self):
+        seen: list[tuple] = []
+
+        app = _build_fastapi_app(
+            TaskStore(),
+            lambda: {"groupCode": "G1", "projectId": "P1"},
+            photo_index_fn=lambda uid, kind, count, device: seen.append(
+                (uid, kind, count, device)
+            ),
+        )
+
+        resp = _post(app, "/api/collab/photo-index", {
+            "uid": "U1",
+            "kind": "zip",
+            "count": 3,
+            "deviceId": "lab-pc",
+            "groupCode": "G1",
+            "projectId": "P1",
+        })
+
+        assert resp.status_code == 200
+        assert seen == [("U1", "zip", 3, "lab-pc")]
+
+
+class TestUpdateStatusForce:
+    def test_api_force_allows_skip_transition(self):
+        from app.services.collab_types import TaskStatus
+
+        store = TaskStore()
+        store.create("U1")
+        store.update_status("U1", TaskStatus.SHOOTING)
+        app = _build_fastapi_app(
+            store,
+            lambda: {"groupCode": "G1", "projectId": "P1"},
+        )
+
+        blocked = _post(app, "/api/collab/tasks/update-status", {
+            "uid": "U1",
+            "status": "done",
+            "groupCode": "G1",
+        })
+        forced = _post(app, "/api/collab/tasks/update-status", {
+            "uid": "U1",
+            "status": "done",
+            "groupCode": "G1",
+            "force": True,
+        })
+
+        assert blocked.status_code == 422
+        assert forced.status_code == 200
+        assert store.get_task("U1").status.value == "done"
+
+
+class TestTaskListEndpointGroupGuard:
+    def test_list_tasks_requires_same_group(self):
+        store = TaskStore()
+        store.create("U1")
+        app = _build_fastapi_app(
+            store,
+            lambda: {"groupCode": "G1", "projectId": "P1"},
+        )
+
+        ok = _get(app, "/api/collab/tasks", {"groupCode": "G1"})
+        missing = _get(app, "/api/collab/tasks")
+        bad = _get(app, "/api/collab/tasks", {"groupCode": "G2"})
+
+        assert ok.status_code == 200
+        assert ok.json()[0]["uid"] == "U1"
+        assert missing.status_code == 403
+        assert bad.status_code == 403
+
+
+class TestSpecimenEndpointGuard:
+    def test_list_specimens_requires_same_group_and_project_before_provider(self):
+        seen = []
+        app = _build_fastapi_app(
+            TaskStore(),
+            lambda: {"groupCode": "G1", "projectId": "P1"},
+            specimen_provider_fn=lambda uid=None: seen.append(uid) or [{"uid": "U1"}],
+        )
+
+        ok = _get(app, "/api/collab/specimens", {"groupCode": "G1", "projectId": "P1"})
+        missing = _get(app, "/api/collab/specimens")
+        bad_group = _get(app, "/api/collab/specimens", {"groupCode": "G2", "projectId": "P1"})
+        bad_project = _get(app, "/api/collab/specimens", {"groupCode": "G1", "projectId": "P2"})
+
+        assert ok.status_code == 200
+        assert ok.json() == [{"uid": "U1"}]
+        assert missing.status_code == 403
+        assert bad_group.status_code == 403
+        assert bad_project.status_code == 403
+        assert seen == [None]
+
+    def test_push_specimens_requires_same_group_and_project_before_write(self):
+        seen = []
+        app = _build_fastapi_app(
+            TaskStore(),
+            lambda: {"groupCode": "G1", "projectId": "P1"},
+            specimen_writer_fn=lambda specimens: seen.append(specimens) or len(specimens),
+        )
+
+        ok = _post(app, "/api/collab/specimens/push", {
+            "groupCode": "G1",
+            "projectId": "P1",
+            "specimens": [{"uid": "U1"}],
+        })
+        missing = _post(app, "/api/collab/specimens/push", {
+            "specimens": [{"uid": "U2"}],
+        })
+        bad_group = _post(app, "/api/collab/specimens/push", {
+            "groupCode": "G2",
+            "projectId": "P1",
+            "specimens": [{"uid": "U3"}],
+        })
+        bad_project = _post(app, "/api/collab/specimens/push", {
+            "groupCode": "G1",
+            "projectId": "P2",
+            "specimens": [{"uid": "U4"}],
+        })
+
+        assert ok.status_code == 200
+        assert ok.json()["written"] == 1
+        assert missing.status_code == 403
+        assert bad_group.status_code == 403
+        assert bad_project.status_code == 403
+        assert seen == [[{"uid": "U1"}]]
+
+
+class TestActivityEndpointGroupGuard:
+    def test_get_activity_requires_same_group(self):
+        activity = MagicMock()
+        activity.to_dicts.return_value = [{"type": "claimed", "uid": "U1"}]
+        app = _build_fastapi_app(
+            TaskStore(),
+            lambda: {"groupCode": "G1", "projectId": "P1"},
+            activity_log=activity,
+        )
+
+        ok = _get(app, "/api/collab/activity", {"groupCode": "G1"})
+        missing = _get(app, "/api/collab/activity")
+        bad = _get(app, "/api/collab/activity", {"groupCode": "G2"})
+
+        assert ok.status_code == 200
+        assert ok.json() == [{"type": "claimed", "uid": "U1"}]
+        assert missing.status_code == 403
+        assert bad.status_code == 403
+        activity.to_dicts.assert_called_once_with()
+
+
 # ── /api/node/reachback (one-way firewall detection) ─────────────────────────
 
 class TestReachbackEndpoint:
@@ -218,6 +400,29 @@ class TestSyncPeerGroupFilter:
         assert changed == 1
         assert svc.store.exists("U9")
 
+    def test_task_sync_proceeds_for_same_group_different_project(self):
+        """UID/task coordination is team-scoped; media/specimen data is not."""
+        svc = CollabService()
+        svc.set_group_code("G1")
+        svc._project_id = "P-LOCAL"
+        peer = PeerInfo(
+            ip="1.2.3.4",
+            port=5050,
+            group_code="G1",
+            project_id="P-OTHER",
+        )
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = [
+            {"uid": "U10", "status": "created", "updatedAt": "2026-01-01T00:00:00+00:00"}
+        ]
+        with patch("httpx.get", return_value=mock_resp) as mock_get:
+            changed = svc._sync_peer(peer)
+        mock_get.assert_called_once()
+        assert changed == 1
+        assert svc.store.exists("U10")
+        assert svc._data_sync_allowed(peer) is False
+
 
 # ── create_task: broadcast only to same-group peers ──────────────────────────
 
@@ -239,6 +444,29 @@ class TestCreateTaskGroupBroadcast:
         ok, msg = svc.create_task("UID-G", assignee="A")
         assert ok, msg
         assert called_peers == ["1.1.1.1"]  # foreign-group peer skipped
+
+    def test_broadcast_to_same_group_even_when_project_differs(self):
+        svc = CollabService()
+        svc.set_group_code("G1")
+        svc._project_id = "P-LOCAL"
+        with svc._peers_lock:
+            svc._peers["1.1.1.1:5050"] = PeerInfo(
+                ip="1.1.1.1",
+                port=5050,
+                group_code="G1",
+                project_id="P-OTHER",
+            )
+
+        called_peers: list[str] = []
+
+        def fake_remote(peer, uid, assignee, device_id):
+            called_peers.append(peer.ip)
+            return True, "", False
+
+        svc._remote_create = fake_remote  # type: ignore[assignment]
+        ok, msg = svc.create_task("UID-CROSS-PROJECT", assignee="A")
+        assert ok, msg
+        assert called_peers == ["1.1.1.1"]
 
     def test_no_group_no_broadcast(self):
         """With empty local group, create stays local-only (no peer broadcast)."""

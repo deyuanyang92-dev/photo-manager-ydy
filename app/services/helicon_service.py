@@ -34,6 +34,22 @@ from typing import Optional
 
 from app.utils.path_utils import wsl_to_windows, windows_to_wsl, is_wsl_runtime, normalize_path
 
+# ── Helicon QSettings key constants ───────────────────────────────────────────
+# Canonical home of the helicon/* settings keys (settings_view re-exports them).
+_K_HELICON_EXE = "helicon/exe_path"
+_K_HELICON_METHOD = "helicon/method"
+_K_HELICON_RADIUS = "helicon/radius"
+_K_HELICON_SMOOTHING = "helicon/smoothing"
+_K_HELICON_QUALITY = "helicon/quality"
+
+_K_HELICON_OUTPUT_FORMAT = "helicon/output_format"     # "tif" | "jpg"
+_K_HELICON_TIFF_COMPRESSION = "helicon/tiff_compression"  # "u" | "lzw" | "zip"
+_K_HELICON_SAVE_DEPTH_MAP = "helicon/save_depth_map"   # "true"/"false"
+_K_HELICON_RUN_MODE = "helicon/run_mode"               # "silent" | "progress" | "gui"
+_K_HELICON_CONCURRENCY = "helicon/concurrency"          # int 1–8
+
+_K_HELICON_PRESETS_JSON = "helicon/presets_json"
+
 
 def helicon_path_for_exe(p: str) -> str:
     """Return a path Helicon.exe can read (Windows path when running under WSL)."""

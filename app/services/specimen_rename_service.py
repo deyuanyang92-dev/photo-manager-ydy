@@ -156,7 +156,10 @@ def _rewrite_zip_manifest(zip_path: str, old_uid: str, new_uid: str) -> None:
     """Update manifest.json tiffBasename after a result ZIP is renamed."""
     if not os.path.isfile(zip_path):
         return
+    tmp = None
     try:
+        # The source zip must be CLOSED before os.replace() — Windows refuses
+        # to replace a file that still has an open handle.
         with zipfile.ZipFile(zip_path, "r") as src:
             if "manifest.json" not in src.namelist():
                 return
@@ -174,25 +177,25 @@ def _rewrite_zip_manifest(zip_path: str, old_uid: str, new_uid: str) -> None:
                 dir=str(Path(zip_path).parent),
             )
             os.close(fd)
-            try:
-                with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as dst:
-                    for item in src.infolist():
-                        if item.filename == "manifest.json":
-                            dst.writestr(
-                                item,
-                                json.dumps(manifest, indent=2, ensure_ascii=False),
-                            )
-                        else:
-                            dst.writestr(item, src.read(item.filename))
-                os.replace(tmp, zip_path)
-            except Exception:
-                try:
-                    os.unlink(tmp)
-                except OSError:
-                    pass
-                raise
+            with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as dst:
+                for item in src.infolist():
+                    if item.filename == "manifest.json":
+                        dst.writestr(
+                            item,
+                            json.dumps(manifest, indent=2, ensure_ascii=False),
+                        )
+                    else:
+                        dst.writestr(item, src.read(item.filename))
+        os.replace(tmp, zip_path)
+        tmp = None
     except (OSError, zipfile.BadZipFile, json.JSONDecodeError):
         return
+    finally:
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
 
 
 def _migrate_grouping_result_files(

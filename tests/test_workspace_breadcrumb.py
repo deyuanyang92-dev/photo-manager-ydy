@@ -5,14 +5,14 @@
     无工作区→空链。
   - sibling_dirs(ws)：同级目录（含自身），过滤文件/点号目录/RESERVED_DIR_NAMES，排序。
   - WorkspaceBreadcrumb：
-      * 无项目 → text() 含「（未选）」，点击 → navigate_requested("overview")。
+      * 无项目 → text() 含「选择工作区」，点击 → 打开工作区菜单（含项目总览）。
       * 有链   → text() = "根 / 断面A / B2"（>3 级折叠中间为 …）。
       * ◀ ▶   → 访问历史后退/前进（浏览器式），走 project_service.enter_workspace
                 （唯一入口），成功后发 workspace_changed；首/末端禁用，不回绕。
                 中途回退后再切新工作区 → 截断前向分支。同级切换改走 ▾ 下拉。
       * 根即工作区（chain==1）只要有历史也能 ◀▶（修复「光秃秃无箭头」）。
-      * 叶子下拉 → 项目目录（已是工作区的标 📷）+ 末尾「+ 新建文件夹…」：
-                在当前工作区父目录下建新文件夹并进入；名字预填 YYYYMMDD(；
+      * 叶子下拉 → 本项目内 / 磁盘上的其他项目 / 最近使用 / 新建文件夹分组；
+                已是工作区的标「· 工作区」；新建在当前工作区父目录下建新文件夹并进入；
                 拒 / \\ .. 空。
   - MainWindow._project_switcher 即该控件；refresh_context_bar() 后 text() 反映链。
 
@@ -153,11 +153,48 @@ def test_sibling_project_dirs_lists_project_root_peers(tmp_path):
 def test_widget_no_project_placeholder():
     w = WorkspaceBreadcrumb(_Ctx())
     w.refresh()
-    assert "（未选）" in w.text()
+    assert "选择工作区" in w.text()
+    assert w._btn_folder is None
     got = []
     w.navigate_requested.connect(got.append)
-    w._placeholder_btn.click()
+    menu = w._build_placeholder_menu()
+    labels = [a.text() for a in menu.actions() if not a.isSeparator()]
+    assert any("最近使用" in s for s in labels)
+    assert any("项目总览" in s for s in labels)
+    assert any("打开文件夹" in s for s in labels)
+    assert any("新建工作区" in s for s in labels)
+    overview = next(a for a in menu.actions() if "项目总览" in a.text())
+    overview.trigger()
     assert got == ["overview"]
+
+
+def test_placeholder_menu_lists_recent_workspaces(tmp_path, monkeypatch):
+    import json
+    recent = tmp_path / "user_projects.json"
+    project = tmp_path / "航次2026" / "断面A"
+    project.mkdir(parents=True)
+    recent.write_text(json.dumps({
+        "version": 1,
+        "projects": [{
+            "name": "航次2026 / 断面A",
+            "directory": str(project),
+            "root": str(project.parent),
+        }],
+    }, ensure_ascii=False), encoding="utf-8")
+    from app.services import project_service
+    monkeypatch.setattr(
+        project_service,
+        "default_user_projects_json_path",
+        lambda: str(recent),
+    )
+    w = WorkspaceBreadcrumb(_Ctx())
+    w.refresh()
+
+    menu = w._build_placeholder_menu()
+    recent_menu = next(a.menu() for a in menu.actions() if a.menu() and "最近使用" in a.text())
+    labels = [a.text() for a in recent_menu.actions()]
+
+    assert any("航次2026 / 断面A" in s for s in labels)
 
 
 def test_widget_shows_chain(tmp_path):
@@ -390,12 +427,12 @@ def test_dropdown_lists_project_tree_marks_workspaces(tmp_path):
     w = WorkspaceBreadcrumb(_Ctx(str(sect / "B2"), str(root)))
     w.refresh()
     menu = w._build_sibling_menu()
-    sib_menu = next(a.menu() for a in menu.actions() if a.menu() and "项目目录" in a.text())
+    sib_menu = next(a.menu() for a in menu.actions() if a.menu() and "本项目内" in a.text())
     sib_labels = [a.text() for a in sib_menu.actions()]
     assert len(sib_labels) >= 5
     assert any("B1" in s for s in sib_labels)
-    # B2 是工作区 → 带 📷
-    assert any("📷" in s and "B2" in s for s in sib_labels)
+    # B2 是工作区 → 带工作区标记
+    assert any("工作区" in s and "B2" in s for s in sib_labels)
 
 
 def test_dropdown_root_workspace_lists_child_dirs(tmp_path):
@@ -403,7 +440,7 @@ def test_dropdown_root_workspace_lists_child_dirs(tmp_path):
     w = WorkspaceBreadcrumb(_Ctx(str(root), str(root)))
     w.refresh()
     menu = w._build_sibling_menu()
-    tree_menu = next(a.menu() for a in menu.actions() if a.menu() and "项目目录" in a.text())
+    tree_menu = next(a.menu() for a in menu.actions() if a.menu() and "本项目内" in a.text())
     labels = [a.text() for a in tree_menu.actions()]
     assert any("断面A" in s for s in labels)
     assert any(os.path.join("断面A", "B2") in s for s in labels)
@@ -422,11 +459,19 @@ def test_dropdown_lists_peer_project_dirs(tmp_path):
     w = WorkspaceBreadcrumb(_Ctx(str(proj), str(proj)))
     w.refresh()
     menu = w._build_sibling_menu()
-    # 同级项目现在平铺在菜单顶层(不再藏「同级目录」子菜单)→ 点当前号直接见兄弟
-    labels = [a.text() for a in menu.actions()]
-    assert any("ceshi7" in s for s in labels)
-    assert any("📷" in s and "ceshi8" in s for s in labels)
-    assert any("proj_x" in s for s in labels)
+    peer_menu = next(
+        a.menu() for a in menu.actions() if a.menu() and "磁盘上的其他项目" in a.text()
+    )
+    peer_labels = [a.text() for a in peer_menu.actions()]
+    assert any("ceshi7" in s for s in peer_labels)
+    assert any("工作区" in s and "ceshi8" in s for s in peer_labels)
+    top_labels = [
+        a.text() for a in menu.actions()
+        if a.text() and not a.isSeparator() and not a.menu()
+        and not a.text().startswith("当前：")
+    ]
+    assert not any("ceshi7" in s for s in top_labels)
+    assert not any("ceshi8" in s for s in top_labels)
 
 
 def test_switch_peer_root_uses_peer_as_root(tmp_path, monkeypatch):
@@ -453,8 +498,7 @@ def test_dropdown_groups_current_project_tree_recent_and_new(tmp_path):
     menu = w._build_sibling_menu()
     labels = [a.text() for a in menu.actions() if not a.isSeparator()]
     assert labels[0] == "当前：B2"
-    assert any("项目目录" in s for s in labels)
-    assert any("同盘项目" in s for s in labels)   # 平铺段(原「同级目录」子菜单)
+    assert any("本项目内" in s for s in labels)
     assert any("最近使用" in s for s in labels)
     assert labels[-1].endswith("新建文件夹…")
 

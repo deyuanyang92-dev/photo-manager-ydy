@@ -26,6 +26,7 @@ from PyQt6.QtWidgets import (
     QApplication,
     QComboBox,
     QDialog,
+    QFileDialog,
     QFrame,
     QHBoxLayout,
     QHeaderView,
@@ -36,7 +37,6 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
-    QSplitter,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -46,6 +46,13 @@ from PyQt6.QtWidgets import (
 from app.services.collab_offline_queue import OfflineDraftQueue
 from app.services.collab_status import build_collab_status
 from app.views.base_view import BaseView
+from app.widgets.collab_share_project_picker import CollabShareProjectPicker
+
+try:
+    from app.config.effects import apply_card_shadow as _apply_card_shadow
+except ImportError:  # pragma: no cover
+    def _apply_card_shadow(widget, **_kw):  # type: ignore[misc]
+        return None
 
 if False:  # TYPE_CHECKING
     from app.app_context import AppContext
@@ -83,6 +90,11 @@ _TASK_COL_ASSIGNEE = 3
 _TASK_COL_UPDATED = 4
 
 
+def _elevate_card(frame: QFrame) -> None:
+    """Soft drop shadow so setup/activity panels read as cards."""
+    _apply_card_shadow(frame, blur=20, y=3, alpha=32)
+
+
 # ── CollabView ────────────────────────────────────────────────────────────────
 
 class CollabView(BaseView):
@@ -113,227 +125,244 @@ class CollabView(BaseView):
 
     def _setup_ui(self) -> None:
         root = QVBoxLayout(self)
-        root.setContentsMargins(18, 16, 18, 16)
-        root.setSpacing(12)
+        root.setContentsMargins(20, 16, 20, 16)
+        root.setSpacing(14)
 
-        # ── Header: global collaboration centre ──────────────────────────
+        # ── Header ───────────────────────────────────────────────────────
         header_frame = QFrame()
         header_frame.setObjectName("CollabHeader")
-        header_layout = QVBoxLayout(header_frame)
-        header_layout.setContentsMargins(14, 12, 14, 12)
-        header_layout.setSpacing(10)
+        _elevate_card(header_frame)
+        header_layout = QHBoxLayout(header_frame)
+        header_layout.setContentsMargins(18, 14, 18, 14)
+        header_layout.setSpacing(16)
 
-        header = QHBoxLayout()
         title_col = QVBoxLayout()
-        title_col.setSpacing(2)
+        title_col.setSpacing(4)
         title = QLabel("协作中心")
         title.setObjectName("CollabTitle")
         title_col.addWidget(title)
-        self._scope_label = QLabel("协作组：—")
+        self._scope_label = QLabel("团队永久码：—")
         self._scope_label.setObjectName("CollabScope")
         title_col.addWidget(self._scope_label)
-        self._connection_label = QLabel("本机地址：启动后显示")
+        self._connection_label = QLabel("")
         self._connection_label.setObjectName("CollabScope")
+        self._connection_label.hide()
         title_col.addWidget(self._connection_label)
-        header.addLayout(title_col, 1)
+        header_layout.addLayout(title_col, stretch=2)
 
+        stats_frame = QFrame()
+        stats_frame.setObjectName("CollabStatsBar")
+        stats_layout = QHBoxLayout(stats_frame)
+        stats_layout.setContentsMargins(12, 8, 12, 8)
+        stats_layout.setSpacing(10)
+        self._local_project_badge = QLabel("本机项目：—")
+        self._local_project_badge.setObjectName("CollabMetric")
+        stats_layout.addWidget(self._local_project_badge)
+        self._device_count_badge = QLabel("在线 0")
+        self._device_count_badge.setObjectName("CollabMetric")
+        stats_layout.addWidget(self._device_count_badge)
+        self._project_count_badge = QLabel("项目 0")
+        self._project_count_badge.setObjectName("CollabMetric")
+        stats_layout.addWidget(self._project_count_badge)
+        self._task_count_badge = QLabel("任务 0")
+        self._task_count_badge.setObjectName("CollabMetric")
+        stats_layout.addWidget(self._task_count_badge)
+        self._conflict_count_badge = QLabel("冲突 0")
+        self._conflict_count_badge.setObjectName("CollabMetric")
+        stats_layout.addWidget(self._conflict_count_badge)
+        header_layout.addWidget(stats_frame, stretch=3)
+
+        status_col = QVBoxLayout()
+        status_col.setSpacing(8)
         self._status_badge = QLabel("⚪ 协作未启动")
         self._status_badge.setObjectName("CollabStatusBadge")
+        self._status_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
         bold = QFont()
         bold.setBold(True)
-        bold.setPointSize(12)
+        bold.setPointSize(11)
         self._status_badge.setFont(bold)
-        header.addWidget(self._status_badge)
-
+        status_col.addWidget(self._status_badge)
         self._debug_btn = QPushButton("诊断")
         self._debug_btn.setObjectName("Ghost")
         self._debug_btn.setCheckable(True)
-        self._debug_btn.setFixedWidth(66)
         self._debug_btn.toggled.connect(self._toggle_debug_drawer)
-        header.addWidget(self._debug_btn)
-        header_layout.addLayout(header)
-
-        metrics = QHBoxLayout()
-        metrics.setSpacing(8)
-        self._local_project_badge = QLabel("本机项目：—")
-        self._local_project_badge.setObjectName("CollabMetric")
-        metrics.addWidget(self._local_project_badge)
-        self._device_count_badge = QLabel("在线设备：0")
-        self._device_count_badge.setObjectName("CollabMetric")
-        metrics.addWidget(self._device_count_badge)
-        self._project_count_badge = QLabel("项目：0")
-        self._project_count_badge.setObjectName("CollabMetric")
-        metrics.addWidget(self._project_count_badge)
-        self._task_count_badge = QLabel("任务：0")
-        self._task_count_badge.setObjectName("CollabMetric")
-        metrics.addWidget(self._task_count_badge)
-        self._conflict_count_badge = QLabel("冲突：0")
-        self._conflict_count_badge.setObjectName("CollabMetric")
-        metrics.addWidget(self._conflict_count_badge)
-        metrics.addStretch()
-        header_layout.addLayout(metrics)
+        status_col.addWidget(self._debug_btn, alignment=Qt.AlignmentFlag.AlignHCenter)
+        header_layout.addLayout(status_col)
         root.addWidget(header_frame)
 
-        guide = QFrame()
-        guide.setObjectName("CollabGuide")
-        guide_layout = QHBoxLayout(guide)
-        guide_layout.setContentsMargins(12, 10, 12, 10)
-        guide_layout.setSpacing(12)
-
-        guide_text = QVBoxLayout()
-        guide_text.setSpacing(3)
         self._next_step_label = QLabel("下一步：—")
         self._next_step_label.setObjectName("CollabGuideTitle")
-        guide_text.addWidget(self._next_step_label)
-        self._next_step_detail = QLabel("先让电脑互相看见，再确认哪些电脑允许同步照片。")
+        self._next_step_detail = QLabel(
+            "选择一种协作方式：团队永久码用于自动连接，项目码共享用于绑定同一个采集项目。"
+        )
         self._next_step_detail.setObjectName("CollabGuideDetail")
         self._next_step_detail.setWordWrap(True)
-        guide_text.addWidget(self._next_step_detail)
-        guide_layout.addLayout(guide_text, 1)
 
-        root.addWidget(guide)
-
-        # Three visible actions in the order a new operator actually needs them.
-        self._setup_btn = QPushButton("启动/加入")
+        self._setup_btn = QPushButton("设置永久码")
         self._setup_btn.setObjectName("Primary")
-        self._setup_btn.setMinimumWidth(112)
+        self._setup_btn.setMinimumHeight(34)
         self._setup_btn.clicked.connect(self._on_setup_wizard)
 
-        self._share_btn = QPushButton("复制连接地址")
+        self._share_btn = QPushButton("复制连接码")
         self._share_btn.setObjectName("Outline")
-        self._share_btn.setMinimumWidth(112)
+        self._share_btn.setMinimumHeight(34)
         self._share_btn.clicked.connect(self._on_share_addr)
 
         self._manual_toggle_btn = QPushButton("手动连接")
         self._manual_toggle_btn.setObjectName("Ghost")
         self._manual_toggle_btn.setCheckable(True)
-        self._manual_toggle_btn.setMinimumWidth(86)
         self._manual_toggle_btn.toggled.connect(self._toggle_manual_connect)
 
-        self._project_code_btn = QPushButton("绑定同一项目")
-        self._project_code_btn.setObjectName("Outline")
-        self._project_code_btn.setMinimumWidth(112)
+        self._shared_scope_btn = QPushButton("共享项目范围")
+        self._shared_scope_btn.setObjectName("Outline")
+        self._shared_scope_btn.setMinimumHeight(34)
+        self._shared_scope_btn.setCheckable(True)
+        self._shared_scope_btn.toggled.connect(self._toggle_shared_scope_panel)
+
+        self._pick_project_btn = QPushButton("配对项目")
+        self._pick_project_btn.setObjectName("Outline")
+        self._pick_project_btn.setMinimumHeight(34)
+        self._pick_project_btn.clicked.connect(self._on_pick_team_project)
+
+        self._same_name_btn = QPushButton("同名一键配对")
+        self._same_name_btn.setObjectName("Outline")
+        self._same_name_btn.setMinimumHeight(34)
+        self._same_name_btn.clicked.connect(self._on_same_name_bind_quick)
+        self._same_name_btn.hide()
+
+        self._project_code_btn = QPushButton("打开项目码共享")
+        self._project_code_btn.setObjectName("Primary")
+        self._project_code_btn.setMinimumHeight(34)
         self._project_code_btn.clicked.connect(self._on_project_sync_code)
-        self._bind_project_btn = self._project_code_btn
+        self._bind_project_btn = self._pick_project_btn
 
-        steps = QHBoxLayout()
-        steps.setSpacing(10)
-        steps.addWidget(
-            self._make_step_panel(
-                "1",
-                "组队",
-                "同一团队使用同一个协作组码。",
-                self._setup_btn,
-            ),
-            1,
-        )
-        steps.addWidget(
-            self._make_step_panel(
-                "2",
-                "连接",
-                "自动发现优先；找不到时再发连接地址或手动输入。",
-                self._share_btn,
-                self._manual_toggle_btn,
-            ),
-            1,
-        )
-        steps.addWidget(
-            self._make_step_panel(
-                "3",
-                "照片同步",
-                "确认为同一项目后，才同步照片/TIF/ZIP。",
-                self._project_code_btn,
-            ),
-            1,
-        )
-        root.addLayout(steps)
+        self._team_scope_state = QLabel("团队永久码：未设置")
+        self._team_scope_state.setObjectName("CollabScopeState")
+        self._project_scope_state = QLabel("项目码共享：可单独使用；不需要先设置团队永久码。")
+        self._project_scope_state.setObjectName("CollabScopeState")
+        self._project_scope_state.setWordWrap(True)
 
-        # ── Conflict banner (hidden by default) ───────────────────────────
         self._conflict_banner = QLabel()
         self._conflict_banner.setObjectName("ConflictBanner")
         self._conflict_banner.setWordWrap(True)
         self._conflict_banner.hide()
         root.addWidget(self._conflict_banner)
 
-        # Manual IP connection: novice flow keeps this hidden until requested.
+        guide_panel = QFrame()
+        guide_panel.setObjectName("CollabGuide")
+        _elevate_card(guide_panel)
+        guide_layout = QVBoxLayout(guide_panel)
+        guide_layout.setContentsMargins(16, 14, 16, 14)
+        guide_layout.setSpacing(6)
+        guide_layout.addWidget(self._next_step_label)
+        guide_layout.addWidget(self._next_step_detail)
+        root.addWidget(guide_panel)
+
+        entry_row = QHBoxLayout()
+        entry_row.setSpacing(14)
+        entry_row.addWidget(self._make_unified_pairing_panel(), stretch=1)
+        entry_row.addWidget(self._make_project_code_panel(), stretch=1)
+        root.addLayout(entry_row)
+
+        self._shared_scope_panel = self._make_shared_project_scope_panel()
+        self._shared_scope_panel.hide()
+        root.addWidget(self._shared_scope_panel)
+        self._connect_panel = None
+
         manual_group = QFrame()
         manual_group.setObjectName("ManualConnectFrame")
-        manual_group.setFrameShape(QFrame.Shape.StyledPanel)
         manual_layout = QHBoxLayout(manual_group)
-        manual_layout.setContentsMargins(10, 9, 10, 9)
+        manual_layout.setContentsMargins(14, 10, 14, 10)
         manual_layout.setSpacing(8)
-
         manual_title = QLabel("手动连接")
         manual_title.setObjectName("Muted")
         manual_layout.addWidget(manual_title)
-
         self._ip_input = QLineEdit()
         self._ip_input.setPlaceholderText("队友 IP，例如 192.168.1.100")
         self._ip_input.setObjectName("ManualIpInput")
         manual_layout.addWidget(self._ip_input, 1)
-
         self._port_input = QLineEdit("5050")
         self._port_input.setFixedWidth(64)
         self._port_input.setObjectName("ManualPortInput")
         manual_layout.addWidget(self._port_input)
-
         self._connect_btn = QPushButton("连接")
-        self._connect_btn.setFixedWidth(64)
+        self._connect_btn.setFixedWidth(72)
         self._connect_btn.clicked.connect(self._on_manual_connect)
         manual_layout.addWidget(self._connect_btn)
         manual_group.hide()
         self._manual_group = manual_group
         root.addWidget(manual_group)
 
-        # ── Main splitter: device list | task table ────────────────────────
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        # ── Activity hub (always visible) ─────────────────────────────────
+        activity_hub = QFrame()
+        activity_hub.setObjectName("CollabActivityHub")
+        _elevate_card(activity_hub)
+        self._activity_hub = activity_hub
+        activity_layout = QVBoxLayout(activity_hub)
+        activity_layout.setContentsMargins(16, 14, 16, 14)
+        activity_layout.setSpacing(12)
 
-        # Left — devices
-        left = QWidget()
-        left_layout = QVBoxLayout(left)
-        left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(8)
+        hub_title = QLabel("设备与任务")
+        hub_title.setObjectName("CollabHubTitle")
+        activity_layout.addWidget(hub_title)
 
+        self._empty_banner = QFrame()
+        self._empty_banner.setObjectName("CollabEmptyBanner")
+        empty_lay = QVBoxLayout(self._empty_banner)
+        empty_lay.setContentsMargins(20, 18, 20, 18)
+        empty_lay.setSpacing(6)
+        empty_icon = QLabel("👥")
+        empty_icon.setObjectName("CollabEmptyIcon")
+        empty_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        empty_lay.addWidget(empty_icon)
+        empty_title = QLabel("还没有在线设备或协作任务")
+        empty_title.setObjectName("CollabEmptyTitle")
+        empty_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        empty_lay.addWidget(empty_title)
+        empty_detail = QLabel(
+            "完成上方「团队永久码」或「项目码共享」后，队友上线时设备会出现在下方；"
+            "在照片工作区保存编号后，任务会自动同步到这里。"
+        )
+        empty_detail.setObjectName("CollabEmptyDetail")
+        empty_detail.setWordWrap(True)
+        empty_detail.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        empty_lay.addWidget(empty_detail)
+        activity_layout.addWidget(self._empty_banner)
+
+        device_panel = QFrame()
+        device_panel.setObjectName("CollabActivityPane")
+        device_layout = QVBoxLayout(device_panel)
+        device_layout.setContentsMargins(0, 0, 0, 0)
+        device_layout.setSpacing(8)
         dev_title = QLabel("在线设备")
         dev_title.setObjectName("Section")
-        left_layout.addWidget(dev_title)
-
+        device_layout.addWidget(dev_title)
         self._device_list = QTableWidget(0, 6)
-        self._device_list.setHorizontalHeaderLabels(["主机名", "项目", "组码", "照片", "地址", "延迟"])
+        self._device_list.setObjectName("CollabDeviceTable")
+        self._device_list.setHorizontalHeaderLabels(
+            ["主机名", "项目", "团队永久码", "照片", "地址", "延迟"]
+        )
         self._device_list.horizontalHeader().setStretchLastSection(False)
         self._device_list.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.ResizeMode.Stretch
         )
-        self._device_list.horizontalHeader().setSectionResizeMode(
-            1, QHeaderView.ResizeMode.ResizeToContents
-        )
-        self._device_list.horizontalHeader().setSectionResizeMode(
-            2, QHeaderView.ResizeMode.ResizeToContents
-        )
-        self._device_list.horizontalHeader().setSectionResizeMode(
-            3, QHeaderView.ResizeMode.ResizeToContents
-        )
-        self._device_list.horizontalHeader().setSectionResizeMode(
-            4, QHeaderView.ResizeMode.ResizeToContents
-        )
-        self._device_list.horizontalHeader().setSectionResizeMode(
-            5, QHeaderView.ResizeMode.ResizeToContents
-        )
+        for col in (1, 2, 3, 4, 5):
+            self._device_list.horizontalHeader().setSectionResizeMode(
+                col, QHeaderView.ResizeMode.ResizeToContents
+            )
         self._device_list.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._device_list.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self._device_list.setAlternatingRowColors(True)
         self._device_list.verticalHeader().hide()
-        left_layout.addWidget(self._device_list)
+        self._device_list.setMinimumHeight(140)
+        device_layout.addWidget(self._device_list)
+        activity_layout.addWidget(device_panel)
 
-        splitter.addWidget(left)
-
-        # Right — task table
-        right = QWidget()
-        right_layout = QVBoxLayout(right)
-        right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.setSpacing(8)
-
+        task_panel = QFrame()
+        task_panel.setObjectName("CollabActivityPane")
+        task_layout = QVBoxLayout(task_panel)
+        task_layout.setContentsMargins(0, 0, 0, 0)
+        task_layout.setSpacing(8)
         task_header = QHBoxLayout()
         task_title = QLabel("任务清单")
         task_title.setObjectName("Section")
@@ -347,9 +376,10 @@ class CollabView(BaseView):
         self._project_combo.setMinimumWidth(150)
         self._project_combo.currentIndexChanged.connect(self._on_project_filter_changed)
         task_header.addWidget(self._project_combo)
-        right_layout.addLayout(task_header)
+        task_layout.addLayout(task_header)
 
         self._task_table = QTableWidget(0, 5)
+        self._task_table.setObjectName("CollabTaskTable")
         self._task_table.setHorizontalHeaderLabels(["UID", "项目", "状态", "负责人", "更新时间"])
         self._task_table.horizontalHeader().setStretchLastSection(False)
         self._task_table.horizontalHeader().setSectionResizeMode(
@@ -365,12 +395,15 @@ class CollabView(BaseView):
         self._task_table.verticalHeader().hide()
         self._task_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._task_table.customContextMenuRequested.connect(self._on_task_context_menu)
-        right_layout.addWidget(self._task_table)
+        self._task_table.setMinimumHeight(200)
+        task_layout.addWidget(self._task_table)
+        activity_layout.addWidget(task_panel, stretch=1)
 
-        splitter.addWidget(right)
-        splitter.setStretchFactor(0, 2)
-        splitter.setStretchFactor(1, 3)
-        root.addWidget(splitter, stretch=1)
+        root.addWidget(activity_hub, stretch=1)
+        self._activity_splitter = activity_hub  # compat for older refresh hooks
+
+        self._activity_empty_panel = QWidget()
+        self._activity_empty_panel.hide()
 
         # ── Debug drawer (collapsed by default) ───────────────────────────
         self._debug_drawer = QFrame()
@@ -407,25 +440,19 @@ class CollabView(BaseView):
 
     def _make_step_panel(
         self,
-        number: str,
         title: str,
         detail: str,
         *buttons: QPushButton,
     ) -> QFrame:
         panel = QFrame()
         panel.setObjectName("CollabStepPanel")
-        panel.setMinimumHeight(96)
+        panel.setMinimumHeight(82)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(12, 10, 12, 10)
         layout.setSpacing(8)
 
         title_row = QHBoxLayout()
         title_row.setSpacing(8)
-        badge = QLabel(number)
-        badge.setObjectName("CollabStepBadge")
-        badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        badge.setFixedSize(22, 22)
-        title_row.addWidget(badge)
         title_lbl = QLabel(title)
         title_lbl.setObjectName("CollabStepTitle")
         title_row.addWidget(title_lbl, 1)
@@ -444,8 +471,173 @@ class CollabView(BaseView):
         layout.addLayout(action_row)
         return panel
 
+    def _make_unified_pairing_panel(self) -> QFrame:
+        """Team permanent code card. Project-code sharing is separate."""
+        panel = QFrame()
+        panel.setObjectName("CollabStepPanel")
+        panel.setProperty("role", "entry")
+        panel.setMinimumHeight(168)
+        panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        _elevate_card(panel)
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(10)
+
+        title_row = QHBoxLayout()
+        title_row.setSpacing(8)
+        badge = QLabel("方式一")
+        badge.setObjectName("CollabEntryBadge")
+        title_row.addWidget(badge)
+        title_lbl = QLabel("团队永久码")
+        title_lbl.setObjectName("CollabStepTitle")
+        title_row.addWidget(title_lbl)
+        title_row.addStretch()
+        layout.addLayout(title_row)
+
+        detail_lbl = QLabel(
+            "几个人填同一个团队永久码。保存后永久有效，软件重启或更新后自动连接。"
+        )
+        detail_lbl.setObjectName("CollabStepDetail")
+        detail_lbl.setWordWrap(True)
+        layout.addWidget(detail_lbl, 1)
+
+        layout.addWidget(self._team_scope_state)
+
+        team_row = QHBoxLayout()
+        team_row.setSpacing(8)
+        team_row.addWidget(self._setup_btn)
+        team_row.addWidget(self._share_btn)
+        team_row.addWidget(self._shared_scope_btn)
+        team_row.addWidget(self._manual_toggle_btn)
+        team_row.addStretch()
+        layout.addLayout(team_row)
+        return panel
+
+    def _make_project_code_panel(self) -> QFrame:
+        """Independent project-code sharing card."""
+        panel = QFrame()
+        panel.setObjectName("CollabStepPanel")
+        panel.setProperty("role", "entry")
+        panel.setMinimumHeight(168)
+        panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        _elevate_card(panel)
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(10)
+
+        title_row = QHBoxLayout()
+        title_row.setSpacing(8)
+        badge = QLabel("方式二")
+        badge.setObjectName("CollabEntryBadge")
+        title_row.addWidget(badge)
+        title_lbl = QLabel("项目码共享")
+        title_lbl.setObjectName("CollabStepTitle")
+        title_row.addWidget(title_lbl)
+        title_row.addStretch()
+        layout.addLayout(title_row)
+
+        detail_lbl = QLabel(
+            "不用先设置团队永久码。选择本机项目或文件夹，复制项目码给队友；"
+            "也可以粘贴队友项目码，把本机项目连接到同一个采集项目。"
+        )
+        detail_lbl.setObjectName("CollabStepDetail")
+        detail_lbl.setWordWrap(True)
+        layout.addWidget(detail_lbl, 1)
+
+        layout.addWidget(self._project_scope_state)
+
+        project_row = QHBoxLayout()
+        project_row.setSpacing(8)
+        for button in (
+            self._project_code_btn,
+            self._pick_project_btn,
+            self._same_name_btn,
+        ):
+            project_row.addWidget(button)
+        project_row.addStretch()
+        layout.addLayout(project_row)
+        return panel
+
+    def _make_shared_project_scope_panel(self) -> QFrame:
+        """Optional project scope list used after team-code setup."""
+        panel = QFrame()
+        panel.setObjectName("CollabOptionalPanel")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(14, 10, 14, 10)
+        layout.setSpacing(8)
+
+        title_row = QHBoxLayout()
+        title_row.setSpacing(8)
+        title_lbl = QLabel("共享项目范围")
+        title_lbl.setObjectName("CollabStepTitle")
+        title_row.addWidget(title_lbl)
+        hint_lbl = QLabel("团队永久码使用这个范围；项目码共享不需要先设置这里")
+        hint_lbl.setObjectName("MutedSmall")
+        title_row.addWidget(hint_lbl)
+        title_row.addStretch()
+        self._broadcast_toggle_btn = QPushButton("收起")
+        self._broadcast_toggle_btn.setObjectName("Ghost")
+        self._broadcast_toggle_btn.clicked.connect(lambda: self._toggle_shared_scope_panel(False))
+        title_row.addWidget(self._broadcast_toggle_btn)
+        layout.addLayout(title_row)
+
+        self._broadcast_body = QWidget()
+        body_layout = QVBoxLayout(self._broadcast_body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(8)
+        self._share_picker = CollabShareProjectPicker(self.ctx, autoload=False)
+        self._share_picker.selection_changed.connect(self._on_share_selection_changed)
+        body_layout.addWidget(self._share_picker)
+        layout.addWidget(self._broadcast_body)
+        return panel
+
+    def _toggle_shared_scope_panel(self, checked: bool) -> None:
+        if hasattr(self, "_shared_scope_panel"):
+            self._shared_scope_panel.setVisible(checked)
+        if hasattr(self, "_shared_scope_btn"):
+            self._shared_scope_btn.setChecked(checked)
+            self._shared_scope_btn.setText("收起共享范围" if checked else "共享项目范围")
+
+    def _make_scope_panel(
+        self,
+        title: str,
+        detail: str,
+        state_label: QLabel,
+        *buttons: QPushButton,
+    ) -> QFrame:
+        panel = QFrame()
+        panel.setObjectName("CollabStepPanel")
+        panel.setMinimumHeight(148)
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(8)
+
+        title_lbl = QLabel(title)
+        title_lbl.setObjectName("CollabStepTitle")
+        layout.addWidget(title_lbl)
+        layout.addWidget(state_label)
+
+        detail_lbl = QLabel(detail)
+        detail_lbl.setObjectName("CollabStepDetail")
+        detail_lbl.setWordWrap(True)
+        layout.addWidget(detail_lbl, 1)
+
+        action_row = QHBoxLayout()
+        action_row.setSpacing(8)
+        for button in buttons:
+            action_row.addWidget(button)
+        action_row.addStretch()
+        layout.addLayout(action_row)
+        return panel
+
     def on_activate(self) -> None:
         """Refresh devices + tasks from the service."""
+        self._service = getattr(self.ctx, "collab_service", self._service)
+        if self._service is not None:
+            self._service.ensure_running(self.ctx)
+            self._connect_service_signals()
+        if hasattr(self, "_share_picker"):
+            self._share_picker.reload()
         self._refresh_devices()
         self._refresh_tasks()
         if self._service:
@@ -466,7 +658,17 @@ class CollabView(BaseView):
         self._service.tasks_changed.connect(self._refresh_tasks)
         self._service.conflict_detected.connect(self._on_conflict)
         self._service.server_ready.connect(self._on_server_ready)
+        if hasattr(self._service, "project_bind_suggested"):
+            self._service.project_bind_suggested.connect(self._on_project_bind_suggested)
+        if hasattr(self._service, "photo_index_received"):
+            self._service.photo_index_received.connect(self._on_photo_index_received)
         self._connected_service = self._service
+
+    @pyqtSlot(str, str, int, str)
+    def _on_photo_index_received(self, uid: str, kind: str, count: int, device_id: str) -> None:
+        self._refresh_tasks()
+        if self._service is not None:
+            self._refresh_devices()
 
     # ── Slots ─────────────────────────────────────────────────────────────
 
@@ -506,7 +708,7 @@ class CollabView(BaseView):
         if not peers:
             self._device_list.setRowCount(1)
             empty = QTableWidgetItem(
-                "暂无在线设备。让队友加入同一协作组，或把本机连接地址发给对方手动连接。"
+                "暂无在线设备。让队友填写同一个团队永久码，或复制连接码手动连接。"
             )
             empty.setFlags(empty.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self._device_list.setItem(0, 0, empty)
@@ -518,6 +720,7 @@ class CollabView(BaseView):
         tasks = self._service.store.list_tasks()
         self._refresh_project_filter(tasks, peers)
         self._refresh_summary(tasks, peers)
+        self._refresh_activity_visibility(peers, tasks)
 
     @pyqtSlot()
     def _refresh_tasks(self) -> None:
@@ -561,6 +764,16 @@ class CollabView(BaseView):
             self._task_table.setItem(0, 0, empty)
             self._task_table.setSpan(0, 0, 1, self._task_table.columnCount())
         self._refresh_summary(tasks, peers)
+        self._refresh_activity_visibility(peers, tasks)
+
+    def _refresh_activity_visibility(
+        self,
+        peers: list["PeerInfo"],
+        tasks: list["TaskRecord"],
+    ) -> None:
+        has_content = bool(peers) or bool(tasks)
+        if hasattr(self, "_empty_banner"):
+            self._empty_banner.setVisible(not has_content)
 
     def _refresh_project_filter(self, tasks: list["TaskRecord"], peers: list["PeerInfo"]) -> None:
         if not hasattr(self, "_project_combo"):
@@ -604,12 +817,12 @@ class CollabView(BaseView):
 
     def _refresh_summary(self, tasks: list["TaskRecord"], peers: list["PeerInfo"]) -> None:
         if self._service is None:
-            self._scope_label.setText("协作组：—")
+            self._scope_label.setText("团队永久码：—")
             self._connection_label.setText("本机地址：启动后显示")
-            self._local_project_badge.setText("本机项目：—")
-            self._device_count_badge.setText("在线设备：0")
-            self._project_count_badge.setText("项目：0")
-            self._task_count_badge.setText("任务：0")
+            self._local_project_badge.setText("本机 —")
+            self._device_count_badge.setText("在线 0")
+            self._project_count_badge.setText("项目 0")
+            self._task_count_badge.setText("任务 0")
             self._conflict_count_badge.setText("冲突：0")
             self._refresh_next_step([])
             return
@@ -637,17 +850,51 @@ class CollabView(BaseView):
             self._connection_label.setText("本机地址：启动后显示")
         else:
             self._connection_label.setText(f"本机地址：{self._service.local_address()}")
-        self._local_project_badge.setText(f"本机项目：{local_project}")
-        self._device_count_badge.setText(f"在线设备：{len(peers)}")
-        self._project_count_badge.setText(f"项目：{len(projects)}")
-        self._task_count_badge.setText(f"任务：{len(tasks)}")
-        self._conflict_count_badge.setText(f"冲突：{conflict_count}")
+        self._local_project_badge.setText(f"本机 {local_project}")
+        self._device_count_badge.setText(f"在线 {len(peers)}")
+        self._project_count_badge.setText(f"项目 {len(projects)}")
+        self._task_count_badge.setText(f"任务 {len(tasks)}")
+        self._conflict_count_badge.setText(f"冲突 {conflict_count}")
         self._conflict_count_badge.setObjectName(
             "CollabMetricDanger" if conflict_count else "CollabMetric"
         )
         self._conflict_count_badge.style().unpolish(self._conflict_count_badge)
         self._conflict_count_badge.style().polish(self._conflict_count_badge)
+        self._refresh_scope_cards(peers)
         self._refresh_next_step(peers)
+
+    def _refresh_scope_cards(self, peers: list["PeerInfo"]) -> None:
+        svc = self._service
+        if svc is None:
+            self._team_scope_state.setText("团队永久码：未启动")
+            self._project_scope_state.setText("项目码共享：可单独使用；协作服务未启动时只生成/连接项目码。")
+            self._same_name_btn.hide()
+            return
+
+        code = str(getattr(svc, "group_code", "") or "")
+        if code:
+            self._team_scope_state.setText(f"团队永久码：{code}")
+        else:
+            self._team_scope_state.setText("团队永久码：未设置")
+            self._project_scope_state.setText(
+                "项目码共享：可单独使用；共享项目范围只影响团队永久码模式。"
+            )
+            self._same_name_btn.hide()
+            return
+
+        from app.services.collab_project_bind import (
+            describe_project_sync_state,
+            same_name_options,
+        )
+        self._project_scope_state.setText(describe_project_sync_state(svc, peers))
+        same = same_name_options(svc, peers)
+        if same and getattr(svc, "project_id", ""):
+            self._same_name_btn.show()
+            self._same_name_btn.setToolTip(
+                f"队友也在做「{same[0].name}」，一键绑定为同一项目"
+            )
+        else:
+            self._same_name_btn.hide()
 
     def _refresh_next_step(self, peers: list["PeerInfo"]) -> None:
         if not hasattr(self, "_next_step_label"):
@@ -656,20 +903,24 @@ class CollabView(BaseView):
         self._next_step_label.setText(status.next_step_label)
         self._next_step_detail.setText(status.next_step_detail)
         self._setup_btn.setEnabled(status.setup_enabled)
-        if status.state in {"not_started", "missing_group"}:
-            self._setup_btn.setText("启动/加入协作")
-            self._setup_btn.setToolTip("创建协作组，或输入队友给你的组码加入")
-        elif status.state == "no_service":
-            self._setup_btn.setText("打开项目后启用")
-            self._setup_btn.setToolTip("打开项目后才能启动协作")
+        if status.state in {"no_service", "not_started", "missing_group"}:
+            self._setup_btn.setText("设置永久码")
+            self._setup_btn.setToolTip("输入或生成团队永久码（保存后自动重连）")
         else:
-            self._setup_btn.setText("管理协作组")
-            self._setup_btn.setToolTip("调整协作组码、操作人和连接方式")
+            self._setup_btn.setText("修改永久码")
+            self._setup_btn.setToolTip("查看或修改团队永久码、名字和连接方式")
         self._bind_project_btn.setEnabled(status.bind_project_enabled)
-        self._project_code_btn.setEnabled(status.bind_project_enabled)
+        self._pick_project_btn.setEnabled(status.bind_project_enabled)
+        show_connect = status.state in {"no_peers", "different_group"} and self._service
+        if getattr(self, "_connect_panel", None) is not None:
+            self._connect_panel.setVisible(bool(show_connect))
+        self._same_name_btn.setEnabled(status.bind_project_enabled)
+        self._project_code_btn.setEnabled(True)
         self._share_btn.setEnabled(status.state not in {"no_service", "not_started"})
+        self._share_btn.setVisible(self._share_btn.isEnabled())
         manual_enabled = status.state not in {"no_service", "not_started"}
         self._manual_toggle_btn.setEnabled(manual_enabled)
+        self._manual_toggle_btn.setVisible(manual_enabled)
         if not manual_enabled and self._manual_toggle_btn.isChecked():
             self._manual_toggle_btn.setChecked(False)
 
@@ -731,22 +982,72 @@ class CollabView(BaseView):
         dlg = _CollabShareDialog(self.ctx, self)
         dlg.exec()
 
-    def _on_project_sync_code(self) -> None:
+    def _on_pick_team_project(self) -> None:
+        from app.widgets.collab_project_bind_dialog import CollabProjectBindDialog
+        dlg = CollabProjectBindDialog(self.ctx, self)
+        dlg.applied.connect(self._on_project_bind_applied)
+        dlg.exec()
+
+    def _on_same_name_bind_quick(self) -> None:
+        from app.services.collab_project_bind import same_name_options
+        from app.widgets.collab_project_bind_dialog import CollabProjectBindDialog
+
         svc = self._service
-        if svc is None or not getattr(svc, "project_id", ""):
-            QMessageBox.information(
-                self,
-                "绑定同一项目",
-                "请先打开项目并启用协作服务。",
-            )
+        if svc is None:
             return
+        opts = same_name_options(svc, svc.peers())
+        if not opts:
+            self._on_pick_team_project()
+            return
+        dlg = CollabProjectBindDialog(self.ctx, self)
+        dlg._bind_option(opts[0])
+
+    def _on_project_bind_applied(self) -> None:
+        self._refresh_devices()
+        self._refresh_tasks()
+
+    def _on_project_bind_suggested(self, peer_name: str, project_name: str, sync_code: str) -> None:
+        msg = QMessageBox(self)
+        msg.setWindowTitle("发现同名项目")
+        msg.setText(
+            f"队友 <b>{peer_name}</b> 也在做「{project_name}」。\n"
+            "是否绑定为同一项目并开始同步？"
+        )
+        msg.setInformativeText(
+            "绑定后标本和照片/TIF 会互通；若只是恰好同名，请选「暂不绑定」。"
+        )
+        msg.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        msg.button(QMessageBox.StandardButton.Yes).setText("绑定并同步")
+        msg.button(QMessageBox.StandardButton.No).setText("暂不绑定")
+        if msg.exec() != QMessageBox.StandardButton.Yes:
+            return
+        svc = self._service
+        if svc is None:
+            return
+        try:
+            svc.apply_project_sync_code(sync_code)
+            svc.pull_all_specimens_from_session()
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "绑定失败", str(exc))
+            return
+        self._on_project_bind_applied()
+
+    def _on_project_sync_code(self) -> None:
         dlg = _ProjectSyncCodeDialog(self.ctx, self)
-        dlg.applied.connect(self._on_project_sync_code_applied)
+        dlg.applied.connect(self._on_project_bind_applied)
         dlg.exec()
 
     def _on_project_sync_code_applied(self) -> None:
+        self._on_project_bind_applied()
+
+    def _on_share_selection_changed(self) -> None:
+        if not hasattr(self, "_share_picker"):
+            return
+        self._share_picker.apply_selection()
+        self._refresh_scope_cards(self._service.peers() if self._service else [])
         self._refresh_devices()
-        self._refresh_tasks()
 
     def _on_setup_wizard(self) -> None:
         from app.widgets.collab_setup_wizard import CollabSetupWizard
@@ -757,6 +1058,8 @@ class CollabView(BaseView):
     def _on_setup_wizard_done(self, group_code: str, operator: str) -> None:
         self._service = getattr(self.ctx, "collab_service", self._service)
         self._connect_service_signals()
+        if hasattr(self, "_share_picker"):
+            self._share_picker.reload()
         self._refresh_devices()
         self._refresh_tasks()
 
@@ -777,6 +1080,15 @@ class CollabView(BaseView):
 
         menu = QMenu(self)
         assign_act = menu.addAction("分配给我")
+        status_menu = menu.addMenu("更改状态")
+        status_actions: dict = {}
+        for ns, label in (
+            ("shooting", "拍摄中"),
+            ("shot_done", "已拍完"),
+            ("organizing", "整理中"),
+            ("done", "完成"),
+        ):
+            status_actions[status_menu.addAction(label)] = ns
         void_act = menu.addAction("作废")
         resolve_act = None
         if is_conflict:
@@ -803,6 +1115,8 @@ class CollabView(BaseView):
                 svc.resolve_conflict(uid)
             except Exception:
                 pass
+        elif action in status_actions:
+            self._update_task_status(uid, status_actions[action])
         self.on_activate()
 
     def _toggle_debug_drawer(self, checked: bool) -> None:
@@ -833,7 +1147,9 @@ class CollabView(BaseView):
         if self._service is None:
             return
         try:
-            self._service.update_task_status(uid, status)
+            self._service.update_task_status(
+                uid, status, force=True, broadcast=True,
+            )
         except Exception:
             self._offline_queue.mark_draft(uid, status)
 
@@ -847,6 +1163,7 @@ class CollabView(BaseView):
         self._task_table.setSpan(0, 0, 1, self._task_table.columnCount())
         self._status_badge.setText("⚪ 协作服务未启动")
         self._refresh_summary([], [])
+        self._refresh_activity_visibility([], [])
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -884,62 +1201,236 @@ class _ProjectSyncCodeDialog(QDialog):
         super().__init__(parent)
         self.ctx = ctx
         self._svc = getattr(ctx, "collab_service", None)
-        self.setWindowTitle("绑定同一项目")
-        self.setMinimumWidth(560)
+        self.setWindowTitle("项目码共享")
+        self.setMinimumSize(780, 430)
 
-        project_name = _project_display(
-            getattr(self._svc, "project_name", "")
-            or getattr(ctx, "current_project_dir", "")
-            or ""
-        ) or "—"
-        local_code = ""
-        if self._svc is not None and hasattr(self._svc, "project_sync_code"):
-            local_code = self._svc.project_sync_code()
+        current_dir = str(getattr(ctx, "current_project_dir", "") or "")
+        self._project_options = []
+        try:
+            from app.services.collab_share_registry import list_local_share_candidates
+            extras = [current_dir] if current_dir else None
+            self._project_options = list_local_share_candidates(extra_directories=extras)
+        except Exception:  # noqa: BLE001
+            self._project_options = []
 
         layout = QVBoxLayout(self)
-        layout.setSpacing(10)
-        layout.addWidget(QLabel(f"当前项目：{project_name}"))
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(12)
         note = QLabel(
-            "这个码不是连接地址，只决定哪些电脑被确认是同一个项目。绑定后，同协作组设备才能互相同步照片/TIF/ZIP；盘符和目录可以不同。"
+            "项目码不是连接地址，也不包含本机绝对路径。它只声明“这两个文件夹是同一个采集项目”。"
+            "团队永久码负责自动连接；项目码负责照片/TIF/ZIP 同步范围。"
         )
         note.setWordWrap(True)
         layout.addWidget(note)
 
-        layout.addWidget(QLabel("把本机作为正确项目时，复制这个码给队友："))
-        self._local_code = QLineEdit(local_code)
+        flow = QLabel(
+            "多人使用：第一台电脑复制项目码发给所有队友；第 2、3、4 台电脑都选择自己的本机项目，"
+            "粘贴同一个项目码并连接。"
+        )
+        flow.setObjectName("MutedSmall")
+        flow.setWordWrap(True)
+        layout.addWidget(flow)
+
+        project_row = QHBoxLayout()
+        project_row.setSpacing(8)
+        project_row.addWidget(QLabel("本机项目："))
+        self._local_project_combo = QComboBox()
+        self._local_project_combo.setMinimumWidth(260)
+        for project in self._project_options:
+            self._local_project_combo.addItem(project.name, project.directory)
+        self._local_project_combo.currentIndexChanged.connect(self._refresh_local_code)
+        project_row.addWidget(self._local_project_combo, 1)
+        browse_btn = QPushButton("选择文件夹…")
+        browse_btn.setObjectName("Ghost")
+        browse_btn.clicked.connect(self._browse_local_project)
+        project_row.addWidget(browse_btn)
+        layout.addLayout(project_row)
+
+        self._local_path_label = QLabel("")
+        self._local_path_label.setObjectName("MutedSmall")
+        self._local_path_label.setWordWrap(True)
+        layout.addWidget(self._local_path_label)
+
+        panels = QHBoxLayout()
+        panels.setSpacing(12)
+
+        send_panel = QFrame()
+        send_panel.setObjectName("CollabStepPanel")
+        send_lay = QVBoxLayout(send_panel)
+        send_lay.setContentsMargins(12, 10, 12, 10)
+        send_lay.setSpacing(8)
+        send_title = QLabel("1. 本机项目码")
+        send_title.setObjectName("CollabStepTitle")
+        send_lay.addWidget(send_title)
+        send_hint = QLabel("把这个码发给所有参与同一采集项目的电脑。")
+        send_hint.setObjectName("MutedSmall")
+        send_hint.setWordWrap(True)
+        send_lay.addWidget(send_hint)
+        self._local_code = QLineEdit()
         self._local_code.setReadOnly(True)
-        self._local_code.setPlaceholderText("当前项目尚未生成同步码")
-        layout.addWidget(self._local_code)
+        self._local_code.setPlaceholderText("选择项目后生成项目码")
+        send_lay.addWidget(self._local_code)
 
-        copy_btn = QPushButton("复制本机项目码")
-        copy_btn.clicked.connect(self._copy_local_code)
-        copy_btn.setEnabled(bool(local_code))
-        layout.addWidget(copy_btn)
+        self._copy_local_btn = QPushButton("复制所选项目码")
+        self._copy_local_btn.clicked.connect(self._copy_local_code)
+        send_lay.addWidget(self._copy_local_btn)
+        panels.addWidget(send_panel, 1)
 
-        layout.addWidget(QLabel("本机要加入队友项目时，粘贴队友给你的码："))
+        join_panel = QFrame()
+        join_panel.setObjectName("CollabStepPanel")
+        join_lay = QVBoxLayout(join_panel)
+        join_lay.setContentsMargins(12, 10, 12, 10)
+        join_lay.setSpacing(8)
+        join_title = QLabel("2. 连接队友项目码")
+        join_title.setObjectName("CollabStepTitle")
+        join_lay.addWidget(join_title)
+        join_hint = QLabel("其他电脑在这里粘贴项目码，把所选本机项目连接到同一个采集项目。")
+        join_hint.setObjectName("MutedSmall")
+        join_hint.setWordWrap(True)
+        join_lay.addWidget(join_hint)
         self._join_code = QLineEdit()
         self._join_code.setPlaceholderText("粘贴队友的项目码")
-        layout.addWidget(self._join_code)
+        join_lay.addWidget(self._join_code)
+        self._apply_btn = QPushButton("连接到所选项目")
+        self._apply_btn.setObjectName("Primary")
+        self._apply_btn.clicked.connect(self._apply_join_code)
+        join_lay.addWidget(self._apply_btn)
+        panels.addWidget(join_panel, 1)
+        layout.addLayout(panels)
+
+        self._project_status_label = QLabel("项目状态：—")
+        self._project_status_label.setObjectName("MutedSmall")
+        self._project_status_label.setWordWrap(True)
+        layout.addWidget(self._project_status_label)
 
         action_row = QHBoxLayout()
         action_row.addStretch()
-        apply_btn = QPushButton("确认加入")
-        apply_btn.clicked.connect(self._apply_join_code)
-        action_row.addWidget(apply_btn)
         close_btn = QPushButton("关闭")
         close_btn.clicked.connect(self.close)
         action_row.addWidget(close_btn)
         layout.addLayout(action_row)
+        self._refresh_local_code()
 
     def _copy_local_code(self) -> None:
         code = self._local_code.text().strip()
         if code:
+            directory = self._selected_project_directory()
+            if directory:
+                self._share_directory(directory)
             QApplication.clipboard().setText(code)
 
+    def _selected_project_directory(self) -> str:
+        return str(self._local_project_combo.currentData() or "").strip()
+
+    def _selected_project_name(self) -> str:
+        idx = self._local_project_combo.currentIndex()
+        if 0 <= idx < len(self._project_options):
+            return str(getattr(self._project_options[idx], "name", "") or "")
+        directory = self._selected_project_directory()
+        return Path(directory).name if directory else ""
+
+    def _share_directory(self, directory: str) -> None:
+        if not directory:
+            return
+        try:
+            from app.services.collab_share_registry import (
+                load_shared_dirs,
+                save_shared_dirs,
+            )
+            settings = getattr(self.ctx, "settings", None)
+            qs = getattr(settings, "_qs", settings)
+            selected = load_shared_dirs(qs)
+            try:
+                selected.add(str(Path(directory).resolve()))
+            except OSError:
+                selected.add(directory)
+            save_shared_dirs(qs, selected)
+            svc = self._svc
+            if svc is not None and hasattr(svc, "set_shared_project_dirs"):
+                svc.set_shared_project_dirs(selected)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _add_project_option(self, directory: str) -> bool:
+        from app.services.project_tree_service import is_workspace
+        from app.services.collab_share_registry import (
+            LocalShareProject,
+            read_project_id_for_directory,
+        )
+
+        raw = str(directory or "").strip()
+        if not raw:
+            return False
+        try:
+            resolved = str(Path(raw).resolve())
+        except OSError:
+            resolved = raw
+        if not is_workspace(resolved):
+            QMessageBox.warning(self, "项目码共享", "请选择已经创建的拍照工作区。")
+            return False
+        for i in range(self._local_project_combo.count()):
+            if str(self._local_project_combo.itemData(i)) == resolved:
+                self._local_project_combo.setCurrentIndex(i)
+                return True
+        project = LocalShareProject(
+            directory=resolved,
+            name=Path(resolved).name or resolved,
+            project_id=read_project_id_for_directory(resolved),
+        )
+        self._project_options.append(project)
+        self._local_project_combo.addItem(project.name, project.directory)
+        self._local_project_combo.setCurrentIndex(self._local_project_combo.count() - 1)
+        return True
+
+    def _browse_local_project(self) -> None:
+        directory = QFileDialog.getExistingDirectory(
+            self,
+            "选择本机拍照工作区",
+            self._selected_project_directory() or str(getattr(self.ctx, "current_project_dir", "") or ""),
+        )
+        if directory:
+            self._add_project_option(directory)
+
+    def _refresh_local_code(self) -> None:
+        code = ""
+        path_text = "未找到可生成项目码的本机项目。请先打开或新建项目。"
+        status_text = "项目状态：未选择本机项目。"
+        directory = self._selected_project_directory()
+        name = self._selected_project_name()
+        if directory:
+            path_text = f"本机绝对路径：{directory}"
+            try:
+                from app.services.project_identity_service import project_sync_code
+                from app.services.collab_share_registry import (
+                    project_id_for_directory,
+                    read_project_id_for_directory,
+                )
+                existing = read_project_id_for_directory(directory)
+                pid = existing or project_id_for_directory(directory)
+                code = project_sync_code(pid, project_name=name or Path(directory).name)
+                status_text = (
+                    f"项目状态：已绑定项目码 {pid[:8]}…"
+                    if existing else
+                    f"项目状态：已为所选项目生成项目码 {pid[:8]}…"
+                )
+            except Exception:  # noqa: BLE001
+                code = ""
+                status_text = "项目状态：无法生成项目码，请确认这是有效拍照工作区。"
+        elif self._svc is not None and hasattr(self._svc, "project_sync_code"):
+            code = self._svc.project_sync_code()
+
+        self._local_path_label.setText(path_text)
+        self._local_code.setText(code)
+        self._copy_local_btn.setEnabled(bool(code))
+        if hasattr(self, "_apply_btn"):
+            self._apply_btn.setEnabled(bool(directory))
+        if hasattr(self, "_project_status_label"):
+            self._project_status_label.setText(status_text)
+
     def _apply_join_code(self) -> None:
-        svc = self._svc
-        if svc is None or not hasattr(svc, "apply_project_sync_code"):
-            QMessageBox.warning(self, "绑定同一项目", "协作服务未启动。")
+        directory = self._selected_project_directory()
+        if not directory:
+            QMessageBox.warning(self, "项目码共享", "请先选择本机项目。")
             return
         raw = self._join_code.text().strip()
         try:
@@ -950,15 +1441,24 @@ class _ProjectSyncCodeDialog(QDialog):
             return
 
         new_project_id = parsed["projectId"]
-        if new_project_id == getattr(svc, "project_id", ""):
-            QMessageBox.information(self, "绑定同一项目", "当前项目已经使用这个项目码。")
+        try:
+            from app.services.collab_share_registry import read_project_id_for_directory
+            current_id = read_project_id_for_directory(directory)
+        except Exception:  # noqa: BLE001
+            current_id = ""
+        if new_project_id == current_id:
+            QMessageBox.information(self, "绑定同一项目", "所选项目已经使用这个项目码。")
+            self._share_directory(directory)
+            self._project_status_label.setText(
+                f"项目状态：所选项目已连接到 {new_project_id[:8]}…，可把同一个项目码给更多电脑使用。"
+            )
             return
 
         remote_name = _project_display(parsed.get("projectName", "")) or "队友项目"
         ret = QMessageBox.warning(
             self,
             "确认绑定同一项目",
-            f"即将把当前项目加入“{remote_name}”的照片同步身份。\n\n"
+            f"即将把本机项目「{Path(directory).name}」连接到“{remote_name}”。\n\n"
             "只有确认两边是同一个采集项目时才继续；确认后同组设备可以互相同步照片/TIF/ZIP。",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
@@ -966,13 +1466,25 @@ class _ProjectSyncCodeDialog(QDialog):
         if ret != QMessageBox.StandardButton.Yes:
             return
         try:
-            svc.apply_project_sync_code(raw)
+            from app.services.collab_share_registry import apply_project_sync_code_to_directory
+            applied_id = apply_project_sync_code_to_directory(directory, raw)
+            svc = self._svc
+            service_dir = str(getattr(svc, "_project_dir", "") or "") if svc is not None else ""
+            try:
+                same_as_service = bool(service_dir) and Path(service_dir).resolve() == Path(directory).resolve()
+            except OSError:
+                same_as_service = service_dir == directory
+            if same_as_service and svc is not None:
+                svc._project_id = applied_id
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "绑定同一项目", f"写入项目码失败：{exc}")
             return
-        if hasattr(svc, "project_sync_code"):
-            self._local_code.setText(svc.project_sync_code())
-        QMessageBox.information(self, "绑定同一项目", "当前项目已绑定到同一个照片同步项目。")
+        self._share_directory(directory)
+        self._refresh_local_code()
+        self._project_status_label.setText(
+            f"项目状态：已连接到队友项目码 {applied_id[:8]}…；第 3、4 台电脑可重复粘贴同一个码。"
+        )
+        QMessageBox.information(self, "绑定同一项目", "所选项目已绑定到同一个照片同步项目。")
         self.applied.emit()
 
 

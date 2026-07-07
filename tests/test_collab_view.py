@@ -108,15 +108,17 @@ class TestCollabShareDialog:
 
         assert hasattr(view, "_share_btn"), "CollabView must have _share_btn"
 
-    def test_collab_view_promotes_setup_as_primary_entry(self, qtbot, mock_ctx):
+    def test_collab_view_shows_two_beginner_entries_without_service(self, qtbot, mock_ctx):
         from app.views.collab_view import CollabView
 
         view = CollabView(mock_ctx)
         qtbot.addWidget(view)
 
-        assert view._setup_btn.text() == "打开项目后启用"
+        assert view._next_step_label.text() == "下一步：选择协作方式"
+        assert view._setup_btn.text() == "设置永久码"
         assert view._setup_btn.objectName() == "Primary"
-        assert not view._setup_btn.isEnabled()
+        assert view._setup_btn.isEnabled()
+        assert view._project_code_btn.isEnabled()
         assert not view._share_btn.isEnabled()
 
     def test_collab_view_presents_three_step_actions(self, qtbot, mock_ctx):
@@ -130,10 +132,30 @@ class TestCollabShareDialog:
             frame for frame in view.findChildren(QFrame)
             if frame.objectName() == "CollabStepPanel"
         ]
-        assert len(steps) == 3
-        assert view._setup_btn.text() == "打开项目后启用"
-        assert view._share_btn.text() == "复制连接地址"
-        assert view._project_code_btn.text() == "绑定同一项目"
+        assert len(steps) == 2
+        assert view._setup_btn.text() == "设置永久码"
+        assert view._share_btn.text() == "复制连接码"
+        assert view._pick_project_btn.text() == "配对项目"
+        assert view._project_code_btn.text() == "打开项目码共享"
+        assert view._project_code_btn.isEnabled()
+        assert "可单独使用" in view._project_scope_state.text()
+
+    def test_collab_view_constructor_does_not_scan_shared_projects(
+        self, qtbot, mock_ctx, monkeypatch
+    ):
+        def fail_scan(**_kwargs):
+            raise AssertionError("shared project scan should not run in constructor")
+
+        monkeypatch.setattr(
+            "app.widgets.collab_share_project_picker.list_local_share_candidates",
+            fail_scan,
+        )
+        from app.views.collab_view import CollabView
+
+        view = CollabView(mock_ctx)
+        qtbot.addWidget(view)
+
+        assert not view._share_picker._loaded
 
     def test_manual_connection_is_hidden_until_requested(self, qtbot, mock_ctx):
         from app.views.collab_view import CollabView
@@ -143,6 +165,111 @@ class TestCollabShareDialog:
 
         assert view._manual_group.isHidden()
         assert not view._manual_toggle_btn.isEnabled()
+
+    def test_project_code_dialog_can_generate_code_for_any_local_project(
+        self, qtbot, tmp_path, monkeypatch
+    ):
+        from app.db import db_manager
+        from app.services.project_identity_service import (
+            ensure_project_identity,
+            parse_project_sync_code,
+            read_project_identity,
+        )
+        from app.views.collab_view import _ProjectSyncCodeDialog
+        from PyQt6.QtWidgets import QLabel
+
+        def make_workspace(name: str) -> str:
+            ws = tmp_path / name
+            ws.mkdir()
+            db = db_manager.open_project_db(str(ws), create=True)
+            try:
+                ensure_project_identity(db, project_name=name)
+            finally:
+                db_manager.close_project_db(str(ws))
+            return str(ws.resolve())
+
+        def make_workspace_without_identity(name: str) -> str:
+            ws = tmp_path / name
+            ws.mkdir()
+            db_manager.open_project_db(str(ws), create=True)
+            db_manager.close_project_db(str(ws))
+            return str(ws.resolve())
+
+        alpha = make_workspace("alpha_project")
+        beta = make_workspace_without_identity("beta_project")
+        monkeypatch.setattr(
+            "app.services.project_service.load_user_projects",
+            lambda: [
+                {"name": "alpha_project", "directory": alpha},
+                {"name": "beta_project", "directory": beta},
+            ],
+        )
+        ctx = MagicMock()
+        ctx.current_project_dir = alpha
+        ctx.collab_service = None
+
+        dlg = _ProjectSyncCodeDialog(ctx)
+        qtbot.addWidget(dlg)
+
+        labels = " ".join(label.text() for label in dlg.findChildren(QLabel))
+        assert "第一台电脑" in labels
+        assert "第 2、3、4 台电脑" in labels
+
+        idx = dlg._local_project_combo.findText("beta_project")
+        assert idx >= 0
+        dlg._local_project_combo.setCurrentIndex(idx)
+
+        parsed = parse_project_sync_code(dlg._local_code.text())
+        assert parsed["projectName"] == "beta_project"
+        assert "beta_project" in dlg._local_path_label.text()
+        db = db_manager.open_project_db_private(beta)
+        try:
+            assert read_project_identity(db) == parsed["projectId"]
+        finally:
+            db.close()
+
+    def test_project_code_dialog_applies_code_to_selected_local_project(
+        self, qtbot, tmp_path, monkeypatch
+    ):
+        from app.db import db_manager
+        from app.services.project_identity_service import (
+            project_sync_code,
+            read_project_identity,
+        )
+        from app.views.collab_view import _ProjectSyncCodeDialog, QMessageBox
+
+        ws = tmp_path / "local_target"
+        ws.mkdir()
+        db_manager.open_project_db(str(ws), create=True)
+        db_manager.close_project_db(str(ws))
+        target = str(ws.resolve())
+        monkeypatch.setattr(
+            "app.services.project_service.load_user_projects",
+            lambda: [{"name": "local_target", "directory": target}],
+        )
+        monkeypatch.setattr(
+            "app.views.collab_view.QMessageBox.warning",
+            lambda *a, **k: QMessageBox.StandardButton.Yes,
+        )
+        monkeypatch.setattr(
+            "app.views.collab_view.QMessageBox.information",
+            lambda *a, **k: QMessageBox.StandardButton.Ok,
+        )
+        ctx = MagicMock()
+        ctx.current_project_dir = ""
+        ctx.collab_service = None
+
+        dlg = _ProjectSyncCodeDialog(ctx)
+        qtbot.addWidget(dlg)
+        dlg._join_code.setText(project_sync_code("b" * 32, project_name="remote"))
+        dlg._apply_join_code()
+
+        db = db_manager.open_project_db_private(target)
+        try:
+            assert read_project_identity(db) == "b" * 32
+        finally:
+            db.close()
+        assert "第 3、4 台电脑" in dlg._project_status_label.text()
 
 
 class TestUserFacingEmptyStates:
@@ -160,10 +287,10 @@ class TestUserFacingEmptyStates:
         qtbot.addWidget(view)
         view.on_activate()
 
-        assert view._setup_btn.text() == "管理协作组"
+        assert view._setup_btn.text() == "修改永久码"
         assert view._share_btn.isEnabled()
         assert "暂无在线设备" in view._device_list.item(0, 0).text()
-        assert "本机地址" in view._connection_label.text()
+        assert "等待队友" in view._next_step_label.text()
         view.close()
         svc.stop()
 

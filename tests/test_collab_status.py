@@ -20,7 +20,8 @@ def test_collab_status_no_service_is_not_started():
 
     assert status.state == "no_service"
     assert status.status_badge == "⚪ 协作服务未启动"
-    assert status.setup_enabled is False
+    assert status.next_step_label == "下一步：选择协作方式"
+    assert status.setup_enabled is True
 
 
 def test_collab_status_service_not_running_does_not_claim_no_peers():
@@ -36,8 +37,8 @@ def test_collab_status_running_without_group_is_missing_group():
     status = build_collab_status(_Service(running=True), [])
 
     assert status.state == "missing_group"
-    assert status.status_badge == "⚪ 未设置协作组码"
-    assert "设置协作组码" in status.next_step_label
+    assert status.status_badge == "⚪ 未配对团队"
+    assert status.next_step_label == "下一步：选择协作方式"
 
 
 def test_collab_status_running_group_without_peers_is_no_peers():
@@ -56,7 +57,7 @@ def test_collab_status_same_group_different_project_is_tasks_only():
 
     assert status.state == "tasks_only"
     assert status.status_badge == "🟢 1 台在线"
-    assert status.next_step_label == "任务已可协作；照片还不能同步"
+    assert status.next_step_label == "下一步：选择共享项目"
 
 
 def test_collab_status_same_group_same_project_is_media_ready():

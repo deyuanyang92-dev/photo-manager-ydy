@@ -34,6 +34,7 @@ from app.services.export_service import (
 )
 from app.services.project_paths import ProjectUnavailableError
 from app.services.project_tree_service import scan_tree
+from app.utils.naming import parse_uid
 
 # 采集站位汇总的列（断面在前，由调用处单独前置）。与 schema.sql 的真实列对齐。
 _COLLECTION_COLUMNS: tuple[str, ...] = (
@@ -421,6 +422,580 @@ def collect_specimen_summary_rows(
     if use_cache:
         _SPECIMEN_ROWS_CACHE[sig] = _copy_summary_payload(payload)
     return _copy_summary_payload(payload)
+
+
+def _text(value) -> str:
+    return str(value or "").strip()
+
+
+def _first_text(data: dict, *keys: str) -> str:
+    for key in keys:
+        value = data.get(key)
+        if value not in (None, ""):
+            return _text(value)
+    return ""
+
+
+def _normalise_identification(data: dict | str) -> dict:
+    if isinstance(data, str):
+        return {"scientific_name": data.strip()}
+    if not isinstance(data, dict):
+        return {}
+    return {
+        "scientific_name": _first_text(
+            data, "scientific_name", "scientificName", "scientificname", "species"
+        ),
+        "scientific_name_cn": _first_text(
+            data, "scientific_name_cn", "scientificNameCn", "speciesCn", "name_cn"
+        ),
+        "taxon_group": _first_text(data, "taxon_group", "taxonGroup", "class", "class_name"),
+        "order_name": _first_text(data, "order_name", "order", "orderName"),
+        "family": _first_text(data, "family", "family_name"),
+        "genus": _first_text(data, "genus", "genus_name"),
+        "notes": _first_text(data, "notes", "note", "remark", "remarks"),
+    }
+
+
+def _has_taxon_identity(row: dict) -> bool:
+    return any(
+        _text(row.get(key))
+        for key in (
+            "scientific_name",
+            "scientific_name_cn",
+            "taxon_group",
+            "order_name",
+            "family",
+            "genus",
+        )
+    )
+
+
+def _raw_identifications(raw: dict) -> list[dict]:
+    if not isinstance(raw, dict):
+        return []
+    for key in (
+        "identifications",
+        "taxa",
+        "taxonIdentifications",
+        "mixedTaxa",
+        "speciesList",
+    ):
+        value = raw.get(key)
+        if isinstance(value, list):
+            rows = [_normalise_identification(item) for item in value]
+            return [row for row in rows if _has_taxon_identity(row)]
+    return []
+
+
+def _additional_raw_identifications(raw: dict) -> list[dict]:
+    if not isinstance(raw, dict):
+        return []
+    for key in ("additional_identifications", "additionalIdentifications"):
+        value = raw.get(key)
+        if isinstance(value, list):
+            rows = [_normalise_identification(item) for item in value]
+            return [row for row in rows if _has_taxon_identity(row)]
+    return []
+
+
+def _primary_identification(sp: Specimen) -> dict:
+    raw = sp.raw
+    return {
+        "scientific_name": _text(sp.scientific_name)
+        or _first_text(raw, "scientificName", "scientific_name", "species"),
+        "scientific_name_cn": _text(sp.scientific_name_cn)
+        or _first_text(raw, "scientificNameCn", "scientific_name_cn", "speciesCn"),
+        "taxon_group": _text(sp.taxon_group)
+        or _first_text(raw, "taxonGroup", "taxon_group", "class"),
+        "order_name": _text(sp.order_name)
+        or _first_text(raw, "order", "order_name", "orderName"),
+        "family": _text(sp.family) or _first_text(raw, "family"),
+        "genus": _text(sp.genus) or _first_text(raw, "genus"),
+        "notes": _text(sp.notes) or _first_text(raw, "notes", "remark"),
+    }
+
+
+def _dedupe_identifications(rows: list[dict]) -> list[dict]:
+    out: list[dict] = []
+    seen: set[tuple[str, str, str, str, str, str]] = set()
+    for row in rows:
+        if not _has_taxon_identity(row):
+            continue
+        key = (
+            _text(row.get("scientific_name")).casefold(),
+            _text(row.get("scientific_name_cn")),
+            _text(row.get("taxon_group")).casefold(),
+            _text(row.get("order_name")).casefold(),
+            _text(row.get("family")).casefold(),
+            _text(row.get("genus")).casefold(),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(row)
+    return out
+
+
+def _specimen_identifications(sp: Specimen) -> list[dict]:
+    explicit = _raw_identifications(sp.raw)
+    additional = _additional_raw_identifications(sp.raw)
+    if explicit:
+        return _dedupe_identifications(explicit + additional)
+    primary = _primary_identification(sp)
+    rows = [primary] if _has_taxon_identity(primary) else []
+    rows.extend(additional)
+    return _dedupe_identifications(rows)
+
+
+def _collection_event_contexts(conn: sqlite3.Connection) -> dict[tuple[str, str, str, str], dict]:
+    cols = _table_columns(conn, "collection_records")
+    if not cols:
+        return {}
+    wanted = (
+        "province", "site", "station", "collection_date", "station_label",
+        "lon", "lat", "geo_area", "water_body", "collection_time",
+        "habitat", "method", "remark",
+    )
+    select = ", ".join(
+        name if name in cols else f"NULL AS {name}"
+        for name in wanted
+    )
+    try:
+        rows = conn.execute(f"SELECT {select} FROM collection_records").fetchall()
+    except sqlite3.Error:
+        return {}
+
+    out: dict[tuple[str, str, str, str], dict] = {}
+    for row in rows:
+        d = dict(row)
+        province = _text(d.get("province"))
+        site = _text(d.get("site"))
+        station = _text(d.get("station"))
+        collection_date = _text(d.get("collection_date"))
+        value = {
+            "station_label": _text(d.get("station_label")),
+            "lon": d.get("lon") if d.get("lon") not in (None, "") else "",
+            "lat": d.get("lat") if d.get("lat") not in (None, "") else "",
+            "geo_area": _text(d.get("geo_area")),
+            "water_body": _text(d.get("water_body")),
+            "collection_time": _text(d.get("collection_time")),
+            "habitat": _text(d.get("habitat")),
+            "method": _text(d.get("method")),
+            "remark": _text(d.get("remark")),
+        }
+        keys = [
+            (province, site, station, collection_date),
+            (province, site, station, ""),
+        ]
+        for key in keys:
+            out.setdefault(key, value)
+    return out
+
+
+def _collection_context(
+    contexts: dict[tuple[str, str, str, str], dict],
+    province: str,
+    site: str,
+    station: str,
+    collection_date: str,
+) -> dict:
+    return (
+        contexts.get((province, site, station, collection_date))
+        or contexts.get((province, site, station, ""))
+        or {}
+    )
+
+
+def collect_taxon_checklist(dirs: list[str], root: str) -> list[dict]:
+    """Aggregate identified taxa by workspace/site/station.
+
+    This is a taxonomy/ecology checklist. Unidentified mixed samples and
+    workflow-only grouping rows belong in ``collect_sample_processing_summary``.
+    """
+    buckets: dict[tuple, dict] = {}
+
+    for ws_dir, conn in _iter_dbs(dirs):
+        label = _label(ws_dir, root)
+        event_contexts = _collection_event_contexts(conn)
+        try:
+            rows = conn.execute("SELECT * FROM specimens ORDER BY station, uid").fetchall()
+        except sqlite3.Error:
+            continue
+        for row in rows:
+            sp = Specimen.from_row(row)
+            province = _text(sp.province)
+            site = _text(sp.site)
+            station = _text(sp.station)
+            sample_label = _text(sp.id)
+            uid = _text(sp.uid)
+            collection_date = _text(sp.collection_date)
+            event = _collection_context(
+                event_contexts, province, site, station, collection_date
+            )
+            lon = sp.lon if sp.lon not in (None, "") else event.get("lon", "")
+            lat = sp.lat if sp.lat not in (None, "") else event.get("lat", "")
+            geo_area = _text(sp.geo_area) or _text(event.get("geo_area"))
+
+            for ident in _specimen_identifications(sp):
+                scientific_name = _text(ident.get("scientific_name"))
+                scientific_name_cn = _text(ident.get("scientific_name_cn"))
+                taxon_key = scientific_name or scientific_name_cn or "未鉴定/混合样"
+                key = (
+                    label,
+                    province,
+                    site,
+                    station,
+                    collection_date,
+                    str(lon),
+                    str(lat),
+                    taxon_key,
+                )
+                bucket = buckets.setdefault(key, {
+                    "workspace_label": label,
+                    "province": province,
+                    "site": site,
+                    "station": station,
+                    "station_label": _text(event.get("station_label")),
+                    "collection_date": collection_date,
+                    "collection_time": _text(event.get("collection_time")),
+                    "lon": lon,
+                    "lat": lat,
+                    "geo_area": geo_area,
+                    "water_body": _text(event.get("water_body")),
+                    "habitat": _text(event.get("habitat")),
+                    "method": _text(event.get("method")),
+                    "taxon_group": _text(ident.get("taxon_group")),
+                    "order_name": _text(ident.get("order_name")),
+                    "family": _text(ident.get("family")),
+                    "genus": _text(ident.get("genus")),
+                    "scientific_name": scientific_name,
+                    "scientific_name_cn": scientific_name_cn or taxon_key,
+                    "sample_labels": set(),
+                    "uids": set(),
+                    "notes": set(),
+                })
+                for field in ("taxon_group", "order_name", "family", "genus"):
+                    if not bucket.get(field) and ident.get(field):
+                        bucket[field] = _text(ident.get(field))
+                if sample_label:
+                    bucket["sample_labels"].add(sample_label)
+                if uid:
+                    bucket["uids"].add(uid)
+                note = _text(ident.get("notes"))
+                if note:
+                    bucket["notes"].add(note)
+
+    out: list[dict] = []
+    for bucket in buckets.values():
+        uid_list = sorted(bucket.pop("uids"))
+        sample_labels = sorted(bucket.pop("sample_labels"))
+        notes = sorted(bucket.pop("notes"))
+        row = dict(bucket)
+        row.update({
+            "sample_labels": "；".join(sample_labels),
+            "uids": "；".join(uid_list),
+            "evidence_count": len(uid_list),
+            "notes": "；".join(notes),
+        })
+        out.append(row)
+
+    return sorted(
+        out,
+        key=lambda r: (
+            r.get("workspace_label", ""),
+            r.get("site", ""),
+            r.get("station", ""),
+            r.get("collection_date", ""),
+            r.get("scientific_name") or r.get("scientific_name_cn") or "",
+        ),
+    )
+
+
+def collect_station_species_summary(dirs: list[str], root: str) -> list[dict]:
+    """Backward-compatible wrapper for the taxonomic checklist."""
+    return collect_taxon_checklist(dirs, root)
+
+
+_TAXON_CHECKLIST_HEADERS: tuple[tuple[str, str], ...] = (
+    ("断面/来源", "workspace_label"),
+    ("地区", "province"),
+    ("样地", "site"),
+    ("站位", "station"),
+    ("站位说明", "station_label"),
+    ("采集日期", "collection_date"),
+    ("采集时间", "collection_time"),
+    ("经度", "lon"),
+    ("纬度", "lat"),
+    ("采集地理区", "geo_area"),
+    ("水体", "water_body"),
+    ("生境", "habitat"),
+    ("采样方法", "method"),
+    ("类群", "taxon_group"),
+    ("目", "order_name"),
+    ("科", "family"),
+    ("属", "genus"),
+    ("物种拉丁名", "scientific_name"),
+    ("物种中文名", "scientific_name_cn"),
+    ("证据记录数", "evidence_count"),
+    ("样品/物种标签", "sample_labels"),
+    ("凭证/样品编号", "uids"),
+    ("备注", "notes"),
+)
+
+
+def export_taxon_checklist(
+    dirs: list[str],
+    root: str,
+    out_path: str | None = None,
+) -> Path:
+    """Write a true taxonomic checklist for field survey review."""
+    rows = collect_taxon_checklist(dirs, root)
+    if out_path is None:
+        out = _default_out(root, "分类名录", "xlsx")
+    else:
+        out = Path(out_path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+
+    headers = [label for label, _key in _TAXON_CHECKLIST_HEADERS]
+    data_rows = [
+        [row.get(key, "") for _label, key in _TAXON_CHECKLIST_HEADERS]
+        for row in rows
+    ]
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "分类名录"
+    ws.freeze_panes = "A2"
+    _apply_header_row(ws, headers)
+    for row_idx, row_data in enumerate(data_rows, start=2):
+        for col_idx, value in enumerate(row_data, start=1):
+            ws.cell(row=row_idx, column=col_idx, value=value)
+        if (row_idx - 2) % 2 == 1:
+            for col_idx in range(1, len(headers) + 1):
+                ws.cell(row=row_idx, column=col_idx).fill = _ALT_FILL
+    _auto_col_widths(ws, headers, data_rows)
+    wb.save(str(out))
+    return out.resolve()
+
+
+def export_station_species_summary(
+    dirs: list[str],
+    root: str,
+    out_path: str | None = None,
+) -> Path:
+    """Backward-compatible wrapper for exporting the taxonomic checklist."""
+    return export_taxon_checklist(dirs, root, out_path)
+
+
+def _grouping_processing_counts(conn: sqlite3.Connection) -> dict[str, dict]:
+    cols = _table_columns(conn, "grouping")
+    if "uid" not in cols:
+        return {}
+    wanted = [
+        "uid", "status", "jpg_paths", "composed_tiff_path", "archive_zip",
+    ]
+    select = ", ".join(
+        name if name in cols else f"NULL AS {name}"
+        for name in wanted
+    )
+    try:
+        rows = conn.execute(f"SELECT {select} FROM grouping").fetchall()
+    except sqlite3.Error:
+        return {}
+
+    out: dict[str, dict] = {}
+    for row in rows:
+        uid = _text(row["uid"])
+        if not uid:
+            continue
+        bucket = out.setdefault(uid, {
+            "group_count": 0,
+            "done_group_count": 0,
+            "pending_group_count": 0,
+            "group_jpg_count": 0,
+            "tiff_count": 0,
+            "zip_count": 0,
+        })
+        bucket["group_count"] += 1
+        status = _text(row["status"])
+        if status in _GROUPING_COMPOSED_STATUSES:
+            bucket["done_group_count"] += 1
+        else:
+            bucket["pending_group_count"] += 1
+        bucket["group_jpg_count"] += len(_json_path_list(row["jpg_paths"]))
+        if _text(row["composed_tiff_path"]):
+            bucket["tiff_count"] += 1
+        if _text(row["archive_zip"]):
+            bucket["zip_count"] += 1
+    return out
+
+
+def _current_assignment_counts(conn: sqlite3.Connection) -> dict[str, int]:
+    photo_cols = _table_columns(conn, "photos")
+    assignment_cols = _table_columns(conn, "photo_assignments")
+    if not {"current_assignment_id"} <= photo_cols:
+        return {}
+    if not {"assignment_id", "specimen_uid"} <= assignment_cols:
+        return {}
+    try:
+        rows = conn.execute(
+            """
+            SELECT a.specimen_uid AS uid, COUNT(*) AS n
+              FROM photos p
+              JOIN photo_assignments a ON a.assignment_id = p.current_assignment_id
+             WHERE a.specimen_uid IS NOT NULL
+               AND TRIM(a.specimen_uid) <> ''
+             GROUP BY a.specimen_uid
+            """
+        ).fetchall()
+    except sqlite3.Error:
+        return {}
+    return {_text(row["uid"]): int(row["n"] or 0) for row in rows if _text(row["uid"])}
+
+
+def _specimen_rows_by_uid(conn: sqlite3.Connection) -> dict[str, Specimen]:
+    try:
+        rows = conn.execute("SELECT * FROM specimens").fetchall()
+    except sqlite3.Error:
+        return {}
+    out: dict[str, Specimen] = {}
+    for row in rows:
+        sp = Specimen.from_row(row)
+        uid = _text(sp.uid)
+        if uid:
+            out[uid] = sp
+    return out
+
+
+def _uid_context(uid: str, sp: Specimen | None = None) -> dict:
+    parsed = parse_uid(uid) or {}
+    ad_hoc_label = "未归属" if str(uid or "").startswith("~") else ""
+    if not parsed:
+        parts = [part for part in str(uid or "").split("-") if part]
+        if len(parts) >= 4 and parts[-1].isdigit():
+            parsed = {
+                "province": parts[0],
+                "site": parts[1],
+                "speciesId": parts[2],
+                "dateSegment": parts[-1],
+            }
+    return {
+        "province": _text(getattr(sp, "province", "")) or _text(parsed.get("province")),
+        "site": _text(getattr(sp, "site", "")) or _text(parsed.get("site")),
+        "station": _text(getattr(sp, "station", "")) or _text(parsed.get("station")),
+        "sample_label": _text(getattr(sp, "id", ""))
+        or _text(parsed.get("speciesId"))
+        or ad_hoc_label,
+        "storage": _text(getattr(sp, "storage", "")) or _text(parsed.get("storage")),
+        "collection_date": _text(getattr(sp, "collection_date", ""))
+        or _text(parsed.get("dateSegment")),
+    }
+
+
+def _taxonomy_status(sp: Specimen | None) -> str:
+    if sp is None:
+        return "未建标本记录"
+    if _specimen_identifications(sp):
+        return "已鉴定"
+    return "未鉴定"
+
+
+def collect_sample_processing_summary(dirs: list[str], root: str) -> list[dict]:
+    """Summarise sample/photo/grouping workflow state without calling it a checklist."""
+    rows: list[dict] = []
+    for ws_dir, conn in _iter_dbs(dirs):
+        label = _label(ws_dir, root)
+        specimens = _specimen_rows_by_uid(conn)
+        grouping = _grouping_processing_counts(conn)
+        photo_counts = _current_assignment_counts(conn)
+        all_uids = sorted(set(specimens) | set(grouping) | set(photo_counts))
+        for uid in all_uids:
+            sp = specimens.get(uid)
+            ctx = _uid_context(uid, sp)
+            g = grouping.get(uid, {})
+            photo_count = int(photo_counts.get(uid) or 0)
+            group_jpg_count = int(g.get("group_jpg_count") or 0)
+            rows.append({
+                "workspace_label": label,
+                "uid": uid,
+                "province": ctx["province"],
+                "site": ctx["site"],
+                "station": ctx["station"],
+                "sample_label": ctx["sample_label"],
+                "storage": ctx["storage"],
+                "collection_date": ctx["collection_date"],
+                "taxonomy_status": _taxonomy_status(sp),
+                "photo_count": photo_count,
+                "group_count": int(g.get("group_count") or 0),
+                "done_group_count": int(g.get("done_group_count") or 0),
+                "pending_group_count": int(g.get("pending_group_count") or 0),
+                "tiff_count": int(g.get("tiff_count") or 0),
+                "zip_count": int(g.get("zip_count") or 0),
+                "group_jpg_count": group_jpg_count,
+            })
+    return sorted(
+        rows,
+        key=lambda r: (
+            r.get("workspace_label", ""),
+            r.get("site", ""),
+            r.get("station", ""),
+            r.get("sample_label", ""),
+            r.get("uid", ""),
+        ),
+    )
+
+
+_SAMPLE_PROCESSING_HEADERS: tuple[tuple[str, str], ...] = (
+    ("断面/来源", "workspace_label"),
+    ("地区", "province"),
+    ("样地", "site"),
+    ("站位", "station"),
+    ("样品/物种标签", "sample_label"),
+    ("保存方式", "storage"),
+    ("采集日期", "collection_date"),
+    ("分类状态", "taxonomy_status"),
+    ("当前照片数", "photo_count"),
+    ("分组数", "group_count"),
+    ("已完成分组", "done_group_count"),
+    ("待处理分组", "pending_group_count"),
+    ("TIFF 数", "tiff_count"),
+    ("ZIP 数", "zip_count"),
+    ("分组 JPG 数", "group_jpg_count"),
+    ("UID/样品编号", "uid"),
+)
+
+
+def export_sample_processing_summary(
+    dirs: list[str],
+    root: str,
+    out_path: str | None = None,
+) -> Path:
+    rows = collect_sample_processing_summary(dirs, root)
+    if out_path is None:
+        out = _default_out(root, "样品处理概况", "xlsx")
+    else:
+        out = Path(out_path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+
+    headers = [label for label, _key in _SAMPLE_PROCESSING_HEADERS]
+    data_rows = [
+        [row.get(key, "") for _label, key in _SAMPLE_PROCESSING_HEADERS]
+        for row in rows
+    ]
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "样品处理概况"
+    ws.freeze_panes = "A2"
+    _apply_header_row(ws, headers)
+    for row_idx, row_data in enumerate(data_rows, start=2):
+        for col_idx, value in enumerate(row_data, start=1):
+            ws.cell(row=row_idx, column=col_idx, value=value)
+        if (row_idx - 2) % 2 == 1:
+            for col_idx in range(1, len(headers) + 1):
+                ws.cell(row=row_idx, column=col_idx).fill = _ALT_FILL
+    _auto_col_widths(ws, headers, data_rows)
+    wb.save(str(out))
+    return out.resolve()
 
 
 def _default_out(root: str, suffix: str, ext: str) -> Path:

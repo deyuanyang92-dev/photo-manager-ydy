@@ -50,6 +50,9 @@ def test_register_workspace_updates_relative_path_for_existing_workspace(tmp_pat
     old.mkdir(parents=True)
 
     first = register_workspace(str(root), str(old))
+    # Windows can't rename a directory while its project.db connection is
+    # still open in the cache — release it first (simulates app closed).
+    db_manager.close_all()
     old.rename(new)
     second = register_workspace(str(root), str(new), name="断面A_重命名")
 

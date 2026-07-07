@@ -9,6 +9,7 @@ import pytest
 pytest.importorskip("PyQt6")
 
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QColor, QPixmap
 
 from app.views.project_tree_view import ProjectTreeView
 
@@ -39,6 +40,13 @@ class _FakeCtx:
 def _make_workspace(p: Path):
     (p / "_data").mkdir(parents=True, exist_ok=True)
     sqlite3.connect(str(p / "_data" / "project.db")).close()
+
+
+def _write_image(path: Path, color: QColor | None = None):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pm = QPixmap(40, 28)
+    pm.fill(color or QColor("#0f766e"))
+    assert pm.save(str(path))
 
 
 @pytest.fixture
@@ -378,7 +386,47 @@ def test_no_match_state_clears_selected_detail_actions(qtbot, tmp_path, ctx):
     assert view._detail_path.text() == ""
     assert not view._btn_enter.isEnabled()
     assert not view._btn_summary.isEnabled()
+    assert not view._btn_station_species.isEnabled()
     assert not view._btn_station_import.isEnabled()
+
+
+def test_detail_panel_shows_recent_media_preview(qtbot, tmp_path, ctx):
+    root = tmp_path / "调查区"
+    workspace = root / "断面a"
+    _make_workspace(workspace)
+    _write_image(workspace / "incoming-jpg" / "frame-001.jpg")
+    _write_image(workspace / "results" / "result-001.png", QColor("#15803d"))
+    ctx.settings.project_tree_root = str(root)
+
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    view.on_activate()
+
+    top = view._tree.topLevelItem(0)
+    target = next(top.child(i) for i in range(top.childCount())
+                  if "断面a" in top.child(i).text(0))
+    view._select_tree_item(target)
+
+    assert not view._media_block.isHidden()
+    assert view._media_count_lbl.text() == "2 个"
+    assert view._media_grid.count() == 2
+    assert view._media_empty_lbl.isHidden()
+
+
+def test_detail_panel_media_preview_has_empty_state(qtbot, tmp_path, ctx):
+    root = tmp_path / "调查区"
+    _make_workspace(root / "断面a")
+    ctx.settings.project_tree_root = str(root)
+
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    view.on_activate()
+
+    assert not view._media_block.isHidden()
+    assert view._media_count_lbl.text() == "0 个"
+    assert view._media_grid.count() == 0
+    assert not view._media_empty_lbl.isHidden()
+    assert "JPG" in view._media_empty_lbl.text()
 
 
 def test_enter_node_sets_ctx_and_root(qtbot, tmp_path, ctx, monkeypatch):

@@ -8,8 +8,10 @@ Design:
       → maxSeqForUid (disk scan) + 1, or hint+1, whichever is larger.
   organize_preview(db, uid, resolved_dir, path_config) → dict
       → nextSeq + suggested TIFF name.
-  organize(db, uid, ...) → list[dict]
-      → gate checks → Helicon compose → archive → write back grouping/tasks.
+  _check_organize_gate(...)
+      → the pre-organize gate only. The full organize orchestration
+        (Helicon compose → archive → write back grouping/tasks) lives in
+        the workbench view + capture_workflow_service, not in this module.
 
 Gates (hard requirements before organize can proceed):
   1. uid must be the active specimen (or opts.allow_inactive).

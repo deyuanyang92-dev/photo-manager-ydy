@@ -612,7 +612,10 @@ class LabelTemplateLibrary:
                 if isinstance(lib, dict) and isinstance(lib.get("templates"), list):
                     return lib
             except Exception:
-                pass
+                import logging
+                logging.getLogger(__name__).warning(
+                    "标签模板库解析失败（%s），回退为空库", key, exc_info=True
+                )
         return {"version": 1, "templates": []}
 
     def _write_raw(self, lib: dict) -> None:

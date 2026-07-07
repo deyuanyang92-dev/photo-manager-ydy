@@ -190,7 +190,9 @@ class TestAddProject:
 
         saved: dict = {}
         monkeypatch.setattr("app.views.project_dialog.ProjectDialog", _FakeDialog)
-        monkeypatch.setattr("app.views.overview_view._load_projects", lambda: [])
+        monkeypatch.setattr(
+            "app.services.project_service.load_user_projects", lambda: []
+        )
         monkeypatch.setattr(
             "app.services.project_service.save_project_descriptor",
             lambda _path, proj, **_kw: saved.setdefault("project", proj),

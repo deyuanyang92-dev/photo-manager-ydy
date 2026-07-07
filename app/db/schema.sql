@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS specimens (
   metadata INTEGER DEFAULT 0,
   pinned INTEGER DEFAULT 0,
   owner_project_dir TEXT,
+  collab_updated_at TEXT,  -- 协作同步 LWW 时间戳（本地保存/推送时写入）
   raw_json TEXT            -- 完整原始 specimen 对象（兜底，零字段丢失）
   -- 注意：无 species/species_cn 列；中文名在 scientific_name_cn；俗名在 raw_json
 );

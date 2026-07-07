@@ -29,7 +29,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QApplication, QMessageBox, QWidget
+from PyQt6.QtWidgets import QApplication, QMessageBox, QWidget, QWIDGETSIZE_MAX
 
 # One shared QApplication instance for all tests in this module
 _APP = None
@@ -223,6 +223,30 @@ def test_compose_organise_notice_uses_single_progress_dialog(qtbot, tmp_path):
     assert not bool(dlg.windowFlags() & Qt.WindowType.FramelessWindowHint)
     assert not dlg.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
     assert dlg.stage_texts() == ("完成", "进行中")
+
+
+def test_compose_organise_dialog_starts_hidden_until_task_notice(qtbot, tmp_path):
+    from app.views.workbench_view import WorkbenchView
+
+    db = _make_db(str(tmp_path / "project.db"))
+    ctx = _make_ctx(str(tmp_path), db)
+    w = WorkbenchView(ctx)
+    qtbot.addWidget(w)
+    w.show()
+    qtbot.wait(50)
+
+    dlg = getattr(w, "_compose_organise_progress_dialog", None)
+    assert dlg is not None
+    assert not dlg.isVisible()
+
+    w._workflow_notice(
+        "合成+整理：正在合成 TIFF",
+        "已接收 2 张 JPG。",
+        state="busy",
+        force_show=True,
+        task_key="compose-org",
+    )
+    assert dlg.isVisible()
 
 
 def test_compose_organise_dialog_buttons_compact_hide_and_restore(qtbot, tmp_path):
@@ -3028,8 +3052,9 @@ class TestHeliconParamsPanel:
 
 class _FakeQS:
     """Minimal QSettings stand-in: dict-backed value(key, default)."""
-    def __init__(self, d): self._d = d
+    def __init__(self, d=None): self._d = dict(d or {})
     def value(self, k, default=None): return self._d.get(k, default)
+    def setValue(self, k, v): self._d[k] = v
 
 
 class TestHeliconOutputWiring:
@@ -3800,6 +3825,38 @@ class TestRightRailWebFaithful:
             == Qt.ScrollBarPolicy.ScrollBarAlwaysOn
         )
 
+    def test_workbench_splitters_keep_clear_drag_targets(self):
+        import app.views.workbench_view as workbench_view
+        from app.views.workbench_view import WorkbenchView
+        ctx = _make_ctx()
+        ctx.settings._qs = _FakeQS()
+        w = WorkbenchView(ctx)
+
+        assert w._outer_splitter.objectName() == "WorkbenchSplitter"
+        assert w._outer_splitter.handleWidth() >= 14
+        assert not w._outer_splitter.childrenCollapsible()
+        assert w._centre_splitter.objectName() == "WorkbenchVerticalSplitter"
+        assert w._centre_splitter.handleWidth() >= 14
+        assert not w._centre_splitter.childrenCollapsible()
+        assert w._sidebar.maximumWidth() == QWIDGETSIZE_MAX
+        assert w._right_scroll.maximumWidth() == QWIDGETSIZE_MAX
+        assert w._sidebar.minimumWidth() == w._sidebar_min_width()
+        w._right_scroll.setMinimumWidth(w._right_rail_min_width())
+        assert w._right_scroll.minimumWidth() == w._right_rail_min_width()
+
+        w._save_workbench_outer_splitter()
+        w._save_workbench_centre_splitter()
+        assert workbench_view._WORKBENCH_OUTER_SPLITTER_STATE_KEY in ctx.settings._qs._d
+        assert workbench_view._WORKBENCH_CENTRE_SPLITTER_STATE_KEY in ctx.settings._qs._d
+
+        w._toggle_right_rail()
+        assert w._right_scroll.minimumWidth() == w._right_rail_collapsed_width()
+        assert w._right_scroll.maximumWidth() == w._right_scroll.minimumWidth()
+
+        w._toggle_right_rail()
+        assert w._right_scroll.minimumWidth() == w._right_rail_min_width()
+        assert w._right_scroll.maximumWidth() == QWIDGETSIZE_MAX
+
     def test_rail_autosave_persists_across_three_cards(self, tmp_path):
         from app.views.workbench_view import WorkbenchView
         project_dir = str(tmp_path)
@@ -3818,9 +3875,12 @@ class TestRightRailWebFaithful:
         w._metadata._collector.setText("COLL")
         w._taxon_card._notes.setPlainText("NOTE")
         w._taxon_card._cn["family_cn"].setText("芋螺科")
+        w._taxon_card._extra_identifications.setPlainText(
+            "Taxon beta | 中文乙 | FamB | GenusB | mixed tube"
+        )
         w._flush_rail_save()
         row = db.execute(
-            "SELECT collector, collection_date, photo_notes, notes, family_cn "
+            "SELECT collector, collection_date, photo_notes, notes, family_cn, raw_json "
             "FROM specimens WHERE uid=?", (uid,)
         ).fetchone()
         assert row["collector"] == "COLL"
@@ -3828,6 +3888,14 @@ class TestRightRailWebFaithful:
         assert row["photo_notes"] == "PN"
         assert row["notes"] == "NOTE"
         assert row["family_cn"] == "芋螺科"
+        raw = json.loads(row["raw_json"])
+        assert raw["additional_identifications"] == [{
+            "scientific_name": "Taxon beta",
+            "scientific_name_cn": "中文乙",
+            "family": "FamB",
+            "genus": "GenusB",
+            "notes": "mixed tube",
+        }]
         db.close()
 
 
@@ -3893,8 +3961,10 @@ class TestSupplementaryArchival:
         assert w._supp_pending.uid == "FJ-XM-B2-DLC001-T95E-20260601"
         db.close()
 
-    def test_supplementary_default_deletes_loose_jpg_after_archive(self, qt_app, tmp_path):
-        """Default organise setting passes delete_jpg=True to the archive worker."""
+    def test_supplementary_default_uses_two_phase_deletion(self, qt_app, tmp_path):
+        """Default deletion setting is DEFERRED: worker archives with
+        delete_jpg=False; actual deletion happens only after finalize succeeds
+        (commit_jpg_deletion_after_archive), mirroring the organize path."""
         from unittest.mock import patch, MagicMock
         from app.views.workbench_view import WorkbenchView
 
@@ -3914,7 +3984,62 @@ class TestSupplementaryArchival:
             w._run_supplementary([jpg, tiff])
 
         inst.start.assert_called_once()
-        assert MW.call_args.kwargs["delete_jpg"] is True
+        assert MW.call_args.kwargs["delete_jpg"] is False
+        assert w._supp_request_delete_jpg is True
+        db.close()
+
+    def test_supplementary_jpgs_survive_when_finalize_fails(self, qt_app, tmp_path):
+        """RED LINE: if finalize_supplementary_archive raises, the loose JPGs
+        must NOT have been deleted (two-phase deletion regression test)."""
+        from unittest.mock import patch
+        from app.views.workbench_view import WorkbenchView
+        from app.services.supplementary_service import SuppGroup
+        from app.services.archive_service import ZipResult
+
+        proj, db = self._project_with_specimen(tmp_path)
+        ctx = _make_ctx(proj, db)
+        w = WorkbenchView(ctx)
+
+        incoming = os.path.join(proj, "incoming-jpg")
+        jpg = os.path.join(incoming, "a.jpg")
+        tiff = os.path.join(incoming, "FJ-XM-B2-DLC001-1-T95E-20260601.tif")
+        zip_ = os.path.join(incoming, "FJ-XM-B2-DLC001-1-T95E-20260601.zip")
+        Path(jpg).write_bytes(b"\xff\xd8jpg")
+        Path(tiff).write_bytes(b"tiffdata")
+        Path(zip_).write_bytes(b"zipdata-zipdata-zipdata-zipdata")
+
+        w._supp_pending = SuppGroup(
+            jpg_paths=[jpg],
+            tiff_path=tiff,
+            uid="FJ-XM-B2-DLC001-T95E-20260601",
+            specimen={"uid": "FJ-XM-B2-DLC001-T95E-20260601"},
+        )
+        w._supp_request_delete_jpg = True  # user setting wants deletion
+
+        result = ZipResult(
+            zip_path=zip_,
+            zip_size=32,
+            file_count=1,
+            total_original=3,
+            total_compressed=3,
+            saved_percent=0,
+            delete_jpg=False,
+            requested_delete_jpg=False,
+            deletion_skipped_reason="",
+            manifest={"format": "jpg-zip", "files": []},
+            ok=True,
+        )
+
+        def _boom(*_a, **_k):
+            raise RuntimeError("simulated finalize failure")
+
+        with patch(
+            "app.services.capture_workflow_service.finalize_supplementary_archive",
+            side_effect=_boom,
+        ), patch("app.utils.ui.info"), patch("app.utils.ui.warn"):
+            w._on_supp_finished(result)
+
+        assert os.path.isfile(jpg), "finalize 失败时 JPG 原片必须仍在磁盘上"
         db.close()
 
     def test_finished_moves_tiff_and_zip_to_results(self, qt_app, tmp_path):
@@ -4366,7 +4491,7 @@ class TestSaveButtonPersistsMetadata:
         assert db.execute("SELECT count(*) FROM specimens").fetchone()[0] == 0
         assert warnings
         assert "样地" in warnings[0][2]
-        assert "物种缩写" in warnings[0][2]
+        assert "样品/物种标签" in warnings[0][2]
         assert "保存方式" in warnings[0][2]
 
 
@@ -7309,7 +7434,9 @@ class TestRestoreLastProject:
         root = tmp_path / "survey"
         workspace = root / "section-a"
         (workspace / "_data").mkdir(parents=True)
-        (workspace / "_data" / "project.db").write_bytes(b"x")
+        # 0-byte file is a VALID empty sqlite db; non-db bytes would make
+        # enter_workspace correctly refuse to restore ("file is not a database").
+        (workspace / "_data" / "project.db").write_bytes(b"")
         ctx = MagicMock()
         ctx.settings.last_project_dir = str(workspace)
         ctx.settings.project_tree_root = str(root)
@@ -7327,7 +7454,7 @@ class TestRestoreLastProject:
         root = tmp_path / "survey"
         workspace = root / "section-a"
         (workspace / "_data").mkdir(parents=True)
-        (workspace / "_data" / "project.db").write_bytes(b"x")
+        (workspace / "_data" / "project.db").write_bytes(b"")
         root_wsl = windows_to_wsl(str(root))
         workspace_wsl = windows_to_wsl(str(workspace))
         if not root_wsl or not workspace_wsl:

@@ -81,10 +81,30 @@ def test_join_mode_uses_pairing_code_without_manual_group_or_ip(qtbot, tmp_path)
     qtbot.addWidget(dlg)
 
     code = encode_pairing("192.168.1.44", 5050, "TEAM-ABC-123")
-    dlg._rb_join.setChecked(True)
+    dlg._adv_toggle.setChecked(True)
     dlg._pairing_edit.setText(code)
     dlg._go_next()
 
     assert ctx.settings.team_code == "TEAM-ABC-123"
     assert ctx.collab_service.started[0]["group_code"] == "TEAM-ABC-123"
     assert ctx.collab_service.added_peers == [("192.168.1.44", 5050)]
+
+
+def test_team_code_is_saved_even_when_service_is_unavailable(qtbot, tmp_path):
+    QApplication.instance() or QApplication([])
+    settings = AppSettings()
+    settings._qs.clear()
+    settings._qs.sync()
+    ctx = SimpleNamespace(
+        settings=settings,
+        collab_service=None,
+        current_project_dir=str(tmp_path),
+    )
+    dlg = CollabSetupWizard(ctx)
+    qtbot.addWidget(dlg)
+
+    dlg._group_code_edit.setText("TEAM-SAVED")
+    dlg._go_next()
+
+    assert ctx.settings.collab_enabled is True
+    assert ctx.settings.team_code == "TEAM-SAVED"

@@ -271,7 +271,7 @@ class NamingPanel(QWidget):
         self._site = _make_compact_line_edit("如 YGLZ", auto=True)
         self._site.setMinimumWidth(60)
         self._station = _make_compact_line_edit("如 B2", auto=True)
-        self._species_id = _make_compact_line_edit("如 DLC001")
+        self._species_id = _make_compact_line_edit("如 DLC001 / MIX01 / 管号")
         self._species_id.setMaximumWidth(150)
 
         self._geo_group, geo_grid = _section("采集位置", show_title=False)
@@ -293,16 +293,16 @@ class NamingPanel(QWidget):
         identity_grid.setColumnStretch(0, 0)
         identity_grid.setColumnStretch(1, 0)
         identity_grid.setColumnStretch(2, 1)
-        identity_grid.addWidget(_field("物种缩写", self._species_id, required=True,
+        identity_grid.addWidget(_field("样品/物种标签", self._species_id, required=True,
                                        key="species_id",
-                                       help_text="物种拼音缩写编号，如 DLC001；这是标本唯一编号的一段，不是完整 voucher number"), 0, 0)
+                                       help_text="可填物种缩写编号或现场混合管标签；这是唯一编号的一段，不是完整 voucher number"), 0, 0)
 
         # Sequence hint + 填入建议 — inline (no popup), aligned under the field column.
         seq_cell = QWidget()
         seq_lay = QHBoxLayout(seq_cell)
         seq_lay.setContentsMargins(0, 0, 0, 0)
         seq_lay.setSpacing(8)
-        self._seq_hint_label = QLabel("输入物种缩写前缀后显示下一个可用编号")
+        self._seq_hint_label = QLabel("输入字母前缀后显示下一个可用编号")
         self._seq_hint_label.setObjectName("MutedSmall")
         self._seq_hint_label.setWordWrap(True)
         seq_lay.addWidget(self._seq_hint_label, stretch=1)
@@ -1371,7 +1371,7 @@ class NamingPanel(QWidget):
         """Refresh the per-prefix next-number hint from the project DB."""
         suggested = ""
         if not species_text.strip():
-            self._seq_hint_label.setText("输入物种缩写前缀后显示下一个可用编号")
+            self._seq_hint_label.setText("输入字母前缀后显示下一个可用编号")
             self._seq_apply_btn.setEnabled(False)
             self._seq_apply_btn.setText("填入建议")
             self._seq_apply_btn.setProperty("suggested_id", "")
@@ -1403,7 +1403,9 @@ class NamingPanel(QWidget):
             return
 
         if not summary.prefix or not summary.next_id:
-            self._seq_hint_label.setText("请输入字母前缀，如 DLC")
+            self._seq_hint_label.setText(
+                "自由样品标签可直接使用；输入 DLC 这类字母前缀时才自动建议下一个编号"
+            )
             self._seq_apply_btn.setEnabled(False)
             self._seq_apply_btn.setText("填入建议")
             self._seq_apply_btn.setProperty("suggested_id", "")
@@ -1514,14 +1516,9 @@ class NamingPanel(QWidget):
         if site and len(site) < 2:
             issues.append("样地代码太短")
         if species_id:
-            if not re.fullmatch(r"[A-Za-z]+\d+", species_id):
-                if re.fullmatch(r"[A-Za-z]", species_id):
-                    issues.append(
-                        "物种缩写应为字母+数字（如 DLC001）；"
-                        f"{species_id.upper()} 更像保存方式，不应填在这里"
-                    )
-                else:
-                    issues.append("物种缩写应为字母+数字（如 DLC001）")
+            normalized_label = re.sub(r"[-\s]+", "_", species_id).strip("_")
+            if not normalized_label:
+                issues.append("样品/物种标签不能为空")
         if col_date and len(col_date) != 8:
             issues.append("采集日期应为 8 位 YYYYMMDD")
         if storage and not any(storage.upper().startswith(c) for c in ("T", "D", "R")):
