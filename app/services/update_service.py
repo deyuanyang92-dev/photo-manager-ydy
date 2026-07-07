@@ -3,25 +3,32 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import http.client
 import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
 import shutil
+import socket
+import ssl
 import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.request
 import zipfile
 
 
 REPO = "deyuanyang92-dev/photo-manager-ydy"
 LATEST_RELEASE_API = f"https://api.github.com/repos/{REPO}/releases/latest"
+LATEST_RELEASE_PAGE = f"https://github.com/{REPO}/releases/latest"
 WINDOWS_ASSET_RE = re.compile(r"SpecimenPhotoWorkbench-.*-win64\.zip$", re.I)
 APP_EXE_NAME = "SpecimenPhotoWorkbench.exe"
 PACKAGED_ERROR_RE = re.compile(r"Traceback|PermissionError|ModuleNotFoundError|ImportError", re.I)
+DEFAULT_NETWORK_ATTEMPTS = 3
+DEFAULT_RETRY_DELAY_SECONDS = 1.0
 MAX_UPDATE_ZIP_ENTRIES = 30_000
 MAX_UPDATE_UNCOMPRESSED_BYTES = 2 * 1024 * 1024 * 1024
 PROTECTED_RELATIVE_PATHS = (
@@ -56,6 +63,41 @@ class PreparedUpdate:
     script_path: Path
 
 
+class UpdateNetworkError(RuntimeError):
+    """User-facing network failure raised after update retries are exhausted."""
+
+
+def _is_retryable_update_error(exc: BaseException) -> bool:
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code in {408, 409, 425, 429, 500, 502, 503, 504}
+    return isinstance(
+        exc,
+        (
+            urllib.error.URLError,
+            TimeoutError,
+            ConnectionError,
+            socket.timeout,
+            ssl.SSLError,
+            http.client.IncompleteRead,
+            http.client.RemoteDisconnected,
+        ),
+    )
+
+
+def _sleep_before_retry(attempt_index: int, retry_delay: float) -> None:
+    if retry_delay <= 0:
+        return
+    time.sleep(retry_delay * attempt_index)
+
+
+def _network_error(action: str, exc: BaseException) -> UpdateNetworkError:
+    return UpdateNetworkError(
+        f"{action}失败：网络连接被中断，或 GitHub 暂时不可达。\n"
+        f"请检查网络/代理后重试；也可以手动打开 {LATEST_RELEASE_PAGE} 下载 Windows 便携包。\n\n"
+        f"最后错误：{exc}"
+    )
+
+
 def version_key(version: str) -> tuple[int, ...]:
     """Return a numeric comparison key for tags like ``v0.02``."""
     parts = re.findall(r"\d+", version or "")
@@ -86,7 +128,12 @@ def release_from_api_payload(payload: dict) -> ReleaseInfo:
     raise ValueError("latest release does not contain a Windows portable zip")
 
 
-def fetch_latest_release(timeout: int = 20) -> ReleaseInfo:
+def fetch_latest_release(
+    timeout: int = 20,
+    *,
+    attempts: int = DEFAULT_NETWORK_ATTEMPTS,
+    retry_delay: float = DEFAULT_RETRY_DELAY_SECONDS,
+) -> ReleaseInfo:
     req = urllib.request.Request(
         LATEST_RELEASE_API,
         headers={
@@ -94,9 +141,19 @@ def fetch_latest_release(timeout: int = 20) -> ReleaseInfo:
             "User-Agent": "SpecimenPhotoWorkbench-Updater",
         },
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-    return release_from_api_payload(data)
+    attempts = max(1, int(attempts))
+    for attempt in range(1, attempts + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            return release_from_api_payload(data)
+        except Exception as exc:  # noqa: BLE001
+            if not _is_retryable_update_error(exc) or attempt >= attempts:
+                if _is_retryable_update_error(exc):
+                    raise _network_error("检查更新", exc) from exc
+                raise
+            _sleep_before_retry(attempt, retry_delay)
+    raise AssertionError("unreachable")
 
 
 def can_self_update(executable: str | None = None, platform: str | None = None) -> bool:
@@ -121,24 +178,42 @@ def download_file(
     *,
     progress_cb=None,
     timeout: int = 30,
+    attempts: int = DEFAULT_NETWORK_ATTEMPTS,
+    retry_delay: float = DEFAULT_RETRY_DELAY_SECONDS,
 ) -> None:
     req = urllib.request.Request(
         url,
         headers={"User-Agent": "SpecimenPhotoWorkbench-Updater"},
     )
     destination = Path(destination)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        total = int(resp.headers.get("Content-Length") or 0)
-        done = 0
-        with destination.open("wb") as fh:
-            while True:
-                chunk = resp.read(1024 * 1024)
-                if not chunk:
-                    break
-                fh.write(chunk)
-                done += len(chunk)
-                if progress_cb is not None:
-                    progress_cb(done, total)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    attempts = max(1, int(attempts))
+    for attempt in range(1, attempts + 1):
+        wrote_partial = False
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                total = int(resp.headers.get("Content-Length") or 0)
+                done = 0
+                with destination.open("wb") as fh:
+                    wrote_partial = True
+                    while True:
+                        chunk = resp.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        fh.write(chunk)
+                        done += len(chunk)
+                        if progress_cb is not None:
+                            progress_cb(done, total)
+            return
+        except Exception as exc:  # noqa: BLE001
+            if wrote_partial and destination.exists():
+                destination.unlink()
+            if not _is_retryable_update_error(exc) or attempt >= attempts:
+                if _is_retryable_update_error(exc):
+                    raise _network_error("下载更新包", exc) from exc
+                raise
+            _sleep_before_retry(attempt, retry_delay)
+    raise AssertionError("unreachable")
 
 
 def sha256_file(path: str | Path) -> str:

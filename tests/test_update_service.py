@@ -1,8 +1,30 @@
 from pathlib import Path
+import ssl
+import urllib.error
 
 import pytest
 
 from app.services import update_service
+
+
+class _FakeResponse:
+    def __init__(self, chunks, *, headers=None):
+        self._chunks = list(chunks)
+        self.headers = headers or {}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def read(self, _size=-1):
+        if not self._chunks:
+            return b""
+        chunk = self._chunks.pop(0)
+        if isinstance(chunk, BaseException):
+            raise chunk
+        return chunk
 
 
 def test_version_key_compares_release_tags():
@@ -38,6 +60,79 @@ def test_release_from_api_payload_selects_windows_zip():
 def test_release_from_api_payload_requires_windows_zip():
     with pytest.raises(ValueError):
         update_service.release_from_api_payload({"tag_name": "v0.03", "assets": []})
+
+
+def test_fetch_latest_release_retries_transient_ssl_eof(monkeypatch):
+    payload = (
+        b'{"tag_name":"v0.03","html_url":"https://github.com/example/releases/tag/v0.03",'
+        b'"assets":[{"name":"SpecimenPhotoWorkbench-v0.03-win64.zip",'
+        b'"browser_download_url":"https://x/app.zip","size":123}]}'
+    )
+    calls = []
+
+    def fake_urlopen(req, timeout):
+        calls.append((req, timeout))
+        if len(calls) == 1:
+            raise urllib.error.URLError(
+                ssl.SSLError("UNEXPECTED_EOF_WHILE_READING")
+            )
+        return _FakeResponse([payload])
+
+    monkeypatch.setattr(update_service.urllib.request, "urlopen", fake_urlopen)
+
+    release = update_service.fetch_latest_release(attempts=2, retry_delay=0)
+
+    assert release.tag_name == "v0.03"
+    assert release.asset_url == "https://x/app.zip"
+    assert len(calls) == 2
+
+
+def test_download_file_retries_transient_read_error_and_clears_partial(monkeypatch, tmp_path):
+    path = tmp_path / "update.zip"
+    calls = []
+    eof = urllib.error.URLError(ssl.SSLError("UNEXPECTED_EOF_WHILE_READING"))
+
+    def fake_urlopen(req, timeout):
+        calls.append((req, timeout))
+        if len(calls) == 1:
+            return _FakeResponse([b"bad", eof], headers={"Content-Length": "4"})
+        return _FakeResponse([b"good", b""], headers={"Content-Length": "4"})
+
+    monkeypatch.setattr(update_service.urllib.request, "urlopen", fake_urlopen)
+
+    update_service.download_file(
+        "https://x/app.zip",
+        path,
+        attempts=2,
+        retry_delay=0,
+    )
+
+    assert path.read_bytes() == b"good"
+    assert len(calls) == 2
+
+
+def test_download_file_reports_network_hint_and_removes_partial(monkeypatch, tmp_path):
+    path = tmp_path / "update.zip"
+    eof = urllib.error.URLError(ssl.SSLError("UNEXPECTED_EOF_WHILE_READING"))
+
+    def fake_urlopen(req, timeout):
+        return _FakeResponse([b"bad", eof], headers={"Content-Length": "4"})
+
+    monkeypatch.setattr(update_service.urllib.request, "urlopen", fake_urlopen)
+
+    with pytest.raises(update_service.UpdateNetworkError) as excinfo:
+        update_service.download_file(
+            "https://x/app.zip",
+            path,
+            attempts=1,
+            retry_delay=0,
+        )
+
+    assert not path.exists()
+    message = str(excinfo.value)
+    assert "GitHub" in message
+    assert "releases/latest" in message
+    assert "网络/代理" in message
 
 
 def test_can_self_update_requires_windows_app_exe(monkeypatch):
