@@ -571,3 +571,166 @@ def export_darwin_core(db: sqlite3.Connection, path: str | Path) -> Path:
             writer.writerow(list(row))
 
     return path.resolve()
+
+
+# ── Inventory (物种名录) export ────────────────────────────────────────────────
+#
+# 加法式辅助函数,服务于调查汇总视图的物种名录面板 (spec survey-summary-view T4)。
+# inventory 是 taxon_inventory_service.aggregate_taxon_inventory 返回的 list[dict]
+# (scientific_name / scientific_name_cn / family / genus / order_name / sites /
+# count_per_site / total_count)。34 列标本导出 (export_excel / export_csv) 接收的是
+# Specimen 实例,不适用于按物种聚合的汇总表,故此处的专用函数复用同一套 openpyxl
+# 样式与 UTF-8-BOM CSV 约定,但完全不触碰标本导出路径。
+#
+# 红线:无 species / species_cn 列 → 用 scientific_name / scientific_name_cn。
+
+#: 物种名录列定义:(表头, accessor(row_dict) -> 标量)。
+INVENTORY_COLUMNS: list[tuple[str, callable]] = [
+    ("学名",       lambda r: r.get("scientific_name", "")),
+    ("中文名",     lambda r: r.get("scientific_name_cn", "")),
+    ("目",         lambda r: r.get("order_name", "")),
+    ("科",         lambda r: r.get("family", "")),
+    ("属",         lambda r: r.get("genus", "")),
+    ("出现断面",   lambda r: ", ".join(r.get("sites", []) or [])),
+    ("各断面数量", lambda r: ", ".join(
+        f"{site}={n}" for site, n in sorted((r.get("count_per_site") or {}).items())
+    )),
+    ("合计编号数", lambda r: r.get("total_count", 0)),
+]
+
+INVENTORY_HEADERS: list[str] = [h for h, _ in INVENTORY_COLUMNS]
+
+
+def _inventory_rows(
+    inventory: Sequence[dict],
+    columns: list[tuple[str, callable]],
+) -> list[list]:
+    """inventory list[dict] → 行列表 (与 _build_data_rows 对应,但作用于 dict)。"""
+    rows: list[list] = []
+    for row in (inventory or []):
+        out = []
+        for _h, fn in columns:
+            try:
+                out.append(fn(row))
+            except Exception:
+                out.append("")
+        rows.append(out)
+    return rows
+
+
+def export_inventory_excel(
+    inventory: Sequence[dict],
+    path: str | Path,
+) -> Path:
+    """将物种名录汇总写入 .xlsx (样式与 34 列标本导出一致)。
+
+    *inventory* 为 taxon_inventory_service.aggregate_taxon_inventory 的返回值。
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    headers = INVENTORY_HEADERS
+    data_rows = _inventory_rows(inventory, INVENTORY_COLUMNS)
+
+    wb = openpyxl.Workbook()
+    wb.properties.creator = "拍照工作台"
+    ws = wb.active
+    ws.title = "物种名录"
+    ws.freeze_panes = "A2"
+    if headers:
+        ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}1"
+
+    _apply_header_row(ws, headers)
+    for row_idx, row_data in enumerate(data_rows, start=2):
+        for col_idx, value in enumerate(row_data, start=1):
+            ws.cell(row=row_idx, column=col_idx, value=value)
+        if (row_idx - 2) % 2 == 1:
+            for col_idx in range(1, len(headers) + 1):
+                ws.cell(row=row_idx, column=col_idx).fill = _ALT_FILL
+    _auto_col_widths(ws, headers, data_rows)
+
+    # 导出信息 sheet
+    sites_seen: set[str] = set()
+    for r in (inventory or []):
+        sites_seen.update(r.get("sites", []) or [])
+    ws2 = wb.create_sheet("导出信息")
+    ws2["A1"] = "导出日期"
+    ws2["B1"] = date.today().isoformat()
+    ws2["A2"] = "物种数"
+    ws2["B2"] = len(data_rows)
+    ws2["A3"] = "断面数"
+    ws2["B3"] = len(sites_seen)
+
+    wb.save(str(path))
+    return path.resolve()
+
+
+def export_inventory_csv(
+    inventory: Sequence[dict],
+    path: str | Path,
+) -> Path:
+    """将物种名录汇总写入 UTF-8-BOM CSV (Excel 友好)。"""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    headers = INVENTORY_HEADERS
+    data_rows = _inventory_rows(inventory, INVENTORY_COLUMNS)
+
+    with path.open("w", encoding="utf-8-sig", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(headers)
+        for row in data_rows:
+            writer.writerow(row)
+
+    return path.resolve()
+
+
+def export_inventory_darwin_core(
+    workspaces: Sequence[str],
+    path: str | Path,
+) -> Path:
+    """跨多工作区合并 darwin_core 视图行,写入一张 CSV。
+
+    只读打开每个 ``<workspace>/_data/project.db``;db 缺失 / 被锁 / 缺少
+    darwin_core 视图的工作区静默跳过 (与 taxon_inventory_service 同样的容错)。
+    输出列取自首个能返回列描述的工作区 —— 所有工作区 db 共用同一 schema,
+    因此列对齐。
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    col_names: list[str] = []
+    combined: list[list] = []
+    for ws in (workspaces or []):
+        db_path = Path(ws) / "_data" / "project.db"
+        if not db_path.exists():
+            continue
+        try:
+            conn = sqlite3.connect(str(db_path))
+            try:
+                cur = conn.execute("SELECT * FROM darwin_core")
+                if not col_names:
+                    col_names = [d[0] for d in cur.description]
+                combined.extend(list(r) for r in cur.fetchall())
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            # 损坏 / 非 SQLite / 视图缺失 —— 跳过该断面,不阻断整体导出。
+            continue
+
+    if not col_names:
+        # 没有任何工作区提供列描述时,回退到 oracle darwin_core 的 12 个核心术语,
+        # 保证导出文件仍然是一份结构合法的 DwC CSV (仅有表头,无数据行)。
+        col_names = [
+            "occurrenceID", "scientificName", "family", "genus", "order",
+            "decimalLongitude", "decimalLatitude", "eventDate", "recordedBy",
+            "identifiedBy", "locality", "verbatimPreservation",
+        ]
+
+    with path.open("w", encoding="utf-8-sig", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(col_names)
+        for row in combined:
+            writer.writerow(row)
+
+    return path.resolve()
