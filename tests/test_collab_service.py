@@ -1838,7 +1838,14 @@ class TestEnsureRunning:
         ctx.settings.team_code = "TEAM-99"
         ctx.settings.last_project_dir = ""
         ctx.current_project_dir = None
-        assert svc.ensure_running(ctx) is True
+
+        def _fake_start(**kwargs):
+            svc._running = True
+            if kwargs.get("group_code"):
+                svc._group_code = kwargs["group_code"]
+
+        with patch.object(svc, "start", side_effect=_fake_start):
+            assert svc.ensure_running(ctx) is True
         assert svc.is_running()
         assert svc.group_code == "TEAM-99"
 
@@ -1850,8 +1857,9 @@ class TestEnsureRunning:
         assert svc.ensure_running(ctx) is False
         assert not svc.is_running()
 
-    def test_create_session_starts_service(self):
+    def test_create_session_calls_ensure_running(self):
         svc = CollabService()
-        code = svc.create_session()
+        with patch.object(svc, "ensure_running", return_value=True) as er:
+            code = svc.create_session()
         assert code
-        assert svc.is_running()
+        er.assert_called_once()
