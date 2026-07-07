@@ -148,6 +148,15 @@ function Invoke-PackagedSmoke {
     }
 }
 
+# --collect-all pyproj also copies the same PROJ database inside the package.
+# The Windows runtime hook uses Library/share/proj, so remove the duplicate to
+# keep the portable ZIP below GitHub's 100 MB per-file limit. Do this before the
+# smoke check so the uploaded ZIP matches the tested package layout.
+$duplicateProjData = Join-Path $distDir "_internal\pyproj\proj_dir\share\proj"
+if (Test-Path $duplicateProjData) {
+    Remove-Item $duplicateProjData -Recurse -Force
+}
+
 $oldQtPlatform = $env:QT_QPA_PLATFORM
 $oldAllowMulti = $env:SPECIMEN_WORKBENCH_ALLOW_MULTI
 try {
@@ -177,14 +186,6 @@ try {
     } else {
         $env:SPECIMEN_WORKBENCH_ALLOW_MULTI = $oldAllowMulti
     }
-}
-
-# --collect-all pyproj also copies the same PROJ database inside the package.
-# The Windows runtime hook uses Library/share/proj, so remove the duplicate to
-# keep the portable ZIP below GitHub's 100 MB per-file limit.
-$duplicateProjData = Join-Path $distDir "_internal\pyproj\proj_dir\share\proj"
-if (Test-Path $duplicateProjData) {
-    Remove-Item $duplicateProjData -Recurse -Force
 }
 
 for ($i = 1; $i -le 5; $i++) {

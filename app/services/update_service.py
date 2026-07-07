@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import json
 import os
-from pathlib import Path, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -19,6 +21,21 @@ REPO = "deyuanyang92-dev/photo-manager-ydy"
 LATEST_RELEASE_API = f"https://api.github.com/repos/{REPO}/releases/latest"
 WINDOWS_ASSET_RE = re.compile(r"SpecimenPhotoWorkbench-.*-win64\.zip$", re.I)
 APP_EXE_NAME = "SpecimenPhotoWorkbench.exe"
+PACKAGED_ERROR_RE = re.compile(r"Traceback|PermissionError|ModuleNotFoundError|ImportError", re.I)
+MAX_UPDATE_ZIP_ENTRIES = 30_000
+MAX_UPDATE_UNCOMPRESSED_BYTES = 2 * 1024 * 1024 * 1024
+PROTECTED_RELATIVE_PATHS = (
+    r"_internal\data\user_projects.json",
+    r"_internal\data\user_taxonomy.json",
+    r"_internal\data\worms_cache.json",
+    r"_internal\data\worms_jobs.json",
+    r"_internal\data\worms_taxonomy.json",
+    r"data\user_projects.json",
+    r"data\user_taxonomy.json",
+    r"data\worms_cache.json",
+    r"data\worms_jobs.json",
+    r"data\worms_taxonomy.json",
+)
 
 
 @dataclass(frozen=True)
@@ -28,6 +45,7 @@ class ReleaseInfo:
     asset_url: str
     asset_size: int
     page_url: str
+    asset_digest: str = ""
 
 
 @dataclass(frozen=True)
@@ -63,6 +81,7 @@ def release_from_api_payload(payload: dict) -> ReleaseInfo:
             asset_url=url,
             asset_size=int(asset.get("size") or 0),
             page_url=str(payload.get("html_url") or ""),
+            asset_digest=str(asset.get("digest") or ""),
         )
     raise ValueError("latest release does not contain a Windows portable zip")
 
@@ -122,18 +141,125 @@ def download_file(
                     progress_cb(done, total)
 
 
+def sha256_file(path: str | Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as fh:
+        while True:
+            chunk = fh.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def verify_downloaded_package(release: ReleaseInfo, zip_path: str | Path) -> None:
+    """Validate size and GitHub-provided SHA-256 digest when available."""
+    zip_path = Path(zip_path)
+    if release.asset_size > 0:
+        actual_size = zip_path.stat().st_size
+        if actual_size != release.asset_size:
+            raise ValueError(
+                f"downloaded update size mismatch: expected {release.asset_size}, got {actual_size}"
+            )
+    digest = str(release.asset_digest or "").strip()
+    if digest:
+        algo, sep, expected = digest.partition(":")
+        if sep and algo.lower() == "sha256" and expected:
+            actual = sha256_file(zip_path)
+            if actual.lower() != expected.lower():
+                raise ValueError("downloaded update SHA-256 mismatch")
+
+
+def _zip_target(package_dir: Path, info: zipfile.ZipInfo) -> Path:
+    raw = str(info.filename or "").replace("\\", "/")
+    if not raw:
+        raise ValueError("update package contains an empty path")
+    rel = PurePosixPath(raw)
+    if rel.is_absolute() or any(part in {"", ".", ".."} for part in rel.parts):
+        raise ValueError(f"unsafe path in update package: {info.filename}")
+    target = (package_dir / Path(*rel.parts)).resolve()
+    root = package_dir.resolve()
+    if target != root and root not in target.parents:
+        raise ValueError(f"unsafe path in update package: {info.filename}")
+    return target
+
+
+def _is_zip_symlink(info: zipfile.ZipInfo) -> bool:
+    return ((info.external_attr >> 16) & 0o170000) == 0o120000
+
+
+def _validate_zip_manifest(infos: list[zipfile.ZipInfo]) -> None:
+    if len(infos) > MAX_UPDATE_ZIP_ENTRIES:
+        raise ValueError("update package contains too many files")
+    total = 0
+    for info in infos:
+        total += int(info.file_size or 0)
+        if total > MAX_UPDATE_UNCOMPRESSED_BYTES:
+            raise ValueError("update package is too large after extraction")
+
+
 def extract_update_zip(zip_path: str | Path, package_dir: str | Path) -> Path:
     package_dir = Path(package_dir)
     package_dir.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(zip_path, "r") as zf:
-        zf.extractall(package_dir)
+        infos = zf.infolist()
+        _validate_zip_manifest(infos)
+        for info in infos:
+            if _is_zip_symlink(info):
+                raise ValueError(f"update package contains unsupported symlink: {info.filename}")
+            target = _zip_target(package_dir, info)
+            if info.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(info, "r") as src, target.open("wb") as dst:
+                shutil.copyfileobj(src, dst)
     exe = package_dir / APP_EXE_NAME
     if exe.is_file():
-        return package_dir
+        return validate_package_dir(package_dir)
     matches = list(package_dir.rglob(APP_EXE_NAME))
     if not matches:
         raise ValueError(f"{APP_EXE_NAME} not found in update package")
-    return matches[0].parent
+    return validate_package_dir(matches[0].parent)
+
+
+def validate_package_dir(package_dir: str | Path) -> Path:
+    """Require the expected PyInstaller onedir shape before applying."""
+    package_dir = Path(package_dir)
+    exe = package_dir / APP_EXE_NAME
+    if not exe.is_file():
+        raise ValueError(f"{APP_EXE_NAME} not found in update package")
+    internal = package_dir / "_internal"
+    if not internal.is_dir():
+        raise ValueError("update package is missing PyInstaller _internal directory")
+    return package_dir
+
+
+def run_packaged_smoke(exe_path: str | Path, *, timeout: int = 30) -> None:
+    """Start an extracted packaged app in offscreen smoke mode."""
+    exe_path = Path(exe_path)
+    env = os.environ.copy()
+    env["QT_QPA_PLATFORM"] = "offscreen"
+    env["SPECIMEN_WORKBENCH_ALLOW_MULTI"] = "1"
+    try:
+        completed = subprocess.run(
+            [str(exe_path), "--smoke"],
+            cwd=str(exe_path.parent),
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"packaged smoke test timed out after {timeout} seconds") from exc
+    combined = f"{completed.stdout}\n{completed.stderr}"
+    if completed.returncode != 0 or PACKAGED_ERROR_RE.search(combined):
+        detail = "\n".join(line for line in combined.splitlines() if line.strip())[-1200:]
+        raise RuntimeError(
+            f"packaged smoke test failed with exit code {completed.returncode}: {detail}"
+        )
 
 
 def ps_quote(value: str | Path) -> str:
@@ -146,36 +272,141 @@ def make_update_script(
     package_dir: str | Path,
     exe_path: str | Path,
     backup_dir: str | Path,
+    protected_dir: str | Path,
     pid: int,
+    protected_relative_paths: tuple[str, ...] = PROTECTED_RELATIVE_PATHS,
 ) -> str:
     """PowerShell script that runs after the app exits, then restarts it."""
     install = ps_quote(install_dir)
     package = ps_quote(package_dir)
     exe = ps_quote(exe_path)
     backup = ps_quote(backup_dir)
-    return f"""$ErrorActionPreference = 'Stop'
+    protected = ps_quote(protected_dir)
+    protected_items = "@(" + ", ".join(ps_quote(p) for p in protected_relative_paths) + ")"
+    return rf"""$ErrorActionPreference = 'Stop'
 $installDir = {install}
 $packageDir = {package}
 $exePath = {exe}
 $backupDir = {backup}
+$protectedDir = {protected}
 $pidToWait = {int(pid)}
+$protectedRelPaths = {protected_items}
+$logPath = Join-Path (Split-Path -Parent $backupDir) 'apply-update.log'
+
+function Write-UpdateLog([string]$Message) {{
+    $stamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    Add-Content -LiteralPath $logPath -Value "$stamp $Message"
+}}
+
+function Copy-Tree([string]$Source, [string]$Destination) {{
+    New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+    foreach ($item in Get-ChildItem -LiteralPath $Source -Force) {{
+        Copy-Item -LiteralPath $item.FullName -Destination $Destination -Recurse -Force
+    }}
+}}
+
+function Clear-InstallDir {{
+    foreach ($item in Get-ChildItem -LiteralPath $installDir -Force) {{
+        Remove-Item -LiteralPath $item.FullName -Recurse -Force
+    }}
+}}
+
+function Save-ProtectedFiles {{
+    if (Test-Path -LiteralPath $protectedDir) {{
+        Remove-Item -LiteralPath $protectedDir -Recurse -Force
+    }}
+    foreach ($rel in $protectedRelPaths) {{
+        $src = Join-Path $installDir $rel
+        if (Test-Path -LiteralPath $src) {{
+            $dst = Join-Path $protectedDir $rel
+            New-Item -ItemType Directory -Path (Split-Path -Parent $dst) -Force | Out-Null
+            Copy-Item -LiteralPath $src -Destination $dst -Force
+        }}
+    }}
+}}
+
+function Restore-ProtectedFiles {{
+    foreach ($rel in $protectedRelPaths) {{
+        $src = Join-Path $protectedDir $rel
+        if (Test-Path -LiteralPath $src) {{
+            $dst = Join-Path $installDir $rel
+            New-Item -ItemType Directory -Path (Split-Path -Parent $dst) -Force | Out-Null
+            Copy-Item -LiteralPath $src -Destination $dst -Force
+        }}
+    }}
+}}
+
+function Invoke-Smoke([string]$Path) {{
+    $oldQt = $env:QT_QPA_PLATFORM
+    $oldMulti = $env:SPECIMEN_WORKBENCH_ALLOW_MULTI
+    try {{
+        $env:QT_QPA_PLATFORM = 'offscreen'
+        $env:SPECIMEN_WORKBENCH_ALLOW_MULTI = '1'
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $Path
+        $psi.Arguments = '--smoke'
+        $psi.WorkingDirectory = Split-Path -Parent $Path
+        $psi.UseShellExecute = $false
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.CreateNoWindow = $true
+        $proc = New-Object System.Diagnostics.Process
+        $proc.StartInfo = $psi
+        [void]$proc.Start()
+        if (-not $proc.WaitForExit(30000)) {{
+            try {{ $proc.Kill($true) }} catch {{ $proc.Kill() }}
+            throw 'installed smoke test timed out after 30 seconds'
+        }}
+        $stdout = $proc.StandardOutput.ReadToEnd()
+        $stderr = $proc.StandardError.ReadToEnd()
+        $combined = "$stdout`n$stderr"
+        if ($proc.ExitCode -ne 0 -or $combined -match 'Traceback|PermissionError|ModuleNotFoundError|ImportError') {{
+            Write-UpdateLog $combined
+            throw "installed smoke test failed with exit code $($proc.ExitCode)"
+        }}
+    }} finally {{
+        if ($null -eq $oldQt) {{ Remove-Item Env:\QT_QPA_PLATFORM -ErrorAction SilentlyContinue }} else {{ $env:QT_QPA_PLATFORM = $oldQt }}
+        if ($null -eq $oldMulti) {{ Remove-Item Env:\SPECIMEN_WORKBENCH_ALLOW_MULTI -ErrorAction SilentlyContinue }} else {{ $env:SPECIMEN_WORKBENCH_ALLOW_MULTI = $oldMulti }}
+    }}
+}}
 
 Start-Sleep -Seconds 1
 if ($pidToWait -gt 0) {{
     try {{ Wait-Process -Id $pidToWait -Timeout 90 -ErrorAction SilentlyContinue }} catch {{ }}
 }}
 
-New-Item -ItemType Directory -Path (Split-Path -Parent $backupDir) -Force | Out-Null
-if (Test-Path -LiteralPath $backupDir) {{
-    Remove-Item -LiteralPath $backupDir -Recurse -Force
+try {{
+    Write-UpdateLog 'Starting update apply'
+    New-Item -ItemType Directory -Path (Split-Path -Parent $backupDir) -Force | Out-Null
+    if (Test-Path -LiteralPath $backupDir) {{
+        Remove-Item -LiteralPath $backupDir -Recurse -Force
+    }}
+    New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
+
+    Copy-Tree -Source $installDir -Destination $backupDir
+    Save-ProtectedFiles
+
+    Clear-InstallDir
+    Copy-Tree -Source $packageDir -Destination $installDir
+    Restore-ProtectedFiles
+    Invoke-Smoke -Path $exePath
+    Write-UpdateLog 'Update apply succeeded'
+    Start-Process -FilePath $exePath -WorkingDirectory $installDir
+}} catch {{
+    Write-UpdateLog "Update failed: $($_.Exception.Message)"
+    if (Test-Path -LiteralPath $backupDir) {{
+        try {{
+            Clear-InstallDir
+            Copy-Tree -Source $backupDir -Destination $installDir
+            Restore-ProtectedFiles
+            Write-UpdateLog 'Rollback succeeded'
+            Start-Process -FilePath $exePath -WorkingDirectory $installDir
+        }} catch {{
+            Write-UpdateLog "Rollback failed: $($_.Exception.Message)"
+        }}
+    }}
+    throw
 }}
-New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
-
-Get-ChildItem -LiteralPath $installDir -Force |
-    Copy-Item -Destination $backupDir -Recurse -Force
-
-Copy-Item -Path (Join-Path $packageDir '*') -Destination $installDir -Recurse -Force
-Start-Process -FilePath $exePath -WorkingDirectory $installDir
 """
 
 
@@ -184,6 +415,7 @@ def prepare_update(
     *,
     executable: str | None = None,
     progress_cb=None,
+    smoke: bool | None = None,
 ) -> PreparedUpdate:
     install_dir = install_dir_for_executable(executable)
     stamp = time.strftime("%Y%m%d-%H%M%S")
@@ -193,8 +425,14 @@ def prepare_update(
     work_dir.mkdir(parents=True, exist_ok=True)
     zip_path = work_dir / release.asset_name
     download_file(release.asset_url, zip_path, progress_cb=progress_cb)
+    verify_downloaded_package(release, zip_path)
     package_dir = extract_update_zip(zip_path, work_dir / "package")
+    if smoke is None:
+        smoke = can_self_update(executable=executable)
+    if smoke:
+        run_packaged_smoke(package_dir / APP_EXE_NAME)
     backup_dir = Path(tempfile.gettempdir()) / f"specimen-photo-workbench-backup-{stamp}"
+    protected_dir = work_dir / "protected"
     script_path = work_dir / "apply-update.ps1"
     script_path.write_text(
         make_update_script(
@@ -202,6 +440,7 @@ def prepare_update(
             package_dir=package_dir,
             exe_path=install_dir / APP_EXE_NAME,
             backup_dir=backup_dir,
+            protected_dir=protected_dir,
             pid=os.getpid(),
         ),
         encoding="utf-8",

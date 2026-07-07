@@ -34,10 +34,20 @@ jobs:
       - name: Build portable EXE
         shell: pwsh
         run: powershell -ExecutionPolicy Bypass -File .\scripts\build_windows.ps1
+      - name: Verify Windows bundle
+        shell: pwsh
+        run: |
+          if (-not (Get-ChildItem dist -Filter 'SpecimenPhotoWorkbench-*-win64.zip')) {
+            throw 'Versioned Windows ZIP was not produced'
+          }
+          if (-not (Test-Path 'dist\SpecimenPhotoWorkbench\SpecimenPhotoWorkbench.exe')) {
+            throw 'Packaged executable was not produced'
+          }
       - name: Upload Windows bundle
         uses: actions/upload-artifact@v4
         with:
           name: SpecimenPhotoWorkbench-win64
           path: |
-            dist/SpecimenPhotoWorkbench-win64.zip
+            dist/SpecimenPhotoWorkbench-*-win64.zip
             dist/SpecimenPhotoWorkbench/SpecimenPhotoWorkbench.exe
+          if-no-files-found: error

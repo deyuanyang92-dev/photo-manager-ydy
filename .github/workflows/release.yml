@@ -1,0 +1,81 @@
+name: Release Windows
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build, for example v0.52"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  windows-release:
+    runs-on: windows-latest
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Verify release tag matches app version
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          $appVersion = (python -c "from app.config.version import APP_VERSION; print(APP_VERSION)").Trim()
+          if ($appVersion -ne $env:RELEASE_TAG) {
+            throw "APP_VERSION ($appVersion) must match release tag ($env:RELEASE_TAG)"
+          }
+
+      - name: Run release tests
+        shell: pwsh
+        run: python -m pytest tests/ -q --tb=line
+
+      - name: Build portable Windows package
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File .\scripts\build_windows.ps1
+
+      - name: Resolve package path
+        id: package
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem dist -Filter 'SpecimenPhotoWorkbench-*-win64.zip' | Select-Object -First 1
+          if (-not $zip) { throw 'Windows ZIP was not produced' }
+          "zip=$($zip.FullName)" >> $env:GITHUB_OUTPUT
+          "name=$($zip.Name)" >> $env:GITHUB_OUTPUT
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.name }}
+          path: ${{ steps.package.outputs.zip }}
+          if-no-files-found: error
+
+      - name: Create or update GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          ZIP_PATH: ${{ steps.package.outputs.zip }}
+        run: |
+          if (gh release view $env:RELEASE_TAG 2>$null) {
+            gh release upload $env:RELEASE_TAG $env:ZIP_PATH --clobber
+          } else {
+            gh release create $env:RELEASE_TAG $env:ZIP_PATH --title $env:RELEASE_TAG --notes "Automated Windows portable build."
+          }
