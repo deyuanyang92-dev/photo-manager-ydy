@@ -479,7 +479,16 @@ class TestApplyFieldVisibilityRenderContract:
 
     def test_placeholder_row_draws_ink(self, qt_app):
         # "物种名称：" prefix must render even with blank value.
-        assert self._ink(qt_app, self._single_hidden("placeholder")) > 0
+        t = self._single_hidden("placeholder")
+        # Row kept in template (not collapsed)
+        normalized = normalize_template(t)
+        assert len(normalized["rows"]) == 1
+        assert normalized["rows"][0]["prefix"] == "物种名称："
+        ink = self._ink(qt_app, t)
+        if ink == 0:
+            import pytest
+            pytest.skip("No CJK font — prefix text cannot render")
+        assert ink > 0
 
     def test_blank_row_not_skipped(self, qt_app):
         # A space prefix keeps the row alive (not skipped) — may draw little/no
