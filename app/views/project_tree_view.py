@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Optional
 
 from PyQt6.QtCore import QSize, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QDialog,
     QFrame,
@@ -26,6 +27,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QGridLayout,
     QSplitter,
+    QStackedWidget,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -185,7 +187,10 @@ class ProjectTreeView(BaseView):
         self._tree.setIconSize(QSize(18, 18))
         self._tree.setUniformRowHeights(True)
         self._tree.setRootIsDecorated(False)
-        self._tree.itemSelectionChanged.connect(self._update_detail_panel_for_selected_project)
+        # T5 survey-summary (spec §2): 树改多选,Ctrl/Shift 多选断面做汇总.
+        self._tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        # self._tree.itemSelectionChanged.connect(self._update_detail_panel_for_selected_project)  # §7 旧单选槽,保留;多选改由 _on_tree_selection_changed 派发
+        self._tree.itemSelectionChanged.connect(self._on_tree_selection_changed)
         self._tree.itemDoubleClicked.connect(lambda *_: self._enter_selected())
         self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._tree.customContextMenuRequested.connect(self._show_tree_context_menu)
@@ -353,8 +358,40 @@ class ProjectTreeView(BaseView):
         dl.addLayout(tool_row)
         dl.addStretch()
         detail.setMinimumWidth(560)
-        split.addWidget(detail)
-        split.setSizes([420, 720])
+        # split.addWidget(detail)            # §7 旧:右栏直接挂 detail 单栏;新:detail 成为右栏 stack 的 page0
+        # split.setSizes([420, 720])         # §7 旧:两栏尺寸;新:三栏
+
+        # ── T5 中间预览栏 (多选断面 → UidGroupedGrid 合并 groups;单选时隐藏) ──
+        self._grid_panel = QFrame()
+        self._grid_panel.setObjectName("ProjectTreeGridPanel")
+        grid_panel_lay = QVBoxLayout(self._grid_panel)
+        grid_panel_lay.setContentsMargins(14, 12, 14, 14)
+        grid_panel_lay.setSpacing(8)
+        grid_head = QLabel("按编号汇总")
+        grid_head.setObjectName("Section")
+        grid_panel_lay.addWidget(grid_head)
+        from app.widgets.uid_grouped_grid import UidGroupedGrid
+        self._uid_grid = UidGroupedGrid(self._grid_panel)
+        grid_panel_lay.addWidget(self._uid_grid, 1)
+        self._grid_panel.setMinimumWidth(360)
+        self._grid_panel.setVisible(False)   # 单选默认隐藏;多选时显示
+
+        # ── T5 右栏 QStackedWidget 三态 (spec §2):page0 单张详情 / page1 编号列表 / page2 物种名录 ──
+        from app.widgets.survey_summary_panel import SurveySummaryPanel
+        self._right_stack = QStackedWidget()
+        self._right_stack.addWidget(detail)                       # page0: 现有 detail (单选,现状行为不变)
+        uid_list_page = QLabel("编号列表(占位)")                   # page1: 编号列表占位 (本期简单)
+        uid_list_page.setObjectName("EmptyState")
+        uid_list_page.setWordWrap(True)
+        self._right_stack.addWidget(uid_list_page)
+        self._survey_panel = SurveySummaryPanel(ctx=self.ctx, parent=self)  # page2: 物种名录
+        self._right_stack.addWidget(self._survey_panel)
+        self._right_stack.setCurrentIndex(0)
+        self._right_stack.setMinimumWidth(420)
+
+        split.addWidget(self._grid_panel)
+        split.addWidget(self._right_stack)
+        split.setSizes([360, 420, 560])
 
         root.addWidget(split, 1)
 
@@ -1038,6 +1075,105 @@ class ProjectTreeView(BaseView):
         self._render_child_preview(current_item)
         self._render_stats(path)
         self._render_media_preview(path)
+
+    # ── T5 survey-summary: 多选派发 + 三栏切换 (spec §2) ───────────────────────
+    def _on_tree_selection_changed(self) -> None:
+        """selectionChanged 派发器:按选中节点数切右栏 page + 填中间网格.
+
+        - 选 0 / 1 个 → 现有单选/空选路径 (现状行为不变):右栏 page0 单张详情,
+          中间网格隐藏.
+        - 选 ≥2 个 → 多选汇总路径:右栏 page2 物种名录,
+          中间 UidGroupedGrid 显示合并后的按编号 groups.
+        """
+        items = self._tree.selectedItems()
+        if len(items) >= 2:
+            self._show_multi_selection_summary(items)
+            return
+        # 0 或 1 个 → 现状单选路径
+        if getattr(self, "_grid_panel", None) is not None:
+            self._grid_panel.setVisible(False)
+        if getattr(self, "_uid_grid", None) is not None:
+            # 清掉多选残留的合并 groups,避免隐藏网格仍占内存 / worker 解码旧路径.
+            self._uid_grid.clear()
+        if getattr(self, "_right_stack", None) is not None:
+            self._right_stack.setCurrentIndex(0)  # page0: 单张详情
+        self._update_detail_panel_for_selected_project()
+
+    def _show_multi_selection_summary(self, items: list) -> None:
+        """多选 ≥2 节点:右栏切物种名录页,中间填合并 groups 网格 (spec §2/§3)."""
+        dirs: list[str] = []
+        labels: dict[str, str] = {}
+        for it in items:
+            p = it.data(0, _PATH_ROLE)
+            if not p:
+                continue
+            dirs.append(str(p))
+            labels[str(p)] = it.text(0)  # 节点 label (如 "断面a  ·  工作区")
+        if not dirs:
+            self._grid_panel.setVisible(False)
+            self._right_stack.setCurrentIndex(0)
+            return
+        # 右栏 → 物种名录页:聚合所选工作区的 specimens (跨断面按学名去重).
+        self._survey_panel.set_workspaces(dirs, labels=labels)
+        self._right_stack.setCurrentIndex(2)
+        # 中间 → 合并各选中断面的 results groups (不同断面 UID 天然不冲突,spec §3).
+        merged = self._collect_merged_groups(dirs)
+        self._uid_grid.set_groups(merged)
+        self._grid_panel.setVisible(True)
+        # page0(detail)已隐藏,其内 _media_block / _empty_state 不再可见.
+        self._empty_state.hide()
+
+    def _collect_merged_groups(self, dirs: list[str]) -> list:
+        """对每个选中断面调 ``project_service.get_project_results`` 合并 groups.
+
+        复用 (spec §3):groups 直接拼接;ungrouped 合成单个「未分组」section
+        (incoming 散片进未分组,spec §6 红线).任一断面读取失败静默跳过.
+        """
+        from app.services import project_service as _ps
+        merged: list[dict] = []
+        ungrouped_all: list[dict] = []
+        for d in dirs:
+            try:
+                res = _ps.get_project_results(d)
+            except Exception:
+                continue
+            for g in (res.get("groups") or []):
+                merged.append({
+                    "uid": str(g.get("uid") or ""),
+                    "items": list(g.get("items") or []),
+                })
+            ungrouped_all.extend(res.get("ungrouped") or [])
+        if ungrouped_all:
+            merged.append({"uid": "", "items": ungrouped_all})
+        return merged
+
+    # ── T5 生命周期: UidGroupedGrid worker 线程防泄漏 (memory: workbench-timer-leak-hang) ──
+    def on_deactivate(self) -> None:
+        """切走页面:清空合并网格(保留 worker 线程供下次进入).
+
+        真正 quit+wait 在 :meth:`stop_background_work` (MainWindow._teardown 调用,
+        对应 app 退出路径) 与 :meth:`closeEvent` 中执行 —— 切页不杀线程,避免
+        再次进入后网格无法解码。
+        """
+        try:
+            grid = getattr(self, "_uid_grid", None)
+            if grid is not None:
+                grid.clear()
+        except Exception:  # pragma: no cover - 防御性
+            pass
+
+    def stop_background_work(self) -> None:
+        """App 退出 (MainWindow._teardown) 时 join worker 线程,防 close→reopen→必须重启."""
+        try:
+            grid = getattr(self, "_uid_grid", None)
+            if grid is not None:
+                grid.teardown()
+        except Exception:  # pragma: no cover - 防御性
+            pass
+
+    def closeEvent(self, event) -> None:  # noqa: D401 - Qt override
+        self.stop_background_work()
+        super().closeEvent(event)
 
     def _set_enter_action_style(
         self,
