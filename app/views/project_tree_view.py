@@ -714,6 +714,35 @@ class ProjectTreeView(BaseView):
         for key, button in self._kind_filter_buttons.items():
             button.setChecked(key == kind)
         self._filter_tree(self._search.text())
+        # 「全部」: 一键全选所有可见工作区 → 多选汇总显示全部照片/编号.
+        # 用户需求: 点「全部」应显示全部信息(照片+编号), 不是只切列表显隐.
+        # 其他 filter (工作区/区域/待导入) 维持 _filter_tree 的单选详情行为不变.
+        if kind == "all":
+            self._select_all_visible_workspaces()
+
+    def _select_all_visible_workspaces(self) -> None:
+        """全选所有可见工作区节点 → 触发多选汇总(中间编号网格 + 右栏物种名录).
+
+        点「全部」的语义 = 看全部工作区的照片/编号汇总. 只选 kind=="workspace"
+        的节点(跳过 folder/candidate/region), 递归整棵树. 可见工作区 < 2 时
+        维持单选详情(_on_tree_selection_changed 自行按选中数派发).
+        """
+        found: list = []
+        for i in range(self._tree.topLevelItemCount()):
+            self._collect_visible_workspaces(self._tree.topLevelItem(i), found)
+        # blockSignals 抑制循环里的多次 selectionChanged, 最后手动派发一次.
+        self._tree.blockSignals(True)
+        self._tree.clearSelection()
+        for it in found:
+            it.setSelected(True)
+        self._tree.blockSignals(False)
+        self._on_tree_selection_changed()
+
+    def _collect_visible_workspaces(self, item, acc: list) -> None:
+        if (not item.isHidden()) and item.data(0, _KIND_ROLE) == "workspace":
+            acc.append(item)
+        for i in range(item.childCount()):
+            self._collect_visible_workspaces(item.child(i), acc)
 
     def _is_filtering(self, query: str) -> bool:
         return bool(query) or self._kind_filter != "all"
