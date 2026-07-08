@@ -34,18 +34,15 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING, Optional
 
-from PyQt6.QtCore import QObject, QSize, Qt, QThread, pyqtSignal
+from PyQt6.QtCore import QSize, Qt
 from PyQt6.QtGui import QAction, QCloseEvent, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
-    QApplication,
     QButtonGroup,
     QFrame,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QMenu,
-    QMessageBox,
-    QProgressDialog,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -58,7 +55,6 @@ from PyQt6.QtWidgets import (
 
 from app.config import icons
 from app.config.i18n import tr
-from app.config.version import APP_VERSION
 from app.utils import ui
 from app.views.base_view import BaseView
 
@@ -68,49 +64,6 @@ if TYPE_CHECKING:
 _K_SCREENSHOT_TOOL_ENABLED = "ui/screenshot_tool_enabled"
 _K_SCREENSHOT_DEFAULT_MIGRATED = "ui/screenshot_tool_default_migrated"
 _K_SCREENSHOT_OPT_IN_MIGRATED = "ui/screenshot_tool_opt_in_migrated"
-
-
-class _UpdateWorker(QObject):
-    progress = pyqtSignal(int, str)
-    ready = pyqtSignal(object)
-    no_update = pyqtSignal(object)
-    failed = pyqtSignal(str)
-    finished = pyqtSignal()
-
-    def __init__(self, current_version: str) -> None:
-        super().__init__()
-        self._current_version = current_version
-
-    def run(self) -> None:
-        try:
-            from app.services import update_service
-
-            self.progress.emit(4, "正在检查 GitHub 最新版本...")
-            release = update_service.fetch_latest_release()
-            if not update_service.is_newer_version(
-                release.tag_name, self._current_version
-            ):
-                self.no_update.emit(release)
-                return
-            self.progress.emit(10, f"发现 {release.tag_name}，正在下载...")
-
-            def _on_download(done: int, total: int) -> None:
-                if total > 0:
-                    pct = 10 + min(80, int(done * 80 / total))
-                else:
-                    pct = 18
-                self.progress.emit(pct, "正在下载更新包...")
-
-            prepared = update_service.prepare_update(
-                release,
-                progress_cb=_on_download,
-            )
-            self.progress.emit(100, "更新包已准备，正在重启升级...")
-            self.ready.emit(prepared)
-        except Exception as exc:  # noqa: BLE001
-            self.failed.emit(str(exc))
-        finally:
-            self.finished.emit()
 
 
 class MainWindow(QMainWindow):
@@ -474,7 +427,18 @@ class MainWindow(QMainWindow):
         self._nav_buttons.append(btn)
         self._nav_row.addWidget(btn)
         self._add_view_to_nav_menu(view_cls, idx)
-        btn.setVisible(self._is_nav_pinned(view_id))
+        # 老用户 pin 列表升级: 新加入 _DEFAULT_PINNED_NAV 的 view(如 data_filter),
+        # 若老 setting 没固定过它, 自动 pin 显示(否则用户发现不了新页)。
+        raw_pins = self.ctx.settings._qs.value("ui/topbar_pinned_views", "", type=str) or ""
+        if raw_pins and raw_pins != "__none__" and view_id in _DEFAULT_PINNED_NAV:
+            pins = self._nav_pins_setting()
+            if view_id not in pins:
+                pins.add(view_id)
+                self._save_nav_pins(pins)
+                btn.setVisible(True)  # 刚升级 pin, 立即可见(QSettings 写后读在 drvfs 上可能延迟)
+        # 默认 pin 的 view(含新加的 data_filter)直接可见, 不依赖 _is_nav_pinned
+        # 重读 QSettings — drvfs 上写后读有延迟, 会读到旧值导致新 tab 不显示。
+        btn.setVisible(view_id in _DEFAULT_PINNED_NAV or self._is_nav_pinned(view_id))
         # View is NOT built here — see _ensure_view (lazy, first-activation).
 
     def _add_view_to_nav_menu(self, view_cls: object, idx: int) -> None:
@@ -719,86 +683,16 @@ class MainWindow(QMainWindow):
         dlg.activateWindow()
 
     def _on_upgrade_requested(self) -> None:
-        from app.services import update_service
+        """手动检查/安装更新——编排逻辑在 app/widgets/update_controller.py。"""
+        from app.widgets.update_controller import check_for_updates
 
-        if not update_service.can_self_update():
-            QMessageBox.information(
-                self,
-                tr("软件更新"),
-                tr("一键升级只支持 Windows 打包版。\n\n"
-                   "当前像是源码/开发环境运行，不会自动替换程序目录。"),
-            )
-            return
+        check_for_updates(self)
 
-        reply = QMessageBox.question(
-            self,
-            tr("软件更新"),
-            tr("将下载 GitHub 最新 Windows 包，准备完成后自动关闭当前程序、替换文件并重启。\n\n"
-               "当前版本：{}\n是否继续？").format(APP_VERSION),
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
+    def start_background_update_check(self) -> None:
+        """启动后台静默检查更新（发现未跳过的新版本才提示）。"""
+        from app.widgets.update_controller import start_background_update_check
 
-        progress = QProgressDialog(tr("正在准备更新..."), "", 0, 100, self)
-        progress.setWindowTitle(tr("软件更新"))
-        progress.setCancelButton(None)
-        progress.setWindowModality(Qt.WindowModality.ApplicationModal)
-        progress.setMinimumDuration(0)
-        progress.setValue(0)
-        progress.show()
-
-        thread = QThread(self)
-        worker = _UpdateWorker(APP_VERSION)
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.progress.connect(lambda value, text: self._set_update_progress(progress, value, text))
-        worker.ready.connect(lambda prepared: self._apply_prepared_update(prepared, progress))
-        worker.no_update.connect(lambda release: self._show_no_update(progress, release))
-        worker.failed.connect(lambda message: self._show_update_failed(progress, message))
-        worker.finished.connect(thread.quit)
-        worker.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
-        self._update_thread = thread
-        self._update_worker = worker
-        thread.start()
-
-    def _set_update_progress(self, dialog: QProgressDialog, value: int, text: str) -> None:
-        dialog.setLabelText(tr(text))
-        dialog.setValue(value)
-
-    def _show_update_failed(self, dialog: QProgressDialog, message: str) -> None:
-        dialog.close()
-        QMessageBox.warning(
-            self,
-            tr("软件更新失败"),
-            tr("未能完成自动更新：\n{}").format(message),
-        )
-
-    def _show_no_update(self, dialog: QProgressDialog, release) -> None:
-        dialog.close()
-        QMessageBox.information(
-            self,
-            tr("软件更新"),
-            tr("当前已是最新版本。\n\n当前版本：{}\nGitHub 最新：{}").format(
-                APP_VERSION,
-                getattr(release, "tag_name", "") or APP_VERSION,
-            ),
-        )
-
-    def _apply_prepared_update(self, prepared, dialog: QProgressDialog) -> None:
-        from app.services import update_service
-
-        try:
-            update_service.launch_update_script(prepared.script_path)
-        except Exception as exc:  # noqa: BLE001
-            self._show_update_failed(dialog, str(exc))
-            return
-        dialog.setValue(100)
-        dialog.setLabelText(tr("更新脚本已启动，正在关闭当前版本..."))
-        self.statusBar().showMessage(tr("正在升级到 {}...").format(prepared.release.tag_name), 3000)
-        QApplication.quit()
+        start_background_update_check(self)
 
     def navigate_to(self, view_id: str) -> None:
         """Programmatically switch to the view with the given view_id."""
@@ -1216,6 +1110,12 @@ class MainWindow(QMainWindow):
             db_manager.close_all()
         except Exception:  # noqa: BLE001
             pass
+        # 若用户选了「退出时安装」，在进程退出前启动替换脚本（它会等待本进程结束）。
+        try:
+            from app.widgets.update_controller import apply_pending_update_on_exit
+            apply_pending_update_on_exit(self)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _wire_collab_status_bar(self) -> None:
         """Connect CollabService signals to the status bar segment.
@@ -1268,6 +1168,7 @@ _DEFAULT_PINNED_NAV: tuple[str, ...] = (
     "collab",
     "project_tree",
     "collection_records",
+    "data_filter",
 )
 
 
