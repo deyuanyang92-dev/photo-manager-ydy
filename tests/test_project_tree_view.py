@@ -567,3 +567,30 @@ def test_add_workspace_manual_registers(qtbot, tmp_path, ctx, monkeypatch):
 
     dirs = {p.get("directory") for p in ps.list_projects(str(jp))}
     assert any("手动工作区" in (d or "") for d in dirs), "手动选的目录应被登记"
+
+
+def test_show_all_projects_clears_root(qtbot, tmp_path, ctx) -> None:
+    """「全部项目」清锁定 root → flat list 显示全部已登记项目。"""
+    from app.services import project_service as ps
+
+    jp = tmp_path / "user_projects.json"
+    (tmp_path / "ws1" / "_data").mkdir(parents=True)
+    (tmp_path / "ws2" / "_data").mkdir(parents=True)
+    import json as _json
+    jp.write_text(_json.dumps({"version": 1, "projects": [
+        {"directory": str(tmp_path / "ws1"), "name": "ws1"},
+        {"directory": str(tmp_path / "ws2"), "name": "ws2"},
+    ]}), encoding="utf-8")
+
+    ctx.settings.project_tree_root = str(tmp_path / "ws1")  # 锁 ws1
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    view.on_activate()
+    # 锁 root → rooted scan ws1, 只 ws1
+    assert view._tree.topLevelItemCount() >= 1
+    view._show_all_projects()
+    # 清 root → flat list 全部
+    assert ctx.settings.project_tree_root is None
+    assert view._root is None
+    names = [view._tree.topLevelItem(i).text(0) for i in range(view._tree.topLevelItemCount())]
+    assert any("ws1" in n for n in names) and any("ws2" in n for n in names), "flat 该显全部"

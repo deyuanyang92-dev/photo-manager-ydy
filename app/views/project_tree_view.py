@@ -132,6 +132,16 @@ class ProjectTreeView(BaseView):
                               color=icons.TONE_MUTED, size=15)
         self._btn_add_ws.clicked.connect(self._add_workspace_manual)
         bar.addWidget(self._btn_add_ws)
+        # 全部项目: 清锁定的根目录 → flat list 显示所有已登记项目
+        self._btn_all = QPushButton("全部项目")
+        self._btn_all.setObjectName("Outline")
+        self._btn_all.setToolTip("清除锁定的根目录，显示所有已登记项目（flat list）")
+        self._btn_all.setFixedHeight(34)
+        self._btn_all.setCursor(Qt.CursorShape.PointingHandCursor)
+        icons.set_button_icon(self._btn_all, "mdi6.format-list-bulleted",
+                              color=icons.TONE_MUTED, size=15)
+        self._btn_all.clicked.connect(self._show_all_projects)
+        bar.addWidget(self._btn_all)
         self._btn_newsub = QPushButton("新建断面/子节点")
         self._btn_newsub.setObjectName("Outline")
         self._btn_newsub.setToolTip("在当前选中文件夹下新建断面、站位或任意子节点")
@@ -1575,6 +1585,17 @@ class ProjectTreeView(BaseView):
             f"新增 {added} 个到项目列表(已登记的自动去重)。",
         )
         pts.clear_project_tree_cache(root)
+        self._reload_project_tree()
+
+    def _show_all_projects(self) -> None:
+        """清锁定的根目录 → flat list 显示所有已登记项目。
+
+        解决: 用户「选择根目录」锁了某单项目后, 项目树只扫该 root 子树,
+        看不到其他项目。点此 → root=None → flat list 全部已登记项目。
+        """
+        self._root = None
+        self.ctx.settings.project_tree_root = None  # 清持久 root
+        pts.clear_project_tree_cache()
         self._reload_project_tree()
 
     def _add_workspace_manual(self) -> None:
