@@ -122,6 +122,16 @@ class ProjectTreeView(BaseView):
                               color=icons.TONE_MUTED, size=15)
         self._btn_scan.clicked.connect(self._scan_disk)
         bar.addWidget(self._btn_scan)
+        # 手动添加: 选单个目录登记为工作区/子节点(不扫整盘, 用于扫描识别不到的目录)
+        self._btn_add_ws = QPushButton("添加工作区…")
+        self._btn_add_ws.setObjectName("Outline")
+        self._btn_add_ws.setToolTip("手动选择一个已有工作区/子目录，登记到项目列表（不扫描整盘）")
+        self._btn_add_ws.setFixedHeight(34)
+        self._btn_add_ws.setCursor(Qt.CursorShape.PointingHandCursor)
+        icons.set_button_icon(self._btn_add_ws, "mdi6.folder-plus",
+                              color=icons.TONE_MUTED, size=15)
+        self._btn_add_ws.clicked.connect(self._add_workspace_manual)
+        bar.addWidget(self._btn_add_ws)
         self._btn_newsub = QPushButton("新建断面/子节点")
         self._btn_newsub.setObjectName("Outline")
         self._btn_newsub.setToolTip("在当前选中文件夹下新建断面、站位或任意子节点")
@@ -1566,6 +1576,31 @@ class ProjectTreeView(BaseView):
         )
         pts.clear_project_tree_cache(root)
         self._reload_project_tree()
+
+    def _add_workspace_manual(self) -> None:
+        """手动选单个目录登记为工作区/子节点(不扫整盘, 用于扫描识别不到的目录)。
+
+        与 ``_scan_disk`` 互补: 扫描是"指定盘/目录深扫找全部"; 这是"我就要这一个"。
+        选目录 → record_recent_workspace 去重登记 → 刷新 flat list。
+        """
+        start = self._root or ""
+        path = ui.get_existing_directory(self, "选择要添加的工作区或子目录", start)
+        if not path:
+            return
+        from app.services.project_service import (
+            default_user_projects_json_path,
+            record_recent_workspace,
+        )
+        try:
+            record_recent_workspace(
+                default_user_projects_json_path(), path, root=self._root
+            )
+        except Exception as exc:
+            ui.warn(self, "添加失败", f"登记工作区失败:\n{exc}")
+            return
+        pts.clear_project_tree_cache(self._root or path)
+        self._reload_project_tree()
+        ui.info(self, "已添加", f"已登记到项目列表:\n{path}")
 
     def _new_region(self) -> None:
         """Scaffold a 调查区域 root: create the folder, seed region-level

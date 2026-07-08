@@ -543,3 +543,27 @@ def test_scan_disk_registers_discovered_workspaces(qtbot, tmp_path, ctx, monkeyp
     assert any("old1" in (d or "") for d in dirs), "old1 工作区应被登记"
     assert any("old2" in (d or "") for d in dirs), "old2 工作区应被登记"
     assert not any("not_a_workspace" in (d or "") for d in dirs), "非工作区目录不应登记"
+
+
+def test_add_workspace_manual_registers(qtbot, tmp_path, ctx, monkeypatch):
+    """「添加工作区」手动选单目录 → 登记到 user_projects.json(不扫整盘)。"""
+    import json as _json
+    from app.services import project_service as ps
+    from app.utils import ui as _ui
+
+    ws = tmp_path / "手动工作区"
+    ws.mkdir()
+
+    jp = tmp_path / "user_projects.json"
+    jp.write_text(_json.dumps({"version": 1, "projects": []}), encoding="utf-8")
+    monkeypatch.setattr(ps, "default_user_projects_json_path", lambda: str(jp))
+    monkeypatch.setattr(_ui, "get_existing_directory", lambda *a, **k: str(ws))
+    monkeypatch.setattr(_ui, "info", lambda *a, **k: None)
+
+    ctx.settings.project_tree_root = None
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    view._add_workspace_manual()
+
+    dirs = {p.get("directory") for p in ps.list_projects(str(jp))}
+    assert any("手动工作区" in (d or "") for d in dirs), "手动选的目录应被登记"
