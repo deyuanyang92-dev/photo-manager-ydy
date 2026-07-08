@@ -630,3 +630,66 @@ def test_select_all_filter_shows_every_workspace_summary(qtbot, tmp_path, ctx):
     assert view._right_stack.currentIndex() == 2, "全部 → 右栏切物种名录汇总页"
     assert len(view._uid_grid._sections) >= 2, "汇总两个工作区的编号组"
 
+
+def _make_specimen_ws(p, uid, storage, photographer, province):
+    """建含 1 行 specimen 的工作区 (specimens 表最小列)."""
+    (p / "_data").mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(p / "_data" / "project.db"))
+    conn.execute(
+        "CREATE TABLE specimens (uid TEXT, storage TEXT, photographer TEXT, province TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO specimens VALUES (?,?,?,?)", (uid, storage, photographer, province)
+    )
+    conn.commit()
+    conn.close()
+
+
+def _touch_tif(p):
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(b"")
+
+
+def test_summary_filter_rna_shrinks_grid(qtbot, tmp_path, ctx):
+    """多选汇总后勾「已取RNA」→ 编号网格只剩 RNA 编号 (用户需求: 预览时筛 RNA)."""
+    root = tmp_path / "survey"
+    # 断面a = RNA(R95E), 断面b = 非RNA(T95E)
+    _make_specimen_ws(root / "断面a", "AA-BB-C1-001-R95E-20260101", "R95E", "张三", "浙江")
+    _make_specimen_ws(root / "断面b", "AA-BB-C2-002-T95E-20260101", "T95E", "李四", "福建")
+    # 成果 tif (文件名 7 段含 uid+seq+storage+date; get_project_results 据此分组)
+    _touch_tif(root / "断面a" / "results" / "AA-BB-C1-001-1-R95E-20260101.tif")
+    _touch_tif(root / "断面b" / "results" / "AA-BB-C2-002-1-T95E-20260101.tif")
+    ctx.settings.project_tree_root = str(root)
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    view.on_activate()
+    view._set_kind_filter("all")  # 全选 → 汇总
+    assert len(view._uid_grid._sections) == 2, "全部 = 2 个编号"
+
+    view._chk_rna.setChecked(True)  # 勾 RNA → 触发 _apply_summary_filter
+    assert len(view._uid_grid._sections) == 1, "RNA = 只剩 1 个编号(R95E 那个)"
+
+    view._chk_rna.setChecked(False)  # 取消 → 回到全部
+    assert len(view._uid_grid._sections) == 2, "取消 RNA = 回到 2 个编号"
+
+
+def test_summary_filter_photographer(qtbot, tmp_path, ctx):
+    """拍摄人下拉筛 → 只显该拍摄人的编号."""
+    root = tmp_path / "survey"
+    _make_specimen_ws(root / "断面a", "AA-BB-C1-001-R95E-20260101", "R95E", "张三", "浙江")
+    _make_specimen_ws(root / "断面b", "AA-BB-C2-002-T95E-20260101", "T95E", "李四", "福建")
+    _touch_tif(root / "断面a" / "results" / "AA-BB-C1-001-1-R95E-20260101.tif")
+    _touch_tif(root / "断面b" / "results" / "AA-BB-C2-002-1-T95E-20260101.tif")
+    ctx.settings.project_tree_root = str(root)
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    view.on_activate()
+    view._set_kind_filter("all")
+    assert len(view._uid_grid._sections) == 2
+
+    # 选「张三」(index 1 = 全部之后的第一个值)
+    idx = view._cmb_photographer.findData("张三")
+    assert idx >= 0
+    view._cmb_photographer.setCurrentIndex(idx)
+    assert len(view._uid_grid._sections) == 1, "张三 = 只剩断面a 的 1 个编号"
+

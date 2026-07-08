@@ -17,6 +17,8 @@ from PyQt6.QtCore import QSize, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QCheckBox,
+    QComboBox,
     QDialog,
     QFrame,
     QHBoxLayout,
@@ -404,6 +406,35 @@ class ProjectTreeView(BaseView):
         grid_head = QLabel("按编号汇总")
         grid_head.setObjectName("Section")
         grid_panel_lay.addWidget(grid_head)
+        # ── 字段筛选条 (用户需求: 预览时筛 RNA / 拍摄人 / 地区 + 文本) ──
+        # 下拉选项动态来自所选工作区 specimens (field_choices), 非硬编码值;
+        # RNA = 派生维度 storage_is_rna (specimen_fields.DERIVED). 无勾选 = 全部.
+        self._filter_bar = QFrame()
+        self._filter_bar.setObjectName("ProjectTreeFilterBar")
+        flay = QHBoxLayout(self._filter_bar)
+        flay.setContentsMargins(0, 0, 0, 0)
+        flay.setSpacing(6)
+        self._chk_rna = QCheckBox("已取RNA")
+        self._cmb_photographer = QComboBox()
+        self._cmb_photographer.setMinimumWidth(90)
+        self._cmb_site = QComboBox()
+        self._cmb_site.setMinimumWidth(90)
+        self._txt_search = QLineEdit()
+        self._txt_search.setPlaceholderText("搜编号 / 学名…")
+        self._txt_search.setClearButtonEnabled(True)
+        flay.addWidget(self._chk_rna)
+        flay.addWidget(self._cmb_photographer)
+        flay.addWidget(self._cmb_site)
+        flay.addWidget(self._txt_search, 1)
+        grid_panel_lay.addWidget(self._filter_bar)
+        # change → 实时过滤
+        self._chk_rna.toggled.connect(self._apply_summary_filter)
+        self._cmb_photographer.currentIndexChanged.connect(self._apply_summary_filter)
+        self._cmb_site.currentIndexChanged.connect(self._apply_summary_filter)
+        self._txt_search.textChanged.connect(self._apply_summary_filter)
+        # 当前多选的合并 groups + 工作区目录 (供 _apply_summary_filter 复用)
+        self._current_merged: list = []
+        self._current_ws_dirs: list = []
         from app.widgets.uid_grouped_grid import UidGroupedGrid
         self._uid_grid = UidGroupedGrid(self._grid_panel)
         grid_panel_lay.addWidget(self._uid_grid, 1)
@@ -1192,10 +1223,69 @@ class ProjectTreeView(BaseView):
         self._right_stack.setCurrentIndex(2)
         # 中间 → 合并各选中断面的 results groups (不同断面 UID 天然不冲突,spec §3).
         merged = self._collect_merged_groups(dirs)
-        self._uid_grid.set_groups(merged)
+        self._current_merged = merged
+        self._current_ws_dirs = dirs
+        # 刷新筛选下拉选项(动态取自所选工作区 specimens) + 应用筛选(默认全部)
+        self._refresh_summary_filter_choices(dirs)
+        self._apply_summary_filter()
         self._grid_panel.setVisible(True)
         # page0(detail)已隐藏,其内 _media_block / _empty_state 不再可见.
         self._empty_state.hide()
+
+    def _refresh_summary_filter_choices(self, dirs: list) -> None:
+        """拍摄人 / 地区下拉选项 = 所选工作区 specimens 的 distinct 值(动态, 非硬编码)."""
+        from app.services.specimen_filter_service import field_choices
+        for cmb, field, all_label in (
+            (self._cmb_photographer, "photographer", "拍摄人(全部)"),
+            (self._cmb_site, "site", "地区(全部)"),
+        ):
+            cmb.blockSignals(True)
+            cmb.clear()
+            cmb.addItem(all_label, "")  # data="" = 不筛该字段
+            for v in field_choices(dirs, field):
+                cmb.addItem(v, v)
+            cmb.setCurrentIndex(0)
+            cmb.blockSignals(False)
+
+    def _apply_summary_filter(self, *_args) -> None:
+        """按筛选条(RNA / 拍摄人 / 地区 / 文本)实时过滤中间「按编号汇总」网格.
+
+        无任何勾选/输入 = 显示全部合并 groups. 有条件 = query_specimens 查符合
+        specimen 的 uid 集合, 只保留 uid 命中的 group (ungrouped uid="" 自动排除).
+        """
+        merged = getattr(self, "_current_merged", None)
+        if merged is None:
+            return
+        conditions: list = []
+        if self._chk_rna.isChecked():
+            conditions.append({"field": "storage_is_rna", "op": "eq", "value": "是"})
+        pp = self._cmb_photographer.currentData()
+        if pp:
+            conditions.append({"field": "photographer", "op": "eq", "value": str(pp)})
+        ss = self._cmb_site.currentData()
+        if ss:
+            conditions.append({"field": "site", "op": "eq", "value": str(ss)})
+        q = self._txt_search.text().strip().lower()
+        if q:
+            conditions.append({"field": "uid", "op": "contains", "value": q})
+        if not conditions:
+            self._uid_grid.set_groups(merged)
+            return
+        from app.services.specimen_filter_service import query_specimens
+        rows = query_specimens(self._current_ws_dirs, conditions)
+        # 用 5 段前缀 (province-site-station-id-storage) 匹配, 砍 date 段:
+        # specimen.uid 的 dateSeg 常是 8 位 (20260618), 成果 tif 文件名的 dateSeg 常是
+        # 6 位 (260618) → 整 uid 比对会全部失配. 前 5 段唯一标识标本, 不含 date.
+        keep = {self._uid_prefix(r.get("uid")) for r in rows if r.get("uid")}
+        filtered = [g for g in merged if self._uid_prefix(g.get("uid")) in keep]
+        self._uid_grid.set_groups(filtered)
+
+    @staticmethod
+    def _uid_prefix(uid: str) -> str:
+        """uid 砍掉末段 dateSeg, 留前 5 段 (province-site-station-id-storage)."""
+        s = str(uid or "")
+        parts = s.split("-")
+        return "-".join(parts[:5]) if len(parts) >= 5 else s
 
     def _collect_merged_groups(self, dirs: list[str]) -> list:
         """对每个选中断面调 ``project_service.get_project_results`` 合并 groups.
