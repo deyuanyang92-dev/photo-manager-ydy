@@ -1585,6 +1585,9 @@ class ProjectTreeView(BaseView):
             f"新增 {added} 个到项目列表(已登记的自动去重)。",
         )
         pts.clear_project_tree_cache(root)
+        # 清锁定 root → flat list 显示全部(含新扫到的, 否则 rooted 只显旧 root 子树, 新加的看不到)
+        self._root = None
+        self.ctx.settings.project_tree_root = None
         self._reload_project_tree()
 
     def _show_all_projects(self) -> None:
