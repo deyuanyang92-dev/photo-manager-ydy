@@ -30,3 +30,24 @@ def _no_real_geocode_network():
 
     with patch.object(geocode_service, "_http_get_json", side_effect=_blocked):
         yield
+
+
+@pytest.fixture(autouse=True)
+def _isolate_user_projects_json(tmp_path, monkeypatch):
+    """测试永不写真 ``data/user_projects.json``。
+
+    根因: ``record_recent_workspace`` / ``enter_workspace`` 走
+    ``default_user_projects_json_path()`` → 测试建 tmp 工作区并 enter 时, 把
+    ``/tmp/pytest-.../FJ-SHUTDOWN`` 这类垃圾登记进 app-local json, 下次启动 app
+    就在项目列表里看到测试垃圾。这里把 default 路径 patch 到 per-test tmp,
+    测试显式传 path 的用例不受影响。
+    """
+    try:
+        from app.services import project_service as _ps
+    except Exception:
+        yield
+        return
+    jp = tmp_path / "user_projects.json"
+    jp.write_text('{"version": 1, "projects": []}', encoding="utf-8")
+    monkeypatch.setattr(_ps, "default_user_projects_json_path", lambda: str(jp))
+    yield
