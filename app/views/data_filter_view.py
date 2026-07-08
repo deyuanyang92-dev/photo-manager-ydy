@@ -43,6 +43,7 @@ from app.config.specimen_fields import (
 from app.services import edit_lock_service
 from app.services import specimen_filter_service as filter_svc
 from app.utils import ui
+from app.utils.image_thumbnail import decode_image_data, make_pixmap
 from app.views.base_view import BaseView
 
 _OP_LABELS = {"eq": "等于", "contains": "包含", "is_empty": "为空", "not_empty": "非空"}
@@ -144,7 +145,15 @@ class DataFilterView(BaseView):
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._table.itemChanged.connect(self._on_cell_changed)
         self._table.horizontalHeader().setStretchLastSection(True)
+        self._table.itemSelectionChanged.connect(self._on_selection_changed)
         root.addWidget(self._table, 1)
+
+        # 照片预览(选中编号 → 该 workspace 下成果 tif 缩略, 同步解码 max 280)
+        self._photo_label = QLabel("选中编号查看照片")
+        self._photo_label.setObjectName("DataFilterPhotoLabel")
+        self._photo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._photo_label.setMinimumHeight(220)
+        root.addWidget(self._photo_label)
 
         # 默认一个条件行
         self._add_condition_row()
@@ -427,6 +436,56 @@ class DataFilterView(BaseView):
             spec_row[key] = item.text()
             self._fill_table(self._rows)
             self._fill_stats(self._rows)
+
+    def _on_selection_changed(self) -> None:
+        """选中结果行 → 右下显示该编号成果照片(首个 .tif 缩略)。"""
+        sm = self._table.selectionModel()
+        if sm is None:
+            return
+        idxs = sm.selectedRows()
+        if not idxs:
+            self._photo_label.clear()
+            self._photo_label.setText("选中编号查看照片")
+            return
+        row_idx = idxs[0].row()
+        if row_idx >= len(self._rows):
+            return
+        r = self._rows[row_idx]
+        path = self._find_specimen_photo(r.get("uid"), r.get("_workspace"))
+        if not path:
+            self._photo_label.clear()
+            self._photo_label.setText("(该编号暂无成果照片)")
+            return
+        pm = make_pixmap(decode_image_data(path, 280))
+        if pm is not None and not pm.isNull():
+            self._photo_label.setPixmap(pm.scaled(
+                280, 220, Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation))
+        else:
+            self._photo_label.clear()
+            self._photo_label.setText("(照片解码失败)")
+
+    def _find_specimen_photo(self, uid: Optional[str], workspace: Optional[str]) -> Optional[str]:
+        """该 specimen 在所属 workspace 下的代表成果照片(首个 .tif, uid 前缀匹配)。
+
+        成果文件名 = uid + (-seq) + .tif(oracle parseTiffBasename); 故 uid 前缀 glob 命中。
+        incoming-jpg 的 jpg 命名自由(无 uid), 不在此关联。
+        """
+        from pathlib import Path
+        if not uid or not workspace:
+            return None
+        root = Path(workspace)
+        for sub in ("results", "results/freeform"):
+            d = root / sub
+            if not d.is_dir():
+                continue
+            try:
+                matches = sorted(list(d.glob(f"{uid}*.tif")) + list(d.glob(f"{uid}*.tiff")))
+            except OSError:
+                continue
+            if matches:
+                return str(matches[0])
+        return None
 
     def _persist_edit(self, uid: str, field: str, value: str, workspace: str) -> bool:
         """解锁后: 写回该 specimen 所属工作区 db + 记审计。"""

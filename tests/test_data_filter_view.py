@@ -127,3 +127,27 @@ def test_persist_edit_writes_to_db(qtbot, qapp, tmp_path) -> None:
     val = conn.execute("SELECT photographer FROM specimens WHERE uid='u1'").fetchone()[0]
     conn.close()
     assert val == "李四"
+
+
+def test_find_specimen_photo_matches_uid_prefix(qtbot, qapp, tmp_path) -> None:
+    """选中编号 → results 下 uid 前缀匹配的首个 .tif。"""
+    ws = tmp_path / "断面a"
+    (ws / "results").mkdir(parents=True)
+    uid = "浙江-三门湾-B2-1-R95E-260621"
+    (ws / "results" / f"{uid}-001.tif").write_bytes(b"")
+    (ws / "results" / f"{uid}-002.tif").write_bytes(b"")
+    (ws / "results" / "其他-xxx-001.tif").write_bytes(b"")
+    ctx = _Ctx()
+    v = DataFilterView(ctx)
+    qtbot.addWidget(v)
+    path = v._find_specimen_photo(uid, str(ws))
+    assert path is not None
+    assert path.endswith(f"{uid}-001.tif"), "应取排序首个 uid 前缀 tif"
+    # 无成果 → None
+    assert v._find_specimen_photo("不存在-uid", str(ws)) is None
+    # freeform 兜底
+    ws2 = tmp_path / "断面b"
+    (ws2 / "results" / "freeform").mkdir(parents=True)
+    (ws2 / "results" / "freeform" / f"{uid}-005.tif").write_bytes(b"")
+    path2 = v._find_specimen_photo(uid, str(ws2))
+    assert path2 is not None and path2.endswith("-005.tif")
