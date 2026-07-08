@@ -596,100 +596,25 @@ def test_show_all_projects_clears_root(qtbot, tmp_path, ctx) -> None:
     assert any("ws1" in n for n in names) and any("ws2" in n for n in names), "flat 该显全部"
 
 
-def test_select_all_filter_shows_every_workspace_summary(qtbot, tmp_path, ctx):
-    """点「全部」filter → 全选所有可见工作区 → 多选汇总(中间编号网格显全部照片/编号).
+def test_select_all_filter_pure_nav(qtbot, tmp_path, ctx):
+    """A 重构: 项目树纯导航. 「全部」filter 只切列表显隐 + 单选详情, 不再汇总.
 
-    用户需求: 点「全部」应显示全部信息(照片/编号), 不是只切列表显隐.
+    多选汇总 / 编号网格 / 字段筛选 已迁至「数据筛选」页 (DataFilterView, 自有测试).
     """
     root = tmp_path / "survey"
-    # 2 个工作区(各1张可解析 7 段 tif) + 1 个空文件夹(非工作区, 不应被选)
     for n in ("断面a", "断面b", "空文件夹"):
         (root / n).mkdir(parents=True)
     _make_workspace(root / "断面a")
     _make_workspace(root / "断面b")
-    # get_project_results 只按文件名 + is_file 归组, 不读内容 → 造空 .tif 即可
-    for rel in ("断面a/results/AA-BB-C1-001-1-T95E-20260101.tif",
-                "断面b/results/AA-BB-C2-002-1-T95E-20260101.tif"):
-        p = root / rel
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_bytes(b"")
     ctx.settings.project_tree_root = str(root)
     view = ProjectTreeView(ctx)
     qtbot.addWidget(view)
     view.on_activate()
-
-    # 先切到「工作区」filter(单选详情), 再点回「全部」→ 应回到全选汇总
+    # 切来切去不应崩; A 后无汇总, 单选详情
     view._set_kind_filter("workspace")
-    assert view._right_stack.currentIndex() == 0, "工作区 filter = 单选详情(page0)"
     view._set_kind_filter("all")
-
-    sel = view._tree.selectedItems()
-    kinds = [it.data(0, _KIND_ROLE) for it in sel]
-    assert len(sel) >= 2, "全部应全选 ≥2 个工作区"
-    assert all(k == "workspace" for k in kinds), "只选工作区, 跳过 folder/candidate"
-    assert view._right_stack.currentIndex() == 2, "全部 → 右栏切物种名录汇总页"
-    assert len(view._uid_grid._sections) >= 2, "汇总两个工作区的编号组"
-
-
-def _make_specimen_ws(p, uid, storage, photographer, province):
-    """建含 1 行 specimen 的工作区 (specimens 表最小列)."""
-    (p / "_data").mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(p / "_data" / "project.db"))
-    conn.execute(
-        "CREATE TABLE specimens (uid TEXT, storage TEXT, photographer TEXT, province TEXT)"
-    )
-    conn.execute(
-        "INSERT INTO specimens VALUES (?,?,?,?)", (uid, storage, photographer, province)
-    )
-    conn.commit()
-    conn.close()
-
-
-def _touch_tif(p):
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_bytes(b"")
-
-
-def test_summary_filter_rna_shrinks_grid(qtbot, tmp_path, ctx):
-    """多选汇总后勾「已取RNA」→ 编号网格只剩 RNA 编号 (用户需求: 预览时筛 RNA)."""
-    root = tmp_path / "survey"
-    # 断面a = RNA(R95E), 断面b = 非RNA(T95E)
-    _make_specimen_ws(root / "断面a", "AA-BB-C1-001-R95E-20260101", "R95E", "张三", "浙江")
-    _make_specimen_ws(root / "断面b", "AA-BB-C2-002-T95E-20260101", "T95E", "李四", "福建")
-    # 成果 tif (文件名 7 段含 uid+seq+storage+date; get_project_results 据此分组)
-    _touch_tif(root / "断面a" / "results" / "AA-BB-C1-001-1-R95E-20260101.tif")
-    _touch_tif(root / "断面b" / "results" / "AA-BB-C2-002-1-T95E-20260101.tif")
-    ctx.settings.project_tree_root = str(root)
-    view = ProjectTreeView(ctx)
-    qtbot.addWidget(view)
-    view.on_activate()
-    view._set_kind_filter("all")  # 全选 → 汇总
-    assert len(view._uid_grid._sections) == 2, "全部 = 2 个编号"
-
-    view._chk_rna.setChecked(True)  # 勾 RNA → 触发 _apply_summary_filter
-    assert len(view._uid_grid._sections) == 1, "RNA = 只剩 1 个编号(R95E 那个)"
-
-    view._chk_rna.setChecked(False)  # 取消 → 回到全部
-    assert len(view._uid_grid._sections) == 2, "取消 RNA = 回到 2 个编号"
-
-
-def test_summary_filter_photographer(qtbot, tmp_path, ctx):
-    """拍摄人下拉筛 → 只显该拍摄人的编号."""
-    root = tmp_path / "survey"
-    _make_specimen_ws(root / "断面a", "AA-BB-C1-001-R95E-20260101", "R95E", "张三", "浙江")
-    _make_specimen_ws(root / "断面b", "AA-BB-C2-002-T95E-20260101", "T95E", "李四", "福建")
-    _touch_tif(root / "断面a" / "results" / "AA-BB-C1-001-1-R95E-20260101.tif")
-    _touch_tif(root / "断面b" / "results" / "AA-BB-C2-002-1-T95E-20260101.tif")
-    ctx.settings.project_tree_root = str(root)
-    view = ProjectTreeView(ctx)
-    qtbot.addWidget(view)
-    view.on_activate()
+    view._set_kind_filter("region" if "region" in view._kind_filter_buttons else "all")
     view._set_kind_filter("all")
-    assert len(view._uid_grid._sections) == 2
-
-    # 选「张三」(index 1 = 全部之后的第一个值)
-    idx = view._cmb_photographer.findData("张三")
-    assert idx >= 0
-    view._cmb_photographer.setCurrentIndex(idx)
-    assert len(view._uid_grid._sections) == 1, "张三 = 只剩断面a 的 1 个编号"
+    assert view._tree.topLevelItemCount() >= 1, "树仍在"
+    assert not hasattr(view, "_right_stack"), "A 重构后项目树无 _right_stack"
 

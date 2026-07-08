@@ -394,8 +394,10 @@ class ProjectTreeView(BaseView):
         dl.addLayout(tool_row)
         dl.addStretch()
         detail.setMinimumWidth(560)
-        # split.addWidget(detail)            # §7 旧:右栏直接挂 detail 单栏;新:detail 成为右栏 stack 的 page0
-        # split.setSizes([420, 720])         # §7 旧:两栏尺寸;新:三栏
+        # A 重构(拆页): 项目树回纯导航(树 + 单选详情 2 栏).
+        # 多选汇总 / 字段筛选 / 物种名录 已迁至独立「数据筛选」页 (DataFilterView).
+        split.addWidget(detail)
+        split.setSizes([420, 720])
 
         # ── T5 中间预览栏 (多选断面 → UidGroupedGrid 合并 groups;单选时隐藏) ──
         self._grid_panel = QFrame()
@@ -441,22 +443,24 @@ class ProjectTreeView(BaseView):
         self._grid_panel.setMinimumWidth(360)
         self._grid_panel.setVisible(False)   # 单选默认隐藏;多选时显示
 
-        # ── T5 右栏 QStackedWidget 三态 (spec §2):page0 单张详情 / page1 编号列表 / page2 物种名录 ──
-        from app.widgets.survey_summary_panel import SurveySummaryPanel
-        self._right_stack = QStackedWidget()
-        self._right_stack.addWidget(detail)                       # page0: 现有 detail (单选,现状行为不变)
-        uid_list_page = QLabel("编号列表(占位)")                   # page1: 编号列表占位 (本期简单)
-        uid_list_page.setObjectName("EmptyState")
-        uid_list_page.setWordWrap(True)
-        self._right_stack.addWidget(uid_list_page)
-        self._survey_panel = SurveySummaryPanel(ctx=self.ctx, parent=self)  # page2: 物种名录
-        self._right_stack.addWidget(self._survey_panel)
-        self._right_stack.setCurrentIndex(0)
-        self._right_stack.setMinimumWidth(420)
-
-        split.addWidget(self._grid_panel)
-        split.addWidget(self._right_stack)
-        split.setSizes([360, 420, 560])
+        # ── §7 A重构移除: T5 右栏 3 态 stack + split 挂 grid/right ──
+        # 项目树回纯导航, 汇总/名录迁至 DataFilterView. 旧码见 git e5eb421.
+        # _grid_panel / _filter_bar / _uid_grid 仍构建(上方), 不挂 split → 不显示.
+        # 恢复: 取消本块注释 + L397 改回 detail 入 stack + _on_tree_selection_changed 多选分支.
+        # from app.widgets.survey_summary_panel import SurveySummaryPanel
+        # self._right_stack = QStackedWidget()
+        # self._right_stack.addWidget(detail)
+        # uid_list_page = QLabel("编号列表(占位)")
+        # uid_list_page.setObjectName("EmptyState")
+        # uid_list_page.setWordWrap(True)
+        # self._right_stack.addWidget(uid_list_page)
+        # self._survey_panel = SurveySummaryPanel(ctx=self.ctx, parent=self)
+        # self._right_stack.addWidget(self._survey_panel)
+        # self._right_stack.setCurrentIndex(0)
+        # self._right_stack.setMinimumWidth(420)
+        # split.addWidget(self._grid_panel)
+        # split.addWidget(self._right_stack)
+        # split.setSizes([360, 420, 560])
 
         root.addWidget(split, 1)
 
@@ -745,11 +749,10 @@ class ProjectTreeView(BaseView):
         for key, button in self._kind_filter_buttons.items():
             button.setChecked(key == kind)
         self._filter_tree(self._search.text())
-        # 「全部」: 一键全选所有可见工作区 → 多选汇总显示全部照片/编号.
-        # 用户需求: 点「全部」应显示全部信息(照片+编号), 不是只切列表显隐.
-        # 其他 filter (工作区/区域/待导入) 维持 _filter_tree 的单选详情行为不变.
-        if kind == "all":
-            self._select_all_visible_workspaces()
+        # §7 A重构移除: 「全部」不再全选汇总(项目树纯导航, 汇总迁至数据筛选页).
+        # 旧: 点「全部」→ _select_all_visible_workspaces → 多选汇总全部照片/编号.
+        # if kind == "all":
+        #     self._select_all_visible_workspaces()
 
     def _select_all_visible_workspaces(self) -> None:
         """全选所有可见工作区节点 → 触发多选汇总(中间编号网格 + 右栏物种名录).
@@ -1183,18 +1186,16 @@ class ProjectTreeView(BaseView):
         self._enter_selected()
 
     def _on_tree_selection_changed(self) -> None:
-        """selectionChanged 派发器:按选中节点数切右栏 page + 填中间网格.
+        """selectionChanged 派发器 (A 重构: 项目树纯导航, 只单选详情).
 
-        - 选 0 / 1 个 → 现有单选/空选路径 (现状行为不变):右栏 page0 单张详情,
-          中间网格隐藏.
-        - 选 ≥2 个 → 多选汇总路径:右栏 page2 物种名录,
-          中间 UidGroupedGrid 显示合并后的按编号 groups.
+        多选汇总 / 编号网格 / 物种名录 已迁至「数据筛选」页 (DataFilterView).
         """
-        items = self._tree.selectedItems()
-        if len(items) >= 2:
-            self._show_multi_selection_summary(items)
-            return
-        # 0 或 1 个 → 现状单选路径
+        # §7 A重构移除: 多选汇总分支 (旧: 选≥2 → _show_multi_selection_summary)
+        # items = self._tree.selectedItems()
+        # if len(items) >= 2:
+        #     self._show_multi_selection_summary(items)
+        #     return
+        # 0 或 1 个 → 单选详情 (现状行为)
         if getattr(self, "_grid_panel", None) is not None:
             self._grid_panel.setVisible(False)
         if getattr(self, "_uid_grid", None) is not None:
