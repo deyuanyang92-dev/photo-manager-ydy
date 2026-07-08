@@ -216,9 +216,14 @@ def load_setting(db: sqlite3.Connection, key: str, default: dict) -> dict:
 
 def load_setting_if_present(db: sqlite3.Connection, key: str) -> Optional[dict]:
     """Return parsed JSON for *key*, or None when the row is absent/invalid."""
-    row = db.execute(
-        "SELECT value_json FROM project_settings WHERE setting_key=?", (key,)
-    ).fetchone()
+    try:
+        # row = db.execute("SELECT value_json FROM project_settings WHERE setting_key=?", (key,)).fetchone()  # §7 旧: legacy db 无 project_settings 表 → OperationalError 崩整个 app
+        row = db.execute(
+            "SELECT value_json FROM project_settings WHERE setting_key=?", (key,)
+        ).fetchone()
+    except sqlite3.OperationalError:
+        # legacy/早期 db(扫描识别的旧工作区)可能没有 project_settings 表 → 视作无此 setting, 不崩
+        return None
     if not row:
         return None
     try:
