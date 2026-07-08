@@ -15,6 +15,7 @@ from app.utils.path_utils import localize_path
 
 if TYPE_CHECKING:
     from app.services.collab_service import CollabService
+    from app.services.remote_collab_service import RemoteCollabService
 
 
 class AppContext:
@@ -35,6 +36,9 @@ class AppContext:
         QApplication is created (FastAPI / uvicorn require a running event
         loop in a QThread, so service is started *after* QApp exists).
         May be None if the service fails to start (no uvicorn / no network).
+    remote_collab_service:
+        Optional account/relay backed remote collaboration client.  This is
+        distinct from the LAN P2P collaboration service.
     """
 
     def __init__(self) -> None:
@@ -43,6 +47,10 @@ class AppContext:
         self._project_root: Optional[str] = None
         self.last_db_error: Optional[Exception] = None
         self.collab_service: Optional["CollabService"] = None
+        self.remote_collab_service: Optional["RemoteCollabService"] = None
+        # 数据筛选页编辑锁(会话登录, spec 2026-07-08): 默认只读, unlock 后本会话可编辑。
+        self.edit_unlocked: bool = False
+        self.edit_actor: str = ""           # 当前解锁操作员(审计 / 修改人姓名)
 
     # ── Project dir ───────────────────────────────────────────────────
 

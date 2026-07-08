@@ -73,6 +73,7 @@ ALL_VIEW_SPECS: tuple[LazyViewSpec, ...] = (
         "app.views.collection_records_view",
         "CollectionRecordsView",
     ),
+    LazyViewSpec("data_filter", "数据筛选", "app.views.data_filter_view", "DataFilterView"),
     LazyViewSpec("collection_map", "采集地图", "app.views.collection_map_view", "CollectionMapView"),
     LazyViewSpec("settings", "配置", "app.views.settings_view", "SettingsView"),
 )

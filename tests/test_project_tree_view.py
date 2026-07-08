@@ -467,3 +467,79 @@ def test_enter_node_sets_ctx_and_root(qtbot, tmp_path, ctx, monkeypatch):
     import json
     recorded = json.loads(recent_json.read_text(encoding="utf-8"))["projects"]
     assert any(p.get("directory") == str(leaf.resolve()) for p in recorded)
+
+
+def test_double_click_multi_selection_does_not_enter(qtbot, tmp_path, ctx, monkeypatch):
+    """多选(≥2)态下双击保持多断面汇总预览, 不误跳拍照界面 (spec §2, 用户投诉)."""
+    root = tmp_path / "survey"
+    for n in ("断面a", "断面b", "断面c"):
+        (root / n).mkdir(parents=True)
+    _make_workspace(root / "断面a")
+    _make_workspace(root / "断面b")
+    ctx.settings.project_tree_root = str(root)
+
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    view.on_activate()
+
+    top = view._tree.topLevelItem(0)
+    top.child(0).setSelected(True)
+    top.child(1).setSelected(True)
+    assert len(view._tree.selectedItems()) >= 2, "前置: 应已多选 2 节点"
+
+    entered = []
+    monkeypatch.setattr(view, "_enter_selected", lambda: entered.append(1))
+    view._on_tree_double_clicked()
+    assert not entered, "多选≥2 时双击不应进入拍照界面"
+
+
+def test_double_click_single_selection_enters(qtbot, tmp_path, ctx, monkeypatch):
+    """单选态下双击仍正常进入工作区 (回归保护)."""
+    root = tmp_path / "survey"
+    (root / "断面a").mkdir(parents=True)
+    _make_workspace(root / "断面a")
+    ctx.settings.project_tree_root = str(root)
+
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    view.on_activate()
+
+    view._tree.clearSelection()
+    top = view._tree.topLevelItem(0)
+    top.child(0).setSelected(True)
+    assert len(view._tree.selectedItems()) == 1
+
+    entered = []
+    monkeypatch.setattr(view, "_enter_selected", lambda: entered.append(1))
+    view._on_tree_double_clicked()
+    assert entered, "单选双击应进入工作区"
+
+
+def test_scan_disk_registers_discovered_workspaces(qtbot, tmp_path, ctx, monkeypatch):
+    """扫描磁盘: 发现的旧工作区登记到 user_projects.json (用户核心需求)."""
+    import json as _json
+    from app.services import project_service as ps
+    from app.utils import ui as _ui
+
+    scan_root = tmp_path / "disk"
+    _make_workspace(scan_root / "old1")
+    _make_workspace(scan_root / "old2")
+    # 非工作区目录应被忽略
+    (scan_root / "not_a_workspace").mkdir(parents=True)
+
+    jp = tmp_path / "user_projects.json"
+    jp.write_text(_json.dumps({"version": 1, "projects": []}), encoding="utf-8")
+    monkeypatch.setattr(ps, "default_user_projects_json_path", lambda: str(jp))
+    monkeypatch.setattr(_ui, "get_existing_directory", lambda *a, **k: str(scan_root))
+    monkeypatch.setattr(_ui, "info", lambda *a, **k: None)
+
+    ctx.settings.project_tree_root = None
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    view._scan_disk()
+
+    projects = ps.list_projects(str(jp))
+    dirs = {p.get("directory") for p in projects}
+    assert any("old1" in (d or "") for d in dirs), "old1 工作区应被登记"
+    assert any("old2" in (d or "") for d in dirs), "old2 工作区应被登记"
+    assert not any("not_a_workspace" in (d or "") for d in dirs), "非工作区目录不应登记"

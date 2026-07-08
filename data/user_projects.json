@@ -2,12 +2,6 @@
   "version": 1,
   "projects": [
     {
-      "name": "项目X",
-      "directory": "/tmp/pytest-of-root/pytest-43/test_add_project_persists_sele0/proj_x",
-      "dir": "/tmp/pytest-of-root/pytest-43/test_add_project_persists_sele0/proj_x",
-      "id": "f975a544-05a0-4033-925f-a69c6af14d14"
-    },
-    {
       "id": "6728e4d4-09bb-4860-a944-adf9cab45e69",
       "name": "ceshi7",
       "directory": "/mnt/n/claude/ceshi7",
@@ -44,16 +38,16 @@
       "resultsSubdir": "results"
     },
     {
-      "id": "250a7f82-140d-400a-8b6b-6803b1989976",
+      "id": "79d937be-d1a8-401a-80d6-b3efd80775f0",
       "name": "proj_x",
-      "directory": "/tmp/pytest-of-root/pytest-2/test_add_project_persists_sele0/proj_x",
-      "dir": "/tmp/pytest-of-root/pytest-2/test_add_project_persists_sele0/proj_x"
+      "directory": "/mnt/c/Users/123/AppData/Local/Temp/pytest-of-123/pytest-510/test_add_project_persists_sele0/proj_x",
+      "dir": "/mnt/c/Users/123/AppData/Local/Temp/pytest-of-123/pytest-510/test_add_project_persists_sele0/proj_x"
     },
     {
-      "id": "2ad2731d-79ff-4b03-9d5a-770aa802406e",
+      "id": "3e76d32f-254e-46ce-aa2e-da3a251079de",
       "name": "proj_x",
-      "directory": "/tmp/pytest-of-root/pytest-4/test_add_project_persists_sele0/proj_x",
-      "dir": "/tmp/pytest-of-root/pytest-4/test_add_project_persists_sele0/proj_x"
+      "directory": "/mnt/c/Users/123/AppData/Local/Temp/pytest-of-123/pytest-602/test_add_project_persists_sele0/proj_x",
+      "dir": "/mnt/c/Users/123/AppData/Local/Temp/pytest-of-123/pytest-602/test_add_project_persists_sele0/proj_x"
     }
   ]
 }

@@ -25,6 +25,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QMenu,
     QPushButton,
+    QProgressDialog,
     QGridLayout,
     QSplitter,
     QStackedWidget,
@@ -111,6 +112,16 @@ class ProjectTreeView(BaseView):
                               color=icons.TONE_MUTED, size=15)
         self._btn_pick.clicked.connect(self._pick_root)
         bar.addWidget(self._btn_pick)
+        # 扫描磁盘: 指定盘/目录深扫, 把发现的工作区(含旧项目)登记到项目列表 (用户核心需求).
+        self._btn_scan = QPushButton("扫描磁盘…")
+        self._btn_scan.setObjectName("Outline")
+        self._btn_scan.setToolTip("选择磁盘或目录，深扫其中所有工作区（含旧项目），登记到项目列表")
+        self._btn_scan.setFixedHeight(34)
+        self._btn_scan.setCursor(Qt.CursorShape.PointingHandCursor)
+        icons.set_button_icon(self._btn_scan, "mdi6.database-search-outline",
+                              color=icons.TONE_MUTED, size=15)
+        self._btn_scan.clicked.connect(self._scan_disk)
+        bar.addWidget(self._btn_scan)
         self._btn_newsub = QPushButton("新建断面/子节点")
         self._btn_newsub.setObjectName("Outline")
         self._btn_newsub.setToolTip("在当前选中文件夹下新建断面、站位或任意子节点")
@@ -191,7 +202,10 @@ class ProjectTreeView(BaseView):
         self._tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         # self._tree.itemSelectionChanged.connect(self._update_detail_panel_for_selected_project)  # §7 旧单选槽,保留;多选改由 _on_tree_selection_changed 派发
         self._tree.itemSelectionChanged.connect(self._on_tree_selection_changed)
-        self._tree.itemDoubleClicked.connect(lambda *_: self._enter_selected())
+        # §7 旧: 双击直接 _enter_selected, 多选态下误跳拍照界面(打断多断面预览).
+        # self._tree.itemDoubleClicked.connect(lambda *_: self._enter_selected())
+        # 新: _on_tree_double_clicked 在 ≥2 选中时保持预览, 不进入.
+        self._tree.itemDoubleClicked.connect(self._on_tree_double_clicked)
         self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._tree.customContextMenuRequested.connect(self._show_tree_context_menu)
         tl.addWidget(self._tree, 1)
@@ -1077,6 +1091,17 @@ class ProjectTreeView(BaseView):
         self._render_media_preview(path)
 
     # ── T5 survey-summary: 多选派发 + 三栏切换 (spec §2) ───────────────────────
+    def _on_tree_double_clicked(self, *_args) -> None:
+        """双击进入工作区; 多选(≥2)态下保持多断面汇总预览, 不进拍照 (spec §2).
+
+        §7 旧实现 (已注释保留在 _setup_ui L194):
+            self._tree.itemDoubleClicked.connect(lambda *_: self._enter_selected())
+        多选预览时双击会误跳拍照界面. 新实现: ≥2 选中 → 维持预览.
+        """
+        if len(self._tree.selectedItems()) >= 2:
+            return
+        self._enter_selected()
+
     def _on_tree_selection_changed(self) -> None:
         """selectionChanged 派发器:按选中节点数切右栏 page + 填中间网格.
 
@@ -1491,6 +1516,55 @@ class ProjectTreeView(BaseView):
         self._root = str(Path(path).resolve())
         pts.clear_project_tree_cache(self._root)
         self.ctx.settings.project_tree_root = self._root
+        self._reload_project_tree()
+
+    def _scan_disk(self) -> None:
+        """扫描指定磁盘/目录, 把发现的工作区(含 legacy 候选)登记到项目列表.
+
+        用户核心需求: 旧项目目录不在 user_projects.json 时, 指定盘/目录深扫,
+        所有 is_workspace_candidate 的文件夹经 record_recent_workspace 去重登记 →
+        立刻出现在 flat list + 项目总览. 同步扫 + 模态进度框(大目录可能慢,
+        后续可改后台线程).
+        """
+        start = self._root or ""
+        path = ui.get_existing_directory(self, "选择要扫描的磁盘或目录", start)
+        if not path:
+            return
+        root = str(Path(path).resolve())
+        progress = QProgressDialog("正在扫描工作区…", "取消", 0, 0, self)
+        progress.setWindowTitle("扫描磁盘")
+        progress.setWindowModality(Qt.WindowModality.ApplicationModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+        QApplication.processEvents()
+        try:
+            candidates = pts.discover_workspace_candidates(root, max_depth=6)
+        except OSError:
+            candidates = []
+        progress.close()
+        if not candidates:
+            ui.info(self, "扫描完成", f"未在该目录发现工作区:\n{root}")
+            return
+        from app.services.project_service import (
+            default_user_projects_json_path,
+            list_projects,
+            record_recent_workspace,
+        )
+        jp = default_user_projects_json_path()
+        before = len(list_projects(jp))
+        for c in candidates:
+            try:
+                record_recent_workspace(jp, c["path"], root=root)
+            except Exception:
+                continue
+        added = len(list_projects(jp)) - before
+        ui.info(
+            self,
+            "扫描完成",
+            f"在「{Path(root).name}」下发现 {len(candidates)} 个工作区,\n"
+            f"新增 {added} 个到项目列表(已登记的自动去重)。",
+        )
+        pts.clear_project_tree_cache(root)
         self._reload_project_tree()
 
     def _new_region(self) -> None:
