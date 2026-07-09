@@ -1,7 +1,21 @@
-"""collab_offline_queue.py — Persistent queue for collab task updates sent while offline.
+"""collab_offline_queue.py — Persistent retry queue for collab STATUS pushes.
 
-When a collabUpdateTaskStatus call fails (network error), the update is saved here.
-A QTimer retries every 30 seconds.  On success the draft is removed.
+When a ``collabUpdateTaskStatus`` call fails (network error), the update is
+saved here.  A QTimer retries every 30 seconds.  On success the entry is removed.
+
+NOTE — two distinct "offline" mechanisms, do not confuse them:
+  * THIS module (``StatusRetryQueue``, historic name ``OfflineDraftQueue``):
+    retries a task *status* push that failed mid-flight (uid + status).
+    Persisted in QSettings; used by CollabView.
+  * ``CollabService._offline_drafts`` (``collab_drafts.json``): retries a task
+    *creation/claim* that never reached a peer (uid + assignee + device_id).
+    In-memory + on-disk; used by CollabService.create_task.
+
+They are intentionally separate: a status push and a claim create fail and
+recover under different conditions, and merging them would tangle the retry
+loops.  The historic class name ``OfflineDraftQueue`` collided with the
+claim-draft vocabulary, so the canonical name is now ``StatusRetryQueue``;
+``OfflineDraftQueue`` remains as a back-compat alias.
 """
 from __future__ import annotations
 import json
@@ -14,7 +28,9 @@ if TYPE_CHECKING:
     from app.services.collab_service import CollabService
 
 
-class OfflineDraftQueue:
+class StatusRetryQueue:
+    """Retry queue for failed task-status pushes (historic name OfflineDraftQueue)."""
+
     SETTINGS_KEY = "collab/offline_drafts"
 
     def __init__(self, settings: QSettings) -> None:
@@ -63,3 +79,8 @@ class OfflineDraftQueue:
 
     def clear(self) -> None:
         self._save_drafts_to_settings([])
+
+
+# §7 back-compat: historic name kept so existing imports (CollabView, tests)
+# keep working unchanged.  Canonical name is StatusRetryQueue.
+OfflineDraftQueue = StatusRetryQueue

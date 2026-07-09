@@ -1,4 +1,6 @@
-"""test_collab_offline_queue.py — Tests for OfflineDraftQueue.
+"""test_collab_offline_queue.py — Tests for StatusRetryQueue (offline status-push retry).
+
+Historic class name ``OfflineDraftQueue`` is kept as a back-compat alias.
 
 Coverage:
   test_mark_and_count
@@ -6,6 +8,7 @@ Coverage:
   test_retry_success_removes_draft
   test_retry_failure_keeps_draft
   test_clear_empties_queue
+  test_offline_draft_queue_alias_back_compat
 
 Run:
     QT_QPA_PLATFORM=offscreen pytest tests/test_collab_offline_queue.py -v
@@ -18,7 +21,7 @@ from unittest.mock import MagicMock
 import pytest
 from PyQt6.QtCore import QSettings
 
-from app.services.collab_offline_queue import OfflineDraftQueue
+from app.services.collab_offline_queue import OfflineDraftQueue, StatusRetryQueue
 
 
 @pytest.fixture()
@@ -29,7 +32,15 @@ def settings(tmp_path):
 
 @pytest.fixture()
 def queue(settings):
-    return OfflineDraftQueue(settings)
+    return StatusRetryQueue(settings)
+
+
+def test_offline_draft_queue_alias_back_compat(settings):
+    """Historic name must remain importable and construct the same queue."""
+    assert OfflineDraftQueue is StatusRetryQueue
+    legacy = OfflineDraftQueue(settings)
+    canonical = StatusRetryQueue(settings)
+    assert type(legacy) is type(canonical) is StatusRetryQueue
 
 
 class TestMarkAndCount:
