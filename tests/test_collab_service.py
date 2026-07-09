@@ -418,6 +418,30 @@ class TestCollabServiceOffline:
 
         assert spawned == [], "must not start a second cycle while one is in flight"
 
+    def test_on_peer_found_survives_concurrent_peer_lost(self):
+        """peer reference must be captured under the peers lock.
+
+        ``_on_peer_found`` used to read ``self._peers[key]`` *after* releasing
+        the lock; if a concurrent ``peer_lost`` (wired to peers_changed) pops
+        the key in between, that was a KeyError.  The peer object must be
+        captured inside the locked block.
+        """
+        from app.services.collab_service import PeerInfo
+        svc = self._make_service()
+        svc._fetch_peer_info = MagicMock()    # no real HTTP
+        svc._spawn = lambda fn: fn()          # run enrichment inline
+        ip, port = "10.0.0.7", 5050
+
+        # peers_changed slot simulates a concurrent peer_lost popping the key
+        # (direct pop — no re-emit, to avoid recursion through _on_peer_lost).
+        def _pop_on_change(*_a, **_kw):
+            with svc._peers_lock:
+                svc._peers.pop(f"{ip}:{port}", None)
+        svc.peers_changed.connect(_pop_on_change)
+
+        # Must not raise KeyError.
+        svc._on_peer_found(ip, port, "host7")
+
     def test_tasks_changed_signal_after_create(self):
         svc = self._make_service()
         received: list[int] = []

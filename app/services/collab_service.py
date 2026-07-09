@@ -925,14 +925,21 @@ class CollabService(QObject):
         if ip == _get_local_ip():
             return
         key = f"{ip}:{port}"
+        # Capture the peer reference INSIDE the lock: a concurrent peer_lost
+        # (or a peers_changed slot) can pop the key after we release the lock,
+        # and the old ``peer = self._peers[key]`` read below would KeyError.
         with self._peers_lock:
-            self._peers[key] = PeerInfo(ip=ip, port=port, hostname=hostname)
+            peer = self._peers[key] = PeerInfo(ip=ip, port=port, hostname=hostname)
         logger.info("collab: peer found %s (%s:%d)", hostname, ip, port)
         self.peers_changed.emit()
         self._log_activity("joined", actor=hostname, detail=f"{hostname} 加入了协作组")
         # Enrich with group_code / project_name from /api/node/info so the peer
         # can pass the group filter.  HTTP → do it off the main thread.
-        peer = self._peers[key]
+        # §7 keep-old: previously ``peer = self._peers[key]`` was read here,
+        # outside the lock — racy (KeyError if peer lost between).  ``peer`` is
+        # now captured under the lock above; this reference stays valid even if
+        # the key is later popped.
+        # peer = self._peers[key]
         self._spawn(lambda: (self._fetch_peer_info(peer), self.peers_changed.emit()))
 
     def _on_peer_lost(self, ip: str, port: int) -> None:
