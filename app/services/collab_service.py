@@ -75,6 +75,7 @@ from app.services.collab_types import (  # noqa: F401
     _get_local_ip,
     _missing_deps,
     _now_iso,
+    get_httpx,
     is_valid_transition,
 )
 from app.services.collab_store import TaskStore  # noqa: F401
@@ -761,7 +762,7 @@ class CollabService(QObject):
                     if self.isInterruptionRequested():
                         return None
                     try:
-                        import httpx
+                        httpx = get_httpx()
                         r = httpx.get(
                             f"http://{ip}:{self._port}/api/node/health",
                             timeout=1.0,
@@ -817,7 +818,7 @@ class CollabService(QObject):
     def _probe_peer(self, peer: PeerInfo) -> None:
         """Measure reachability, clock skew and reachback for one peer."""
         try:
-            import httpx
+            httpx = get_httpx()
             r = httpx.get(f"{peer.base_url}/api/node/info", timeout=3.0)
             if r.status_code == 200:
                 peer.reachable = True
@@ -878,9 +879,9 @@ class CollabService(QObject):
         """
         hosts = hosts if hosts is not None else self._local_subnet_hosts()
         ports = ports if ports is not None else list(self.SCAN_PORTS)
-        try:
-            import httpx
-        except ImportError:
+        # §7 keep-old: was ``try: import httpx / except ImportError: return []``
+        httpx = get_httpx()
+        if httpx is None:
             return []
 
         local_ip = _get_local_ip()
@@ -982,7 +983,7 @@ class CollabService(QObject):
     def _fetch_peer_info(self, peer: PeerInfo) -> None:
         """Try to enrich PeerInfo with hostname/projectName from /api/node/info."""
         try:
-            import httpx
+            httpx = get_httpx()
             resp = httpx.get(f"{peer.base_url}/api/node/info", timeout=3.0)
             if resp.status_code == 200:
                 data = resp.json()
@@ -1078,7 +1079,7 @@ class CollabService(QObject):
         if not self._task_sync_allowed(peer):
             return 0, []
         try:
-            import httpx
+            httpx = get_httpx()
             t0 = time.monotonic()
             resp = httpx.get(
                 f"{peer.base_url}/api/collab/tasks",
@@ -1214,7 +1215,7 @@ class CollabService(QObject):
     def _remote_release(self, peer: PeerInfo, uid: str) -> None:
         """Ask a peer to release a UID claim (best-effort compensation)."""
         try:
-            import httpx
+            httpx = get_httpx()
             httpx.post(
                 f"{peer.base_url}/api/collab/tasks/release",
                 json={"uid": uid, "groupCode": self._group_code},
@@ -1241,7 +1242,7 @@ class CollabService(QObject):
         Network failure is treated as peer unavailable (``ok=True``, ``created=False``).
         """
         try:
-            import httpx
+            httpx = get_httpx()
             resp = httpx.post(
                 f"{peer.base_url}/api/collab/tasks/create",
                 json={
@@ -1447,9 +1448,9 @@ class CollabService(QObject):
             return
 
         def _send() -> None:
-            try:
-                import httpx
-            except ImportError:
+            # §7 keep-old: was ``try: import httpx / except ImportError: return``
+            httpx = get_httpx()
+            if httpx is None:
                 return
             payload = {
                 "specimens": specs,
@@ -1477,7 +1478,7 @@ class CollabService(QObject):
         if not self._data_sync_allowed(peer):
             return 0
         try:
-            import httpx
+            httpx = get_httpx()
             resp = httpx.get(
                 f"{peer.base_url}/api/collab/specimens",
                 params={
@@ -1517,7 +1518,7 @@ class CollabService(QObject):
         is asynchronous — listen for ``pairing_accepted`` signal.
         """
         try:
-            import httpx
+            httpx = get_httpx()
             resp = httpx.post(
                 f"http://{peer_ip}:{peer_port}/api/collab/pairing/request",
                 json={
@@ -1545,7 +1546,7 @@ class CollabService(QObject):
 
         # Notify the peer that we accepted
         try:
-            import httpx
+            httpx = get_httpx()
             httpx.post(
                 f"http://{peer_ip}:{peer_port}/api/collab/pairing/accept",
                 json={
@@ -1602,9 +1603,9 @@ class CollabService(QObject):
         }
 
         def _send() -> None:
-            try:
-                import httpx
-            except ImportError:
+            # §7 keep-old: was ``try: import httpx / except ImportError: return``
+            httpx = get_httpx()
+            if httpx is None:
                 return
             for peer in peers:
                 try:
@@ -1672,9 +1673,9 @@ class CollabService(QObject):
         )
         payload = record.to_dict()
 
-        try:
-            import httpx
-        except ImportError:
+        # §7 keep-old: was ``try: import httpx / except ImportError: return``
+        httpx = get_httpx()
+        if httpx is None:
             return
 
         for peer in peers_snapshot:
@@ -1821,8 +1822,9 @@ class CollabService(QObject):
             peers_snapshot = [p for p in self._peers.values() if self._task_sync_allowed(p)]
 
         if peers_snapshot:
-            try:
-                import httpx
+            # §7 keep-old: was ``try: import httpx / ...<loop>... / except ImportError: pass``
+            httpx = get_httpx()
+            if httpx is not None:
                 for peer in peers_snapshot:
                     try:
                         httpx.post(
@@ -1832,8 +1834,6 @@ class CollabService(QObject):
                         )
                     except Exception:  # noqa: BLE001
                         pass
-            except ImportError:
-                pass
 
         self.tasks_changed.emit()
         self._log_activity("released", uid, detail=f"释放了编号 {uid}")

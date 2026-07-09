@@ -7,6 +7,7 @@ here, so external imports (views, tests) keep working unchanged.
 from __future__ import annotations
 
 import socket
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -30,6 +31,38 @@ def _get_local_ip() -> str:
         return ip
     except OSError:
         return "127.0.0.1"
+
+
+# ── Optional-dep lazy accessor ──────────────────────────────────────────────────
+# httpx is the single optional collab network dependency.  Importing it once
+# here (cached, thread-safe) replaces ~17 inline ``import httpx`` + ImportError
+# guards that were scattered across the collab subsystem.  Call sites do
+# ``httpx = get_httpx()`` and treat ``None`` as "not installed → degrade".
+_HTTPX_MODULE = None
+_HTTPX_PROBED = False
+_HTTPX_LOCK = threading.Lock()
+
+
+def get_httpx():
+    """Return the httpx module, or None if it is not installed.
+
+    Cached after the first call.  CPython's import is already thread-safe and
+    idempotent; the lock only avoids redundant re-import probes.  Returning the
+    real module object means ``unittest.mock.patch("httpx.get")`` etc. still
+    patch the same object the call sites use.
+    """
+    global _HTTPX_MODULE, _HTTPX_PROBED
+    if _HTTPX_PROBED:
+        return _HTTPX_MODULE
+    with _HTTPX_LOCK:
+        if not _HTTPX_PROBED:
+            try:
+                import httpx as _h  # noqa: PLC0415
+                _HTTPX_MODULE = _h
+            except ImportError:
+                _HTTPX_MODULE = None
+            _HTTPX_PROBED = True
+    return _HTTPX_MODULE
 
 
 # ── Task state machine ────────────────────────────────────────────────────────

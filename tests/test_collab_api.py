@@ -12,6 +12,7 @@ from __future__ import annotations
 import pytest
 
 from app.services.collab_api import _is_private_lan_host
+from app.services.collab_types import get_httpx
 
 
 class TestIsPrivateLanHost:
@@ -39,3 +40,17 @@ class TestIsPrivateLanHost:
         assert _is_private_lan_host("not-an-ip") is False
         assert _is_private_lan_host("") is False
         assert _is_private_lan_host(None) is False  # type: ignore[arg-type]
+
+
+class TestGetHttpx:
+    """Shared lazy httpx accessor (replaces ~17 inline imports)."""
+
+    def test_returns_real_module_when_installed(self):
+        import httpx
+        assert get_httpx() is httpx
+
+    def test_cached_after_first_call(self):
+        import httpx
+        get_httpx()           # warm the cache
+        assert get_httpx() is httpx
+

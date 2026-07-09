@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Callable, Iterable, Optional
 
+from app.services.collab_types import get_httpx
 from app.services.project_paths import require_project_root
 
 
@@ -372,7 +373,7 @@ def _download_one(
     local_path.parent.mkdir(parents=True, exist_ok=True)
     part_path = local_path.with_name(f".{local_path.name}.{uuid.uuid4().hex}.part")
     try:
-        import httpx
+        httpx = get_httpx()
 
         timeout = httpx.Timeout(connect=10.0, read=120.0, write=30.0, pool=10.0)
         with httpx.stream(
@@ -419,7 +420,7 @@ def fetch_peer_manifest(
     uids: Optional[Iterable[str]] = None,
 ) -> list[FileManifestEntry]:
     try:
-        import httpx
+        httpx = get_httpx()
         params = {"groupCode": group_code, "projectId": project_id}
         uid_list = [str(u) for u in (uids or []) if str(u).strip()]
         if uid_list:

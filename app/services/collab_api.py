@@ -17,7 +17,7 @@ from typing import Any, Callable, Optional
 
 from app.models.activity_log import ActivityEntry, ActivityLog
 from app.services.collab_store import TaskStore
-from app.services.collab_types import TaskStatus
+from app.services.collab_types import TaskStatus, get_httpx
 
 logger = logging.getLogger(__name__)
 
@@ -161,7 +161,7 @@ def _build_fastapi_app(store: TaskStore, node_info_fn: Callable[[], dict],
             raise HTTPException(status_code=400, detail="ip and port required")
         reachable = False
         try:
-            import httpx
+            httpx = get_httpx()
             r = httpx.get(f"http://{ip}:{port}/api/node/health", timeout=3.0)
             reachable = r.status_code == 200
         except Exception:  # noqa: BLE001
