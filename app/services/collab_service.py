@@ -6,8 +6,10 @@ Architecture (confirmed by user 2026-06-02, oracle: collab.md § Desktop GUI):
     • CollabServerThread  — FastAPI + uvicorn embedded server (port 5050)
     • CollabDiscoveryThread — zeroconf mDNS registration + peer discovery
 
-  A QTimer (5 s) drives CollabSyncWorker which does HTTP pulls from known
-  peers using httpx (synchronous, runs in the same sync slot, cheap).
+  A QTimer (5 s) schedules a pull cycle.  The cycle runs OFF the Qt main
+  thread via ``_spawn`` → ``_run_sync_cycle`` (a short-lived daemon thread)
+  so a slow/dead peer cannot freeze the UI; a non-blocking ``_sync_lock``
+  skips a firing if the previous cycle is still in flight.
 
   Each peer exposes:
     GET  /api/node/info       → {hostname, projectName, projectId, lanIp, port}
