@@ -817,38 +817,36 @@ class CollabService(QObject):
 
     def _probe_peer(self, peer: PeerInfo) -> None:
         """Measure reachability, clock skew and reachback for one peer."""
-        try:
-            httpx = get_httpx()
-            r = httpx.get(f"{peer.base_url}/api/node/info", timeout=3.0)
-            if r.status_code == 200:
-                peer.reachable = True
-                data = r.json()
-                st = data.get("serverTime")
-                if isinstance(st, (int, float)):
-                    peer.clock_skew_ms = (time.time() - float(st)) * 1000.0
-                peer.project_name = data.get("projectName", peer.project_name)
-                peer.project_id = data.get("projectId", peer.project_id)
-                raw_shared = data.get("sharedProjects")
-                if isinstance(raw_shared, list):
-                    peer.shared_projects = raw_shared
-                if not peer.group_code:
-                    peer.group_code = data.get("groupCode", "")
-                if data.get("sessionName"):
-                    peer.session_name = data["sessionName"]
-                try:
-                    rb = httpx.post(
-                        f"{peer.base_url}/api/node/reachback",
-                        json={"ip": _get_local_ip(), "port": self._port},
-                        timeout=3.0,
-                    )
-                    if rb.status_code == 200:
-                        peer.reachback_ok = bool(rb.json().get("reachable"))
-                except Exception:  # noqa: BLE001
-                    peer.reachback_ok = None
-            else:
-                peer.reachable = False
-        except Exception:  # noqa: BLE001
+        # §7 keep-old: inlined httpx.get(/info)+status+reachable moved to _fetch_node_info
+        data = self._fetch_node_info(peer.base_url, 3.0)
+        if data is None:
             peer.reachable = False
+            return
+        peer.reachable = True
+        st = data.get("serverTime")
+        if isinstance(st, (int, float)):
+            peer.clock_skew_ms = (time.time() - float(st)) * 1000.0
+        peer.project_name = data.get("projectName", peer.project_name)
+        peer.project_id = data.get("projectId", peer.project_id)
+        raw_shared = data.get("sharedProjects")
+        if isinstance(raw_shared, list):
+            peer.shared_projects = raw_shared
+        if not peer.group_code:
+            peer.group_code = data.get("groupCode", "")
+        if data.get("sessionName"):
+            peer.session_name = data["sessionName"]
+        httpx = get_httpx()
+        if httpx is not None:
+            try:
+                rb = httpx.post(
+                    f"{peer.base_url}/api/node/reachback",
+                    json={"ip": _get_local_ip(), "port": self._port},
+                    timeout=3.0,
+                )
+                if rb.status_code == 200:
+                    peer.reachback_ok = bool(rb.json().get("reachable"))
+            except Exception:  # noqa: BLE001
+                peer.reachback_ok = None
 
     def run_probes(self) -> None:
         """Probe every known peer (background) then refresh diagnostics."""
@@ -889,22 +887,19 @@ class CollabService(QObject):
 
         def _probe(target: tuple[str, int]) -> Optional[PeerInfo]:
             host, port = target
-            try:
-                r = httpx.get(f"http://{host}:{port}/api/node/info", timeout=timeout)
-                if r.status_code != 200:
-                    return None
-                data = r.json()
-                return PeerInfo(
-                    ip=host, port=port,
-                    hostname=data.get("hostname", ""),
-                    group_code=data.get("groupCode", ""),
-                    session_name=data.get("sessionName", ""),
-                    project_name=data.get("projectName", ""),
-                    project_id=data.get("projectId", ""),
-                    manual=True,
-                )
-            except Exception:  # noqa: BLE001
+            # §7 keep-old: inlined httpx.get(/info)+status moved to _fetch_node_info
+            data = self._fetch_node_info(f"http://{host}:{port}", timeout)
+            if data is None:
                 return None
+            return PeerInfo(
+                ip=host, port=port,
+                hostname=data.get("hostname", ""),
+                group_code=data.get("groupCode", ""),
+                session_name=data.get("sessionName", ""),
+                project_name=data.get("projectName", ""),
+                project_id=data.get("projectId", ""),
+                manual=True,
+            )
 
         found: list[PeerInfo] = []
         import concurrent.futures
@@ -980,20 +975,35 @@ class CollabService(QObject):
         with self._peers_lock:
             return list(self._peers.values())
 
-    def _fetch_peer_info(self, peer: PeerInfo) -> None:
-        """Try to enrich PeerInfo with hostname/projectName from /api/node/info."""
+    def _fetch_node_info(self, base_url: str, timeout: float = 3.0) -> Optional[dict]:
+        """GET /api/node/info from a peer; return parsed body or None.
+
+        Shared atom for the places that probe a peer's identity
+        (_fetch_peer_info, _probe_peer, scan_lan).  Returns None on any failure
+        (network error, non-200, httpx missing) so callers treat "unreadable"
+        uniformly instead of each re-implementing the GET + status check.
+        """
+        httpx = get_httpx()
+        if httpx is None:
+            return None
         try:
-            httpx = get_httpx()
-            resp = httpx.get(f"{peer.base_url}/api/node/info", timeout=3.0)
+            resp = httpx.get(f"{base_url}/api/node/info", timeout=timeout)
             if resp.status_code == 200:
-                data = resp.json()
-                peer.hostname = data.get("hostname", peer.hostname)
-                peer.project_name = data.get("projectName", "")
-                peer.project_id = data.get("projectId", "")
-                peer.group_code = data.get("groupCode", "")
-                peer.last_seen = time.time()
+                return resp.json()
         except Exception:  # noqa: BLE001
             pass
+        return None
+
+    def _fetch_peer_info(self, peer: PeerInfo) -> None:
+        """Try to enrich PeerInfo with hostname/projectName from /api/node/info."""
+        # §7 keep-old: inlined httpx.get(/info)+status check moved to _fetch_node_info
+        data = self._fetch_node_info(peer.base_url, 3.0)
+        if data:
+            peer.hostname = data.get("hostname", peer.hostname)
+            peer.project_name = data.get("projectName", "")
+            peer.project_id = data.get("projectId", "")
+            peer.group_code = data.get("groupCode", "")
+            peer.last_seen = time.time()
 
     # ── Sync ──────────────────────────────────────────────────────────────
 
