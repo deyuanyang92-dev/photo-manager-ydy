@@ -22,6 +22,26 @@ from app.services.collab_types import TaskStatus
 logger = logging.getLogger(__name__)
 
 
+def _is_private_lan_host(host: str) -> bool:
+    """LAN trust boundary: loopback or RFC1918 / link-local address (module-level
+
+    so it is importable for tests).  Used to gate every endpoint that returns
+    project data (specimens, media manifest, file download, activity).
+    groupCode alone is not enough — a 6-char code over cleartext HTTP on
+    0.0.0.0 can be guessed/sniffed on a shared network; requiring the caller
+    to be inside the LAN closes that.
+    """
+    host = str(host or "")
+    if host in ("127.0.0.1", "::1"):
+        return True
+    import ipaddress
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return addr.is_private
+
+
 def _build_fastapi_app(store: TaskStore, node_info_fn: Callable[[], dict],
                        activity_log: Optional[ActivityLog] = None,
                        file_manifest_fn: Optional[Callable[[Optional[list[str]]], dict]] = None,
@@ -67,6 +87,12 @@ def _build_fastapi_app(store: TaskStore, node_info_fn: Callable[[], dict],
     def _require_group_project(group_code: str, project_id: str) -> None:
         _require_group(group_code)
         _require_project(project_id)
+
+    def _require_lan(request: "Request") -> None:
+        """Reject callers whose source IP is outside the LAN."""
+        client_host = request.client.host if request.client else ""
+        if not _is_private_lan_host(client_host):
+            raise HTTPException(status_code=403, detail="sender not in LAN")
 
     @app.get("/api/node/health")
     async def health() -> dict:
@@ -203,8 +229,9 @@ def _build_fastapi_app(store: TaskStore, node_info_fn: Callable[[], dict],
         return {"ok": True, "uid": uid, "kind": kind, "count": count}
 
     @app.get("/api/collab/files/manifest")
-    async def file_manifest(groupCode: str = "", projectId: str = "", uids: str = "") -> dict:
+    async def file_manifest(request: Request, groupCode: str = "", projectId: str = "", uids: str = "") -> dict:
         """Return project media manifest for selected UIDs or the whole project."""
+        _require_lan(request)
         _require_group_project(groupCode, projectId)
         if file_manifest_fn is None:
             return {"files": []}
@@ -215,8 +242,9 @@ def _build_fastapi_app(store: TaskStore, node_info_fn: Callable[[], dict],
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     @app.get("/api/collab/files/download")
-    async def download_file(path: str = "", groupCode: str = "", projectId: str = "") -> Any:
+    async def download_file(request: Request, path: str = "", groupCode: str = "", projectId: str = "") -> Any:
         """Download one project-relative media file."""
+        _require_lan(request)
         _require_group_project(groupCode, projectId)
         if file_path_fn is None:
             raise HTTPException(status_code=404, detail="file sync unavailable")
@@ -264,16 +292,19 @@ def _build_fastapi_app(store: TaskStore, node_info_fn: Callable[[], dict],
 
         Double guard: LAN IP check (defense-in-depth) + matching groupCode.
         """
+        # §7 keep-old: inline LAN check preserved for cross-reference; now
+        # shared via _require_lan (same boundary, used by file endpoints too).
+        # client_host = request.client.host if request.client else ""
+        # import ipaddress
+        # try:
+        #     addr = ipaddress.ip_address(client_host)
+        #     if not addr.is_private and client_host not in ("127.0.0.1", "::1"):
+        #         raise HTTPException(status_code=403, detail="sender not in LAN")
+        # except ValueError:
+        #     raise HTTPException(status_code=403, detail="invalid sender address")
+        _require_lan(request)
         if activity_log is None:
             return {"ok": True}
-        client_host = request.client.host if request.client else ""
-        import ipaddress
-        try:
-            addr = ipaddress.ip_address(client_host)
-            if not addr.is_private and client_host not in ("127.0.0.1", "::1"):
-                raise HTTPException(status_code=403, detail="sender not in LAN")
-        except ValueError:
-            raise HTTPException(status_code=403, detail="invalid sender address")
         body = await request.json()
         _require_group(body.get("groupCode", ""))
         entry = ActivityEntry.from_dict(body)
