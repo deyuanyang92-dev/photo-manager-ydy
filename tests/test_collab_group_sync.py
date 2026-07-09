@@ -424,6 +424,63 @@ class TestSyncPeerGroupFilter:
         assert svc._data_sync_allowed(peer) is False
 
 
+# ── LWW clock-skew guard (task store merge) ──────────────────────────────────
+
+class TestLwwClockSkewGuard:
+    """LWW relies on wall-clock updated_at.  When a peer's clock is measured
+    to skew beyond the trust threshold, a fast-clock peer would always "win"
+    and silently clobber genuinely-newer local edits.  The guard refuses to
+    overwrite a differing local status when the remote clock is untrusted."""
+
+    def test_untrusted_remote_clock_does_not_clobber_local_status(self):
+        store = TaskStore()
+        # Local task edited recently (local clock).
+        store.merge_from_peer([{"uid": "U1", "status": "shot_done",
+                                "updatedAt": "2026-07-09T10:00:00+00:00"}])
+        # Remote claims DONE with a LATER timestamp (peer clock is fast).
+        remote = [{"uid": "U1", "status": "done",
+                   "updatedAt": "2026-07-09T11:00:00+00:00"}]
+        guarded: list[dict] = []
+        changed = store.merge_from_peer(remote, overwrites_out=[],
+                                        trust_remote_clock=False,
+                                        skew_guarded_out=guarded)
+        assert changed == 0                                 # local NOT overwritten
+        assert store.get_task("U1").status.value == "shot_done"
+        assert any(g["uid"] == "U1" for g in guarded)
+
+    def test_trusted_remote_clock_keeps_legacy_lww(self):
+        """Default (trust_remote_clock=True) preserves legacy LWW overwrite."""
+        store = TaskStore()
+        store.merge_from_peer([{"uid": "U2", "status": "shot_done",
+                                "updatedAt": "2026-07-09T10:00:00+00:00"}])
+        remote = [{"uid": "U2", "status": "done",
+                   "updatedAt": "2026-07-09T11:00:00+00:00"}]
+        changed = store.merge_from_peer(remote)             # default trust
+        assert changed == 1
+        assert store.get_task("U2").status.value == "done"
+
+    def test_skewed_peer_does_not_overwrite_local_via_sync(self):
+        """End-to-end: a peer with measured large skew must not overwrite a
+        local task during the 5 s pull-sync."""
+        svc = CollabService()
+        svc.set_group_code("G1")
+        # Local newer task.
+        svc.store.merge_from_peer([{"uid": "U3", "status": "shot_done",
+                                    "updatedAt": "2026-07-09T10:00:00+00:00"}])
+        peer = PeerInfo(ip="1.2.3.4", port=5050, group_code="G1")
+        peer.clock_skew_ms = 60_000.0                        # 60 s skew → untrusted
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = [
+            {"uid": "U3", "status": "done",
+             "updatedAt": "2026-07-09T11:00:00+00:00"}      # later ts (fast clock)
+        ]
+        with patch("httpx.get", return_value=mock_resp):
+            changed = svc._sync_peer(peer)
+        assert changed == 0
+        assert svc.store.get_task("U3").status.value == "shot_done"
+
+
 # ── create_task: broadcast only to same-group peers ──────────────────────────
 
 class TestCreateTaskGroupBroadcast:

@@ -87,12 +87,23 @@ class TaskStore:
             return task
 
     def merge_from_peer(self, remote_tasks: list[dict],
-                        overwrites_out: list | None = None) -> int:
+                        overwrites_out: list | None = None, *,
+                        trust_remote_clock: bool = True,
+                        skew_guarded_out: list | None = None) -> int:
         """Merge peer task list; newer updated_at wins.  Returns changed count.
 
         If *overwrites_out* is supplied, dicts describing each case where a
         local task's status was silently replaced by a remote value are
         appended: ``{"uid": ..., "old_status": ..., "new_status": ...}``.
+
+        Clock-skew guard: LWW relies on wall-clock ``updated_at``.  When
+        *trust_remote_clock* is False (caller measured the peer's clock to skew
+        beyond the trust threshold), a remote record that is wall-clock-newer
+        is NOT allowed to overwrite a *differing* local status — the local
+        value is kept (conservative: local wins under untrusted ordering).
+        Each such skipped case is appended to *skew_guarded_out* (same dict
+        shape as *overwrites_out*).  Same-status refreshes are still applied
+        (harmless).  Default ``trust_remote_clock=True`` preserves legacy LWW.
         """
         changed = 0
         with self._lock:
@@ -102,19 +113,37 @@ class TaskStore:
                     continue
                 remote = TaskRecord.from_dict(rd)
                 local = self._tasks.get(uid)
-                if local is None or remote.updated_at > local.updated_at:
-                    if (
-                        overwrites_out is not None
-                        and local is not None
-                        and local.status != remote.status
-                    ):
-                        overwrites_out.append({
+                if local is None:
+                    self._tasks[uid] = remote
+                    changed += 1
+                    continue
+                if not (remote.updated_at > local.updated_at):
+                    continue                       # local same/newer — legacy skip
+                # Remote is wall-clock newer.  Under large measured clock skew
+                # that ordering is unreliable: refuse to clobber a differing
+                # local status; record and keep local.  (legacy path: the
+                # ``if local is None or remote.updated_at > local.updated_at``
+                # branch below used to overwrite unconditionally — kept as the
+                # trust_remote_clock=True behaviour.)
+                if (not trust_remote_clock and local.status != remote.status):
+                    if skew_guarded_out is not None:
+                        skew_guarded_out.append({
                             "uid": uid,
                             "old_status": local.status.value,
                             "new_status": remote.status.value,
                         })
-                    self._tasks[uid] = remote
-                    changed += 1
+                    continue
+                if (
+                    overwrites_out is not None
+                    and local.status != remote.status
+                ):
+                    overwrites_out.append({
+                        "uid": uid,
+                        "old_status": local.status.value,
+                        "new_status": remote.status.value,
+                    })
+                self._tasks[uid] = remote
+                changed += 1
         return changed
 
     def delete(self, uid: str) -> None:

@@ -1084,7 +1084,27 @@ class CollabService(QObject):
             if resp.status_code == 200:
                 remote_tasks: list[dict] = resp.json()
                 overwrites: list[dict] = []
-                changed = self.store.merge_from_peer(remote_tasks, overwrites_out=overwrites)
+                # Clock-skew guard: only trust the remote wall-clock ordering
+                # when the peer's clock hasn't been measured to skew beyond
+                # the threshold.  None = not yet probed → trust (legacy path).
+                skew = peer.clock_skew_ms
+                trust = skew is None or abs(skew) <= CLOCK_SKEW_THRESHOLD_MS
+                guarded: list[dict] = []
+                changed = self.store.merge_from_peer(
+                    remote_tasks,
+                    overwrites_out=overwrites,
+                    trust_remote_clock=trust,
+                    skew_guarded_out=guarded,
+                )
+                for g in guarded:
+                    self._log_activity(
+                        "conflict", g["uid"],
+                        detail=(
+                            f"时钟偏斜过大({int(skew or 0)}ms)，已忽略远端状态 "
+                            f"{g['new_status']}，保留本地 {g['old_status']}"
+                        ),
+                        severity="warn",
+                    )
                 return changed, overwrites
         except Exception as exc:  # noqa: BLE001
             logger.debug("collab: sync failed for %s: %s", peer.base_url, exc)
