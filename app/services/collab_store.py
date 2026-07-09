@@ -6,6 +6,7 @@ thread).  All mutations are protected by a threading.Lock.
 from __future__ import annotations
 
 import threading
+from datetime import datetime
 from typing import Optional
 
 from app.services.collab_types import (
@@ -14,6 +15,22 @@ from app.services.collab_types import (
     _now_iso,
     is_valid_transition,
 )
+
+
+# Two devices claiming the SAME uid within this wall-clock window are treated
+# as a distributed-claim collision (best-effort; P2P has no coordinator so the
+# race itself cannot be prevented — only detected and surfaced).
+CLAIM_COLLISION_WINDOW_S = 30.0
+
+
+def _created_within(a: str, b: str, window_s: float) -> bool:
+    """True if two ISO-8601 created_at stamps are within *window_s* of each other."""
+    try:
+        ta = datetime.fromisoformat(str(a)).timestamp()
+        tb = datetime.fromisoformat(str(b)).timestamp()
+    except (ValueError, TypeError):
+        return False
+    return abs(ta - tb) <= window_s
 
 
 class TaskStore:
@@ -89,7 +106,8 @@ class TaskStore:
     def merge_from_peer(self, remote_tasks: list[dict],
                         overwrites_out: list | None = None, *,
                         trust_remote_clock: bool = True,
-                        skew_guarded_out: list | None = None) -> int:
+                        skew_guarded_out: list | None = None,
+                        claim_collisions_out: list | None = None) -> int:
         """Merge peer task list; newer updated_at wins.  Returns changed count.
 
         If *overwrites_out* is supplied, dicts describing each case where a
@@ -117,6 +135,21 @@ class TaskStore:
                     self._tasks[uid] = remote
                     changed += 1
                     continue
+                # Best-effort distributed-claim collision detection (P2P has no
+                # coordinator): same uid claimed by two different devices within
+                # a short window → record it.  This only DETECTS the inherent
+                # race; it does not prevent it.  Fires regardless of who is
+                # wall-clock newer so the human can resolve a split-brain.
+                if (claim_collisions_out is not None
+                        and local.device_id and remote.device_id
+                        and local.device_id != remote.device_id
+                        and _created_within(local.created_at, remote.created_at,
+                                            CLAIM_COLLISION_WINDOW_S)):
+                    claim_collisions_out.append({
+                        "uid": uid,
+                        "local_device": local.device_id,
+                        "remote_device": remote.device_id,
+                    })
                 if not (remote.updated_at > local.updated_at):
                     continue                       # local same/newer — legacy skip
                 # Remote is wall-clock newer.  Under large measured clock skew

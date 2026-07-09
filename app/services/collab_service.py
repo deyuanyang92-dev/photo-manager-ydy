@@ -164,6 +164,11 @@ class CollabService(QObject):
         # prevents re-nagging after the user declines.  Reset on project switch.
         self._bind_prompted: set[str] = set()
 
+        # Distributed-claim collisions already surfaced (uid set); prevents the
+        # 5 s pull-sync re-firing conflict_detected for the same split-brain.
+        # Reset on project switch.
+        self._claim_collision_prompted: set[str] = set()
+
         self._server_thread: Optional[CollabServerThread] = None
         self._discovery_thread: Optional[CollabDiscoveryThread] = None
         self._subnet_scanner: Optional[QThread] = None
@@ -544,6 +549,7 @@ class CollabService(QObject):
         """
         self._project_dir = str(project_dir or "")
         self._bind_prompted.clear()
+        self._claim_collision_prompted.clear()
         if project_dir:
             self._project_name = str(project_dir)
             self._project_id = self._ensure_project_id(project_dir)
@@ -1090,11 +1096,13 @@ class CollabService(QObject):
                 skew = peer.clock_skew_ms
                 trust = skew is None or abs(skew) <= CLOCK_SKEW_THRESHOLD_MS
                 guarded: list[dict] = []
+                collisions: list[dict] = []
                 changed = self.store.merge_from_peer(
                     remote_tasks,
                     overwrites_out=overwrites,
                     trust_remote_clock=trust,
                     skew_guarded_out=guarded,
+                    claim_collisions_out=collisions,
                 )
                 for g in guarded:
                     self._log_activity(
@@ -1104,6 +1112,22 @@ class CollabService(QObject):
                             f"{g['new_status']}，保留本地 {g['old_status']}"
                         ),
                         severity="warn",
+                    )
+                # Best-effort distributed-claim collision surfacing (deduped):
+                # P2P cannot prevent two devices claiming the same uid at once;
+                # we only detect and prompt a human once per uid.
+                for c in collisions:
+                    if c["uid"] in self._claim_collision_prompted:
+                        continue
+                    self._claim_collision_prompted.add(c["uid"])
+                    self.conflict_detected.emit(c["uid"])
+                    self._log_activity(
+                        "conflict", c["uid"],
+                        detail=(
+                            f"编号 {c['uid']} 被两台设备近乎同时认领"
+                            f"({c['local_device']} / {c['remote_device']})，需人工确认"
+                        ),
+                        severity="error",
                     )
                 return changed, overwrites
         except Exception as exc:  # noqa: BLE001

@@ -481,7 +481,61 @@ class TestLwwClockSkewGuard:
         assert svc.store.get_task("U3").status.value == "shot_done"
 
 
+# ── Distributed-claim collision detection (best-effort, P2P) ─────────────────
+
+class TestClaimCollisionDetection:
+    """Two devices creating the SAME uid near-simultaneously is an inherent
+    P2P race (no coordinator).  This cannot be *prevented*, only *detected*:
+    when a sync sees the same uid claimed by two different devices within a
+    short window, it surfaces a conflict so a human can resolve it."""
+
+    def test_simultaneous_claim_different_device_flagged(self):
+        store = TaskStore()
+        store.create("UID-X", device_id="deviceA")
+        ts = "2026-07-09T10:00:00+00:00"
+        store._tasks["UID-X"].created_at = ts
+        remote = [{"uid": "UID-X", "status": "created", "deviceId": "deviceB",
+                   "createdAt": ts, "updatedAt": ts}]
+        collisions: list[dict] = []
+        store.merge_from_peer(remote, claim_collisions_out=collisions)
+        assert any(c["uid"] == "UID-X" for c in collisions)
+
+    def test_same_device_not_flagged(self):
+        store = TaskStore()
+        store.create("UID-Y", device_id="deviceA")
+        remote = [{"uid": "UID-Y", "status": "assigned", "deviceId": "deviceA",
+                   "createdAt": store.get_task("UID-Y").created_at,
+                   "updatedAt": "2099-01-01T00:00:00+00:00"}]
+        collisions: list[dict] = []
+        store.merge_from_peer(remote, claim_collisions_out=collisions)
+        assert collisions == []
+
+    def test_collision_surfaced_via_sync_signal(self):
+        """End-to-end: pulling a same-uid/different-device claim fires
+        conflict_detected once (deduped across sync cycles)."""
+        svc = CollabService()
+        svc.set_group_code("G1")
+        svc.store.create("UID-Z", device_id="deviceA")
+        ts = "2026-07-09T10:00:00+00:00"
+        svc.store._tasks["UID-Z"].created_at = ts
+        peer = PeerInfo(ip="1.2.3.4", port=5050, group_code="G1")
+        peer.clock_skew_ms = 0.0  # trusted clock
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = [
+            {"uid": "UID-Z", "status": "created", "deviceId": "deviceB",
+             "createdAt": ts, "updatedAt": "2099-01-01T00:00:00+00:00"}
+        ]
+        received: list[str] = []
+        svc.conflict_detected.connect(lambda uid: received.append(uid))
+        with patch("httpx.get", return_value=mock_resp):
+            svc._sync_peer(peer)            # first sync → fires
+            svc._sync_peer(peer)            # second sync → deduped, no repeat
+        assert received.count("UID-Z") == 1
+
+
 # ── create_task: broadcast only to same-group peers ──────────────────────────
+
 
 class TestCreateTaskGroupBroadcast:
     def test_broadcast_only_to_same_group(self):
