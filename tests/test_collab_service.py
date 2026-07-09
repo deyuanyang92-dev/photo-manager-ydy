@@ -378,6 +378,46 @@ class TestCollabServiceOffline:
         svc.add_manual_peer("1.2.3.4", 5050)
         assert len(received) >= 1
 
+    def test_sync_all_peers_offloads_to_worker_not_main_thread(self):
+        """_sync_all_peers must NOT do HTTP on the main thread.
+
+        It delegates the pull cycle to ``_spawn`` so a slow/dead peer cannot
+        freeze the UI (perf red line: sync is not allowed on the Qt main
+        thread).  Inline HTTP here is a regression.
+        """
+        from app.services.collab_service import PeerInfo
+        svc = self._make_service()
+        svc.set_group_code("G")
+        svc._peers["10.0.0.2:5050"] = PeerInfo(ip="10.0.0.2", port=5050, group_code="G")
+
+        spawned: list = []
+        svc._spawn = lambda fn: spawned.append(fn)   # capture, do NOT run inline
+
+        # If any HTTP runs on the main thread, the patched httpx raises → fail.
+        with patch("httpx.get", side_effect=AssertionError("sync ran HTTP inline on main thread")):
+            svc._sync_all_peers()
+
+        assert len(spawned) == 1, "sync cycle must be delegated to _spawn, not run inline"
+
+    def test_sync_all_peers_skips_when_previous_cycle_busy(self):
+        """Re-entrancy guard: a still-running cycle must not start a second one."""
+        from app.services.collab_service import PeerInfo
+        svc = self._make_service()
+        svc.set_group_code("G")
+        svc._peers["10.0.0.2:5050"] = PeerInfo(ip="10.0.0.2", port=5050, group_code="G")
+
+        spawned: list = []
+        svc._spawn = lambda fn: spawned.append(fn)
+
+        # Simulate an in-flight cycle: hold the guard lock.
+        assert svc._sync_lock.acquire(False)
+        try:
+            svc._sync_all_peers()
+        finally:
+            svc._sync_lock.release()
+
+        assert spawned == [], "must not start a second cycle while one is in flight"
+
     def test_tasks_changed_signal_after_create(self):
         svc = self._make_service()
         received: list[int] = []
@@ -810,7 +850,7 @@ class TestCollabViewSmoke:
         assert view.nav_icon == "👥"
         view.close()
 
-    def test_share_address_uses_base_view_ctx(self, monkeypatch):
+    def test_share_address_without_service_opens_inline_setup_not_dialog(self, monkeypatch):
         from app.views import collab_view
         from app.views.collab_view import CollabView
 
@@ -833,9 +873,9 @@ class TestCollabViewSmoke:
 
         view._on_share_addr()
 
-        assert created["ctx"] is view.ctx
-        assert created["parent"] is view
-        assert created["exec_called"] is True
+        assert created == {}
+        assert not view._team_setup_panel.isHidden()
+        assert "先保存团队永久码" in view._team_setup_status.text()
         view.close()
 
     def test_view_with_service_not_running_shows_not_started(self):
@@ -989,8 +1029,8 @@ class TestCollabViewSmoke:
         view = CollabView(ctx)
         view.on_activate()
 
-        assert view._next_step_label.text() == "下一步：选择共享项目"
-        assert "绑定" in view._next_step_detail.text() or "项目" in view._next_step_detail.text()
+        assert view._next_step_label.text() == "下一步：使用项目码"
+        assert "项目码" in view._next_step_detail.text()
         view.close()
         svc.stop()
 

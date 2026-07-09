@@ -153,6 +153,13 @@ class CollabService(QObject):
         self._offline_drafts: list[OfflineDraft] = []
         self._offline_drafts_lock = threading.Lock()
 
+        # Re-entrancy guard for the pull-sync cycle: only one cycle runs at a
+        # time.  The cycle is offloaded off the Qt main thread (see
+        # _sync_all_peers) so a 5 s timer can fire again before a slow cycle
+        # finishes — this lock makes the second firing a no-op instead of
+        # racing the store / spec-sync counter.
+        self._sync_lock = threading.Lock()
+
         # Same-name project bind suggestions already shown (peer project_ids);
         # prevents re-nagging after the user declines.  Reset on project switch.
         self._bind_prompted: set[str] = set()
@@ -415,6 +422,33 @@ class CollabService(QObject):
         self._log_activity(
             "project-sync-code",
             detail="当前项目已加入共享照片同步身份",
+        )
+        self.peers_changed.emit()
+        return self._project_id
+
+    def reset_project_sync_code(self) -> str:
+        """Break current project-code pairing by assigning a fresh local ID."""
+        if not self._project_dir:
+            raise ValueError("current project is not open")
+        from app.db.db_manager import open_project_db_private
+        from app.services.project_identity_service import (
+            read_project_identity,
+            reset_project_identity,
+        )
+
+        db = open_project_db_private(self._project_dir)
+        try:
+            previous = read_project_identity(db)
+            self._project_id = reset_project_identity(
+                db,
+                project_name=Path(str(self._project_name or self._project_dir)).name,
+                previous_project_id=previous,
+            )
+        finally:
+            db.close()
+        self._log_activity(
+            "project-sync-code",
+            detail="当前项目已解除项目码配对",
         )
         self.peers_changed.emit()
         return self._project_id
@@ -950,45 +984,71 @@ class CollabService(QObject):
     # ── Sync ──────────────────────────────────────────────────────────────
 
     def _sync_all_peers(self) -> None:
-        """Pull tasks from every known peer.  Runs on the Qt main thread (timer)."""
-        peers_snapshot: list[PeerInfo]
-        with self._peers_lock:
-            peers_snapshot = list(self._peers.values())
+        """Pull tasks from every known peer.
 
-        if not peers_snapshot:
+        Runs on the Qt main thread (5 s timer) but **only schedules** the work:
+        the actual HTTP pulls happen off the main thread via ``_spawn`` so a
+        slow/dead peer cannot freeze the UI (perf red line).  ``_spawn`` is
+        overridden to run synchronously in tests.
+
+        Re-entrancy: if the previous cycle is still in flight (slow peer), the
+        non-blocking ``_sync_lock`` makes this firing a no-op instead of
+        spawning a second concurrent cycle that would race the task store and
+        the spec-sync counter.
+        """
+        if not self._sync_lock.acquire(blocking=False):
             return
+        self._spawn(self._run_sync_cycle)
 
-        changed_total = 0
-        all_overwrites: list[dict] = []
-        for peer in peers_snapshot:
-            n, overwrites = self._sync_peer_with_overwrites(peer)
-            changed_total += n
-            all_overwrites.extend(overwrites)
+    def _run_sync_cycle(self) -> None:
+        """One pull-sync pass — runs in a worker thread (or sync in tests).
 
-        if changed_total:
-            self.tasks_changed.emit()
-            self._log_activity("status_changed", detail=f"同步更新了 {changed_total} 条任务")
+        Emits ``tasks_changed`` / ``data_overwritten`` and appends activity
+        entries from here; ``pyqtSignal.emit`` is thread-safe (queued back to
+        the main thread) and ``ActivityLog.append`` holds its own lock, so this
+        is safe off the main thread.
+        """
+        try:
+            peers_snapshot: list[PeerInfo]
+            with self._peers_lock:
+                peers_snapshot = list(self._peers.values())
 
-        if all_overwrites:
-            self.data_overwritten.emit(all_overwrites)
-            for o in all_overwrites:
-                self._log_activity(
-                    "sync_overwrite", o["uid"],
-                    detail=(
-                        f"同步时本机状态被覆盖：{o['old_status']} → {o['new_status']}"
-                    ),
-                    severity="warn",
-                )
+            if not peers_snapshot:
+                return
 
-        # Specimen metadata sync: every 6th task-sync cycle (~30 s)
-        self._spec_sync_counter = getattr(self, "_spec_sync_counter", 0) + 1
-        if self._spec_sync_counter >= 6:
-            self._spec_sync_counter = 0
+            changed_total = 0
+            all_overwrites: list[dict] = []
             for peer in peers_snapshot:
-                self._sync_specimens_from_peer(peer)
+                n, overwrites = self._sync_peer_with_overwrites(peer)
+                changed_total += n
+                all_overwrites.extend(overwrites)
 
-        # Same-name / different-ID projects: suggest binding (confirm in UI)
-        self._check_project_bind_suggestions(peers_snapshot)
+            if changed_total:
+                self.tasks_changed.emit()
+                self._log_activity("status_changed", detail=f"同步更新了 {changed_total} 条任务")
+
+            if all_overwrites:
+                self.data_overwritten.emit(all_overwrites)
+                for o in all_overwrites:
+                    self._log_activity(
+                        "sync_overwrite", o["uid"],
+                        detail=(
+                            f"同步时本机状态被覆盖：{o['old_status']} → {o['new_status']}"
+                        ),
+                        severity="warn",
+                    )
+
+            # Specimen metadata sync: every 6th task-sync cycle (~30 s)
+            self._spec_sync_counter = getattr(self, "_spec_sync_counter", 0) + 1
+            if self._spec_sync_counter >= 6:
+                self._spec_sync_counter = 0
+                for peer in peers_snapshot:
+                    self._sync_specimens_from_peer(peer)
+
+            # Same-name / different-ID projects: suggest binding (confirm in UI)
+            self._check_project_bind_suggestions(peers_snapshot)
+        finally:
+            self._sync_lock.release()
 
     def _sync_peer(self, peer: PeerInfo) -> int:
         """Pull one peer and return the number of changed local tasks."""
