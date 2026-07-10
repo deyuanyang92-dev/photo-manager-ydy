@@ -16,6 +16,26 @@ from PyQt6.QtGui import QImage
 
 _CACHE_ROOT_OVERRIDE: Path | None = None
 _LOCK = threading.Lock()
+# .fail 哨兵有效期(秒): 瞬时失败(源文件被占用/内存不足/网络盘抖动)不该
+# 永久毒化缓存键——过期后放行重试, 真坏的文件也只是每 10 分钟多一次解码尝试。
+_FAIL_SENTINEL_TTL_S = 600
+
+
+def _fail_sentinel_active(fail_path: Path) -> bool:
+    """哨兵存在且未过期 → True; 已过期则顺手清除并放行重试."""
+    try:
+        st = fail_path.stat()
+    except OSError:
+        return False
+    import time
+
+    if (time.time() - st.st_mtime) <= _FAIL_SENTINEL_TTL_S:
+        return True
+    try:
+        fail_path.unlink(missing_ok=True)
+    except OSError:
+        pass
+    return False
 
 # Match memory cache buckets in image_thumbnail.py
 CACHE_SIZE_BUCKETS: tuple[int, ...] = (64, 96, 128, 160, 256, 384, 512, 720, 1080, 1440, 1600)
@@ -79,7 +99,8 @@ def preview_jpeg_file_path(path: str, max_size: int | None) -> Optional[Path]:
         return None
     digest = cache_entry_hash(resolved, mtime_ns, file_size, bucket)
     jpg_path, fail_path = _cache_paths(digest)
-    if fail_path.is_file() or not jpg_path.is_file():
+    # §7 旧: if fail_path.is_file() or ...  # 哨兵无 TTL, 瞬时失败永久毒化
+    if _fail_sentinel_active(fail_path) or not jpg_path.is_file():
         return None
     return jpg_path
 
@@ -95,7 +116,8 @@ def read_disk_thumbnail(path: str, max_size: int | None) -> Optional[QImage]:
         return None
     digest = cache_entry_hash(resolved, mtime_ns, file_size, bucket)
     jpg_path, fail_path = _cache_paths(digest)
-    if fail_path.is_file():
+    # §7 旧: if fail_path.is_file(): ...  # 哨兵无 TTL, 瞬时失败永久毒化
+    if _fail_sentinel_active(fail_path):
         return None
     if not jpg_path.is_file():
         return None
@@ -126,7 +148,10 @@ def write_disk_thumbnail(path: str, max_size: int | None, image: QImage) -> None
             if fail_path.is_file():
                 fail_path.unlink(missing_ok=True)
             jpg_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = jpg_path.with_suffix(".jpg.part")
+            # §7 旧: tmp = jpg_path.with_suffix(".jpg.part")  # 固定名, 多实例互踩
+            # 多开实例(SPECIMEN_WORKBENCH_ALLOW_MULTI)可能同时写同一 digest:
+            # pid 入名, 各写各的临时文件, os.replace 原子发布仍然安全。
+            tmp = jpg_path.with_suffix(f".{os.getpid()}.jpg.part")
             from app.config.preview_profile import current_preview_jpeg_quality
 
             quality = current_preview_jpeg_quality()
