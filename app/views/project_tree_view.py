@@ -2855,13 +2855,105 @@ class ProjectTreeView(BaseView):
         label_list: list[str],
         labels_map: dict[str, str],
     ) -> None:
+        """派发后台查询(worker 线程), 结果回 _apply_summary_result。
+
+        # §7 旧: 主线程同步跑 query_summary_scope(N 库全表扫 + results glob +
+        # 每标本 EXIF + 子库索引 sync), 多断面大表假死数秒且零反馈。
+        # 旧同步实现 = 下方 _apply_summary_result 的主体, 查询部分移入
+        # SummaryQueryWorker(模式同 TiffPreviewWarmupWorker)。
+        # token 防过期: 旧查询结果回来时若已有新请求, 直接丢弃。
+        """
+        from app.workers.summary_query_worker import SummaryQueryWorker
+
+        token = getattr(self, "_summary_query_token", 0) + 1
+        self._summary_query_token = token
+        self._stop_summary_query_worker(wait_ms=200)
+
+        # busy 反馈复用现有状态标签(不新增控件): 点击立即可见"查询中"
+        try:
+            self._summary_stats_lbl.setText(f"查询中… ({len(dirs)} 个工作区)")
+            self._grid_count_lbl.setText("查询中…")
+        except Exception:
+            pass
+
+        worker = SummaryQueryWorker(
+            dirs, self._summary_conditions, label_list, parent=self
+        )
+        worker.finished_result.connect(
+            lambda result, cols, t=token: self._on_summary_query_done(
+                t, dirs, label_list, labels_map, result, cols
+            )
+        )
+        worker.failed.connect(
+            lambda msg, t=token: self._on_summary_query_failed(t, msg)
+        )
+        self._summary_query_worker = worker
+        worker.start()
+
+    def _stop_summary_query_worker(self, wait_ms: int = 200) -> None:
+        worker = getattr(self, "_summary_query_worker", None)
+        if worker is None:
+            return
+        try:
+            if worker.isRunning():
+                worker.cancel()
+                if not worker.wait(wait_ms):
+                    # 停不下来就脱父进退休名单(同 warmup worker 的处置),
+                    # 避免视图销毁连带销毁运行中线程 → 原生 abort。
+                    self._retire_summary_query_worker(worker)
+        except Exception:
+            pass
+        self._summary_query_worker = None
+
+    def _retire_summary_query_worker(self, worker) -> None:
+        for sig in ("finished_result", "failed"):
+            try:
+                getattr(worker, sig).disconnect()
+            except Exception:
+                pass
+        try:
+            worker.setParent(None)
+        except Exception:
+            pass
+        _RETIRED_WARMUP_WORKERS.append(worker)
+
+    def _on_summary_query_failed(self, token: int, msg: str) -> None:
+        if token != getattr(self, "_summary_query_token", 0):
+            return
+        # 与 _run_scope_refresh 的同步守护同款处置(坏库/锁库):
+        # 收起中栏避免半截界面 + 状态栏提示, 不炸 slot。
+        self._hide_grid_panel()
+        win = self.window()
+        bar = getattr(win, "statusBar", None)
+        if callable(bar):
+            try:
+                bar().showMessage(f"汇总读取失败: {msg}", 5000)
+            except Exception:
+                pass
+
+    def _on_summary_query_done(
+        self,
+        token: int,
+        dirs: list[str],
+        label_list: list[str],
+        labels_map: dict[str, str],
+        result,
+        all_columns,
+    ) -> None:
+        if token != getattr(self, "_summary_query_token", 0):
+            return  # 过期结果: 期间已发起新查询
+        self._apply_summary_result(dirs, label_list, labels_map, result, all_columns)
+
+    def _apply_summary_result(
+        self,
+        dirs: list[str],
+        label_list: list[str],
+        labels_map: dict[str, str],
+        result,
+        all_columns,
+    ) -> None:
         from app.services import cross_workspace_query_service as cwq
 
-        result = cwq.query_summary_scope(
-            dirs,
-            self._summary_conditions,
-            labels=label_list,
-        )
         self._current_summary_result = result
         self._current_merged = list(result.groups)
         self._summary_row_uid_order = None
@@ -2876,7 +2968,8 @@ class ProjectTreeView(BaseView):
             f"{n_spec} 编号 · {n_photo} 照片 · RNA {n_rna}{cond_note}"
         )
         self._grid_count_lbl.setText(f"{n_spec} 编号 · {n_photo} 张")
-        self._summary_all_columns = cwq.summary_all_columns(dirs)
+        # self._summary_all_columns = cwq.summary_all_columns(dirs)  # §7 旧: 主线程逐库 PRAGMA; 已随查询进 worker
+        self._summary_all_columns = all_columns
         self._summary_visible_columns = cwq.resolve_summary_visible_columns(
             self._summary_all_columns,
             _read_summary_visible_column_keys(self.ctx.settings),
@@ -3787,6 +3880,7 @@ class ProjectTreeView(BaseView):
     def stop_background_work(self) -> None:
         """App 退出时 join worker 线程."""
         self._stop_tiff_preview_warmup_worker()
+        self._stop_summary_query_worker(wait_ms=2000)
         try:
             grid = getattr(self, "_uid_grid", None)
             if grid is not None:

@@ -203,3 +203,31 @@ def test_enrich_records_absolute_path_when_exif_read_fails(tmp_path, monkeypatch
     ])
     assert rows[0]["photo_absolute_path"] == str(tif.resolve())
     assert "camera_make" not in rows[0]
+
+
+class TestQuerySummaryScopeCancel:
+    """worker 线程取消钩子: cancel_callback=True → 阶段边界提前返回, 不抛异常."""
+
+    def test_cancelled_returns_empty_result(self, tmp_path):
+        from app.services import cross_workspace_query_service as cwq
+
+        ws = tmp_path / "ws"
+        (ws / "_data").mkdir(parents=True)
+        import sqlite3 as _sq
+        conn = _sq.connect(str(ws / "_data" / "project.db"))
+        conn.execute("CREATE TABLE specimens (uid TEXT, storage TEXT)")
+        conn.execute("INSERT INTO specimens VALUES ('U-1', 'R')")
+        conn.commit()
+        conn.close()
+
+        result = cwq.query_summary_scope(
+            [str(ws)], [], cancel_callback=lambda: True
+        )
+        assert result.workspaces == [str(ws)]
+        assert result.specimens == [] or result.stats == {}, "取消后不产出完整结果"
+
+    def test_no_callback_unchanged(self, tmp_path):
+        from app.services import cross_workspace_query_service as cwq
+
+        result = cwq.query_summary_scope([], [])
+        assert result.workspaces == []

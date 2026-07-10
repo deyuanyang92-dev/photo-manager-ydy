@@ -8,7 +8,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from app.config.specimen_fields import (
     COMMON_FILTER_PRIORITY,
@@ -231,8 +231,13 @@ def enrich_specimens_with_photo_info(
     rows: list[dict[str, Any]],
     *,
     groups: list[dict[str, Any]] | None = None,
+    cancel_callback: Optional[Callable[[], bool]] = None,
 ) -> list[dict[str, Any]]:
-    """Attach recorded master TIF paths + camera EXIF to summary rows."""
+    """Attach recorded master TIF paths + camera EXIF to summary rows.
+
+    ``cancel_callback`` 返回 True ⇒ 提前返回已 enrich 的部分行(worker 线程
+    取消用;调用方负责丢弃部分结果)。
+    """
     from app.services.photo_asset_service import read_image_exif_metadata
 
     from app.db.db_manager import open_project_db_private
@@ -253,7 +258,8 @@ def enrich_specimens_with_photo_info(
 
     try:
         return _enrich_rows(
-            rows, cache, out, group_paths, _conn_for, read_image_exif_metadata
+            rows, cache, out, group_paths, _conn_for, read_image_exif_metadata,
+            cancel_callback=cancel_callback,
         )
     finally:
         for c in ws_conns.values():
@@ -264,8 +270,13 @@ def enrich_specimens_with_photo_info(
                     pass
 
 
-def _enrich_rows(rows, cache, out, group_paths, conn_for, read_image_exif_metadata):
+def _enrich_rows(
+    rows, cache, out, group_paths, conn_for, read_image_exif_metadata,
+    cancel_callback=None,
+):
     for row in rows:
+        if cancel_callback is not None and cancel_callback():
+            return out
         enriched = dict(row)
         ws = str(row.get("_workspace") or "")
         uid = str(row.get("uid") or "")
@@ -512,8 +523,14 @@ def query_summary_scope(
     conditions: list[dict[str, Any]] | None = None,
     *,
     labels: Optional[list[str]] = None,
+    cancel_callback: Optional[Callable[[], bool]] = None,
 ) -> SummaryScopeResult:
-    """跨工作区汇总：筛选 specimens → 关联 photo groups → 统计."""
+    """跨工作区汇总：筛选 specimens → 关联 photo groups → 统计.
+
+    ``cancel_callback`` 返回 True ⇒ 在阶段边界(查询/同步/enrich/统计之间)
+    提前返回空/部分 SummaryScopeResult。worker 线程取消用;取消后的返回值
+    不应被展示(调用方按 token 丢弃)。
+    """
     ws_list = [str(w) for w in (workspaces or []) if w]
     conds = list(conditions or [])
     label_list = labels
@@ -523,16 +540,27 @@ def query_summary_scope(
     if not ws_list:
         return SummaryScopeResult(workspaces=[], conditions=conds)
 
+    def _cancelled() -> bool:
+        return cancel_callback is not None and bool(cancel_callback())
+
     specimens = filter_svc.query_specimens(ws_list, conds, labels=label_list)
+    if _cancelled():
+        return SummaryScopeResult(workspaces=ws_list, conditions=conds)
     groups = _filter_groups_for_specimens(ws_list, specimens)
     from app.services.specimen_result_tif_service import sync_workspace_result_tifs
 
     for ws in ws_list:
+        if _cancelled():
+            return SummaryScopeResult(workspaces=ws_list, conditions=conds)
         try:
             sync_workspace_result_tifs(ws)
         except Exception:
             pass
-    specimens = enrich_specimens_with_photo_info(specimens, groups=groups)
+    specimens = enrich_specimens_with_photo_info(
+        specimens, groups=groups, cancel_callback=cancel_callback
+    )
+    if _cancelled():
+        return SummaryScopeResult(workspaces=ws_list, conditions=conds)
     stats = _stats_from_scope(ws_list, specimens, groups)
 
     return SummaryScopeResult(

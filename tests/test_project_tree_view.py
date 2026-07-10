@@ -689,9 +689,10 @@ def test_double_click_single_selection_enters(qtbot, tmp_path, ctx, monkeypatch)
 def test_selection_survives_locked_workspace_db(qtbot, tmp_path, ctx, monkeypatch):
     """v0.56 治理: 聚合遇 database is locked 不炸 slot、收起中栏不留半截界面.
 
-    (选中路径是同步的, 无需 qtbot.wait。历史注: 曾有「≥3 个前序视图积压 +
-    任意 wait ⇒ segfault」的套件地雷, 已由 conftest._flush_deferred_deletions
-    每测试后冲洗销毁队列根治, 2026-07-10 二分定位。)
+    查询已移入 SummaryQueryWorker(主线程不再假死), 失败经 failed 信号异步
+    回 _on_summary_query_failed → 与旧同步守护同款处置(收起中栏+状态栏提示),
+    故此测试等待异步失败落地。(wait 已安全: conftest._flush_deferred_deletions
+    每测试后冲洗销毁队列, 2026-07-10 二分定位。)
     """
     root = tmp_path / "survey"
     (root / "断面a").mkdir(parents=True)
@@ -714,9 +715,53 @@ def test_selection_survives_locked_workspace_db(qtbot, tmp_path, ctx, monkeypatc
     monkeypatch.setattr(cwq, "query_summary_scope", boom)
 
     view._tree.clearSelection()
-    view._tree.topLevelItem(0).child(0).setSelected(True)  # 同步走守护路径
+    view._tree.topLevelItem(0).child(0).setSelected(True)
 
-    assert not view._data_summary_panel.isVisible(), "失败后应收起数据汇总面板"
+    qtbot.waitUntil(
+        lambda: not view._data_summary_panel.isVisible(), timeout=5000
+    )
+    view._stop_summary_query_worker(wait_ms=2000)
+
+
+def test_summary_query_runs_in_worker_and_applies_result(
+    qtbot, tmp_path, ctx, monkeypatch
+):
+    """数据汇总查询在 worker 线程执行(主线程不假死), 结果异步回填表格/统计."""
+    import threading
+
+    root = tmp_path / "survey"
+    (root / "断面a").mkdir(parents=True)
+    _make_workspace(root / "断面a")
+    ctx.settings.project_tree_root = str(root)
+
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    monkeypatch.setattr(view, "_refresh_survey_overview", lambda *_a, **_k: None)
+    view.on_activate()
+
+    from app.services import cross_workspace_query_service as cwq
+
+    seen_threads: list = []
+    real_query = cwq.query_summary_scope
+
+    def spy(*a, **k):
+        seen_threads.append(threading.current_thread())
+        return real_query(*a, **k)
+
+    monkeypatch.setattr(cwq, "query_summary_scope", spy)
+
+    view._tree.clearSelection()
+    view._tree.topLevelItem(0).child(0).setSelected(True)
+
+    qtbot.waitUntil(
+        lambda: getattr(view, "_current_summary_result", None) is not None,
+        timeout=8000,
+    )
+    assert seen_threads, "sanity: 查询应被执行"
+    assert seen_threads[0] is not threading.main_thread(), (
+        "查询必须在 worker 线程, 不得阻塞 Qt 主线程"
+    )
+    view._stop_summary_query_worker(wait_ms=2000)
 
 
 def test_warmup_worker_retired_not_orphaned(qtbot, tmp_path, ctx, monkeypatch):
