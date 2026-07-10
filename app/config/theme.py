@@ -1729,23 +1729,6 @@ QLabel#GroupChip1 {{ background-color: rgba(21,128,61,0.11); color: #15803d; }}
 QLabel#GroupChip2 {{ background-color: rgba(15,118,110,0.12); color: #0f766e; }}
 QLabel#GroupChip3 {{ background-color: rgba(180,83,9,0.11); color: #b45309; }}
 
-/* v0.56 美化: 分组卡片 — 白底细边圆角, hover 提边; 胶片条容器透明无框。 */
-QFrame#GroupCard {{
-    background-color: {t["panel"]};
-    border: 1px solid {t["border"]};
-    border-radius: {t["radius"]};
-}}
-QFrame#GroupCard:hover {{ border-color: {t["border_strong"]}; }}
-QScrollArea#GroupStrip {{ background: transparent; border: none; }}
-QScrollArea#GroupStrip > QWidget > QWidget {{ background: transparent; }}
-/* 空组投放区: 文案居中弱化。 */
-QListWidget#GroupDropZoneEmpty {{
-    color: {t["muted"]};
-    font-size: {t["font_xs"]};
-}}
-/* 工具栏功能分隔竖线 */
-QFrame#VSep {{ background-color: {t["border"]}; border: none; }}
-
 /* ── Project settings drawer (right-edge overlay) + backdrop scrim ─── */
 QWidget#SettingsDrawer {{
     background: {panel_grad};

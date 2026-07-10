@@ -607,10 +607,7 @@ class WorkbenchSpecimenIdentityMixin:
         if divider is not None:
             divider.setVisible(False)
         lay.addWidget(panel)
-        # §7 旧: dlg.resize(760, 560) —— 4 组时横向拥挤、纵向留大片空带
-        # (2026-07-10 用户截图投诉)。宽度容 4 张卡片, 高度贴合内容。
-        dlg.resize(1100, 440)
-        dlg.setMinimumSize(720, 400)
+        dlg.resize(760, 560)
         return dlg
 
     def _grouping_ui_parent(self) -> QWidget:

@@ -391,8 +391,7 @@ class _DraftGroupRow(QFrame):
                  selected: bool = False,
                  display_number: Optional[int] = None) -> None:
         super().__init__(parent)
-        # §7 旧: self.setObjectName("Panel") —— 通用面板样式, 无 hover/无卡片感。
-        self.setObjectName("GroupCard")
+        self.setObjectName("Panel")
         self._group = group
         self._panel = panel
         self._selected = selected
@@ -445,9 +444,7 @@ class _DraftGroupRow(QFrame):
         )
         self._jpg_list.setViewMode(QListWidget.ViewMode.IconMode)
         self._jpg_list.setIconSize(QSize(50, 50))
-        if has_media:
-            # 空组不设网格: 58×60 格子会把多行占位文案截成「点下…」(v0.56)。
-            self._jpg_list.setGridSize(QSize(58, 60))
+        self._jpg_list.setGridSize(QSize(58, 60))
         self._jpg_list.setResizeMode(QListWidget.ResizeMode.Adjust)
         self._jpg_list.setMovement(QListWidget.Movement.Snap)
         self._jpg_list.setWrapping(True)
@@ -470,7 +467,7 @@ class _DraftGroupRow(QFrame):
             tiff_item.setFlags(Qt.ItemFlag.NoItemFlags)
             self._jpg_list.addItem(tiff_item)
         if not self._group.jpg_paths and not tiff_path:
-            empty = QListWidgetItem("空组\n点下方 + 选图\n或拖入 JPG / TIF")
+            empty = QListWidgetItem("空组\n+ / 拖入\nJPG+TIF")
             empty.setFlags(Qt.ItemFlag.NoItemFlags)
             empty.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self._jpg_list.addItem(empty)
