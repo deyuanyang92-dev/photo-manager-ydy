@@ -686,6 +686,39 @@ def test_double_click_single_selection_enters(qtbot, tmp_path, ctx, monkeypatch)
     assert entered, "单选双击应进入工作区"
 
 
+def test_selection_survives_locked_workspace_db(qtbot, tmp_path, ctx, monkeypatch):
+    """v0.56 治理: 聚合遇 database is locked 不炸 slot、收起中栏不留半截界面.
+
+    注意: 本测试刻意不使用 qtbot.wait —— 选中路径是同步的, 无需转动事件循环;
+    且本文件前序测试遗留的挂起事件会让任何 wait 触发 segfault(套件既有地雷,
+    见 P1-2 worker 生命周期治理)。
+    """
+    root = tmp_path / "survey"
+    (root / "断面a").mkdir(parents=True)
+    _make_workspace(root / "断面a")
+    ctx.settings.project_tree_root = str(root)
+
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    # 右栏概览(mini-map/物种面板)非被测对象, stub 掉降低测试面
+    monkeypatch.setattr(view, "_refresh_survey_overview", lambda *_a, **_k: None)
+    view.on_activate()
+
+    import sqlite3 as _sq
+
+    from app.services import cross_workspace_query_service as cwq
+
+    def boom(*_a, **_k):
+        raise _sq.OperationalError("database is locked")
+
+    monkeypatch.setattr(cwq, "query_summary_scope", boom)
+
+    view._tree.clearSelection()
+    view._tree.topLevelItem(0).child(0).setSelected(True)  # 同步走守护路径
+
+    assert not view._data_summary_panel.isVisible(), "失败后应收起数据汇总面板"
+
+
 def test_scan_disk_registers_discovered_workspaces(qtbot, tmp_path, ctx, monkeypatch):
     """扫描磁盘: 发现的旧工作区登记到 user_projects.json (用户核心需求)."""
     import json as _json

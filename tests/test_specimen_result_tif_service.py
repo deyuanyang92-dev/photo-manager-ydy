@@ -35,6 +35,27 @@ def test_sync_persists_absolute_tif_paths(tmp_path) -> None:
     assert all(Path(p).is_absolute() for p in paths)
 
 
+def test_sync_skips_write_when_unchanged(tmp_path) -> None:
+    """树选中会触发 sync——内容没变时必须零写入(导航不该动库, v0.56 治理)."""
+    ws = _make_ws(tmp_path, [("GXFCG-BLW-SC001-1-D79-20260618.tif", "x")])
+    assert srts.sync_workspace_result_tifs(str(ws)) == 1
+
+    from app.db.db_manager import open_project_db
+
+    conn = open_project_db(str(ws))
+    first = conn.execute(
+        "SELECT uid, absolute_path, updated_at FROM specimen_result_tif_index"
+    ).fetchall()
+    changes_before = conn.total_changes
+
+    assert srts.sync_workspace_result_tifs(str(ws)) == 1
+    second = conn.execute(
+        "SELECT uid, absolute_path, updated_at FROM specimen_result_tif_index"
+    ).fetchall()
+    assert second == first, "内容未变时 updated_at 不应被重写"
+    assert conn.total_changes == changes_before, "内容未变时应零写入"
+
+
 def test_enrich_uses_db_index_over_scan(tmp_path, monkeypatch) -> None:
     from app.services import cross_workspace_query_service as cwq
 

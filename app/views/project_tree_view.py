@@ -3513,21 +3513,45 @@ class ProjectTreeView(BaseView):
         self._sync_density_slider(density)
 
     def _on_tree_selection_changed(self) -> None:
-        """selectionChanged: 更新范围 + 右栏 KPI；中栏按内容模式按需加载."""
+        """selectionChanged: 更新范围 + 右栏 KPI；中栏按内容模式按需加载.
+
+        v0.56 治理: 轻量 UI 更新立即做; 跨工作区聚合(右栏概览 + 中栏数据汇总)
+        合并到下一次事件循环再跑——选中高亮先绘制, 连续点选/Shift 框选只聚合一次,
+        且聚合全程有异常守护(坏库/锁库不再把异常抛出 Qt slot 留下半截界面)。
+        """
         items = self._tree.selectedItems()
         self._selection_items = list(items)
         self._scope_labeled = self._labeled_workspaces_from_items(items)
+        self._run_scope_refresh()
 
-        effective = self._effective_scope_labeled()
-        if effective:
-            self._refresh_survey_overview(self._overview_source_items())
-        elif getattr(self, "_right_stack", None) is not None:
-            self._right_stack.setCurrentIndex(0)
+    def _run_scope_refresh(self) -> None:
+        """选中范围刷新(右栏概览 + 中栏数据汇总 + 状态/详情), 带异常守护.
 
-        self._sync_content_mode_buttons()
-        self._apply_content_mode()
-        self._update_scope_status_label()
-        self._update_detail_panel_for_selected_project()
+        执行顺序与 v0.55 逐字相同(detail 面板分支依赖 _grid_panel 可见性,
+        必须在 _apply_content_mode 之后跑)。守护: 坏库/锁库不把异常抛出
+        Qt slot 留下半截界面。注: 曾尝试 0ms 定时器合并突发选中, 在多视图
+        并存场景触发销毁竞态 segfault, 撤回为同步。
+        """
+        try:
+            effective = self._effective_scope_labeled()
+            if effective:
+                self._refresh_survey_overview(self._overview_source_items())
+            elif getattr(self, "_right_stack", None) is not None:
+                self._right_stack.setCurrentIndex(0)
+            self._sync_content_mode_buttons()
+            self._apply_content_mode()
+            self._update_scope_status_label()
+            self._update_detail_panel_for_selected_project()
+        except (sqlite3.Error, OSError) as exc:
+            # 某个子工作区库损坏/被锁: 收起中栏避免半截界面, 状态栏提示, 不炸 slot。
+            self._hide_grid_panel()
+            win = self.window()
+            bar = getattr(win, "statusBar", None)
+            if callable(bar):
+                try:
+                    bar().showMessage(f"汇总读取失败: {exc}", 5000)
+                except Exception:
+                    pass
 
     def _hide_grid_panel(self) -> None:
         if getattr(self, "_grid_panel", None) is not None:

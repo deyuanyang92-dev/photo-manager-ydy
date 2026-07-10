@@ -70,6 +70,22 @@ def sync_workspace_result_tifs(workspace_dir: str) -> int:
                 now,
             ))
 
+    # 树选中/数据汇总每次都会触发本函数——内容没变时零写入, 让「导航」保持纯读
+    # (v0.55 原实现无条件 DELETE+INSERT, 点一下树就写一遍每个子库)。
+    desired = {tuple(r[:5]) for r in rows}
+    try:
+        existing = {
+            tuple(r)
+            for r in conn.execute(
+                "SELECT uid, seq, absolute_path, file_name, mtime_iso"
+                " FROM specimen_result_tif_index"
+            )
+        }
+    except sqlite3.Error:
+        existing = None
+    if existing is not None and existing == desired:
+        return len(rows)
+
     with conn:
         conn.execute("DELETE FROM specimen_result_tif_index")
         if rows:
