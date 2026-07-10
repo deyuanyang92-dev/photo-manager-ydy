@@ -198,6 +198,29 @@ class WorkbenchView(WorkbenchSpecimenIdentityMixin, WorkbenchMediaWorkflowMixin,
             base += scroll.verticalScrollBar().sizeHint().width()
         return max(_RIGHT_RAIL_WIDTH_FLOOR, base)
 
+    def _on_sidebar_collapse_toggled(self, collapsed: bool) -> None:
+        """编号栏收起 → 该列缩成细条(宽度让给中间); 展开 → 恢复。"""
+        sizes = self._outer_splitter.sizes()
+        if collapsed:
+            self._sidebar_expanded_state = self._outer_splitter.saveState()
+            # 细条固定宽:按钮 24 + 卡片左右边距(各 12) + 余量 = 56。
+            strip = 56
+            self._sidebar.setMinimumWidth(strip)
+            self._sidebar.setMaximumWidth(strip)
+            # 按 splitter 当前总宽重算:细条 + 右栏不变, 其余全给中间(诉求:
+            # 方便调整/放大中间主视图)。直接算总宽避免与 min/max 约束打架。
+            if len(sizes) == 3:
+                total = sum(sizes)
+                self._outer_splitter.setSizes(
+                    [strip, max(1, total - strip - sizes[2]), sizes[2]]
+                )
+        else:
+            self._sidebar.setMinimumWidth(self._sidebar_min_width())
+            self._sidebar.setMaximumWidth(QWIDGETSIZE_MAX)
+            state = getattr(self, "_sidebar_expanded_state", None)
+            if state is not None:
+                self._outer_splitter.restoreState(state)
+
     def _right_rail_collapsed_width(self) -> int:
         button = getattr(self, "_rail_collapse_btn", None)
         content = button.sizeHint().width() if button is not None else 1
@@ -326,6 +349,7 @@ class WorkbenchView(WorkbenchSpecimenIdentityMixin, WorkbenchMediaWorkflowMixin,
         self._sidebar.sync_project_overwrite_requested.connect(
             lambda: self._on_sync_project_files(mode="overwrite")
         )
+        self._sidebar.collapse_toggled.connect(self._on_sidebar_collapse_toggled)
         self._sidebar.print_labels_requested.connect(self._on_print_labels)
         self._sidebar.delete_specimen_requested.connect(self._confirm_delete_specimen)
         self._sidebar.print_rna_queue_requested.connect(self._on_print_rna_queue)

@@ -750,10 +750,24 @@ QLabel#CollabMetricDanger {
     color: #b42318;
     border: 1px solid rgba(230,110,99,0.45);
 }
+/* 醒目引导横幅: 呼吸脉冲只切边框色(宽度恒 1px, 无布局抖动), 完成即隐藏。 */
 QFrame#CollabGuide {
     background-color: rgba(15,118,110,0.11);
     border: 1px solid rgba(15,118,110,0.24);
     border-radius: 8px;
+}
+/* 呼吸两态: 底色 11%→24% teal, 边框 soft→实色 —— 明显但不刺眼 */
+QFrame#CollabGuide[pulse="off"] {
+    background-color: rgba(15,118,110,0.11);
+    border: 1px solid rgba(15,118,110,0.24);
+}
+QFrame#CollabGuide[pulse="on"] {
+    background-color: rgba(15,118,110,0.24);
+    border: 1px solid #0f766e;
+}
+QLabel#CollabGuideIcon {
+    font-size: 18px;
+    padding-top: 1px;
 }
 QLabel#CollabGuideTitle {
     color: #17212b;
@@ -763,6 +777,12 @@ QLabel#CollabGuideTitle {
 QLabel#CollabGuideDetail {
     color: #334155;
     font-size: 12px;
+}
+/* 行内操作反馈: 无背景带, 平时隐藏, 有内容才现身 */
+QLabel#CollabInlineFeedback {
+    color: #0f766e;
+    font-size: 11px;
+    font-weight: 600;
 }
 QFrame#CollabStepPanel {
     background-color: #ffffff;
@@ -862,6 +882,141 @@ QLabel#ConflictBanner {
     border-radius: 6px;
     font-weight: 700;
 }
+
+/* ── Collab 协作中心 v0.56 补样式 ──────────────────────────────────
+   方式一/二/三选择卡、表单分区、连接结果横幅等 23 个 objectName 自视图
+   诞生起就没有对应 QSS(裸奔成纯文字, 页面显"乱"的根因), 这里一次补齐。 */
+QFrame#CollabSetupHub {
+    background-color: #ffffff;
+    border: 1px solid rgba(15,23,42,0.08);
+    border-radius: 8px;
+}
+/* 方式选择卡: 未选=浅底; hover=提边; 选中=白底+主色边+顶部渐变 */
+QFrame#CollabMethodTab {
+    background-color: #f8fafc;
+    border: 1px solid rgba(15,23,42,0.08);
+    border-radius: 8px;
+}
+QFrame#CollabMethodTab[hovered="true"] {
+    border-color: rgba(15,23,42,0.22);
+    background-color: #ffffff;
+}
+QFrame#CollabMethodTab[selected="true"] {
+    background-color: #ffffff;
+    border: 1px solid #0f766e;
+}
+QLabel#CollabMethodTabBadge {
+    color: #0f766e;
+    background-color: rgba(15,118,110,0.11);
+    border: 1px solid rgba(15,118,110,0.24);
+    border-radius: 999px;
+    padding: 2px 9px;
+    font-size: 11px;
+    font-weight: 700;
+}
+QLabel#CollabMethodTabTitle {
+    color: #17212b;
+    font-size: 15px;
+    font-weight: 700;
+}
+QLabel#CollabMethodTabSummary {
+    color: #64748b;
+    font-size: 11px;
+}
+QLabel#CollabMethodActiveTitle {
+    color: #64748b;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0;
+}
+QFrame#CollabMethodDetail, QStackedWidget#CollabMethodStack,
+QWidget#CollabMethodBody, QWidget#CollabMethodForm,
+QWidget#CollabDetailShell {
+    background: transparent;
+    border: none;
+}
+/* 示例说明: 压平成安静文字(去掉灰底带), 不与醒目引导争视觉焦点 */
+QLabel#CollabMethodExample {
+    color: #94a3b8;
+    background: transparent;
+    padding: 2px 2px;
+    font-size: 11px;
+}
+QLabel#CollabMethodStatus {
+    color: #334155;
+    font-size: 12px;
+    padding: 6px 10px;
+    background-color: #eef2f6;
+    border-radius: 6px;
+}
+/* 表单分区: 浅色圆角块, 标签小字加重 */
+QFrame#CollabFormSection {
+    background-color: #f8fafc;
+    border: 1px solid rgba(15,23,42,0.08);
+    border-radius: 6px;
+}
+QLabel#CollabFormLabel, QLabel#CollabCopyRowLabel {
+    color: #64748b;
+    font-size: 11px;
+    font-weight: 600;
+}
+QLabel#CollabFormLabelInline {
+    color: #64748b;
+    font-size: 11px;
+}
+/* 主 CTA「保存并启动协作」= Primary 同款 */
+QPushButton#CollabPrimaryAction {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #14b8a6, stop:1 #0f766e);
+    color: #f4f6f8;
+    border: 1px solid #0f766e;
+    border-top: 1px solid #14b8a6;
+    border-radius: 6px;
+    padding: 6px 18px;
+    font-weight: 600;
+}
+QPushButton#CollabPrimaryAction:hover { background-color: #0d9488; }
+QPushButton#CollabPrimaryAction:disabled {
+    background-color: #eef2f6;
+    color: #94a3b8;
+    border-color: rgba(15,23,42,0.08);
+}
+QLabel#CollabSecuritySummary {
+    color: #64748b;
+    font-size: 11px;
+    padding: 4px 8px;
+    background-color: #eef2f6;
+    border-radius: 6px;
+}
+/* 连接结果横幅: idle 灰 / waiting 主色 / success 绿 / warn 橙 */
+QFrame#CollabConnectionResult {
+    background-color: #f8fafc;
+    border: 1px solid rgba(15,23,42,0.08);
+    border-radius: 6px;
+}
+QFrame#CollabConnectionResult[role="waiting"] {
+    background-color: rgba(15,118,110,0.11);
+    border-color: rgba(15,118,110,0.24);
+}
+QFrame#CollabConnectionResult[role="success"] {
+    background-color: rgba(21,128,61,0.10);
+    border-color: rgba(21,128,61,0.35);
+}
+QFrame#CollabConnectionResult[role="warn"] {
+    background-color: rgba(180,83,9,0.10);
+    border-color: rgba(180,83,9,0.35);
+}
+QLabel#CollabConnectionIcon { font-size: 18px; color: #64748b; }
+QFrame#CollabConnectionResult[role="success"] QLabel#CollabConnectionIcon { color: #15803d; }
+QFrame#CollabConnectionResult[role="warn"] QLabel#CollabConnectionIcon { color: #b45309; }
+QLabel#CollabConnectionTitle {
+    color: #17212b;
+    font-size: 12px;
+    font-weight: 600;
+}
+QLabel#CollabConnectionDetail {
+    color: #64748b;
+    font-size: 12px;
+}
 QFrame#ManualConnectFrame,
 QFrame#DebugDrawer {
     background-color: #ffffff;
@@ -960,26 +1115,28 @@ QPushButton#PhasePill:checked, QPushButton#PhasePillActive:checked, QPushButton#
    Always show the phase colour as a ring; the current phase fills.
    Colours reuse per-theme semantic tokens so they track the active theme:
    蓝 info=shooting · 青 accent=shot_done · 橙 warn=organizing · 绿 success=done. */
+/* 相位圆点(7px)累进填充:完成到某阶段, 该点及之前全填实。空心=未到,
+   实心=已完成。细 1px 边框, 让 7px 下填充/空心对比清晰醒目。 */
 QPushButton#PhaseDotShooting, QPushButton#PhaseDotShotDone,
 QPushButton#PhaseDotOrganizing, QPushButton#PhaseDotDone {
-    min-width: 12px; max-width: 12px;
-    min-height: 12px; max-height: 12px;
+    min-width: 7px; max-width: 7px;
+    min-height: 7px; max-height: 7px;
     padding: 0px;
-    border-radius: 6px;
+    border-radius: 4px;
     background-color: transparent;
 }
-QPushButton#PhaseDotShooting   { border: 2px solid #2563eb; }
-QPushButton#PhaseDotShotDone   { border: 2px solid #0f766e; }
-QPushButton#PhaseDotOrganizing { border: 2px solid #b45309; }
-QPushButton#PhaseDotDone       { border: 2px solid #15803d; }
+QPushButton#PhaseDotShooting   { border: 1px solid #2563eb; }
+QPushButton#PhaseDotShotDone   { border: 1px solid #0f766e; }
+QPushButton#PhaseDotOrganizing { border: 1px solid #b45309; }
+QPushButton#PhaseDotDone       { border: 1px solid #15803d; }
 QPushButton#PhaseDotShooting:hover   { background-color: rgba(37,99,235,0.10); }
 QPushButton#PhaseDotShotDone:hover   { background-color: rgba(15,118,110,0.11); }
 QPushButton#PhaseDotOrganizing:hover { background-color: rgba(180,83,9,0.11); }
 QPushButton#PhaseDotDone:hover       { background-color: rgba(21,128,61,0.11); }
-QPushButton#PhaseDotShooting:checked   { background-color: #2563eb; }
-QPushButton#PhaseDotShotDone:checked   { background-color: #0f766e; }
-QPushButton#PhaseDotOrganizing:checked { background-color: #b45309; }
-QPushButton#PhaseDotDone:checked       { background-color: #15803d; }
+QPushButton#PhaseDotShooting:checked   { background-color: #2563eb; border-color: #2563eb; }
+QPushButton#PhaseDotShotDone:checked   { background-color: #0f766e; border-color: #0f766e; }
+QPushButton#PhaseDotOrganizing:checked { background-color: #b45309; border-color: #b45309; }
+QPushButton#PhaseDotDone:checked       { background-color: #15803d; border-color: #15803d; }
 
 QPushButton#Tiny { padding: 3px 11px; font-size: 11px; border-radius: 6px; }
 
@@ -1312,8 +1469,8 @@ QLabel#SpecimenRnaBadge {
     background-color: rgba(20, 184, 166, 0.14);
     border: 1px solid rgba(15, 118, 110, 0.28);
     border-radius: 6px;
-    padding: 1px 6px;
-    font-size: 11px;
+    padding: 0px 4px;
+    font-size: 10px;
     font-weight: 600;
 }
 QLabel#SpecimenProgressBadge {
@@ -1321,9 +1478,21 @@ QLabel#SpecimenProgressBadge {
     background-color: rgba(21,128,61,0.11);
     border: 1px solid #15803d;
     border-radius: 6px;
-    padding: 1px 6px;
-    font-size: 11px;
+    padding: 0px 4px;
+    font-size: 10px;
     font-weight: 600;
+}
+QPushButton#SidebarCollapseBtn {
+    background: transparent;
+    border: none;
+    color: #64748b;
+    font-size: 14px;
+    padding: 0;
+}
+QPushButton#SidebarCollapseBtn:hover {
+    color: #0f766e;
+    background: #e6f5f3;
+    border-radius: 6px;
 }
 QLabel#SpecimenStorageText {
     color: #64748b;

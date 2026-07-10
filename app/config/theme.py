@@ -2188,26 +2188,28 @@ QPushButton#PhasePill:checked, QPushButton#PhasePillActive:checked, QPushButton#
    Always show the phase colour as a ring; the current phase fills.
    Colours reuse per-theme semantic tokens so they track the active theme:
    蓝 info=shooting · 青 accent=shot_done · 橙 warn=organizing · 绿 success=done. */
+/* 相位圆点(7px)累进填充:完成到某阶段, 该点及之前全填实。空心=未到,
+   实心=已完成。细 1px 边框, 让 7px 下填充/空心对比清晰醒目。 */
 QPushButton#PhaseDotShooting, QPushButton#PhaseDotShotDone,
 QPushButton#PhaseDotOrganizing, QPushButton#PhaseDotDone {{
-    min-width: 12px; max-width: 12px;
-    min-height: 12px; max-height: 12px;
+    min-width: 7px; max-width: 7px;
+    min-height: 7px; max-height: 7px;
     padding: 0px;
-    border-radius: 6px;
+    border-radius: 4px;
     background-color: transparent;
 }}
-QPushButton#PhaseDotShooting   {{ border: 2px solid {t["info"]}; }}
-QPushButton#PhaseDotShotDone   {{ border: 2px solid {t["accent"]}; }}
-QPushButton#PhaseDotOrganizing {{ border: 2px solid {t["warn"]}; }}
-QPushButton#PhaseDotDone       {{ border: 2px solid {t["success"]}; }}
+QPushButton#PhaseDotShooting   {{ border: 1px solid {t["info"]}; }}
+QPushButton#PhaseDotShotDone   {{ border: 1px solid {t["accent"]}; }}
+QPushButton#PhaseDotOrganizing {{ border: 1px solid {t["warn"]}; }}
+QPushButton#PhaseDotDone       {{ border: 1px solid {t["success"]}; }}
 QPushButton#PhaseDotShooting:hover   {{ background-color: {t["info_soft"]}; }}
 QPushButton#PhaseDotShotDone:hover   {{ background-color: {t["accent_soft"]}; }}
 QPushButton#PhaseDotOrganizing:hover {{ background-color: {t["warn_soft"]}; }}
 QPushButton#PhaseDotDone:hover       {{ background-color: {t["success_soft"]}; }}
-QPushButton#PhaseDotShooting:checked   {{ background-color: {t["info"]}; }}
-QPushButton#PhaseDotShotDone:checked   {{ background-color: {t["accent"]}; }}
-QPushButton#PhaseDotOrganizing:checked {{ background-color: {t["warn"]}; }}
-QPushButton#PhaseDotDone:checked       {{ background-color: {t["success"]}; }}
+QPushButton#PhaseDotShooting:checked   {{ background-color: {t["info"]}; border-color: {t["info"]}; }}
+QPushButton#PhaseDotShotDone:checked   {{ background-color: {t["accent"]}; border-color: {t["accent"]}; }}
+QPushButton#PhaseDotOrganizing:checked {{ background-color: {t["warn"]}; border-color: {t["warn"]}; }}
+QPushButton#PhaseDotDone:checked       {{ background-color: {t["success"]}; border-color: {t["success"]}; }}
 
 QPushButton#Tiny {{ padding: 3px 11px; font-size: {t["font_xs"]}; border-radius: {t["radius_sm"]}; }}
 
@@ -2540,8 +2542,8 @@ QLabel#SpecimenRnaBadge {{
     background-color: rgba(20, 184, 166, 0.14);
     border: 1px solid rgba(15, 118, 110, 0.28);
     border-radius: {t["radius_sm"]};
-    padding: 1px 6px;
-    font-size: {t["font_xs"]};
+    padding: 0px 4px;
+    font-size: 10px;
     font-weight: 600;
 }}
 QLabel#SpecimenProgressBadge {{
@@ -2549,9 +2551,21 @@ QLabel#SpecimenProgressBadge {{
     background-color: {t["success_soft"]};
     border: 1px solid {t["success"]};
     border-radius: {t["radius_sm"]};
-    padding: 1px 6px;
-    font-size: {t["font_xs"]};
+    padding: 0px 4px;
+    font-size: 10px;
     font-weight: 600;
+}}
+QPushButton#SidebarCollapseBtn {{
+    background: transparent;
+    border: none;
+    color: {t["muted"]};
+    font-size: 14px;
+    padding: 0;
+}}
+QPushButton#SidebarCollapseBtn:hover {{
+    color: {t["accent"]};
+    background: {t["nav_selected_bg"]};
+    border-radius: {t["radius_sm"]};
 }}
 QLabel#SpecimenStorageText {{
     color: {t["muted"]};

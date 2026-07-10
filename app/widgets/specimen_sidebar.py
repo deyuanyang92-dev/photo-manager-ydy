@@ -90,6 +90,7 @@ class SpecimenSidebar(QWidget):
     specimen_selected = pyqtSignal(str)
     # Ctrl/Shift 多选编号 → 成果区只显示这些编号的成果(单选/清空时发 1/0 个)。
     selection_scope_changed = pyqtSignal(list)
+    collapse_toggled = pyqtSignal(bool)   # 编号栏收起/展开 → workbench 调该列宽
     show_all_requested = pyqtSignal()
     activate_requested = pyqtSignal(str)
     deactivate_requested = pyqtSignal(str)
@@ -141,6 +142,25 @@ class SpecimenSidebar(QWidget):
         root = QVBoxLayout(card)
         root.setContentsMargins(12, 12, 12, 12)
         root.setSpacing(8)
+        self._root_layout = root
+
+        # 收起条:始终可见的一行, 放收起/展开按钮。收起时其余所有行隐藏, 该列
+        # 缩成细条, 把宽度让给中间主视图(2026-07-11 用户要求两边可收起)。
+        strip_row = QHBoxLayout()
+        strip_row.setContentsMargins(0, 0, 0, 0)
+        strip_row.setSpacing(0)
+        strip_row.addStretch()
+        self._collapse_btn = QPushButton("«")
+        self._collapse_btn.setObjectName("SidebarCollapseBtn")
+        self._collapse_btn.setFlat(True)
+        self._collapse_btn.setFixedSize(24, 24)
+        self._collapse_btn.setToolTip("收起 / 展开编号栏")
+        self._collapse_btn.clicked.connect(
+            lambda: self.set_collapsed(not self._collapsed)
+        )
+        strip_row.addWidget(self._collapse_btn)
+        root.addLayout(strip_row)
+        self._collapsed = False
 
         top_row = QHBoxLayout()
         top_row.setContentsMargins(0, 0, 0, 0)
@@ -194,14 +214,15 @@ class SpecimenSidebar(QWidget):
         self._filter_rna_btn.setToolTip("筛选保存方式以 R 开头的 RNA 编号")
         self._filter_rna_btn.clicked.connect(lambda: self._set_filter_mode("rna"))
         filter_row.addWidget(self._filter_rna_btn)
-        self._filter_attention_btn = QPushButton("资料待补")
+        # 「资料待补 ▾」下拉:选按哪一项缺失筛选, 方便单独批量补(2026-07-11)。
+        self._filter_attention_btn = QPushButton("资料待补 ▾")
         self._filter_attention_btn.setObjectName("Ghost")
         self._filter_attention_btn.setCheckable(True)
         self._filter_attention_btn.setFixedHeight(24)
         self._filter_attention_btn.setToolTip(
-            "筛选资料不完整的编号：缺物种名、保存方式、采集日期或拍照日期"
+            "按缺失项筛选编号:任意缺失 / 缺分类 / 缺保存方式 / 缺日期,方便批量补"
         )
-        self._filter_attention_btn.clicked.connect(lambda: self._set_filter_mode("attention"))
+        self._filter_attention_btn.clicked.connect(self._show_attention_menu)
         filter_row.addWidget(self._filter_attention_btn)
         filter_row.addStretch()
         root.addLayout(filter_row)
@@ -215,6 +236,8 @@ class SpecimenSidebar(QWidget):
         # 普通单击行为不变(仍单选 + 加载该编号), Ctrl/Shift 才进入多选。
         self._list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._list.itemClicked.connect(self._on_item_clicked)
+        # 双击卡片 = 直接激活该编号(用户 2026-07-11: 激活不该只藏在右键/底部按钮)。
+        self._list.itemDoubleClicked.connect(self._on_item_double_clicked)
         self._list.currentItemChanged.connect(self._on_current_item_changed)
         self._list.itemSelectionChanged.connect(self._on_selection_scope_changed)
         self._list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -391,6 +414,13 @@ class SpecimenSidebar(QWidget):
                         "photo_date": row[5],
                         "row_order": row[6],
                         "is_rna": str(row[3] or "").upper().startswith("R"),
+                        # 分项缺失标记(用户 2026-07-11: 想单独筛"缺分类"等批量补)。
+                        "missing_taxon": not str(row[1] or row[2] or "").strip(),
+                        "missing_storage": not str(row[3] or "").strip(),
+                        "missing_date": (
+                            not str(row[4] or "").strip()
+                            or not str(row[5] or "").strip()
+                        ),
                         "needs_attention": (
                             not str(row[1] or row[2] or "").strip()
                             or not str(row[3] or "").strip()
@@ -534,6 +564,13 @@ class SpecimenSidebar(QWidget):
                 if self._filter_mode == "rna" and not is_rna:
                     continue
                 if self._filter_mode == "attention" and not entry.get("needs_attention"):
+                    continue
+                # 分项待补筛选:只显示缺该项的编号, 方便批量补(2026-07-11)。
+                if self._filter_mode == "miss_taxon" and not entry.get("missing_taxon"):
+                    continue
+                if self._filter_mode == "miss_storage" and not entry.get("missing_storage"):
+                    continue
+                if self._filter_mode == "miss_date" and not entry.get("missing_date"):
                     continue
                 if (
                     query
@@ -757,15 +794,18 @@ class SpecimenSidebar(QWidget):
         dots_row = QHBoxLayout()
         dots_row.setContentsMargins(0, 0, 0, 0)
         dots_row.setSpacing(4)
-        for code, obj_name, tip in self._PHASE_DOTS:
+        cur_idx = self._phase_index(current)
+        for i, (code, obj_name, tip) in enumerate(self._PHASE_DOTS):
             dot = QPushButton()
             dot.setObjectName(obj_name)
             # 强制正方固定尺寸 —— 仅靠 QSS max-width 拗不过按钮默认 padding，会被撑成
             # 矩形；setFixedSize 锁死，配 QSS border-radius=半径 → 真·小圆点。
-            # 用户要求缩小: 12→9。
-            dot.setFixedSize(9, 9)
+            # 用户要求缩小: 12→9→7。
+            dot.setFixedSize(7, 7)
             dot.setCheckable(True)
-            dot.setChecked(code == current)
+            # 累进填充(用户 2026-07-11): 完成到某阶段, 该阶段及之前的点都填实,
+            # 一眼看出进度(不是只点亮当前一个)。checked=已完成到该阶段。
+            dot.setChecked(i <= cur_idx)
             dot.setCursor(Qt.CursorShape.PointingHandCursor)
             dot.setToolTip(f"标记为「{tip}」")
             dot.clicked.connect(
@@ -832,7 +872,7 @@ class SpecimenSidebar(QWidget):
         narrowed = (
             shown is not None
             and shown != total
-            and (bool(query) or self._filter_mode in ("rna", "attention"))
+            and (bool(query) or self._filter_mode in ("rna",) + self._ATTENTION_MODES)
         )
         if narrowed:
             self._filter_all_btn.setText(f"全部 {shown}/{total}")
@@ -843,10 +883,13 @@ class SpecimenSidebar(QWidget):
         else:
             self._filter_rna_btn.setText(f"RNA编号 {rna_total}")
         self._filter_rna_btn.setEnabled(rna_total > 0)
-        if self._filter_mode == "attention" and shown is not None:
-            self._filter_attention_btn.setText(f"资料待补 {shown}")
+        # 待补按钮:显示当前子模式标签 + 计数 + ▾。
+        if self._filter_mode in self._ATTENTION_MODES:
+            lbl = self._ATTENTION_LABELS[self._filter_mode]
+            n = shown if shown is not None else attention_total
+            self._filter_attention_btn.setText(f"{lbl} {n} ▾")
         else:
-            self._filter_attention_btn.setText(f"资料待补 {attention_total}")
+            self._filter_attention_btn.setText(f"资料待补 {attention_total} ▾")
         self._filter_attention_btn.setEnabled(attention_total > 0)
 
     def _row_height_for(self, row, *, active: bool) -> int:
@@ -1049,6 +1092,38 @@ class SpecimenSidebar(QWidget):
             except Exception:
                 continue
 
+    def is_collapsed(self) -> bool:
+        return bool(getattr(self, "_collapsed", False))
+
+    def set_collapsed(self, collapsed: bool) -> None:
+        """收起/展开编号栏:收起时只留顶部细条(展开按钮),其余全隐藏。
+
+        列宽由 workbench 通过 collapse_toggled 信号调整。
+        """
+        collapsed = bool(collapsed)
+        self._collapsed = collapsed
+        root = getattr(self, "_root_layout", None)
+        if root is not None:
+            # 逐行显隐:index 0 是收起条(始终显示), 其余行随状态显隐。
+            for i in range(1, root.count()):
+                self._set_layout_item_visible(root.itemAt(i), not collapsed)
+        self._collapse_btn.setText("»" if collapsed else "«")
+        self._collapse_btn.setToolTip("展开编号栏" if collapsed else "收起编号栏")
+        self.collapse_toggled.emit(collapsed)
+
+    @staticmethod
+    def _set_layout_item_visible(item, visible: bool) -> None:
+        if item is None:
+            return
+        w = item.widget()
+        if w is not None:
+            w.setVisible(visible)
+            return
+        lay = item.layout()
+        if lay is not None:
+            for j in range(lay.count()):
+                SpecimenSidebar._set_layout_item_visible(lay.itemAt(j), visible)
+
     def selected_uids(self) -> list[str]:
         """当前多选中的编号(按列表顺序);单选时返回 1 个,无选中返回 []。"""
         out: list[str] = []
@@ -1105,13 +1180,26 @@ class SpecimenSidebar(QWidget):
         self._sync_row_dots(uid, self._phase_state.get(uid))
         self.phase_mark_requested.emit(uid, code)
 
+    def _phase_index(self, code: Optional[str]) -> int:
+        """相位在进度序列中的下标(shooting=0…done=3);未知/无 → -1(全空)。"""
+        order = [c for c, _, _ in self._PHASE_DOTS]
+        try:
+            return order.index(code) if code else -1
+        except ValueError:
+            return -1
+
     def _sync_row_dots(self, uid: str, current: Optional[str]) -> None:
-        """Set checked-state of *uid*'s dots so only *current* is filled."""
+        """累进填充:完成到 *current* 阶段, 该阶段及之前的点全填实。"""
         dots = self._phase_dots.get(uid)
         if not dots:
             return
+        cur_idx = self._phase_index(current)
+        order = [c for c, _, _ in self._PHASE_DOTS]
         for code, dot in dots.items():
-            dot.setChecked(code == current)
+            try:
+                dot.setChecked(order.index(code) <= cur_idx)
+            except ValueError:
+                dot.setChecked(False)
 
     def refresh_phases(self) -> None:
         """Re-read each visible 编号's phase and update its dots (no rebuild)."""
@@ -1155,11 +1243,36 @@ class SpecimenSidebar(QWidget):
         self._sort_btn.setText(label.split()[0] if label else "排序")
         self._apply_filter(self._search.text())
 
+    _ATTENTION_MODES = ("attention", "miss_taxon", "miss_storage", "miss_date")
+    _ATTENTION_LABELS = {
+        "attention": "资料待补",
+        "miss_taxon": "缺分类",
+        "miss_storage": "缺保存方式",
+        "miss_date": "缺日期",
+    }
+
+    def _show_attention_menu(self) -> None:
+        """「资料待补 ▾」下拉:按具体缺失项筛选。"""
+        menu = QMenu(self)
+        for mode in self._ATTENTION_MODES:
+            act = menu.addAction(self._ATTENTION_LABELS[mode])
+            act.setCheckable(True)
+            act.setChecked(self._filter_mode == mode)
+            act.triggered.connect(lambda _=False, m=mode: self._set_filter_mode(m))
+        btn = self._filter_attention_btn
+        menu.exec(btn.mapToGlobal(btn.rect().bottomLeft()))
+
     def _set_filter_mode(self, mode: str) -> None:
-        self._filter_mode = mode if mode in ("rna", "attention") else "all"
+        valid = ("rna",) + self._ATTENTION_MODES
+        self._filter_mode = mode if mode in valid else "all"
         self._filter_all_btn.setChecked(self._filter_mode == "all")
         self._filter_rna_btn.setChecked(self._filter_mode == "rna")
-        self._filter_attention_btn.setChecked(self._filter_mode == "attention")
+        is_att = self._filter_mode in self._ATTENTION_MODES
+        self._filter_attention_btn.setChecked(is_att)
+        # 选了具体缺失项 → 按钮显示该项标签, 一眼知道当前筛的是什么。
+        self._filter_attention_btn.setText(
+            f"{self._ATTENTION_LABELS[self._filter_mode]} ▾" if is_att else "资料待补 ▾"
+        )
         self._apply_filter(self._search.text())
         if self._filter_mode == "all":
             self.show_all_requested.emit()
@@ -1168,6 +1281,12 @@ class SpecimenSidebar(QWidget):
         uid = item.data(Qt.ItemDataRole.UserRole)
         if uid:
             self.specimen_selected.emit(uid)
+
+    def _on_item_double_clicked(self, item: QListWidgetItem) -> None:
+        """双击卡片 = 直接激活该编号(简化激活, 不必再右键/点底部按钮)。"""
+        uid = item.data(Qt.ItemDataRole.UserRole)
+        if uid:
+            self.activate_requested.emit(uid)
 
     def _on_current_item_changed(
         self,

@@ -169,14 +169,17 @@ def test_grouping_progress_batches_large_uid_lists(ctx, db):
 
 
 def test_current_phase_dot_is_checked_from_db(ctx, db):
+    """累进填充(2026-07-11): 完成到 organizing → shooting/shot_done/organizing
+    三点全填实(≤当前阶段), done 仍空。一眼看出进度 3/4。"""
     _add_specimen(db, "U-1")
     activation_service.set_collab_status(db, "U-1", "organizing")
     sb = SpecimenSidebar(ctx)
     sb.refresh()
     dots = _dots(sb, "U-1")
+    assert dots["shooting"].isChecked() is True      # 累进: 之前阶段也填实
+    assert dots["shot_done"].isChecked() is True
     assert dots["organizing"].isChecked() is True
-    assert dots["shooting"].isChecked() is False
-    assert dots["done"].isChecked() is False
+    assert dots["done"].isChecked() is False         # 未到 done → 空
 
 
 def test_activate_emits_for_single_visible_row_without_prior_selection(ctx, db, qtbot):
@@ -456,19 +459,21 @@ def test_all_filter_button_requests_all_results(ctx, db, qtbot):
 
 
 def test_attention_filter_shows_incomplete_specimens(ctx, db):
+    """资料待补按钮现在带计数 + ▾(点开菜单选缺哪项, 2026-07-11)。
+    「任意缺失」模式仍显示所有不完整编号。"""
     _add_complete_specimen(db, "COMPLETE-1")
     _add_specimen(db, "MISSING-1", storage="D95E")
     sb = SpecimenSidebar(ctx)
     sb.refresh()
 
-    assert sb._filter_attention_btn.text() == "资料待补 1"
-    assert "缺物种名、保存方式、采集日期或拍照日期" in sb._filter_attention_btn.toolTip()
+    assert sb._filter_attention_btn.text() == "资料待补 1 ▾"
 
-    sb._filter_attention_btn.click()
+    # 点击开菜单不直接筛选; 选「任意缺失」= attention 模式。
+    sb._set_filter_mode("attention")
 
     assert sb._list.count() == 1
     assert sb._list.item(0).data(Qt.ItemDataRole.UserRole) == "MISSING-1"
-    assert sb._filter_attention_btn.text() == "资料待补 1"
+    assert "资料待补 1" in sb._filter_attention_btn.text()
 
 
 def test_rna_badge_and_missing_species_are_visible_on_row(ctx, db):
@@ -717,3 +722,108 @@ def test_single_selection_still_emits_specimen_selected(ctx, db):
     sb.specimen_selected.connect(seen.append)
     sb._on_item_clicked(sb._list.item(0))
     assert seen == ["U-1"]
+
+
+class TestSidebarCollapse:
+    """编号栏可收起成细条, 把宽度让给中间主视图(2026-07-11 用户要求两边可收)。"""
+
+    def test_collapse_hides_content_keeps_toggle(self, ctx, db):
+        _add_specimen(db, "U-1")
+        sb = SpecimenSidebar(ctx)
+        sb.refresh()
+        assert not sb.is_collapsed()
+        sb.set_collapsed(True)
+        assert sb.is_collapsed()
+        assert not sb._collapse_btn.isHidden(), "收起后展开按钮必须仍可见"
+        assert sb._list.isHidden(), "收起后编号列表应隐藏"
+        assert sb._collapse_btn.text() == "»"
+
+    def test_expand_restores_content(self, ctx, db):
+        _add_specimen(db, "U-1")
+        sb = SpecimenSidebar(ctx)
+        sb.refresh()
+        sb.set_collapsed(True)
+        sb.set_collapsed(False)
+        assert not sb.is_collapsed()
+        assert not sb._list.isHidden()
+        assert sb._collapse_btn.text() == "«"
+
+    def test_collapse_emits_signal(self, ctx, db):
+        sb = SpecimenSidebar(ctx)
+        sb.refresh()
+        seen = []
+        sb.collapse_toggled.connect(seen.append)
+        sb.set_collapsed(True)
+        sb.set_collapsed(False)
+        assert seen == [True, False]
+
+
+def test_double_click_card_activates(ctx, db):
+    """双击卡片 = 直接激活(2026-07-11 简化激活入口)。"""
+    _add_specimen(db, "U-DBL")
+    sb = SpecimenSidebar(ctx)
+    sb.refresh()
+    seen = []
+    sb.activate_requested.connect(seen.append)
+    item = sb._list.item(0)
+    sb._on_item_double_clicked(item)
+    assert seen == ["U-DBL"]
+
+
+def test_phase_dots_fill_cumulatively(ctx, db):
+    """完成到第 N 阶段 → 前 N 个点全填实(进度条式), 不是只点亮当前一个。"""
+    cases = [
+        ("FJ-YGLZ-B2-DLC001-R-20260618", "shooting", 1),
+        ("FJ-YGLZ-B2-DLC002-R-20260618", "shot_done", 2),
+        ("FJ-YGLZ-B2-DLC003-R-20260618", "organizing", 3),
+        ("FJ-YGLZ-B2-DLC004-R-20260618", "done", 4),
+        ("FJ-YGLZ-B2-DLC005-R-20260618", None, 0),
+    ]
+    for uid, ph, _n in cases:
+        _add_specimen(db, uid)
+        if ph:
+            activation_service.set_collab_status(db, uid, ph)
+    sb = SpecimenSidebar(ctx)
+    sb.refresh()
+    for uid, _ph, n in cases:
+        filled = sum(1 for d in _dots(sb, uid).values() if d.isChecked())
+        assert filled == n, f"{uid}: 应填 {n} 个, 实际 {filled}"
+
+
+def _uids_shown(sb):
+    return sorted(sb._list.item(i).data(Qt.ItemDataRole.UserRole)
+                  for i in range(sb._list.count()))
+
+
+def test_filter_by_specific_missing_field(ctx, db):
+    """按具体缺失项筛选(2026-07-11): 缺分类/缺保存方式/缺日期分别只出对应编号,
+    方便单独批量补。"""
+    db.execute("INSERT INTO specimens (uid,scientific_name,storage,collection_date,photo_date,owner_project_dir) VALUES ('AA-NOTAXON-R-1',null,'R','20260618','20260618',?)", (_PROJ,))
+    db.execute("INSERT INTO specimens (uid,scientific_name,storage,collection_date,photo_date,owner_project_dir) VALUES ('BB-NOSTOR-X-1','Aa',null,'20260618','20260618',?)", (_PROJ,))
+    db.execute("INSERT INTO specimens (uid,scientific_name,storage,collection_date,photo_date,owner_project_dir) VALUES ('CC-NODATE-R-1','Aa','R',null,null,?)", (_PROJ,))
+    db.execute("INSERT INTO specimens (uid,scientific_name,storage,collection_date,photo_date,owner_project_dir) VALUES ('DD-FULL-R-1','Aa','R','20260618','20260618',?)", (_PROJ,))
+    db.commit()
+    sb = SpecimenSidebar(ctx)
+    sb.refresh()
+
+    sb._set_filter_mode("miss_taxon")
+    assert _uids_shown(sb) == ["AA-NOTAXON-R-1"]
+    sb._set_filter_mode("miss_storage")
+    assert _uids_shown(sb) == ["BB-NOSTOR-X-1"]
+    sb._set_filter_mode("miss_date")
+    assert _uids_shown(sb) == ["CC-NODATE-R-1"]
+    sb._set_filter_mode("attention")
+    assert _uids_shown(sb) == ["AA-NOTAXON-R-1", "BB-NOSTOR-X-1", "CC-NODATE-R-1"]
+    sb._set_filter_mode("all")
+    assert len(_uids_shown(sb)) == 4
+
+
+def test_attention_button_label_reflects_submode(ctx, db):
+    db.execute("INSERT INTO specimens (uid,scientific_name,storage,collection_date,photo_date,owner_project_dir) VALUES ('AA-NOTAXON-R-1',null,'R','20260618','20260618',?)", (_PROJ,))
+    db.commit()
+    sb = SpecimenSidebar(ctx)
+    sb.refresh()
+    sb._set_filter_mode("miss_taxon")
+    assert "缺分类" in sb._filter_attention_btn.text()
+    sb._set_filter_mode("all")
+    assert "资料待补" in sb._filter_attention_btn.text()
