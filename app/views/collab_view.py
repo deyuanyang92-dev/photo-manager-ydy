@@ -975,6 +975,11 @@ class CollabView(BaseView):
         self._team_save_btn.setMaximumWidth(220)
         self._team_save_btn.clicked.connect(self._save_team_setup_inline)
         entry_actions.addWidget(self._team_save_btn)
+        # v0.56 修复: 「设置/修改永久码」向导按钮此前创建后从未挂进任何布局
+        # (孤儿控件) —— 保存入口之外的修改路径因此消失。挂到主 CTA 旁,
+        # 降为 Outline 避免双主按钮打架。
+        self._setup_btn.setObjectName("Outline")
+        entry_actions.addWidget(self._setup_btn)
         entry_actions.addStretch()
         layout.addWidget(step_entry)
 
@@ -1158,6 +1163,11 @@ class CollabView(BaseView):
             return
 
         self._service = svc
+        old_code = ""
+        try:
+            old_code = str(svc.group_code or "").strip()
+        except Exception:  # noqa: BLE001
+            old_code = ""
         try:
             svc.set_group_code(group_code)
         except Exception:  # noqa: BLE001
@@ -1172,6 +1182,15 @@ class CollabView(BaseView):
             running = bool(svc.is_running())
         except Exception:  # noqa: BLE001
             running = False
+        # v0.56 修复「永久码不能更新」: set_group_code 只改内存, 运行中的服务
+        # mDNS 仍以旧码注册/匹配 —— 码变了必须停旧服务, 走下方 start 以新码重启。
+        if running and old_code and old_code != group_code:
+            try:
+                svc.stop()
+                running = False
+            except Exception as exc:  # noqa: BLE001
+                self._team_setup_status.setText(f"重启协作服务失败：{exc}")
+                return
         if not running and hasattr(svc, "start"):
             try:
                 svc.start(

@@ -116,7 +116,8 @@ class TestCollabShareDialog:
 
         assert view._next_step_label.text() == "下一步：选择协作方式"
         assert view._setup_btn.text() == "设置永久码"
-        assert view._setup_btn.objectName() == "Primary"
+        # v0.56: 向导按钮挂到主 CTA 旁并降为 Outline(见 TestTeamCodeUpdate)
+        assert view._setup_btn.objectName() == "Outline"
         assert view._setup_btn.isEnabled()
         assert view._project_code_btn.isEnabled()
         assert not view._share_btn.isEnabled()
@@ -270,3 +271,60 @@ class TestSidebarCollabStrip:
             sb._open_collab_view()
 
         win.navigate_to.assert_called_once_with("collab")
+
+
+class TestTeamCodeUpdate:
+    """v0.56: 服务运行中修改永久码必须真正生效(重启服务重新注册 mDNS),
+    且「设置/修改永久码」按钮必须真的在界面上(v0.55 后成了孤儿控件)。"""
+
+    def test_setup_btn_is_placed_in_a_layout(self, qtbot, mock_ctx):
+        from app.views.collab_view import CollabView
+
+        view = CollabView(mock_ctx)
+        qtbot.addWidget(view)
+        assert view._setup_btn.parentWidget() is not None, (
+            "设置/修改永久码按钮必须挂进布局, 不能是孤儿控件"
+        )
+
+    def test_changing_code_while_running_restarts_service(self, qtbot, mock_ctx):
+        from unittest.mock import MagicMock
+
+        from app.views.collab_view import CollabView
+
+        view = CollabView(mock_ctx)
+        qtbot.addWidget(view)
+
+        svc = MagicMock()
+        svc.is_running.return_value = True
+        svc.group_code = "TEAM-OLD-111"
+        svc.local_address.return_value = "192.168.1.10:5050"
+        mock_ctx.ensure_collab_service.return_value = svc
+        mock_ctx.collab_service = svc
+
+        view._team_code_edit.setText("TEAM-NEW-222")
+        view._team_operator_edit.setText("小王")
+        view._save_team_setup_inline()
+
+        svc.set_group_code.assert_called_with("TEAM-NEW-222")
+        assert svc.stop.called, "运行中改码必须停旧服务(否则 mDNS 仍广播旧码)"
+        assert svc.start.called, "停旧后必须以新码重启"
+
+    def test_same_code_while_running_does_not_restart(self, qtbot, mock_ctx):
+        from unittest.mock import MagicMock
+
+        from app.views.collab_view import CollabView
+
+        view = CollabView(mock_ctx)
+        qtbot.addWidget(view)
+
+        svc = MagicMock()
+        svc.is_running.return_value = True
+        svc.group_code = "TEAM-SAME-333"
+        svc.local_address.return_value = "192.168.1.10:5050"
+        mock_ctx.ensure_collab_service.return_value = svc
+        mock_ctx.collab_service = svc
+
+        view._team_code_edit.setText("TEAM-SAME-333")
+        view._save_team_setup_inline()
+
+        assert not svc.stop.called, "码没变不应重启服务"
