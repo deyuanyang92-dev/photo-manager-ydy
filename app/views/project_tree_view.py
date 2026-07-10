@@ -1321,17 +1321,22 @@ class ProjectTreeView(BaseView):
         if not ws:
             return None
         try:
-            from app.db.db_manager import open_project_db
-            conn = open_project_db(ws, create=False)
+            # from app.db.db_manager import open_project_db  # §7 旧: 缓存被浏览节点的连接 → 锁泄漏
+            from app.db.db_manager import open_project_db_private
+            # conn = open_project_db(ws, create=False)  # §7 旧
+            conn = open_project_db_private(ws, create=False)
         except Exception:
             return None
-        if uid:
-            row = conn.execute(
-                "SELECT * FROM specimens WHERE uid = ? LIMIT 1", (uid,)
-            ).fetchone()
-            if row:
-                return dict(row)
-        return None
+        try:
+            if uid:
+                row = conn.execute(
+                    "SELECT * FROM specimens WHERE uid = ? LIMIT 1", (uid,)
+                ).fetchone()
+                if row:
+                    return dict(row)
+            return None
+        finally:
+            conn.close()
 
     def _enter_preview_mode(self, path: str) -> None:
         self._preview_mode = True

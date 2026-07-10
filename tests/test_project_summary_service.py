@@ -667,3 +667,69 @@ def test_qc_report_skips_missing_db(tmp_path):
     # should not raise
     findings = pss.collect_qc_findings([dir_a, str(missing)], str(root))
     assert any(f["category"] == "分类不完整" for f in findings)
+
+
+# ── v0.56 锁泄漏治理: 跨工作区读用私有连接, 读路径不迁移子库 ────────────────
+
+
+class TestPrivateConnectionGovernance:
+    """跨工作区汇总是「碰一下就走」的读路径 (CLAUDE.md 规约):
+
+    - 不得把子工作区连接放进 db_manager 的缓存 (文件锁扣到退出,
+      Windows 上目录因此不能移动/删除 — 历史 shutdown-lock bug);
+    - 不得对子工作区库跑 schema 迁移 (读路径禁写)。
+    """
+
+    def test_collect_rows_leaves_no_cached_connection(self, tmp_path):
+        ws = tmp_path / "wsA"
+        ws.mkdir()
+        conn = db_manager.open_project_db_private(str(ws), create=True)
+        try:
+            conn.execute(
+                "INSERT INTO specimens (uid) VALUES ('FJ-YGLZ-SC001-R-20260618')"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        before = set(db_manager._db_cache)
+        payload = pss.collect_specimen_summary_rows(
+            [str(ws)], str(tmp_path), use_cache=False
+        )
+        assert payload["specimens"], "sanity: 该工作区标本应被汇总到"
+        leaked = set(db_manager._db_cache) - before
+        assert not leaked, f"跨工作区汇总把子库连接留在缓存里: {leaked}"
+
+    def test_read_path_does_not_migrate_legacy_db(self, tmp_path):
+        import sqlite3 as _sqlite3
+
+        ws = tmp_path / "legacy"
+        (ws / "_data").mkdir(parents=True)
+        db_path = ws / "_data" / "project.db"
+        raw = _sqlite3.connect(str(db_path))
+        try:
+            raw.execute(
+                "CREATE TABLE specimens (uid TEXT PRIMARY KEY, raw_json TEXT)"
+            )
+            raw.execute(
+                "INSERT INTO specimens (uid) VALUES ('FJ-YGLZ-SC002-R-20260618')"
+            )
+            raw.commit()
+        finally:
+            raw.close()
+
+        pss.collect_specimen_summary_rows([str(ws)], str(tmp_path), use_cache=False)
+
+        check = _sqlite3.connect(str(db_path))
+        try:
+            tables = {
+                r[0]
+                for r in check.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+        finally:
+            check.close()
+        assert "collection_records" not in tables, (
+            "只读汇总不得对子工作区库执行 ensure_schema/迁移 (读路径禁写)"
+        )

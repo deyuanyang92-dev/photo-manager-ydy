@@ -4,7 +4,8 @@
 计算 断面/来源 标签），合并它们的数据并写出 Excel / HTML 报告。
 
 ZERO 新表：只读已有表（specimens / collection_records / grouping）。复用：
-  - ``db_manager.open_project_db(dir, create=False)`` 严格打开（缺库即跳过）
+  - ``db_manager.open_project_db_private(dir, create=False)`` 严格打开（缺库即
+    跳过），用完即 close —— 跨工作区读规约：不缓存子库连接、不跑 ensure_schema
   - ``Specimen.from_row`` 构造标本
   - ``export_service.export_excel`` 的 ``extra_leading`` 前置列 + 其样式辅助
   - ``collection_record_service.list_records`` 取采集记录
@@ -23,7 +24,8 @@ from typing import Iterator, Optional
 
 import openpyxl
 
-from app.db.db_manager import open_project_db
+# from app.db.db_manager import open_project_db  # §7 旧: 缓存连接跨工作区 → 锁泄漏
+from app.db.db_manager import open_project_db_private
 from app.models.specimen import Specimen
 from app.services.collection_record_service import list_records
 from app.services.export_service import (
@@ -79,13 +81,25 @@ def _label(ws_dir: str, root: str) -> str:
 
 
 def _iter_dbs(dirs: list[str]) -> Iterator[tuple[str, sqlite3.Connection]]:
-    """逐个 yield ``(ws_dir, conn)``；缺失/锁定的库静默跳过，绝不中断全流程。"""
+    """逐个 yield ``(ws_dir, conn)``；缺失/锁定的库静默跳过，绝不中断全流程。
+
+    私有连接 + 用完即 close（CLAUDE.md 跨工作区读规约）：缓存连接会把每个
+    子工作区的文件锁扣到退出（Windows 目录删不掉/移不动），且
+    ``open_project_db`` 每次 open 都跑 ensure_schema —— 「只读汇总」会静默
+    迁移/写入子库。plain 私有连接跳过 ensure_schema，真正只读；老库缺列由
+    ``Specimen.from_row`` 的 ``d.get(k)`` 容错，缺表由各调用点的
+    ``except sqlite3.Error`` 跳过。
+    """
     for d in dirs:
         try:
-            conn = open_project_db(d, create=False)
+            # conn = open_project_db(d, create=False)  # §7 旧: 缓存连接 + 隐式 ensure_schema
+            conn = open_project_db_private(d, create=False)
         except (ProjectUnavailableError, sqlite3.Error):
             continue
-        yield d, conn
+        try:
+            yield d, conn
+        finally:
+            conn.close()
 
 
 def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:

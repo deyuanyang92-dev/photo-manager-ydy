@@ -67,11 +67,16 @@ def clear_project_cover_path(project_dir: str) -> None:
 
 def _read_manual_cover(root: Path) -> Optional[str]:
     try:
-        from app.db.db_manager import open_project_db
+        # from app.db.db_manager import open_project_db  # §7 旧: 卡片网格读外部项目封面 → 缓存连接锁泄漏
+        from app.db.db_manager import open_project_db_private
         from app.services import project_settings_service as pss
 
-        db = open_project_db(str(root), create=False)
-        meta = pss.load_setting(db, "project_meta", pss.DEFAULT_PROJECT_META)
+        # db = open_project_db(str(root), create=False)  # §7 旧
+        db = open_project_db_private(str(root), create=False)
+        try:
+            meta = pss.load_setting(db, "project_meta", pss.DEFAULT_PROJECT_META)
+        finally:
+            db.close()
         cover = str(meta.get("cover_image") or meta.get("coverImage") or "").strip()
         if not cover:
             return None

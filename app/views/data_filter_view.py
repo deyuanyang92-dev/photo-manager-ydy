@@ -594,8 +594,10 @@ class DataFilterView(BaseView):
         """best-effort 审计: 优先 activity_audit_service, 无表/失败静默。"""
         try:
             from app.services.activity_audit_service import default_actor, log_event
-            from app.db.db_manager import open_project_db
-            db = open_project_db(workspace)
+            # from app.db.db_manager import open_project_db  # §7 旧: 缓存任意被聚合工作区的连接 → 锁泄漏
+            from app.db.db_manager import open_project_db_private
+            # db = open_project_db(workspace)  # §7 旧
+            db = open_project_db_private(workspace)
             try:
                 log_event(
                     db,
@@ -606,8 +608,8 @@ class DataFilterView(BaseView):
                     new_value={"field": field, "value": value},
                 )
             finally:
-                # open_project_db 缓存连接, 不在此 close(避免破坏缓存语义)
-                pass
+                # 私有连接用完即 close(跨工作区读写规约, log_event 自带 commit)
+                db.close()
         except Exception:
             # 审计失败不应阻断编辑
             pass
