@@ -12,6 +12,7 @@ from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QProgressBar,
     QPushButton,
     QToolButton,
     QVBoxLayout,
@@ -142,6 +143,16 @@ class _ComposeOrganiseProgressDialog(QWidget):
         stage_layout.addWidget(self._organise_row)
         card_layout.addWidget(self._stage_panel)
 
+        # 真进度条(2026-07-11 用户要求): 分步确定进度 —— 合成中 30% /
+        # 整理中 65% / 完成 100%。成功=绿, 失败=红。
+        self._progress = QProgressBar()
+        self._progress.setObjectName("ComposeOrganiseProgress")
+        self._progress.setRange(0, 100)
+        self._progress.setValue(0)
+        self._progress.setTextVisible(False)
+        self._progress.setFixedHeight(8)
+        card_layout.addWidget(self._progress)
+
         self._detail = QLabel("")
         self._detail.setObjectName("ComposeOrganiseDetail")
         self._detail.setWordWrap(True)
@@ -185,23 +196,23 @@ class _ComposeOrganiseProgressDialog(QWidget):
             "}"
             "QLabel#ComposeOrganiseMark {"
             f" background:{TOKENS['accent']}; color:white;"
-            " border-radius:8px; font-size:15px; font-weight:800;"
+            " border-radius:8px; font-size:13px; font-weight:600;"
             "}"
             "QLabel#ComposeOrganiseTitle {"
-            f" color:{TOKENS['text']}; font-size:16px; font-weight:800;"
+            f" color:{TOKENS['text']}; font-size:14px; font-weight:600;"
             "}"
             "QLabel#ComposeOrganiseSubtitle {"
             f" color:{TOKENS['muted']}; font-size:12px;"
             "}"
             "QLabel#ComposeOrganiseOverallBadge {"
             " background:transparent; border:0; padding:2px 0;"
-            " font-size:12px; font-weight:800;"
+            " font-size:12px; font-weight:600;"
             "}"
             "QToolButton#ComposeOrganiseToolButton {"
             f" background:{TOKENS['panel_2']};"
             f" border:1px solid {TOKENS['border']};"
             " border-radius:8px; min-width:28px; min-height:28px;"
-            f" color:{TOKENS['muted']}; font-size:14px; font-weight:800;"
+            f" color:{TOKENS['muted']}; font-size:13px; font-weight:600;"
             "}"
             "QToolButton#ComposeOrganiseToolButton:hover {"
             f" background:{TOKENS['panel_inset']};"
@@ -223,7 +234,7 @@ class _ComposeOrganiseProgressDialog(QWidget):
             f" color:{TOKENS['danger']};"
             " border:1px solid #fed7aa;"
             " border-radius:8px; padding:6px 12px;"
-            " font-size:12px; font-weight:800;"
+            " font-size:12px; font-weight:600;"
             "}"
             "QPushButton#ComposeOrganiseCancelButton[role=\"danger\"]:hover {"
             " background:#ffedd5; border-color:#fdba74;"
@@ -233,7 +244,7 @@ class _ComposeOrganiseProgressDialog(QWidget):
             f" color:{TOKENS['text']};"
             f" border:1px solid {TOKENS['border']};"
             " border-radius:8px; padding:6px 12px;"
-            " font-size:12px; font-weight:800;"
+            " font-size:12px; font-weight:600;"
             "}"
             "QPushButton#ComposeOrganiseCancelButton[role=\"neutral\"]:hover {"
             f" background:{TOKENS['panel_inset']};"
@@ -246,7 +257,7 @@ class _ComposeOrganiseProgressDialog(QWidget):
             "QPushButton#ComposeOrganiseOkButton {"
             f" background:{TOKENS['accent']}; color:white;"
             " border:0; border-radius:8px; padding:6px 16px;"
-            " font-size:12px; font-weight:800;"
+            " font-size:12px; font-weight:600;"
             "}"
             "QPushButton#ComposeOrganiseOkButton:hover {"
             f" background:{TOKENS['accent_hover']};"
@@ -367,6 +378,7 @@ class _ComposeOrganiseProgressDialog(QWidget):
             self._set_stage(self._compose_state, "进行中")
             self._set_stage(self._organise_state, "等待")
         self._detail.setText(text)
+        self._sync_progress(state, title_text)
         if finish_state:
             self._auto_hide_timer.start(8000)
         else:
@@ -396,7 +408,7 @@ class _ComposeOrganiseProgressDialog(QWidget):
         label.setText(state)
         label.setStyleSheet(
             f"background:{bg}; color:{fg}; border:1px solid {border};"
-            " border-radius:10px; padding:4px 8px; font-size:12px; font-weight:800;"
+            " border-radius:10px; padding:4px 8px; font-size:12px; font-weight:600;"
         )
         hint = getattr(self, "_stage_hint_by_label", {}).get(label)
         if hint is not None:
@@ -413,6 +425,30 @@ class _ComposeOrganiseProgressDialog(QWidget):
             elif label is self._organise_state:
                 self._organise_hint.setText(label_hint)
 
+    def _sync_progress(self, state: str, title_text: str) -> None:
+        """分步进度: 合成中 30% / 整理中 65% / 成功 100% / 失败=当前值转红。"""
+        if state == "success":
+            pct, color = 100, TOKENS["success"]
+        elif state == "error":
+            pct, color = max(self._progress.value(), 30), TOKENS["danger"]
+        elif "正在整理" in title_text:
+            pct, color = 65, TOKENS["accent"]
+        elif "正在合成" in title_text:
+            pct, color = 30, TOKENS["accent"]
+        elif state == "busy":
+            pct, color = max(self._progress.value(), 15), TOKENS["accent"]
+        else:
+            pct, color = 0, TOKENS["accent"]
+        self._progress.setValue(pct)
+        self._progress.setStyleSheet(
+            "QProgressBar#ComposeOrganiseProgress {"
+            f" background:{TOKENS['panel_inset']}; border:0; border-radius:4px;"
+            " }"
+            "QProgressBar#ComposeOrganiseProgress::chunk {"
+            f" background:{color}; border-radius:4px;"
+            " }"
+        )
+
     def _set_overall_badge(self, stage: str) -> None:
         colors = {
             "进行中": (TOKENS["accent"], "#e8f7f4", "#8bd3c7"),
@@ -424,7 +460,7 @@ class _ComposeOrganiseProgressDialog(QWidget):
         self._overall_badge.setText(f"状态：{stage}")
         self._overall_badge.setStyleSheet(
             f"background:transparent; color:{fg}; border:0;"
-            " padding:2px 0; font-size:12px; font-weight:800;"
+            " padding:2px 0; font-size:12px; font-weight:600;"
         )
         self._sync_launcher_style(fg, stage)
 
@@ -550,7 +586,7 @@ class _ComposeOrganiseProgressDialog(QWidget):
         self._launcher.setStyleSheet(
             "QPushButton#ComposeOrganiseLauncher {"
             f" background:{color}; color:white; border:0; border-radius:15px;"
-            " padding:4px 14px; font-size:12px; font-weight:800;"
+            " padding:4px 14px; font-size:12px; font-weight:600;"
             "}"
         )
 

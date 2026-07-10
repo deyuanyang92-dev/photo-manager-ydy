@@ -7672,3 +7672,28 @@ class TestThreeColumnLayoutFits:
         assert sizes[2] >= v._right_rail_min_width() - 40
         v.close()
         real_qs.clear()
+
+
+class TestComposeOrganiseProgressBar:
+    """合成+整理弹窗:字号正常化 + 真进度条(2026-07-11 用户报障字体异常)。"""
+
+    def _dlg(self):
+        from PyQt6.QtWidgets import QWidget
+        from app.widgets.compose_organise_dialog import _ComposeOrganiseProgressDialog
+        host = QWidget()
+        return _ComposeOrganiseProgressDialog(host)
+
+    def test_progress_advances_by_stage(self):
+        d = self._dlg()
+        d.set_notice("合成+整理：正在合成", "", state="busy", task_key="t")
+        assert d._progress.value() == 30
+        d.set_notice("合成+整理：正在整理", "", state="busy", task_key="t")
+        assert d._progress.value() == 65
+        d.set_notice("合成+整理完成", "", state="success", task_key="t")
+        assert d._progress.value() == 100
+
+    def test_progress_bar_exists_and_hidden_text(self):
+        from PyQt6.QtWidgets import QProgressBar
+        d = self._dlg()
+        assert isinstance(d._progress, QProgressBar)
+        assert not d._progress.isTextVisible()
