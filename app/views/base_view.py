@@ -66,6 +66,17 @@ class BaseView(QWidget):
         Guaranteed to run on the main thread.
         """
 
+    def on_deactivate(self) -> None:
+        """Called every time the user navigates AWAY from this view.
+
+        对称于 ``on_activate``:停外观级定时器/watcher/预热线程、释放大块
+        pixmap 缓存。策略 = 「暂停 + 回来重扫」(2026-07-10 用户拍板):
+        ``on_activate`` 每次进页全量重建,所以这里可以放心停 —— 与「关软件
+        再开」走同一恢复路径。**不要**在这里取消用户发起的长任务(合成/
+        归档/导出),那些必须跨页继续,退出清理归 ``stop_background_work``。
+        Default no-op。壳层守护调用(异常不阻断导航),运行于主线程。
+        """
+
     def stop_background_work(self) -> None:
         """Cancel any background QThread / subprocess this view owns.
 

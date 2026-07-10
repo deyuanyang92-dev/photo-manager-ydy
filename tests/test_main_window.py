@@ -639,3 +639,56 @@ def test_refresh_helicon_status_shows_missing_when_not_detected(qtbot, monkeypat
     monkeypatch.setattr(hs, "resolve_helicon_exe", lambda settings=None: None)
     win.refresh_helicon_status()
     assert win._status_helicon.text() == "Helicon: 未检测"
+
+
+# ── 生命周期对称: 切页必须先对旧页调 on_deactivate ────────────────────────────
+
+def test_navigation_calls_on_deactivate_on_previous_view():
+    """切走的页面必须收到 on_deactivate(停定时器/watcher/预热线程的钩子)。
+
+    历史: workbench/project_tree 写好了 on_deactivate 清理, 但壳层从不调用
+    (全仓调用点=0, 死 seam) —— 切页后 fs watcher/QTimer 继续跑。
+    """
+    win = _fresh_window()
+    win.register_view(_DummyView)
+
+    class _Second(_DummyView):
+        view_id = "dummy2"
+        nav_title = "第二页"
+
+        def __init__(self, ctx):
+            super().__init__(ctx)
+            self.deactivated = 0
+
+        def on_deactivate(self) -> None:
+            self.deactivated += 1
+
+    win.register_view(_Second)
+    win.navigate_to("dummy2")
+    second = win._views["dummy2"]
+    assert second.deactivated == 0
+
+    win.navigate_to("dummy")
+    assert second.deactivated == 1, "切走 dummy2 时必须调它的 on_deactivate"
+
+    win.navigate_to("dummy2")
+    assert second.activated == 2
+    assert second.deactivated == 1, "切回不应重复 deactivate"
+
+
+def test_on_deactivate_error_never_blocks_navigation():
+    """旧页清理抛异常不得阻断导航(守护在壳层)。"""
+    win = _fresh_window()
+    win.register_view(_DummyView)
+
+    class _Broken(_DummyView):
+        view_id = "broken"
+        nav_title = "坏页"
+
+        def on_deactivate(self) -> None:
+            raise RuntimeError("cleanup boom")
+
+    win.register_view(_Broken)
+    win.navigate_to("broken")
+    win.navigate_to("dummy")  # 不应抛
+    assert win._views["dummy"] is win._stack.currentWidget()

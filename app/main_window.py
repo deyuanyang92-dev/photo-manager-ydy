@@ -915,6 +915,18 @@ class MainWindow(QMainWindow):
             view = self._ensure_view(view_cls)
             if view:
                 self._hide_startup_placeholder()
+                # 生命周期对称: 切页前先让旧页 on_deactivate(停定时器/watcher/
+                # 预热线程, 策略=「暂停+回来重扫」)。守护调用 —— 清理失败绝不
+                # 阻断导航。(2026-07-10 前该钩子从未被壳层调用, 死 seam:
+                # 切走 workbench 后 fs watcher/QTimer 继续跑。)
+                prev = self._stack.currentWidget()
+                if prev is not None and prev is not view:
+                    deactivate = getattr(prev, "on_deactivate", None)
+                    if callable(deactivate):
+                        try:
+                            deactivate()
+                        except Exception:
+                            pass  # 清理失败不阻断导航; 钩子自身负责留痕
                 self._stack.setCurrentWidget(view)
                 view.on_activate()
         if persist:
