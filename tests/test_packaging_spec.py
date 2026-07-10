@@ -66,7 +66,7 @@ def test_tag_release_workflow_builds_and_uploads_windows_zip():
     assert '"v*"' in text
     assert "APP_VERSION" in text
     assert "must match release tag" in text
-    assert "python -m pytest tests/ -q --tb=line" in text
+    assert "scripts\\run_tests_batched.ps1 -IncludePackaging" in text
     assert "scripts\\build_windows.ps1" in text
     assert "gh release create" in text
     assert "gh release upload" in text

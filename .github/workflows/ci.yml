@@ -21,7 +21,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
       - name: Run tests
-        run: python -m pytest tests/ -q --tb=line
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File .\scripts\run_tests_batched.ps1 -IncludePackaging
 
   build-windows:
     runs-on: windows-latest
