@@ -843,12 +843,13 @@ class SpecimenSidebar(QWidget):
         organized = int(progress.get("organized") or 0)
         composed = int(progress.get("composed") or 0)
         grouped = int(progress.get("grouped") or 0)
+        # 去掉空格更紧凑(用户嫌徽章大): 整3 / 合2 / 组1。
         if organized:
-            return f"整 {organized}"
+            return f"整{organized}"
         if composed:
-            return f"合 {self._format_angle_count(composed, total)}"
+            return f"合{self._format_angle_count(composed, total)}"
         if grouped:
-            return f"组 {self._format_angle_count(grouped, total)}"
+            return f"组{self._format_angle_count(grouped, total)}"
         return ""
 
     @staticmethod

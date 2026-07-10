@@ -2539,20 +2539,20 @@ QLabel#SpecimenBadge {{
 }}
 QLabel#SpecimenRnaBadge {{
     color: #0f766e;
-    background-color: rgba(20, 184, 166, 0.14);
-    border: 1px solid rgba(15, 118, 110, 0.28);
-    border-radius: {t["radius_sm"]};
-    padding: 0px 4px;
-    font-size: 10px;
+    background-color: rgba(20, 184, 166, 0.12);
+    border: 1px solid rgba(15, 118, 110, 0.22);
+    border-radius: 3px;
+    padding: 0px 3px;
+    font-size: 9px;
     font-weight: 600;
 }}
 QLabel#SpecimenProgressBadge {{
     color: {t["success"]};
     background-color: {t["success_soft"]};
-    border: 1px solid {t["success"]};
-    border-radius: {t["radius_sm"]};
-    padding: 0px 4px;
-    font-size: 10px;
+    border: 1px solid rgba(21, 128, 61, 0.4);
+    border-radius: 3px;
+    padding: 0px 3px;
+    font-size: 9px;
     font-weight: 600;
 }}
 QPushButton#SidebarCollapseBtn {{

@@ -375,7 +375,7 @@ def test_row_shows_organize_progress_from_grouping(ctx, db):
         w for w in row.findChildren(QLabel)
         if w.objectName() == "SpecimenProgressBadge"
     ]
-    assert badges and badges[0].text() == "整 1"
+    assert badges and badges[0].text() == "整1"
 
 
 def test_organized_progress_badge_does_not_show_total_groups(ctx, db):
@@ -404,7 +404,7 @@ def test_organized_progress_badge_does_not_show_total_groups(ctx, db):
         w for w in row.findChildren(QLabel)
         if w.objectName() == "SpecimenProgressBadge"
     ]
-    assert badges and badges[0].text() == "整 2"
+    assert badges and badges[0].text() == "整2"
 
 
 def test_selected_specimen_row_gets_explicit_selected_property(ctx, db):
