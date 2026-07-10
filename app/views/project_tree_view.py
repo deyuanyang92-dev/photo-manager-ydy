@@ -60,6 +60,25 @@ if TYPE_CHECKING:
 _PATH_ROLE = Qt.ItemDataRole.UserRole
 _KIND_ROLE = Qt.ItemDataRole.UserRole.value + 1
 
+# 退休但可能仍在跑的预热线程(v0.56): 保持 Python/Qt 对象存活直到线程真正结束,
+# 宁可对象多活一会儿也不 destroy-while-running(那会直接 abort 整个进程)。
+_RETIRED_WARMUP_WORKERS: list = []
+
+
+def _reap_retired_warmup_workers(*, wait_ms: int = 0) -> None:
+    """收割已结束的退休预热线程; 仍在跑的先 cancel 再(可选)等待, 等不到就留着."""
+    still: list = []
+    for w in _RETIRED_WARMUP_WORKERS:
+        try:
+            if w.isRunning():
+                w.cancel()
+                if wait_ms and w.wait(wait_ms):
+                    continue  # 已停, 丢弃引用
+                still.append(w)
+        except Exception:
+            pass  # 判定失败的对象直接丢弃, 不再追踪
+    _RETIRED_WARMUP_WORKERS[:] = still
+
 
 def _theme():
     try:
@@ -2893,14 +2912,32 @@ class ProjectTreeView(BaseView):
             try:
                 if worker.isRunning():
                     worker.cancel()
-                    worker.wait(200)
+                    # §7 旧: worker.wait(200) 后直接覆盖引用 —— 200ms 内没停的
+                    # 线程成孤儿, 视图销毁时 "QThread: Destroyed while thread is
+                    # still running" 直接 abort。新: 停不下来就脱签名、脱父、进
+                    # 模块级退休名单继续追踪, 由 _reap_retired_warmup_workers 收割。
+                    if not worker.wait(200):
+                        self._retire_warmup_worker(worker)
             except Exception:
                 pass
+        _reap_retired_warmup_workers(wait_ms=0)
 
         w = TiffPreviewWarmupWorker(paths, parent=self)
         self._tif_preview_warmup_worker = w
         w.finished_result.connect(self._on_tiff_preview_warmup_done)
         w.start()
+
+    def _retire_warmup_worker(self, worker) -> None:
+        try:
+            worker.finished_result.disconnect(self._on_tiff_preview_warmup_done)
+        except Exception:
+            pass
+        try:
+            # 脱离父子关系: 视图销毁不再连带销毁运行中的 QThread(那是 abort 源)。
+            worker.setParent(None)
+        except Exception:
+            pass
+        _RETIRED_WARMUP_WORKERS.append(worker)
 
     def _on_tiff_preview_warmup_done(self, warmup_result) -> None:
         created = int(getattr(warmup_result, "created", 0) or 0)
@@ -2914,15 +2951,16 @@ class ProjectTreeView(BaseView):
 
     def _stop_tiff_preview_warmup_worker(self) -> None:
         worker = getattr(self, "_tif_preview_warmup_worker", None)
-        if worker is None:
-            return
-        try:
-            if worker.isRunning():
-                worker.cancel()
-                worker.wait(500)
-        except Exception:
-            pass
-        self._tif_preview_warmup_worker = None
+        if worker is not None:
+            try:
+                if worker.isRunning():
+                    worker.cancel()
+                    if not worker.wait(500):
+                        self._retire_warmup_worker(worker)
+            except Exception:
+                pass
+            self._tif_preview_warmup_worker = None
+        _reap_retired_warmup_workers(wait_ms=1500)
 
     def _rebuild_specimen_table_structure(self) -> None:
         cols = getattr(self, "_summary_visible_columns", [])

@@ -719,6 +719,67 @@ def test_selection_survives_locked_workspace_db(qtbot, tmp_path, ctx, monkeypatc
     assert not view._data_summary_panel.isVisible(), "失败后应收起数据汇总面板"
 
 
+def test_warmup_worker_retired_not_orphaned(qtbot, tmp_path, ctx, monkeypatch):
+    """v0.56: 预热线程 200ms 内没停时必须进退休名单继续追踪,
+    不得直接覆盖引用变孤儿(视图销毁时 QThread destroyed-while-running 崩溃)."""
+    from types import SimpleNamespace
+
+    from app.views import project_tree_view as ptv
+
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+
+    class StaleWorker:
+        def __init__(self):
+            self.cancelled = False
+
+        def isRunning(self):
+            return True
+
+        def cancel(self):
+            self.cancelled = True
+
+        def wait(self, _ms=0):
+            return False  # 模拟 200ms 内停不下来
+
+        def setParent(self, _p):
+            pass
+
+    started = {}
+
+    class FakeNewWorker:
+        class _Sig:
+            def connect(self, *_a):
+                pass
+
+        finished_result = _Sig()
+
+        def __init__(self, paths, parent=None):
+            started["paths"] = list(paths)
+
+        def start(self):
+            started["started"] = True
+
+    monkeypatch.setattr(
+        "app.workers.tiff_preview_warmup_worker.TiffPreviewWarmupWorker",
+        FakeNewWorker,
+    )
+    monkeypatch.setattr(
+        "app.services.tiff_preview_warmup_service.collect_tif_paths_from_summary",
+        lambda *_a, **_k: ["/tmp/x.tif"],
+    )
+
+    stale = StaleWorker()
+    view._tif_preview_warmup_worker = stale
+    ptv._RETIRED_WARMUP_WORKERS.clear()
+
+    view._schedule_tiff_preview_warmup(SimpleNamespace(specimens=[{}], groups=[]))
+
+    assert stale.cancelled, "滞留 worker 应先被 cancel"
+    assert stale in ptv._RETIRED_WARMUP_WORKERS, "未停线程必须进退休名单, 不得遗弃"
+    assert started.get("started"), "新 worker 应照常启动"
+
+
 def test_scan_disk_registers_discovered_workspaces(qtbot, tmp_path, ctx, monkeypatch):
     """扫描磁盘: 发现的旧工作区登记到 user_projects.json (用户核心需求)."""
     import json as _json
