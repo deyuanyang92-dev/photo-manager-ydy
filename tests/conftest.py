@@ -54,6 +54,27 @@ def _isolate_user_projects_json(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _flush_deferred_deletions():
+    """每个测试后冲洗 Qt deferred-deletion 队列 (v0.56 拆雷).
+
+    pytest-qt 只 close+deleteLater 测试里的 widget, 不转动事件循环——重型视图
+    (ProjectTreeView 等) 的延迟销毁在队列里越积越多; 第 3 个视图之后, 任何调用
+    qtbot.wait() 的测试都会让 3 个死视图在同一批 processEvents 里销毁 → segfault
+    (2026-07-10 二分定位: 任意 3 个前序视图测试 + 1 个 wait 即稳定 core dump,
+    ≤2 个则安全)。每测试后立即处理, 队列里永远最多 1 个视图的积压。
+    """
+    yield
+    from PyQt6.QtCore import QEvent
+    from PyQt6.QtWidgets import QApplication
+
+    app = QApplication.instance()
+    if app is not None:
+        for _ in range(3):
+            app.sendPostedEvents(None, QEvent.Type.DeferredDelete.value)
+            app.processEvents()
+
+
+@pytest.fixture(autouse=True)
 def _isolate_collab_peer_trust_qs(tmp_path, monkeypatch):
     """Each test gets a fresh collab trust/block list (no cross-test pollution)."""
     from PyQt6.QtCore import QSettings

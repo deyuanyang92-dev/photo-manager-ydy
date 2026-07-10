@@ -689,9 +689,9 @@ def test_double_click_single_selection_enters(qtbot, tmp_path, ctx, monkeypatch)
 def test_selection_survives_locked_workspace_db(qtbot, tmp_path, ctx, monkeypatch):
     """v0.56 治理: 聚合遇 database is locked 不炸 slot、收起中栏不留半截界面.
 
-    注意: 本测试刻意不使用 qtbot.wait —— 选中路径是同步的, 无需转动事件循环;
-    且本文件前序测试遗留的挂起事件会让任何 wait 触发 segfault(套件既有地雷,
-    见 P1-2 worker 生命周期治理)。
+    (选中路径是同步的, 无需 qtbot.wait。历史注: 曾有「≥3 个前序视图积压 +
+    任意 wait ⇒ segfault」的套件地雷, 已由 conftest._flush_deferred_deletions
+    每测试后冲洗销毁队列根治, 2026-07-10 二分定位。)
     """
     root = tmp_path / "survey"
     (root / "断面a").mkdir(parents=True)
@@ -1375,3 +1375,4 @@ def test_compact_project_tree_chrome_uses_horizontal_header_and_metrics(qtbot, c
         assert metric_layout.indexOf(view._tree_metrics_inline) >= 0
     finally:
         view.stop_background_work()
+
