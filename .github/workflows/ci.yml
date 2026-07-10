@@ -7,7 +7,22 @@ on:
     branches: [main, master]
 
 jobs:
+  lint:
+    # 静态门禁(update-260710-grok4.5 A1): F821 未定义名必红。
+    # 只锁 F821 —— F401/F811 等按 D1 分目录渐进清理, 不进门禁一刀切。
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install ruff
+        run: python -m pip install ruff
+      - name: Undefined names (F821)
+        run: ruff check app tests scripts main.py --select=F821
+
   test:
+    needs: lint
     runs-on: windows-latest
     env:
       QT_QPA_PLATFORM: offscreen
