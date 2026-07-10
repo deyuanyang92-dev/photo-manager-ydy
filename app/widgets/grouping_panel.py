@@ -169,6 +169,13 @@ class GroupingPanel(QWidget):
         main_actions.setContentsMargins(0, 0, 0, 0)
         main_actions.setSpacing(8)
 
+        def _toolbar_sep() -> QFrame:
+            """功能簇之间的细竖线(v0.56 美化: 13 键一排无层次 → 分簇)。"""
+            s = QFrame()
+            s.setObjectName("VSep")
+            s.setFixedSize(1, 18)
+            return s
+
         self._select_all_btn = QPushButton("全选组")
         self._select_all_btn.setObjectName("Ghost")
         self._select_all_btn.setFixedHeight(30)
@@ -182,6 +189,8 @@ class GroupingPanel(QWidget):
         self._clear_selection_btn.setToolTip("清除分组勾选；未勾选任何组时顶部操作处理全部")
         self._clear_selection_btn.clicked.connect(self.clear_group_selection)
         main_actions.addWidget(self._clear_selection_btn)
+
+        main_actions.addWidget(_toolbar_sep())
 
         compose_btn = QPushButton("合成")
         compose_btn.setObjectName("Primary")
@@ -209,6 +218,8 @@ class GroupingPanel(QWidget):
         compose_org_btn.setToolTip("合成后立即整理归档（一条龙）")
         compose_org_btn.clicked.connect(self._request_compose_and_organise_all_groups)
         main_actions.addWidget(compose_org_btn)
+
+        main_actions.addWidget(_toolbar_sep())
 
         self._auto_group_btn = QPushButton("自动分组整理")
         self._auto_group_btn.setObjectName("Outline")
@@ -280,7 +291,10 @@ class GroupingPanel(QWidget):
         self._related_filter_btn.toggled.connect(self._on_related_filter_toggled)
         main_actions.addWidget(self._related_filter_btn)
 
-        more_btn = QPushButton("⋯ 更多 ▾")
+        main_actions.addWidget(_toolbar_sep())
+
+        # §7 旧: "⋯ 更多 ▾" —— Qt 的 menu-indicator 自带 ▾, 文字箭头成了双箭头。
+        more_btn = QPushButton("⋯ 更多")
         more_btn.setObjectName("Ghost")
         more_btn.setFixedHeight(30)
         more_btn.setToolTip("更多操作")
@@ -851,7 +865,9 @@ class GroupingPanel(QWidget):
             hscroll.setWidgetResizable(True)
             hscroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
             hscroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-            hscroll.setFixedHeight(286)  # 一张卡片(≈266)+横向滚动条，下方按钮不被裁
+            # §7 旧: hscroll.setFixedHeight(286) —— 固定值低于卡片实际高度,
+            # 底部「加入所选」动作行被裁半截(2026-07-10 用户截图投诉)。
+            # 新: 建完 strip 后按内容 sizeHint + 横向滚动条高度自适应(见下)。
             strip = QWidget()
             strip_lay = QHBoxLayout(strip)
             strip_lay.setContentsMargins(0, 0, 0, 0)
@@ -882,6 +898,8 @@ class GroupingPanel(QWidget):
                 row.tiff_delete_requested.connect(self._request_delete_group_tiff)
                 strip_lay.addWidget(row)
             hscroll.setWidget(strip)
+            bar_h = hscroll.horizontalScrollBar().sizeHint().height()
+            hscroll.setFixedHeight(strip.sizeHint().height() + bar_h + 4)
             self._content_lay.addWidget(hscroll)
 
         if composed:
