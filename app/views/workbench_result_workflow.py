@@ -452,7 +452,13 @@ class WorkbenchResultWorkflowMixin:
                     commit=commit,
                 )
             except Exception:
-                pass
+                # best-effort 保持, 但持续失败会导致坐标永远进不了采集记录
+                # 且无任何征兆 —— 至少留一条日志 (v0.56, 原为双层纯静默)。
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "采集记录坐标回写失败(忽略继续)", exc_info=True
+                )
         except Exception:
             pass
 

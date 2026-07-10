@@ -13,8 +13,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from pathlib import Path
 from typing import Any, Optional
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_PASSWORD = "123"
 
@@ -36,9 +39,13 @@ def load_config(config_path: Optional[str] = None) -> dict[str, Any]:
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
         if not isinstance(data, dict) or "edit_password" not in data:
+            # 文件存在但结构不对 = 配置损坏/被篡改 —— 回落默认密码属 fail-open,
+            # 必须留痕(区别于「文件还没建」的正常首跑, 那种静默即可)。
+            logger.warning("编辑锁配置结构异常, 回落默认密码: %s", p)
             return {"edit_password": _hash(DEFAULT_PASSWORD)}
         return data
-    except (json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning("编辑锁配置读取失败(%s), 回落默认密码: %s", exc, p)
         return {"edit_password": _hash(DEFAULT_PASSWORD)}
 
 
