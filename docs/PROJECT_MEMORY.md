@@ -372,5 +372,19 @@ pytest tests/test_workbench_wiring.py -q -k UnboundResultsVisible
 - 还原完成后立刻 `_refresh_monitor()`，原片马上出现在「待处理照片」里，可以直接重新合成。
 - 只有**当前没有打开项目**（无处可还原）时，才退回让用户选目录。
 
+### 还原 = 撤销整理（2026-07-10 用户第二次裁定，勿再理解成「抽副本」）
+
+用户点组内 ZIP 的「还原原片」是想**撤回这次整理**。原片回到待处理区后，ZIP 若还
+挂在成果区 = 状态矛盾（同一批 JPG 既在待处理又在归档里，看起来像什么都没发生）。
+
+- ZIP **属于某编号的组** → 走「撤销整理」（`_on_undo_organise`）：JPG 还原回原位
+  + ZIP 移入 `_retired-zip/` 备份（不裸删）+ 组退回 `composed` → 成果区那行 ZIP
+  消失、TIF 保留（母版红线）。
+- 组存在但**没记录原 JPG 路径**（改绑挂上的成果）→ 抽副本到待处理区，成功后同样
+  清 `archive_zip` + 退役 ZIP + 组回 `composed`（`_finalize_pending_restore`）。
+  **还原失败绝不撤登记**——原片没回来时归档记录不能丢。
+- **孤儿 ZIP**（不属于任何组）→ 只抽副本到待处理区，ZIP 原地不动。
+
 实现：`app/views/workbench_supplementary_workflow.py::_restore_target_dir` /
-`_on_restore_archive`；回归锚点：`pytest tests/test_restore_archive_target.py -q`
+`_on_restore_archive` / `_owning_group_for_zip` / `_finalize_pending_restore`；
+回归锚点：`pytest tests/test_restore_archive_target.py -q`

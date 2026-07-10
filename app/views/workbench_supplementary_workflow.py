@@ -344,11 +344,48 @@ class WorkbenchSupplementaryWorkflowMixin:
             return ""
         return target
 
-    def _on_restore_archive(self, zip_path: str) -> None:
-        """Recover the original JPGs from a result ZIP back into the pending area.
+    def _owning_group_for_zip(self, zip_path: str):
+        """按 ZIP 绝对路径找它登记在哪个编号的哪个组;找不到返回 (None, None, None)。"""
+        db = getattr(self.ctx, "get_db", lambda: None)()
+        if not db or not zip_path:
+            return None, None, None
+        try:
+            target = str(Path(zip_path).resolve())
+        except OSError:
+            target = str(zip_path)
+        try:
+            from app.services.grouping_service import load_grouping
 
-        Read-only against the archive + additive (writes new JPGs, deletes
-        nothing). Heavy extraction/legacy decode work runs off-thread in RestoreWorker.
+            rows = db.execute("SELECT DISTINCT uid FROM grouping").fetchall()
+            for row in rows:
+                uid = str(row[0])
+                grouping = load_grouping(db, uid)
+                for g in grouping.groups:
+                    zp = str(getattr(g, "archive_zip", "") or "")
+                    if not zp:
+                        continue
+                    try:
+                        zp = str(Path(zp).resolve())
+                    except OSError:
+                        pass
+                    if zp == target:
+                        return uid, grouping, g
+        except Exception:
+            pass
+        return None, None, None
+
+    def _on_restore_archive(self, zip_path: str) -> None:
+        """还原原片。
+
+        语义(用户 2026-07-10 裁定):点组内 ZIP 的「还原原片」= **撤销这次整理**。
+        原片回到待处理区之后, ZIP 若还挂在成果区就是状态矛盾(同一批 JPG 既在
+        待处理又在归档里, 看起来像什么都没发生)。所以:
+
+        · ZIP 属于某编号的组 → 走「撤销整理」(_on_undo_organise):
+          JPG 还原回原位 + ZIP 移入 _retired-zip 备份(不裸删) +
+          组退回 composed → 成果区那行 ZIP 消失, TIF 保留(红线:母版不动)。
+        · 孤儿 ZIP(不属于任何组, 如外部拷入) → 旧行为:只抽副本到待处理区,
+          ZIP 原地不动(additive, 重活在 RestoreWorker 线程)。
         """
         from app.utils import ui
         from app.workers.restore_worker import RestoreWorker
@@ -356,6 +393,20 @@ class WorkbenchSupplementaryWorkflowMixin:
         if not zip_path or not Path(zip_path).is_file():
             ui.warn(self, "还原原片", "归档文件不存在。")
             return
+
+        uid, grouping, group = self._owning_group_for_zip(zip_path)
+        if group is not None and list(getattr(group, "jpg_paths", []) or []):
+            undo = getattr(self, "_on_undo_organise", None)
+            if callable(undo):
+                undo(uid, grouping, group)
+                return
+        # 组存在但没记录原 JPG 路径(如改绑挂上来的成果):抽副本到待处理区,
+        # 成功后同样清 ZIP 登记 + 退役 ZIP + 组回 composed(在 _on_restore_finished
+        # 消费; 失败绝不动登记 —— 原片没回来时归档记录不能丢)。
+        self._pending_restore_finalize = (
+            (uid, int(getattr(group, "group_index", 0)), zip_path)
+            if group is not None else None
+        )
 
         # §7 旧: 每次都弹目录选择框 + 目录非空再问一次是否覆盖 ——
         # out = ui.get_existing_directory(self, "选择还原 JPG 的输出文件夹")
@@ -405,15 +456,59 @@ class WorkbenchSupplementaryWorkflowMixin:
         except Exception:
             pass
 
+    def _finalize_pending_restore(self) -> str:
+        """抽副本成功后的撤登记:清 archive_zip + 组回 composed + ZIP 退役。"""
+        pending = getattr(self, "_pending_restore_finalize", None)
+        self._pending_restore_finalize = None
+        if not pending:
+            return ""
+        uid, group_index, zip_path = pending
+        db = getattr(self.ctx, "get_db", lambda: None)()
+        if not db:
+            return ""
+        try:
+            from app.services.grouping_service import (
+                _utc_now_iso,
+                load_grouping,
+                save_grouping,
+            )
+
+            grouping = load_grouping(db, uid)
+            target = next(
+                (g for g in grouping.groups if g.group_index == group_index), None
+            )
+            if target is None:
+                return ""
+            target.archive_zip = None
+            target.status = "composed"
+            target.updated_at = _utc_now_iso()
+            save_grouping(db, uid, grouping.groups, clean_phantoms=False)
+        except Exception:
+            return ""
+        retire = getattr(self, "_retire_zip", None)
+        retired = retire(zip_path) if callable(retire) else ""
+        # 按当前显示模式重载成果区(传 grouping=None 会刷成空列表)
+        after = getattr(self, "_after_binding_changed", None)
+        if callable(after):
+            try:
+                after(uid=uid, grouping=grouping)
+            except Exception:
+                pass
+        return retired or zip_path
+
     def _on_restore_finished(self, result) -> None:
         from app.utils import ui
         if result is None:
+            self._pending_restore_finalize = None
             ui.critical(self, "还原原片", "还原过程出现错误。")
             return
         if not getattr(result, "ok", False):
+            # 失败绝不撤登记: 原片没回来, 归档记录必须保留。
+            self._pending_restore_finalize = None
             reason = getattr(result, "reason", "") or "；".join(result.failures[:3])
             ui.critical(self, "还原失败", reason or "还原失败，未输出文件。")
             return
+        self._finalize_pending_restore()
 
         msg = f"已还原 {result.count} 张 JPG →\n{result.output_dir}"
         if result.skipped:
