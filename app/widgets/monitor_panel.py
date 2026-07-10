@@ -1267,7 +1267,10 @@ class MonitorPanel(QWidget):
             on_unassign=self._on_ctx_unassign,
             on_workflow_action=self._on_ctx_workflow_action,
             drag_paths_for=self._drag_paths_for,
-            defer_thumbnail=False,
+            # §7 旧: defer_thumbnail=False —— 每张新 JPG/TIFF 卡片构造时同步解码,
+            # 相机连拍时这些解码与用户点击争主线程(2026-07-10 报障:反应迟钝)。
+            # 已有的 16ms 分批队列(_queue_thumbnail)因这里恒 False 从未被用上。
+            defer_thumbnail=True,
             thumb_size=self._pending_thumb_size,
         )
         card.assign_requested.connect(self.assign_requested)
@@ -1337,6 +1340,8 @@ class MonitorPanel(QWidget):
                     card = self._make_card(f)
                     self._card_by_key[key] = card
                     self._card_sig_by_key[key] = sig
+                    # 新建卡片才排队解码(签名未变的复用卡片已带图, 不重复解码)
+                    self._queue_thumbnail(card)
                 self._cards.append(card)
             self._layout_cards(cols)
         finally:

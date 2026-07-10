@@ -546,7 +546,14 @@ def test_tiff_card_uses_real_thumbnail_when_decodable(qtbot, tmp_path):
     assert not pixmap.isNull()
 
 
-def test_results_column_loads_tiff_thumbnail_immediately(qtbot, monkeypatch):
+def test_results_column_loads_tiff_thumbnail_without_user_action(qtbot, monkeypatch):
+    """成果 TIFF 缩略图必须自动出现(PROJECT_MEMORY 不可回归项:不得图标占位)。
+
+    §7 旧断言 `assert calls == ["/fake/visible.tif"]` —— 冻结的是「load_uid 内
+    **同步**解码」这一实现细节, 而同步解码正是「点击反应迟钝」的主因
+    (2026-07-10 用户报障)。改为延迟 + 20ms 分批队列后真需求不变:
+    无需用户任何操作, 缩略图随后自动填充(下方 waitUntil 即证)。
+    """
     from app.widgets.results_column import ResultsColumn
 
     calls = []
@@ -559,7 +566,8 @@ def test_results_column_loads_tiff_thumbnail_immediately(qtbot, monkeypatch):
     qtbot.addWidget(col)
     col.load_uid("UID", [{"path": "/fake/visible.tif", "name": "visible.tif"}], [])
 
-    assert calls == ["/fake/visible.tif"]
+    assert calls == [], "构造卡片时不得同步解码(会卡住点击)"
+    qtbot.waitUntil(lambda: calls == ["/fake/visible.tif"], timeout=2000)
 
 
 def test_results_column_has_windows_folder_actions(qtbot, tmp_path):
@@ -1037,3 +1045,113 @@ def test_results_sort_by_sequence_orders_pairs(qtbot):
 
     cards = [c for c in col._cards if isinstance(c, _TiffCard)]
     assert [c._info["seq"] for c in cards] == [1, 2]
+
+
+# ── 用户报障 2026-07-10: 预览全部编号 / 多选编号预览 / 点击迟钝 ──────────────
+
+
+def _mk_group(tmp_path, uid: str, n: int) -> dict:
+    d = tmp_path / uid
+    d.mkdir(parents=True, exist_ok=True)
+    tiffs = []
+    for i in range(1, n + 1):
+        p = d / f"{uid}-{i}-20260618.tif"
+        p.write_bytes(b"\x00" * 16)
+        tiffs.append({"path": str(p), "name": p.name})
+    return {"uid": uid, "tiffs": tiffs, "zips": []}
+
+
+class TestAllModeLightboxSpansEveryUid:
+    """「全部」模式打开大图后, 上/下一张必须能跨编号连续翻页。
+
+    旧实现把 all_tiff_paths 在分组循环内按 group 重建 → 灯箱锁死在单个编号内。
+    """
+
+    def test_lightbox_paths_cover_all_groups(self, qtbot, tmp_path, monkeypatch):
+        from app.widgets.results_column import ResultsColumn
+
+        col = ResultsColumn()
+        qtbot.addWidget(col)
+        groups = [_mk_group(tmp_path, "AAA-1-R-20260618", 2),
+                  _mk_group(tmp_path, "BBB-2-R-20260618", 3)]
+
+        captured: list = []
+        monkeypatch.setattr(
+            col, "_open_tiff_lightbox",
+            lambda clicked, paths: captured.append((clicked, list(paths))),
+        )
+        col.load_many(groups)
+
+        # 点第一个编号的第一张 → 翻页范围必须含两个编号的全部 5 张
+        first = next(c for c in col._cards if hasattr(c, "_lightbox_fn"))
+        first._lightbox_fn(first._info["path"])
+        assert captured, "sanity: 灯箱应被调用"
+        _clicked, paths = captured[0]
+        assert len(paths) == 5, f"翻页范围只有 {len(paths)} 张, 应跨全部编号共 5 张"
+
+
+class TestSelectedResultsScopeLightbox:
+    """勾选多个编号的成片后, 大图翻页只在勾选集合内 —— 即「选择多个编号预览」."""
+
+    def test_selection_scopes_paging(self, qtbot, tmp_path):
+        from app.widgets.results_column import ResultsColumn
+
+        col = ResultsColumn()
+        qtbot.addWidget(col)
+        g1 = _mk_group(tmp_path, "AAA-1-R-20260618", 2)
+        g2 = _mk_group(tmp_path, "BBB-2-R-20260618", 3)
+        col.load_many([g1, g2])
+
+        pick = [g1["tiffs"][0]["path"], g2["tiffs"][2]["path"]]  # 跨两个编号各挑一张
+        for p in pick:
+            col._toggle_result_selection(p)
+
+        from pathlib import Path
+        scoped = col._lightbox_scope(Path(pick[0]))
+        assert {str(p) for p in scoped} == set(pick), (
+            "勾选 2 张(跨编号)后, 翻页范围应只含这 2 张"
+        )
+
+    def test_no_selection_uses_full_scope(self, qtbot, tmp_path):
+        from pathlib import Path
+
+        from app.widgets.results_column import ResultsColumn
+
+        col = ResultsColumn()
+        qtbot.addWidget(col)
+        g1 = _mk_group(tmp_path, "AAA-1-R-20260618", 2)
+        col.load_many([g1])
+        scoped = col._lightbox_scope(Path(g1["tiffs"][0]["path"]))
+        assert len(scoped) == 2, "无勾选时翻页范围 = 当前全部成片"
+
+
+class TestThumbnailsAreDeferred:
+    """点击编号不得在主线程同步解码全部 TIFF 缩略图(卡顿主因)。
+
+    卡片必须 defer + 进 20ms 分批队列, 点击立即返回, 缩略图随后填充。
+    """
+
+    def test_load_uid_defers_thumbnails(self, qtbot, tmp_path):
+        from app.widgets.results_column import ResultsColumn
+
+        col = ResultsColumn()
+        qtbot.addWidget(col)
+        g = _mk_group(tmp_path, "AAA-1-R-20260618", 3)
+        col.load_uid("AAA-1-R-20260618", g["tiffs"], [])
+
+        tiff_cards = [c for c in col._cards if hasattr(c, "_lightbox_fn")]
+        assert tiff_cards, "sanity: 应建出 TIFF 卡片"
+        assert all(c._defer_thumbnail for c in tiff_cards), "TIFF 卡片必须延迟解码"
+        assert not any(c._thumbnail_loaded for c in tiff_cards), "构造时不得已解码"
+        assert len(col._thumb_queue) == len(tiff_cards), "全部卡片应进异步队列"
+
+    def test_load_many_defers_thumbnails(self, qtbot, tmp_path):
+        from app.widgets.results_column import ResultsColumn
+
+        col = ResultsColumn()
+        qtbot.addWidget(col)
+        col.load_many([_mk_group(tmp_path, "AAA-1-R-20260618", 2),
+                       _mk_group(tmp_path, "BBB-2-R-20260618", 2)])
+        tiff_cards = [c for c in col._cards if hasattr(c, "_lightbox_fn")]
+        assert all(c._defer_thumbnail for c in tiff_cards)
+        assert len(col._thumb_queue) == len(tiff_cards)

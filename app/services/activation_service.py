@@ -315,6 +315,40 @@ def get_collab_status(db: sqlite3.Connection, uid: str) -> Optional[str]:
         return None
 
 
+def get_collab_statuses(db: sqlite3.Connection, uids: list[str]) -> dict[str, str]:
+    """Batch form of :func:`get_collab_status` — one query per 400-uid chunk.
+
+    侧栏一屏可能有上百个编号,逐个 ``get_collab_status`` 是 N+1 查询,
+    「返回工作台 / 激活编号」会明显发涩。语义与单个版本逐字一致:
+    无 tasks 行、raw_json 空、解析失败或无 ``status`` 键 ⇒ 该 uid 不出现在结果里。
+    """
+    out: dict[str, str] = {}
+    if db is None or not uids:
+        return out
+    uid_list = [u for u in uids if u]
+    for i in range(0, len(uid_list), 400):
+        chunk = uid_list[i:i + 400]
+        placeholders = ",".join("?" * len(chunk))
+        try:
+            rows = db.execute(
+                f"SELECT uid, raw_json FROM tasks WHERE uid IN ({placeholders})",
+                chunk,
+            ).fetchall()
+        except Exception:
+            continue
+        for row in rows:
+            uid, raw = row[0], row[1]
+            if not raw:
+                continue
+            try:
+                parsed = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if isinstance(parsed, dict) and parsed.get("status"):
+                out[str(uid)] = parsed["status"]
+    return out
+
+
 def resolve_phase(collab_svc, db, uid: str) -> Optional[str]:
     """Resolve a specimen's confirmed phase: live collab task first, else DB.
 

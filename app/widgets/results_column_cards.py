@@ -262,6 +262,7 @@ class _TiffCard(_ResultCardBase):
                  thumb_provider=None, thumb_size: int = _DEFAULT_THUMB,
                  result_view_mode: str = "list",
                  defer_thumbnail: bool = False,
+                 unbind_fn=None, rebind_fn=None,
                  parent: Optional[QWidget] = None) -> None:
         self._open_fn = open_fn
         self._lightbox_fn = lightbox_fn
@@ -269,6 +270,10 @@ class _TiffCard(_ResultCardBase):
         self._paired_zip = paired_zip
         self._naming_check_fn = naming_check_fn
         self._delete_fn = delete_fn
+        # 纠错入口(用户 2026-07-10):TIF 关联错编号时,解绑 / 改绑到指定编号。
+        # 两者都只改数据库归属,不动磁盘上的 TIF 字节。
+        self._unbind_fn = unbind_fn
+        self._rebind_fn = rebind_fn
         super().__init__(info, thumb_provider=thumb_provider,
                          select_fn=select_fn, selected=selected,
                          thumb_size=thumb_size,
@@ -342,6 +347,13 @@ class _TiffCard(_ResultCardBase):
         link_action = menu.addAction("关联到右侧编号")
         link_action.setEnabled(bool(self._link_fn and path))
         link_action.triggered.connect(lambda: self._link_fn(path, self._paired_zip))
+        # 关联错了的两条纠错路径:知道正确编号 → 改绑; 还要再确认 → 先解绑。
+        rebind_action = menu.addAction("改绑到其他编号…")
+        rebind_action.setEnabled(bool(self._rebind_fn and path))
+        rebind_action.triggered.connect(lambda: self._rebind_fn(path, self._paired_zip))
+        unbind_action = menu.addAction("解绑此成果")
+        unbind_action.setEnabled(bool(self._unbind_fn and path))
+        unbind_action.triggered.connect(lambda: self._unbind_fn(path, self._paired_zip))
         menu.addSeparator()
         delete_action = menu.addAction("删除 TIF")
         delete_action.setEnabled(bool(self._delete_fn and path))

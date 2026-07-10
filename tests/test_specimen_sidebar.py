@@ -600,3 +600,116 @@ def test_refresh_repairs_malformed_uid_from_naming_fields(ctx, db):
     assert sb._list.item(0).data(Qt.ItemDataRole.UserRole) == fixed_uid
     assert db.execute("SELECT 1 FROM specimens WHERE uid=?", (fixed_uid,)).fetchone()
     assert not db.execute("SELECT 1 FROM specimens WHERE uid='RD79'").fetchone()
+
+
+# ── 卡片高度必须容纳换行后的完整编号(不得裁切) ──────────────────────────────
+
+
+def test_long_uid_card_is_tall_enough_to_show_full_uid(ctx, db):
+    """7 段长编号 _display_uid 强制换行 + wordWrap 再折 → 卡片写死 90px 会裁字。
+
+    用户报障(2026-07-10): 侧栏首个编号显示不全, 尾段被卡片下沿切掉。
+    """
+    long_uid = "FJ-YGLZ-B2-DLC001-RT95E-20260618-0813"
+    short_uid = "GXFCG-BLW-BZC003-R-20260618"
+    _add_specimen(db, long_uid)
+    _add_specimen(db, short_uid)
+
+    sb = SpecimenSidebar(ctx)
+    sb.setFixedWidth(240)   # 真实侧栏宽度量级(截图约 230px)→ uid 折 3 行
+    sb.refresh()
+    sb.show()               # 触发布局: viewport 拿到真实宽度, showEvent 重算行高
+    _APP.processEvents()
+
+    heights: dict[str, int] = {}
+    for i in range(sb._list.count()):
+        item = sb._list.item(i)
+        uid = item.data(Qt.ItemDataRole.UserRole)
+        widget = sb._list.itemWidget(item)
+        need = widget.heightForWidth(sb._list.viewport().width())
+        if need <= 0:
+            need = widget.sizeHint().height()
+        heights[uid] = item.sizeHint().height()
+        assert item.sizeHint().height() >= need, (
+            f"{uid}: 卡片高 {item.sizeHint().height()}px < 内容所需 {need}px → 裁字"
+        )
+
+    assert heights[long_uid] > heights[short_uid], (
+        "折行更多的长编号卡片必须比短编号更高"
+    )
+    sb.close()
+
+
+# ── 相位读取不得 N+1(每行一条 SELECT → 编号一多就发涩) ──────────────────────
+
+
+def test_refresh_reads_phases_in_one_batched_query(ctx, db, monkeypatch):
+    """侧栏 refresh() 必须一次批量取回全部编号的相位, 不得逐行查库。
+
+    用户报障(2026-07-10): 点击/返回工作台反应迟钝。50~100 个编号时逐行
+    SELECT 会明显发涩。
+    """
+    from app.services import activation_service
+
+    for i in range(12):
+        _add_specimen(db, f"UID-{i:03d}")
+
+    per_uid_calls: list[str] = []
+    real = activation_service.get_collab_status
+    monkeypatch.setattr(
+        activation_service, "get_collab_status",
+        lambda d, uid: per_uid_calls.append(uid) or real(d, uid),
+    )
+
+    sb = SpecimenSidebar(ctx)
+    sb.refresh()
+
+    assert sb._list.count() == 12, "sanity: 12 行都渲染"
+    assert not per_uid_calls, (
+        f"逐行查了 {len(per_uid_calls)} 次相位 (N+1); 应改为一次批量查询"
+    )
+
+
+# ── 多选编号(Ctrl/Shift)→ 成果区只看这几个编号 ─────────────────────────────
+
+
+def test_sidebar_supports_multi_select_uids(ctx, db):
+    """用户 2026-07-10: 想选多个编号看它们的成果。侧栏必须支持 Ctrl/Shift 多选。"""
+    from PyQt6.QtWidgets import QAbstractItemView
+
+    for uid in ("U-1", "U-2", "U-3"):
+        _add_specimen(db, uid)
+
+    sb = SpecimenSidebar(ctx)
+    sb.refresh()
+    assert sb._list.selectionMode() == QAbstractItemView.SelectionMode.ExtendedSelection
+
+    sb._list.item(0).setSelected(True)
+    sb._list.item(2).setSelected(True)
+    assert sb.selected_uids() == ["U-1", "U-3"]
+
+
+def test_selection_scope_changed_signal_carries_uids(ctx, db):
+    for uid in ("U-1", "U-2"):
+        _add_specimen(db, uid)
+    sb = SpecimenSidebar(ctx)
+    sb.refresh()
+
+    seen: list = []
+    sb.selection_scope_changed.connect(lambda uids: seen.append(list(uids)))
+    sb._list.item(0).setSelected(True)
+    sb._list.item(1).setSelected(True)
+
+    assert seen, "多选变化必须发信号"
+    assert seen[-1] == ["U-1", "U-2"]
+
+
+def test_single_selection_still_emits_specimen_selected(ctx, db):
+    """多选不得破坏单选:普通单击仍加载该编号(右栏/成果区旧行为)。"""
+    _add_specimen(db, "U-1")
+    sb = SpecimenSidebar(ctx)
+    sb.refresh()
+    seen: list = []
+    sb.specimen_selected.connect(seen.append)
+    sb._on_item_clicked(sb._list.item(0))
+    assert seen == ["U-1"]

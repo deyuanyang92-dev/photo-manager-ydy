@@ -244,7 +244,13 @@ def test_file_card_uses_real_jpg_thumbnail(qtbot, tmp_path):
     assert pixmap.height() > 22
 
 
-def test_monitor_panel_loads_grid_thumbnail_immediately(qtbot, panel, monkeypatch):
+def test_monitor_panel_loads_grid_thumbnail_without_user_action(qtbot, panel, monkeypatch):
+    """待处理照片缩略图必须自动出现(PROJECT_MEMORY 不可回归项:不得图标占位)。
+
+    §7 旧断言 `assert calls == ["/tmp/deferred.jpg"]` 冻结「_make_card 内**同步**
+    解码」这一实现细节; 相机连拍时这些同步解码与点击争主线程(2026-07-10 报障)。
+    改走已有的 16ms 分批队列后真需求不变: 无需用户操作, 缩略图随后自动填充。
+    """
     calls = []
     monkeypatch.setattr(
         "app.widgets.monitor_panel._file_thumb_pixmap",
@@ -253,7 +259,8 @@ def test_monitor_panel_loads_grid_thumbnail_immediately(qtbot, panel, monkeypatc
 
     panel.load_scan(_scan([_jpg_entry(path="/tmp/deferred.jpg")]))
 
-    assert calls == ["/tmp/deferred.jpg"]
+    assert calls == [], "构造卡片时不得同步解码(会卡住点击)"
+    qtbot.waitUntil(lambda: calls == ["/tmp/deferred.jpg"], timeout=2000)
 
 
 def test_file_card_selection_has_explicit_visual_marker(qtbot):

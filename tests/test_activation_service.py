@@ -323,3 +323,57 @@ class TestCollabStatusPersistence:
         db.execute("INSERT INTO tasks (uid, raw_json) VALUES ('U3', 'not json')")
         db.commit()
         assert get_collab_status(db, "U3") is None
+
+
+class TestBatchCollabStatuses:
+    """get_collab_statuses 必须与逐个 get_collab_status 语义逐字一致(侧栏 N+1 治理)."""
+
+    def test_matches_single_getter(self, tmp_path):
+        import sqlite3
+        from app.db import db_manager
+        from app.services import activation_service as svc
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        db_manager.ensure_schema(conn)
+        try:
+            svc.set_collab_status(conn, "U-1", "organizing")
+            svc.set_collab_status(conn, "U-2", "done")
+            conn.execute("INSERT INTO tasks (uid, raw_json) VALUES ('U-3', '')")
+            conn.execute("INSERT INTO tasks (uid, raw_json) VALUES ('U-4', 'not-json')")
+            conn.execute("INSERT INTO tasks (uid, raw_json) VALUES ('U-5', '{\"a\":1}')")
+            conn.commit()
+
+            uids = ["U-1", "U-2", "U-3", "U-4", "U-5", "U-missing"]
+            batch = svc.get_collab_statuses(conn, uids)
+            single = {
+                u: svc.get_collab_status(conn, u)
+                for u in uids
+                if svc.get_collab_status(conn, u)
+            }
+            assert batch == single == {"U-1": "organizing", "U-2": "done"}
+        finally:
+            conn.close()
+
+    def test_empty_and_none_inputs(self):
+        from app.services import activation_service as svc
+
+        assert svc.get_collab_statuses(None, ["U-1"]) == {}
+        assert svc.get_collab_statuses(object(), []) == {}
+
+    def test_chunks_large_uid_lists(self):
+        import sqlite3
+        from app.db import db_manager
+        from app.services import activation_service as svc
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        db_manager.ensure_schema(conn)
+        try:
+            uids = [f"U-{i:04d}" for i in range(950)]  # > 400 → 多 chunk, 不撞 SQLite 变量上限
+            for u in uids:
+                svc.set_collab_status(conn, u, "shooting")
+            got = svc.get_collab_statuses(conn, uids)
+            assert len(got) == 950 and got["U-0949"] == "shooting"
+        finally:
+            conn.close()

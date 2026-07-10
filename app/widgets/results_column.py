@@ -58,6 +58,9 @@ class ResultsColumn(QWidget):
     show_all_requested = pyqtSignal()
     current_requested = pyqtSignal()
     link_result_requested = pyqtSignal(str, str)  # tiff_path, zip_path
+    # 纠错:TIF 关联到了错误编号 → 解绑(不挂任何编号)/ 改绑(挂到指定编号)
+    unbind_result_requested = pyqtSignal(str, str)   # tiff_path, zip_path
+    rebind_result_requested = pyqtSignal(str, str)   # tiff_path, zip_path
     tiff_naming_check_requested = pyqtSignal(str)  # tiff_path
     tiff_delete_requested = pyqtSignal(str)  # tiff_path
 
@@ -220,6 +223,7 @@ class ResultsColumn(QWidget):
             Path(tinfo["path"]) for _label, tinfo, _zinfo in rows
             if tinfo is not None and tinfo.get("path")
         ]
+        self._lightbox_all_paths = list(all_tiff_paths)
         for seq_label, tinfo, zinfo in rows:
             tc = None
             zc = None
@@ -232,14 +236,21 @@ class ResultsColumn(QWidget):
                     paired_zip=(zinfo or {}).get("path", "") if zinfo else "",
                     naming_check_fn=self._emit_tiff_naming_check,
                     delete_fn=self._emit_tiff_delete,
+                    unbind_fn=self._emit_unbind_result,
+                    rebind_fn=self._emit_rebind_result,
                     select_fn=self._toggle_result_selection,
                     selected=self._is_result_selected(tinfo.get("path", "")),
                     thumb_provider=self._thumb_provider,
                     thumb_size=self._thumb_size,
                     result_view_mode=self._result_view_mode,
-                    defer_thumbnail=False,
+                    # §7 旧: defer_thumbnail=False —— 卡片构造时同步解码 TIFF
+                    # (PIL 全量栅格, 单张几十~几百 ms), 全压在点击处理器里 →
+                    # 「点击反应迟钝」。异步分批队列(_queue_thumbnail + 20ms
+                    # _thumb_timer)本就写好, 却因这里恒 False 成了死代码。
+                    defer_thumbnail=True,
                 )
                 self._cards.append(tc)
+                self._queue_thumbnail(tc)
             if zinfo is not None:
                 zc = _ArchiveCard(
                     self._display_info(zinfo), open_fn=self._open_in_explorer,
@@ -265,11 +276,14 @@ class ResultsColumn(QWidget):
         if not n:
             self._show_empty()
 
-    def load_many(self, groups: list[dict]) -> None:
-        """Populate results for multiple specimen UIDs, grouped by UID."""
+    def load_many(self, groups: list[dict], *, title: str | None = None) -> None:
+        """Populate results for multiple specimen UIDs, grouped by UID.
+
+        ``title`` 让「所选 N 个编号」复用同一套分组渲染(默认「全部成果」)。
+        """
         self._display_mode = "many"
         self._update_mode_button_state()
-        self._title.setText("全部成果")
+        self._title.setText(title or "全部成果")
         self._current_groups = [
             {
                 "uid": str(g.get("uid") or ""),
@@ -292,19 +306,30 @@ class ResultsColumn(QWidget):
         visible_groups = 0
         show_paired_columns = self._should_show_paired_columns()
         self._rendered_paired_columns = show_paired_columns
+
+        # 「全部」模式的灯箱翻页范围 = 全部编号的成片, 按分组顺序串成一条链。
+        # §7 旧: all_tiff_paths 在下面的分组循环内部按 group 重建 —— 打开大图后
+        # 上/下一张被锁死在单个编号内, 用户「想预览全部编号照片」做不到。
+        grouped_rows: list[tuple[dict, list]] = []
         for group in self._current_groups:
             rows = self._sort_rows(_pair_results(group["tiffs"], group["zips"]))
-            if not rows:
-                continue
+            if rows:
+                grouped_rows.append((group, rows))
+        all_tiff_paths = [
+            Path(tinfo["path"])
+            for _group, rows in grouped_rows
+            for _label, tinfo, _zinfo in rows
+            if tinfo is not None and tinfo.get("path")
+        ]
+        self._lightbox_all_paths = list(all_tiff_paths)
+
+        for group, rows in grouped_rows:
             visible_groups += 1
             total_rows += len(rows)
             header = _SpecimenResultHeader(group["uid"], len(rows))
             header.clicked.connect(self.specimen_requested.emit)
             self._rows_lay.addWidget(header)
-            all_tiff_paths = [
-                Path(tinfo["path"]) for _label, tinfo, _zinfo in rows
-                if tinfo is not None and tinfo.get("path")
-            ]
+            # all_tiff_paths: 见上, 跨编号连续翻页
             for seq_label, tinfo, zinfo in rows:
                 tc = None
                 zc = None
@@ -317,14 +342,19 @@ class ResultsColumn(QWidget):
                         paired_zip=(zinfo or {}).get("path", "") if zinfo else "",
                         naming_check_fn=self._emit_tiff_naming_check,
                         delete_fn=self._emit_tiff_delete,
+                        unbind_fn=self._emit_unbind_result,
+                        rebind_fn=self._emit_rebind_result,
                         select_fn=self._toggle_result_selection,
                         selected=self._is_result_selected(tinfo.get("path", "")),
                         thumb_provider=self._thumb_provider,
                         thumb_size=self._thumb_size,
                         result_view_mode=self._result_view_mode,
-                        defer_thumbnail=False,
+                        # §7 旧: defer_thumbnail=False —— 「全部」模式一次同步解码
+                        # 所有编号的成片, 是最慢的一条路径。改延迟 + 分批队列。
+                        defer_thumbnail=True,
                     )
                     self._cards.append(tc)
+                    self._queue_thumbnail(tc)
                 if zinfo is not None:
                     zc = _ArchiveCard(
                         self._display_info(zinfo), open_fn=self._open_in_explorer,
@@ -364,6 +394,12 @@ class ResultsColumn(QWidget):
 
     def _emit_link_result(self, tiff_path: str, zip_path: str) -> None:
         self.link_result_requested.emit(tiff_path or "", zip_path or "")
+
+    def _emit_unbind_result(self, tiff_path: str, zip_path: str) -> None:
+        self.unbind_result_requested.emit(tiff_path or "", zip_path or "")
+
+    def _emit_rebind_result(self, tiff_path: str, zip_path: str) -> None:
+        self.rebind_result_requested.emit(tiff_path or "", zip_path or "")
 
     def _emit_tiff_naming_check(self, tiff_path: str) -> None:
         self.tiff_naming_check_requested.emit(tiff_path or "")
@@ -838,13 +874,29 @@ class ResultsColumn(QWidget):
         if self._results_dir:
             self._open_in_explorer(self._results_dir)
 
-    def _open_tiff_lightbox(self, clicked_path: Path, all_paths: list) -> None:
+    def _lightbox_scope(self, clicked_path: Path) -> list:
+        """大图翻页范围:勾选了 ≥2 张成片就只在勾选集合内翻,否则翻当前全部。
+
+        这就是「选择多个编号预览」——勾选可以跨编号(全部模式下按编号分组显示),
+        勾选集合即预览集合;没勾选时保持旧行为(翻当前可见的全部成片)。
+        """
+        all_paths = list(getattr(self, "_lightbox_all_paths", []) or [])
+        selected = [p for p in all_paths if self._is_result_selected(str(p))]
+        if len(selected) >= 2 and clicked_path in selected:
+            return selected
+        return all_paths
+
+    def _open_tiff_lightbox(self, clicked_path: Path, all_paths: list | None = None) -> None:
         """Open the TIFF lightbox dialog starting at *clicked_path*."""
+        if all_paths is not None:
+            self._lightbox_all_paths = list(all_paths)
+        # §7 旧: 直接用传入的 all_paths —— 现在先过勾选范围(多选预览)。
+        paths = self._lightbox_scope(clicked_path) or list(all_paths or [])
         try:
-            idx = all_paths.index(clicked_path)
+            idx = paths.index(clicked_path)
         except ValueError:
             idx = 0
-        dlg = _TiffLightboxDialog(all_paths, initial_index=idx, parent=self)
+        dlg = _TiffLightboxDialog(paths, initial_index=idx, parent=self)
         dlg.exec()
 
     def _open_in_explorer(self, path: str) -> None:

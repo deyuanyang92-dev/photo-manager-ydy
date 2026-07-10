@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Optional
 
 from PyQt6.QtCore import QSize, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QFrame,
     QHBoxLayout,
@@ -40,6 +41,10 @@ from app.utils.path_utils import equivalent_paths
 if TYPE_CHECKING:
     from app.app_context import AppContext
     from app.services.collab_service import CollabService
+
+
+# 行是否为「当前激活编号」—— 重算行高时要还原基准高度, 存在 item data 上。
+_ACTIVE_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 
 
 # ── Badge colours matching the 5 file-state palette ─────────────────────────
@@ -83,6 +88,8 @@ class SpecimenSidebar(QWidget):
     """
 
     specimen_selected = pyqtSignal(str)
+    # Ctrl/Shift 多选编号 → 成果区只显示这些编号的成果(单选/清空时发 1/0 个)。
+    selection_scope_changed = pyqtSignal(list)
     show_all_requested = pyqtSignal()
     activate_requested = pyqtSignal(str)
     deactivate_requested = pyqtSignal(str)
@@ -204,8 +211,12 @@ class SpecimenSidebar(QWidget):
         self._list.setObjectName("SpecimenList")
         self._list.setAlternatingRowColors(True)
         self._list.setSpacing(1)
+        # §7 旧: 默认 SingleSelection —— 用户无法「选多个编号看它们的成果」。
+        # 普通单击行为不变(仍单选 + 加载该编号), Ctrl/Shift 才进入多选。
+        self._list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._list.itemClicked.connect(self._on_item_clicked)
         self._list.currentItemChanged.connect(self._on_current_item_changed)
+        self._list.itemSelectionChanged.connect(self._on_selection_scope_changed)
         self._list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._list.customContextMenuRequested.connect(self._on_context_menu)
         root.addWidget(self._list)
@@ -500,6 +511,9 @@ class SpecimenSidebar(QWidget):
         """
         was_enabled = self._list.updatesEnabled()
         self._list.setUpdatesEnabled(False)
+        # 重建期间 clear()/addItem() 会连发 itemSelectionChanged —— 不抑制的话
+        # 每次刷新都往工作台推一串空/半截选区, 触发无谓的成果区重载。
+        self._list.blockSignals(True)
         try:
             self._list.clear()
             self._phase_dots.clear()
@@ -507,6 +521,8 @@ class SpecimenSidebar(QWidget):
             query = text.strip().lower()
             shown = 0
             svc = getattr(self.ctx, "collab_service", None)
+            # 一次批量取相位; 下面每行的 _phase_for 直接命中缓存, 不再逐行查库。
+            self._prefetch_phases([e["uid"] for e in self._all_items])
 
             for entry in self._sorted_items(self._all_items):
                 uid: str = entry["uid"]
@@ -544,16 +560,24 @@ class SpecimenSidebar(QWidget):
                 item = QListWidgetItem()
                 item.setData(Qt.ItemDataRole.UserRole, uid)
                 item.setToolTip("")
-                item.setSizeHint(QSize(0, 96 if active else 90))
+                item.setData(_ACTIVE_ROLE, active)
+                # §7 旧: item.setSizeHint(QSize(0, 96 if active else 90)) —— 写死高度,
+                # 长编号(7 段)折 3 行时尾段被卡片下沿裁掉(用户 2026-07-10 报障)。
+                # item.setSizeHint(QSize(0, 96 if active else 90))
                 self._list.addItem(item)
                 self._list.setItemWidget(item, row)
+                item.setSizeHint(QSize(0, self._row_height_for(row, active=active)))
                 shown += 1
 
             self._update_filter_counts(shown)
+            # 先解除抑制:下面的 setCurrentItem 要真的发 currentItemChanged,
+            # 否则选中行的 selected 样式不会被应用(2026-07-10 回归)。
+            self._list.blockSignals(False)
             if self._list.count() > 0 and self._list.currentItem() is None:
                 self._list.setCurrentItem(self._list.item(0))
             self._sync_action_buttons()
         finally:
+            self._list.blockSignals(False)
             self._list.setUpdatesEnabled(was_enabled)
 
     def _sorted_items(self, items: list[dict]) -> list[dict]:
@@ -652,16 +676,24 @@ class SpecimenSidebar(QWidget):
         row.setObjectName("SpecimenRowActive" if active else "SpecimenRow")
         row.setProperty("selected", False)
         row.setMinimumHeight(88)
+        _row_sp = QSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+        _row_sp.setHeightForWidth(True)  # 让 heightForWidth 从 uid 标签透传上来
+        row.setSizePolicy(_row_sp)
         v = QVBoxLayout(row)
         v.setContentsMargins(7, 5, 7, 5)
         v.setSpacing(2)
 
         uid_lbl = QLabel(self._display_uid(uid))
         uid_lbl.setObjectName("SpecimenUid")
-        uid_lbl.setToolTip("")
+        uid_lbl.setToolTip(uid)  # 折行后仍可悬停看完整编号
         uid_lbl.setMinimumWidth(0)
         uid_lbl.setWordWrap(True)
-        uid_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        # §7 旧: setSizePolicy(Expanding, Preferred) —— 未开 heightForWidth,
+        # 布局不知道折行后需要多高, 配合写死的 90px 卡片高度 → 长编号被裁掉尾段。
+        # uid_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        _uid_sp = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        _uid_sp.setHeightForWidth(True)
+        uid_lbl.setSizePolicy(_uid_sp)
         uid_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
 
         status_pill = QLabel("当前" if active else "未激活")
@@ -811,6 +843,49 @@ class SpecimenSidebar(QWidget):
         else:
             self._filter_attention_btn.setText(f"资料待补 {attention_total}")
         self._filter_attention_btn.setEnabled(attention_total > 0)
+
+    def _row_height_for(self, row, *, active: bool) -> int:
+        """卡片高度 = max(基准高, 内容在当前侧栏宽度下真正需要的高度)。
+
+        侧栏很窄, ``_display_uid`` 强制折一行后 wordWrap 还可能再折 ——
+        写死高度必然裁字。宽度取 viewport(尚未布局时回退到控件宽)。
+        """
+        base = 96 if active else 90
+        width = self._list.viewport().width()
+        if width <= 8:
+            width = max(1, self._list.width() - 8)
+        need = row.heightForWidth(width) if row.hasHeightForWidth() else -1
+        if need <= 0:
+            need = row.sizeHint().height()
+        return max(base, int(need) + 4)  # +4 呼吸位, 防贴边
+
+    def _resync_row_heights(self) -> None:
+        """侧栏宽度变化会改变折行数 → 重算每行高度(纯几何, 不重建 widget)。"""
+        for i in range(self._list.count()):
+            item = self._list.item(i)
+            row = self._list.itemWidget(item)
+            if row is None:
+                continue
+            active = bool(item.data(_ACTIVE_ROLE))
+            h = self._row_height_for(row, active=active)
+            if item.sizeHint().height() != h:
+                item.setSizeHint(QSize(0, h))
+
+    def resizeEvent(self, event) -> None:  # noqa: D401 - Qt override
+        super().resizeEvent(event)
+        self._maybe_resync_row_heights()
+
+    def showEvent(self, event) -> None:  # noqa: D401 - Qt override
+        # refresh() 可能发生在首次布局之前(viewport 宽度还是默认值),
+        # 那时算出的行高偏小 —— 首次显示时按真实宽度重算一次。
+        super().showEvent(event)
+        self._maybe_resync_row_heights()
+
+    def _maybe_resync_row_heights(self) -> None:
+        new_w = self._list.viewport().width()
+        if new_w != getattr(self, "_last_list_width", -1):
+            self._last_list_width = new_w
+            self._resync_row_heights()
 
     @staticmethod
     def _display_uid(uid: str) -> str:
@@ -969,8 +1044,46 @@ class SpecimenSidebar(QWidget):
             except Exception:
                 continue
 
+    def selected_uids(self) -> list[str]:
+        """当前多选中的编号(按列表顺序);单选时返回 1 个,无选中返回 []。"""
+        out: list[str] = []
+        for item in self._list.selectedItems():
+            uid = item.data(Qt.ItemDataRole.UserRole)
+            if uid:
+                out.append(str(uid))
+        order = {
+            self._list.item(i).data(Qt.ItemDataRole.UserRole): i
+            for i in range(self._list.count())
+        }
+        return sorted(out, key=lambda u: order.get(u, 0))
+
+    def _on_selection_scope_changed(self) -> None:
+        self.selection_scope_changed.emit(self.selected_uids())
+
+    def _prefetch_phases(self, uids: list[str]) -> None:
+        """一次批量取回全部编号的 DB 相位, 供 `_phase_for` 命中(消灭 N+1)。"""
+        self._phase_db_cache = {}
+        try:
+            from app.services.activation_service import get_collab_statuses
+            self._phase_db_cache = get_collab_statuses(self.ctx.get_db(), uids)
+        except Exception:
+            self._phase_db_cache = {}
+        self._phase_cache_primed = True
+
     def _phase_for(self, uid: str, svc) -> Optional[str]:
         """Resolve *uid*'s confirmed phase (collab task first, else project DB)."""
+        # 在线协作任务优先(内存 store, 免查库) —— 与 resolve_phase 语义一致。
+        try:
+            task = svc.store.get_task(uid) if svc is not None else None
+            if task is not None:
+                status = task.status
+                return status.value if hasattr(status, "value") else str(status)
+        except Exception:
+            pass
+        # §7 旧: return resolve_phase(svc, self.ctx.get_db(), uid) —— 其 DB 分支
+        # 对每一行发一条 SELECT(N+1), 编号一多「返回工作台/激活」就发涩。
+        if getattr(self, "_phase_cache_primed", False):
+            return self._phase_db_cache.get(uid)
         try:
             from app.services.activation_service import resolve_phase
             return resolve_phase(svc, self.ctx.get_db(), uid)
@@ -998,6 +1111,8 @@ class SpecimenSidebar(QWidget):
     def refresh_phases(self) -> None:
         """Re-read each visible 编号's phase and update its dots (no rebuild)."""
         svc = getattr(self.ctx, "collab_service", None)
+        # 外部刚写过库(如相位点击已持久化) → 必须重新批量取, 否则读到陈旧缓存。
+        self._prefetch_phases(list(self._phase_dots.keys()))
         for uid in list(self._phase_dots.keys()):
             current = self._phase_for(uid, svc)
             self._phase_state[uid] = current
