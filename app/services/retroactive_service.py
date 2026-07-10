@@ -22,7 +22,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from app.services.organize_service import _parse_uid_from_tiff_name
+# from app.services.organize_service import _parse_uid_from_tiff_name  # §7 旧: 只取 uid, seq 另 split 猜段
+from app.services.organize_service import _parse_result_tiff_name
 
 
 @dataclass
@@ -66,13 +67,18 @@ def _build_auto_group_scan_result(
             pending_jpgs.append(str(path))
             continue
 
-        parsed_uid = _parse_uid_from_tiff_name(path.name)
+        # §7 旧: uid 与 seq 分两套解析, seq 用 split('-')[4] 猜段
+        # parsed_uid = _parse_uid_from_tiff_name(path.name)
+        # uid = parsed_uid or (fallback_uid or "").strip() or None
+        # parts = path.stem.split("-")
+        # try:
+        #     seq = int(parts[4]) if parsed_uid else None
+        # except (IndexError, ValueError):
+        #     seq = None
+        parsed = _parse_result_tiff_name(path.name)
+        parsed_uid = parsed[0] if parsed else None
         uid = parsed_uid or (fallback_uid or "").strip() or None
-        parts = path.stem.split("-")
-        try:
-            seq = int(parts[4]) if parsed_uid else None
-        except (IndexError, ValueError):
-            seq = None
+        seq = parsed[1] if parsed else None
         if uid and seq is None and fallback_uid:
             seq = len(groups_by_uid.get(uid, [])) + 1
         if not uid or seq is None:
@@ -272,17 +278,23 @@ def scan_project_retroactive(
             name = os.path.basename(full)
             if sel_set and os.path.abspath(full) not in sel_set:
                 continue
-            uid = _parse_uid_from_tiff_name(name)
-            if not uid:
+            # §7 旧: uid 走 _parse_uid_from_tiff_name, seq 另用 split('-')[4] 猜段
+            # uid = _parse_uid_from_tiff_name(name)
+            # if not uid:
+            #     unnamed_tiffs.append({"name": name, "path": full})
+            #     continue
+            # stem = Path(name).stem
+            # parts = stem.split("-")
+            # try:
+            #     seq = int(parts[4])
+            # except (IndexError, ValueError):
+            #     unnamed_tiffs.append({"name": name, "path": full})
+            #     continue
+            parsed = _parse_result_tiff_name(name)
+            if not parsed:
                 unnamed_tiffs.append({"name": name, "path": full})
                 continue
-            stem = Path(name).stem
-            parts = stem.split("-")
-            try:
-                seq = int(parts[4])
-            except (IndexError, ValueError):
-                unnamed_tiffs.append({"name": name, "path": full})
-                continue
+            uid, seq = parsed
             tiff_files.append({
                 "uid": uid, "seq": seq, "name": name, "path": full,
                 "mtime": _iso_mtime(full),

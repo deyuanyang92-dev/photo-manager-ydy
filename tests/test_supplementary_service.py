@@ -150,3 +150,29 @@ class TestValidateSuppGroup:
     def test_empty_selection_errors(self, db):
         with pytest.raises(SuppGroupError):
             validate_supp_group(db, [])
+
+
+class TestResolveSpecimenLegacyName:
+    """Legacy 无站位 6 段成果名 (PROJECT_MEMORY: GXFCG-BLW-BZC003-R-1-20260618
+    → uniqueId=GXFCG-BLW-BZC003-R-20260618, seq=1) 也必须能解析归属。
+    旧手搓解析器要求 ≥7 段 → 用户自己的 legacy 成果无法补处理。"""
+
+    def test_legacy_six_segment_name_resolves(self, db):
+        _insert_specimen(db, "GXFCG-BLW-BZC003-R-20260618")
+        row = resolve_specimen_for_tiff(db, "GXFCG-BLW-BZC003-R-1-20260618.tif")
+        assert row is not None
+        assert row["uid"] == "GXFCG-BLW-BZC003-R-20260618"
+
+    def test_legacy_multi_digit_sequence(self, db):
+        _insert_specimen(db, "GXFCG-BLW-BZC003-R-20260618")
+        row = resolve_specimen_for_tiff(db, "GXFCG-BLW-BZC003-R-10-20260618.tiff")
+        assert row is not None
+
+    def test_standard_seven_segment_still_resolves(self, db):
+        _insert_specimen(db, UID)
+        row = resolve_specimen_for_tiff(db, RESULT_NAME)
+        assert row is not None and row["uid"] == UID
+
+    def test_bare_uid_without_sequence_still_none(self, db):
+        _insert_specimen(db, UID)
+        assert resolve_specimen_for_tiff(db, f"{UID}.tif") is None

@@ -270,3 +270,36 @@ class TestOrganizeGate:
         db = _db()
         with pytest.raises((OrganizeGateError, ValueError)):
             _check_organize_gate(db, "", [], allow_inactive=True)
+
+
+class TestParseResultTiffName:
+    """权威解析器接管 (PROJECT_MEMORY: 禁止 split('-') 猜段):
+    标准 7 段与旧手搓逐字节一致; legacy 无站位 6 段新增支持。"""
+
+    def test_standard_seven_segments_matches_legacy_behavior(self):
+        from app.services.organize_service import _parse_result_tiff_name
+        assert _parse_result_tiff_name("FJ-XM-B2-DLC001-1-T95E-20260601.tif") == (
+            "FJ-XM-B2-DLC001-T95E-20260601", 1,
+        )
+
+    def test_legacy_six_segments_no_station(self):
+        from app.services.organize_service import _parse_result_tiff_name
+        assert _parse_result_tiff_name("GXFCG-BLW-BZC003-R-10-20260618.tif") == (
+            "GXFCG-BLW-BZC003-R-20260618", 10,
+        )
+
+    def test_bare_uid_without_sequence_is_none(self):
+        from app.services.organize_service import _parse_result_tiff_name
+        assert _parse_result_tiff_name("FJ-XM-B2-DLC001-T95E-20260601.tif") is None
+        assert _parse_result_tiff_name("GXFCG-BLW-BZC003-R-20260618.tif") is None
+
+    def test_unrelated_name_is_none(self):
+        from app.services.organize_service import _parse_result_tiff_name
+        assert _parse_result_tiff_name("IMG_1234.tif") is None
+
+    def test_uid_wrapper_keeps_signature(self):
+        from app.services.organize_service import _parse_uid_from_tiff_name
+        assert _parse_uid_from_tiff_name("GXFCG-BLW-BZC003-R-1-20260618.tif") == (
+            "GXFCG-BLW-BZC003-R-20260618"
+        )
+        assert _parse_uid_from_tiff_name("random.tif") is None

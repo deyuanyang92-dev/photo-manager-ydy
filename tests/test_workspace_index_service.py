@@ -120,3 +120,38 @@ def test_ensure_workspace_meta_pure_read_keeps_updated_at_and_no_cache(tmp_path)
     assert meta2["workspace_id"] == meta1["workspace_id"]
     assert meta2["updated_at"] == meta1["updated_at"], "纯读不应重写 updated_at"
     assert normalize_path(str(ws)) not in db_manager._db_cache
+
+
+class TestCacheStaleness:
+    """docstring 承诺 "fresh-enough row" —— 子库在缓存刷新后又被写过,
+    缓存必须判 stale 返回 None(调用方回退现场扫描),不得无限期喂陈旧 KPI。"""
+
+    def test_stale_cache_returns_none_after_workspace_write(self, tmp_path):
+        import os
+        import time
+
+        root = tmp_path / "survey"
+        a = root / "a"
+        root.mkdir()
+        _make_ws(a, specimens=2)
+        catalog.register_workspace(str(root), str(a), name="a")
+
+        assert wis.cached_kpi_for_workspaces(str(root), [str(a)]) is not None
+
+        # 模拟刷新之后子库又被写: 把 db mtime 推到缓存 updated_at 之后
+        db_path = a / "_data" / "project.db"
+        future = time.time() + 30
+        os.utime(db_path, (future, future))
+
+        assert wis.cached_kpi_for_workspaces(str(root), [str(a)]) is None, (
+            "子库比缓存新 → 必须判 stale 回退现场扫描"
+        )
+
+    def test_fresh_cache_still_served(self, tmp_path):
+        root = tmp_path / "survey"
+        a = root / "a"
+        root.mkdir()
+        _make_ws(a, specimens=4)
+        catalog.register_workspace(str(root), str(a), name="a")
+        totals = wis.cached_kpi_for_workspaces(str(root), [str(a)])
+        assert totals is not None and totals["specimen_count"] == 4

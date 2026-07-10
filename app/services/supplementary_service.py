@@ -75,9 +75,12 @@ def resolve_specimen_for_tiff(
     """Resolve the specimen a TIFF belongs to, from its filename alone.
 
     Mirrors finalCompositeTarget (app.js:3808-3824): the TIFF basename must
-    be a full result-name (PROVINCE-SITE-STATION-ID-SEQ-STORAGE-DATESG); the
-    sequence segment is stripped to yield the uniqueId, which is matched
-    case-insensitively against the specimens table PRIMARY KEY ``uid``.
+    be a full result-name; the sequence segment is stripped to yield the
+    uniqueId, which is matched case-insensitively against the specimens
+    table PRIMARY KEY ``uid``. 标准 7 段
+    (PROVINCE-SITE-STATION-ID-SEQ-STORAGE-DATESG) 与 legacy 无站位 6 段
+    (如 GXFCG-BLW-BZC003-R-1-20260618) 都认 —— 解析走
+    ``naming.parse_tiff_result_detail``(PROJECT_MEMORY 权威解析器)。
 
     Does NOT consult the active task — independent of activation state.
 

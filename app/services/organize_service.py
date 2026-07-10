@@ -37,27 +37,46 @@ def _uid_from_row(row: tuple | dict) -> str:
     return str(row[0])
 
 
-def _parse_uid_from_tiff_name(name: str) -> Optional[str]:
-    """Extract the 6-part specimen UID from a TIFF filename.
+def _parse_result_tiff_name(
+    name: str, components: Optional[list] = None
+) -> Optional[tuple[str, int]]:
+    """Parse ``(uid, sequence)`` from a result-TIFF basename.
 
-    A TIFF basename looks like:
-      PROVINCE-SITE-STATION-ID-SEQ-STORAGE-DATESG[.tif/.tiff]
-    The UID is all parts EXCEPT the sequence (index 4):
-      PROVINCE-SITE-STATION-ID-STORAGE-DATESG
-
-    Returns None if the name doesn't have ≥6 dash-separated parts.
+    权威解析器 = ``naming.parse_tiff_result_detail``（PROJECT_MEMORY：文件名→UID
+    禁止 split('-') 猜段）。同时认标准 7 段
+    ``省-地-站-物-序-存-日`` 与 legacy 无站位 6 段
+    ``GXFCG-BLW-BZC003-R-1-20260618``（→ uid=GXFCG-BLW-BZC003-R-20260618, seq=1）。
+    对标准 7 段名的输出与旧手搓实现逐字节一致（超集，不改变既有行为）；
+    裸 uid（无序号段）与无关名仍返回 None。
     """
-    stem = Path(name).stem
-    parts = stem.split("-")
-    # Must have at least 7 parts (6 uid + 1 seq in position 4)
-    if len(parts) < 7:
+    from app.utils.naming import normalize_naming_components, parse_tiff_result_detail
+
+    detail = parse_tiff_result_detail(
+        Path(name).stem, normalize_naming_components(components)
+    )
+    if detail is None or detail.sequence is None:
         return None
-    try:
-        int(parts[4])  # position 4 is the numeric sequence
-    except ValueError:
-        return None
-    uid_parts = parts[:4] + parts[5:]
-    return "-".join(uid_parts)
+    return detail.uid, int(detail.sequence)
+
+
+def _parse_uid_from_tiff_name(name: str) -> Optional[str]:
+    """Extract the specimen UID (no sequence segment) from a TIFF filename."""
+    # §7 旧: 手搓 split('-'), 要求 ≥7 段 → legacy 无站位 6 段名恒返 None,
+    #        补处理/回填对用户自己的 GXFCG legacy 成果失效; 违 PROJECT_MEMORY
+    #        「必须走 parse_tiff_result_detail」禁令。oracle app.js:3798-3800 的
+    #        parts.slice(0,4).concat(parts.slice(5)) 语义被权威解析器完整覆盖。
+    # stem = Path(name).stem
+    # parts = stem.split("-")
+    # if len(parts) < 7:
+    #     return None
+    # try:
+    #     int(parts[4])  # position 4 is the numeric sequence
+    # except ValueError:
+    #     return None
+    # uid_parts = parts[:4] + parts[5:]
+    # return "-".join(uid_parts)
+    parsed = _parse_result_tiff_name(name)
+    return parsed[0] if parsed else None
 
 
 def _max_seq_for_uid_on_disk(uid: str, *dirs: str) -> int:

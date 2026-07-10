@@ -241,14 +241,51 @@ def refresh_registered_workspaces(root_dir: str) -> list[dict[str, Any]]:
     return out
 
 
+def _workspace_db_newest_mtime(workspace_dir: str) -> Optional[float]:
+    """子库最新写入时刻(epoch 秒)= project.db 与其 -wal sidecar 的较新 mtime。
+
+    WAL 模式下写入先落 ``-wal``,主文件 mtime 可能长期不动 —— 只看主文件会漏判。
+    stat 失败(盘未挂载等)返回 None,调用方按「无法判定」处理。
+    """
+    base = Path(normalize_path(workspace_dir)) / "_data" / "project.db"
+    newest: Optional[float] = None
+    for p in (base, base.with_name(base.name + "-wal")):
+        try:
+            ts = p.stat().st_mtime
+        except OSError:
+            continue
+        if newest is None or ts > newest:
+            newest = ts
+    return newest
+
+
+def _cache_row_is_stale(cached: dict[str, Any], workspace_dir: str) -> bool:
+    """缓存行是否已被子库后续写入超越(全仓其余缓存均有内容签名失效,
+    对齐 global_results ``_dir_sig`` / project_summary ``_cache_signature`` 惯例)。
+
+    判定不了(时间戳缺失/解析失败/db stat 失败)按 stale 处理 —— 回退现场扫描
+    永远给出正确数字,只是慢;喂陈旧 KPI 则是错的。
+    """
+    raw = str(cached.get("updated_at") or "")
+    try:
+        cached_ts = datetime.fromisoformat(raw).timestamp()
+    except ValueError:
+        return True
+    newest = _workspace_db_newest_mtime(workspace_dir)
+    if newest is None:
+        return True
+    return newest > cached_ts
+
+
 def cached_kpi_for_workspaces(
     root_dir: Optional[str],
     workspace_dirs: list[str],
 ) -> Optional[dict[str, int]]:
     """Sum KPI from root cache when every workspace has a fresh-enough row.
 
-    Returns None if root missing or any workspace lacks cache → caller should
-    fall back to live scan.
+    Returns None if root missing, any workspace lacks cache, or any cache row
+    is stale (workspace db written after the cached ``updated_at``) → caller
+    should fall back to live scan.
     """
     if not root_dir or not workspace_dirs:
         return None
@@ -269,6 +306,19 @@ def cached_kpi_for_workspaces(
         cached = read_cached_index(root, wid)
         if not cached:
             return None
+        # §7 旧: 只查行存在, 从不比新旧 —— docstring 承诺 "fresh-enough"
+        # 但除非有人显式 refresh, KPI 可无限期陈旧。
+        # 例外: 根自身就是工作区时, 刷新缓存写的就是同一个 db, mtime 恒新于
+        # updated_at → 判 stale 会永久回退现场扫描; 该情形维持旧行为(行存在即用)。
+        if not _same_dir(ws, root) and _cache_row_is_stale(cached, ws):
+            return None
         for k in _CACHE_COLS:
             totals[k] += int(cached.get(k) or 0)
     return totals
+
+
+def _same_dir(a: str, b: str) -> bool:
+    try:
+        return Path(normalize_path(a)).resolve() == Path(normalize_path(b)).resolve()
+    except OSError:
+        return False
