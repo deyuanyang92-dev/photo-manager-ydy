@@ -65,8 +65,8 @@ def test_disk_cache_survives_memory_clear(disk_cache_root, tmp_path) -> None:
 
 
 def test_ensure_tiff_preview_jpeg_creates_disk_proxy(disk_cache_root, tmp_path) -> None:
+    from app.config.preview_profile import current_preview_master_size
     from app.utils import image_thumbnail as it
-    from app.utils.thumbnail_disk_cache import TIFF_PREVIEW_MASTER_SIZE
 
     path = tmp_path / "preview.tif"
     _write_tiff(path)
@@ -88,7 +88,7 @@ def test_ensure_tiff_preview_jpeg_creates_disk_proxy(disk_cache_root, tmp_path) 
         it._THUMB_CACHE.clear()
     img = QImage(str(jpg_path))
     assert not img.isNull()
-    assert max(img.width(), img.height()) <= TIFF_PREVIEW_MASTER_SIZE
+    assert max(img.width(), img.height()) <= current_preview_master_size()
 
 
 def test_scale_preview_image_downscales() -> None:

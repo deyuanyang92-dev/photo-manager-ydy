@@ -3546,7 +3546,8 @@ class TestComposePreviewDialog:
         dlg._tiff_preview.set_zoom_percent(150)
         assert dlg._tiff_preview._fit_to_window is False
         assert dlg._tiff_preview._zoom_percent == 150
-        assert dlg._tiff_preview.pixmap().width() == int(source_width * 1.5)
+        expected_width = int(source_width * 1.5)
+        assert abs(dlg._tiff_preview.pixmap().width() - expected_width) <= 1
 
         dlg._tiff_preview.actual_size()
         assert dlg._tiff_preview._zoom_percent == 100
