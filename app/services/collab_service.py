@@ -179,6 +179,9 @@ class CollabService(QObject):
         self._peer_trust = CollabPeerTrustStore()
         # Session-only: avoid duplicate join-review dialogs for one peer.
         self._peer_review_prompted: set[str] = set()
+        # v0.56: 同一次 peer_join_review emit 会触达多个界面(协作页 + 工作台
+        # 侧栏), 弹窗权先到先得, 否则一次加入弹两个确认框且答案互踩。
+        self._peer_review_prompt_claimed: set[str] = set()
 
         self._server_thread: Optional[CollabServerThread] = None
         self._discovery_thread: Optional[CollabDiscoveryThread] = None
@@ -747,7 +750,20 @@ class CollabService(QObject):
         self._peer_review_prompted.add(key)
         from app.services.collab_status import peer_display_name
 
+        self._peer_review_prompt_claimed.discard(key)
         self.peer_join_review.emit(peer.ip, peer.port, peer_display_name(peer))
+
+    def claim_peer_join_prompt(self, ip: str, port: int) -> bool:
+        """UI 侧领取「新设备加入」弹窗权.
+
+        peer_join_review 是单例信号, 协作页与工作台侧栏可能同时连接;
+        每次 emit 只有第一个调用本方法的界面拿到 True 并弹窗, 其余跳过。
+        """
+        key = f"{ip}:{port}"
+        if key in self._peer_review_prompt_claimed:
+            return False
+        self._peer_review_prompt_claimed.add(key)
+        return True
 
     @staticmethod
     def _normalize_project_label(name: str) -> str:

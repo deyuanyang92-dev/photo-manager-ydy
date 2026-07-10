@@ -1339,6 +1339,13 @@ class CollabView(BaseView):
 
         from app.utils import ui
 
+        svc0 = self._service
+        # 弹窗权先到先得: 工作台侧栏 CollabPanel 连着同一个信号, 不领取会双弹窗。
+        if svc0 is None or (
+            hasattr(svc0, "claim_peer_join_prompt")
+            and not svc0.claim_peer_join_prompt(ip, port)
+        ):
+            return
         reply = ui.question(
             self,
             "新设备加入",
