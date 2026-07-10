@@ -18,7 +18,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Optional
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -44,6 +44,40 @@ from app.config.specimen_fields import (
 from app.services import edit_lock_service
 from app.services import specimen_filter_service as filter_svc
 from app.utils import ui
+
+# 停不下来的查询线程退休名单(模式同 project_tree_view._RETIRED_WARMUP_WORKERS):
+# 保持模块级引用防 GC, 避免 destroyed-while-running 原生 abort。
+_RETIRED_FILTER_WORKERS: list = []
+
+
+class _FilterQueryWorker(QThread):
+    """跨断面 specimens 查询后台线程 — N 库全表扫不进 Qt 主线程."""
+
+    finished_rows = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, paths, conditions, labels, parent=None) -> None:
+        super().__init__(parent)
+        self._paths = list(paths)
+        self._conditions = list(conditions or [])
+        self._labels = list(labels or [])
+        self._cancel_requested = False
+
+    def cancel(self) -> None:
+        self._cancel_requested = True
+
+    def run(self) -> None:
+        try:
+            rows = filter_svc.query_specimens(
+                self._paths, self._conditions, labels=self._labels
+            )
+        except Exception as exc:
+            if not self._cancel_requested:
+                self.failed.emit(str(exc))
+            return
+        if self._cancel_requested:
+            return
+        self.finished_rows.emit(rows)
 from app.utils.image_thumbnail import decode_image_data, make_pixmap
 from app.views.base_view import BaseView
 
@@ -394,12 +428,77 @@ class DataFilterView(BaseView):
             return
         paths = [p for p, _ in ws]
         labels = [l for _, l in ws]
-        rows = filter_svc.query_specimens(paths, self._collect_conditions(), labels=labels)
+        # §7 旧: 主线程同步跑 query_specimens(N 库全表扫+内存合并), 多断面
+        # 大表按钮 handler 直接假死(用户裁定: 点击零反馈=bug)。
+        # rows = filter_svc.query_specimens(paths, self._collect_conditions(), labels=labels)
+        # self._rows = rows
+        # self._fill_table(rows)
+        # self._fill_stats(rows)
+        # if hasattr(self, "_btn_export"):
+        #     self._btn_export.setEnabled(bool(rows))
+        token = getattr(self, "_query_token", 0) + 1
+        self._query_token = token
+        self._stop_filter_query_worker(wait_ms=200)
+
+        # busy 反馈复用现有控件状态, 不新增控件
+        self._btn_run.setEnabled(False)
+        self._btn_run.setText("查询中…")
+        self._stats_lbl.setText(f"查询中… ({len(paths)} 个断面)")
+
+        worker = _FilterQueryWorker(
+            paths, self._collect_conditions(), labels, parent=self
+        )
+        worker.finished_rows.connect(
+            lambda rows, t=token: self._on_query_done(t, rows)
+        )
+        worker.failed.connect(lambda msg, t=token: self._on_query_failed(t, msg))
+        self._query_worker = worker
+        worker.start()
+
+    def _restore_run_button(self) -> None:
+        self._btn_run.setEnabled(True)
+        self._btn_run.setText("查询")
+
+    def _on_query_done(self, token: int, rows: list) -> None:
+        if token != getattr(self, "_query_token", 0):
+            return
+        self._restore_run_button()
         self._rows = rows
         self._fill_table(rows)
         self._fill_stats(rows)
         if hasattr(self, "_btn_export"):
             self._btn_export.setEnabled(bool(rows))
+
+    def _on_query_failed(self, token: int, msg: str) -> None:
+        if token != getattr(self, "_query_token", 0):
+            return
+        self._restore_run_button()
+        self._stats_lbl.setText("查询失败")
+        ui.warn(self, "查询失败", msg)
+
+    def _stop_filter_query_worker(self, wait_ms: int = 200) -> None:
+        worker = getattr(self, "_query_worker", None)
+        if worker is None:
+            return
+        try:
+            if worker.isRunning():
+                worker.cancel()
+                if not worker.wait(wait_ms):
+                    # 停不下来: 脱父防 destroyed-while-running abort,
+                    # 交回收前的信号已被 token 判过期丢弃。
+                    for sig in ("finished_rows", "failed"):
+                        try:
+                            getattr(worker, sig).disconnect()
+                        except Exception:
+                            pass
+                    try:
+                        worker.setParent(None)
+                    except Exception:
+                        pass
+                    _RETIRED_FILTER_WORKERS.append(worker)
+        except Exception:
+            pass
+        self._query_worker = None
 
     def _export_csv(self) -> None:
         if not self._rows:
@@ -616,5 +715,12 @@ class DataFilterView(BaseView):
 
     # ── 生命周期 ──────────────────────────────────────────────────────
     def stop_background_work(self) -> None:
-        # 本 view 无后台线程(查询同步, 简单稳); 留 hook 防 close→reopen 锁泄漏。
-        pass
+        # §7 旧: 本 view 无后台线程(查询同步, 简单稳) —— 查询已移入
+        # _FilterQueryWorker, 退出/关窗前必须停掉。
+        self._stop_filter_query_worker(wait_ms=2000)
+
+    def closeEvent(self, event) -> None:  # noqa: D401 - Qt override
+        # 本 view 宿主是模态对话框(data_filter_dialog): 对话框关闭 → 视图
+        # 销毁, 运行中的 QThread 不停会原生 abort。
+        self.stop_background_work()
+        super().closeEvent(event)

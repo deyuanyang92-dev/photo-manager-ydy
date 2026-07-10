@@ -37,6 +37,15 @@ class DataFilterDialog(QDialog):
         if preselect_dirs:
             self._panel.preselect_workspaces(preselect_dirs)
 
+    def done(self, result: int) -> None:  # noqa: D401 - Qt override
+        # 对话框关闭(accept/reject/Esc/X 全走这里)→ 先停查询线程:
+        # exec() 返回后 dialog+panel 被销毁, 运行中的 QThread 会原生 abort。
+        try:
+            self._panel.stop_background_work()
+        except Exception:
+            pass
+        super().done(result)
+
 
 def open_data_filter_dialog(
     ctx: "AppContext",

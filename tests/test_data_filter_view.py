@@ -63,6 +63,9 @@ def test_run_query_fills_table_and_stats(qtbot, qapp, tmp_path, monkeypatch) -> 
     v._set_workspaces([(str(a), "断面a")])
     monkeypatch.setattr(v, "_collect_conditions", lambda: [])  # 无条件 = 全通过
     v._run_query()
+    # 查询已移入 _FilterQueryWorker(主线程不假死), 结果异步回填
+    qtbot.waitUntil(lambda: v._table.rowCount() == 2, timeout=5000)
+    v._stop_filter_query_worker(wait_ms=2000)
     assert v._table.rowCount() == 2
     # 已取RNA 列(索引 6): u1 R95E=是, u2 T95E=否
     rna_vals = {v._table.item(r, 6).text() for r in range(v._table.rowCount())}
@@ -130,6 +133,8 @@ def test_table_readonly_until_unlocked(qtbot, qapp, tmp_path, monkeypatch) -> No
     v._set_workspaces([(str(a), "断面a")])
     monkeypatch.setattr(v, "_collect_conditions", lambda: [])
     v._run_query()
+    qtbot.waitUntil(lambda: v._table.rowCount() == 1, timeout=5000)
+    v._stop_filter_query_worker(wait_ms=2000)
     # 只读态: photographer 列(idx 4)不可编辑
     ro_item = v._table.item(0, 4)
     assert not (ro_item.flags() & Qt.ItemFlag.ItemIsEditable)
@@ -191,7 +196,8 @@ def test_export_csv_button_writes_file(qtbot, qapp, tmp_path, monkeypatch) -> No
         v._src_list.item(i).setCheckState(Qt.CheckState.Checked)
     monkeypatch.setattr(v, "_collect_conditions", lambda: [])
     v._run_query()
-    assert v._btn_export.isEnabled()
+    qtbot.waitUntil(lambda: v._btn_export.isEnabled(), timeout=5000)
+    v._stop_filter_query_worker(wait_ms=2000)
     out = tmp_path / "out.csv"
     monkeypatch.setattr(
         "app.utils.ui.get_save_file_name",
@@ -202,3 +208,57 @@ def test_export_csv_button_writes_file(qtbot, qapp, tmp_path, monkeypatch) -> No
     assert out.exists()
     text = out.read_text(encoding="utf-8-sig")
     assert "u1" in text
+
+
+def test_query_runs_in_worker_thread(qtbot, qapp, tmp_path, monkeypatch) -> None:
+    """查询必须在 worker 线程执行, 不得阻塞 Qt 主线程(点击零反馈=bug)."""
+    import threading
+
+    from app.views import data_filter_view as dfv
+
+    a = tmp_path / "断面a"
+    _make_ws(a, [("u1", "R95E", "张三", "浙江", "Aa")])
+    ctx = _Ctx()
+    v = DataFilterView(ctx)
+    qtbot.addWidget(v)
+    v._set_workspaces([(str(a), "断面a")])
+    monkeypatch.setattr(v, "_collect_conditions", lambda: [])
+
+    seen: list = []
+    real = dfv.filter_svc.query_specimens
+
+    def spy(*args, **kwargs):
+        seen.append(threading.current_thread())
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(dfv.filter_svc, "query_specimens", spy)
+    v._run_query()
+    assert not v._btn_run.isEnabled(), "查询中按钮应禁用并显示查询中"
+    qtbot.waitUntil(lambda: v._table.rowCount() == 1, timeout=5000)
+    v._stop_filter_query_worker(wait_ms=2000)
+    assert seen and seen[0] is not threading.main_thread()
+    assert v._btn_run.isEnabled(), "查询完成后按钮应恢复"
+
+
+def test_query_failure_restores_button_and_warns(qtbot, qapp, tmp_path, monkeypatch) -> None:
+    from app.views import data_filter_view as dfv
+
+    a = tmp_path / "断面a"
+    _make_ws(a, [("u1", "R95E", "张三", "浙江", "Aa")])
+    ctx = _Ctx()
+    v = DataFilterView(ctx)
+    qtbot.addWidget(v)
+    v._set_workspaces([(str(a), "断面a")])
+    monkeypatch.setattr(v, "_collect_conditions", lambda: [])
+
+    def boom(*_a, **_k):
+        raise RuntimeError("scan failed")
+
+    monkeypatch.setattr(dfv.filter_svc, "query_specimens", boom)
+    warned: list = []
+    monkeypatch.setattr(dfv.ui, "warn", lambda *a, **k: warned.append(a))
+
+    v._run_query()
+    qtbot.waitUntil(lambda: v._btn_run.isEnabled(), timeout=5000)
+    v._stop_filter_query_worker(wait_ms=2000)
+    assert warned, "失败必须给用户可见提示, 不得静默"
