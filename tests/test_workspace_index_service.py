@@ -72,3 +72,51 @@ def test_compute_stats_missing_db(tmp_path):
     empty.mkdir()
     stats = wis.compute_workspace_index_stats(str(empty))
     assert stats["specimen_count"] == 0
+
+
+def test_cached_kpi_read_leaves_no_cached_child_conn_and_no_writes(tmp_path):
+    """v0.56 锁泄漏治理: KPI 读路径不得缓存子工作区连接(Windows 文件锁扣到退出),
+    也不得改动子库(v0.55 顺手 UPDATE workspace_meta.updated_at + 跑迁移)."""
+    from app.utils.path_utils import normalize_path
+
+    root = tmp_path / "survey"
+    a = root / "a"
+    root.mkdir()
+    _make_ws(a, specimens=2)
+    catalog.register_workspace(str(root), str(a), name="a")
+
+    db_manager.close_all()
+
+    before = sqlite3.connect(str(a / "_data" / "project.db"))
+    row = before.execute("SELECT updated_at FROM workspace_meta").fetchone()
+    before.close()
+    assert row is not None
+    ts_before = row[0]
+
+    totals = wis.cached_kpi_for_workspaces(str(root), [str(a)])
+    assert totals is not None and totals["specimen_count"] == 2
+
+    assert normalize_path(str(a)) not in db_manager._db_cache, (
+        "KPI 读路径不应留下子工作区缓存连接"
+    )
+
+    after = sqlite3.connect(str(a / "_data" / "project.db"))
+    ts_after = after.execute("SELECT updated_at FROM workspace_meta").fetchone()[0]
+    after.close()
+    assert ts_after == ts_before, "KPI 读路径不应改写子库 workspace_meta"
+
+
+def test_ensure_workspace_meta_pure_read_keeps_updated_at_and_no_cache(tmp_path):
+    """v0.56: ensure_workspace_meta 无新信息时=纯读, 不重写 updated_at, 不缓存连接."""
+    from app.utils.path_utils import normalize_path
+
+    ws = tmp_path / "ws"
+    _make_ws(ws)
+
+    meta1 = catalog.ensure_workspace_meta(str(ws))
+    db_manager.close_all()
+    meta2 = catalog.ensure_workspace_meta(str(ws))
+
+    assert meta2["workspace_id"] == meta1["workspace_id"]
+    assert meta2["updated_at"] == meta1["updated_at"], "纯读不应重写 updated_at"
+    assert normalize_path(str(ws)) not in db_manager._db_cache

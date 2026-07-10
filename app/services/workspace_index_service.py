@@ -254,18 +254,19 @@ def cached_kpi_for_workspaces(
         return None
     root = normalize_path(root_dir)
     try:
-        from app.services.project_catalog_service import ensure_workspace_meta
+        # §7 旧: from ... import ensure_workspace_meta —— 「读」KPI 却对每个子库
+        # create=True + ensure_schema + 重写 updated_at, 还留下缓存连接(锁泄漏)。
+        from app.services.project_catalog_service import read_workspace_meta
     except Exception:
         return None
 
     totals = {k: 0 for k in _CACHE_COLS}
     for ws in workspace_dirs:
-        try:
-            meta = ensure_workspace_meta(ws, root_dir=root)
-            wid = str(meta.get("workspace_id") or "")
-        except Exception:
+        meta = read_workspace_meta(ws)
+        wid = str((meta or {}).get("workspace_id") or "")
+        if not wid:
             return None
-        cached = read_cached_index(root, wid) if wid else None
+        cached = read_cached_index(root, wid)
         if not cached:
             return None
         for k in _CACHE_COLS:

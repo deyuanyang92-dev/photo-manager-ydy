@@ -181,24 +181,42 @@ def open_project_db(project_dir: str, *, create: bool = False) -> sqlite3.Connec
     return conn
 
 
-def open_project_db_private(project_dir: str) -> sqlite3.Connection:
-    """Open an uncached connection for background workers.
+def open_project_db_private(
+    project_dir: str, *, create: bool = False, ensure: bool = False
+) -> sqlite3.Connection:
+    """Open an uncached connection for background workers / short-lived reads.
 
     The GUI thread owns the cached connection returned by ``open_project_db``.
     Workers must use a private connection so cursors and transactions cannot
-    cross thread boundaries.
+    cross thread boundaries. 跨工作区汇总/索引等「碰一下就走」的路径也必须用
+    私有连接并在 finally 里 close —— 缓存连接会把每个子工作区的文件锁一直
+    扣到退出 (Windows 上目录因此不能移动/删除, v0.56 锁泄漏治理)。
+
+    ``create=True`` mirrors ``open_project_db(create=True)``: materialise only
+    the ``_data/`` leaf + db file inside an EXISTING root (never fabricates the
+    tree), and run ensure_schema. ``ensure=True`` runs ensure_schema on an
+    existing db (legacy dbs may lack newer tables). Plain open (both False)
+    skips ensure_schema for speed and NEVER writes.
     """
-    from app.services.project_paths import ProjectUnavailableError
+    from app.services.project_paths import (
+        ProjectUnavailableError,
+        require_project_root,
+    )
 
     resolved = normalize_path(project_dir)
     db_path = _project_db_path(resolved)
-    if not db_path.exists():
+    if create:
+        require_project_root(resolved)
+        db_path.parent.mkdir(exist_ok=True)  # only the _data/ leaf, inside root
+    elif not db_path.exists():
         raise ProjectUnavailableError(
             f"工作区不可用（盘未挂载 / 数据库丢失）：{project_dir}"
         )
 
     conn = sqlite3.connect(str(db_path), timeout=8.0)
     _configure_connection(conn)
+    if create or ensure:
+        ensure_schema(conn)
     return conn
 
 

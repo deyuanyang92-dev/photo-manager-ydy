@@ -177,9 +177,15 @@ def _resolve_specimen_result_tif_paths(
     uid: str,
     *,
     groups_map: dict[str, list[str]],
+    conn: Any = None,
 ) -> list[str]:
-    """DB 索引优先，其次成片网格扫描；始终返回母版 TIF 绝对路径列表."""
-    from app.db.db_manager import open_project_db
+    """DB 索引优先，其次成片网格扫描；始终返回母版 TIF 绝对路径列表.
+
+    *conn*: 调用方提供的该工作区连接(enrich 批量时每工作区一条私有连接,
+    用完即关)。缺省 None 时临时开私有连接——§7 旧实现用 open_project_db
+    缓存连接, 每个被汇总的子工作区文件锁被扣到退出。
+    """
+    from app.db.db_manager import open_project_db_private
     from app.services.specimen_result_tif_service import list_result_tif_paths
 
     ws = str(workspace or "").strip()
@@ -188,11 +194,26 @@ def _resolve_specimen_result_tif_paths(
         return []
 
     indexed: list[str] = []
-    try:
-        conn = open_project_db(ws)
-        indexed = list_result_tif_paths(conn, text)
-    except Exception:
-        indexed = []
+    if conn is not None:
+        try:
+            indexed = list_result_tif_paths(conn, text)
+        except Exception:
+            indexed = []
+    else:
+        try:
+            own = open_project_db_private(ws)
+        except Exception:
+            own = None
+        if own is not None:
+            try:
+                indexed = list_result_tif_paths(own, text)
+            except Exception:
+                indexed = []
+            finally:
+                try:
+                    own.close()
+                except Exception:
+                    pass
 
     cache_key = f"{ws}\0{text}"
     scanned = list(groups_map.get(cache_key) or [])
@@ -214,9 +235,36 @@ def enrich_specimens_with_photo_info(
     """Attach recorded master TIF paths + camera EXIF to summary rows."""
     from app.services.photo_asset_service import read_image_exif_metadata
 
+    from app.db.db_manager import open_project_db_private
+
     group_paths = _tif_path_map_from_groups(groups or [])
     cache: dict[str, dict[str, Any]] = {}
     out: list[dict[str, Any]] = []
+    # 每工作区一条私有连接, 批量 enrich 结束统一关闭(锁泄漏治理)。
+    ws_conns: dict[str, Any] = {}
+
+    def _conn_for(ws_dir: str) -> Any:
+        if ws_dir not in ws_conns:
+            try:
+                ws_conns[ws_dir] = open_project_db_private(ws_dir)
+            except Exception:
+                ws_conns[ws_dir] = None
+        return ws_conns[ws_dir]
+
+    try:
+        return _enrich_rows(
+            rows, cache, out, group_paths, _conn_for, read_image_exif_metadata
+        )
+    finally:
+        for c in ws_conns.values():
+            if c is not None:
+                try:
+                    c.close()
+                except Exception:
+                    pass
+
+
+def _enrich_rows(rows, cache, out, group_paths, conn_for, read_image_exif_metadata):
     for row in rows:
         enriched = dict(row)
         ws = str(row.get("_workspace") or "")
@@ -228,6 +276,7 @@ def enrich_specimens_with_photo_info(
                 ws,
                 uid,
                 groups_map=group_paths,
+                conn=conn_for(ws) if ws else None,
             )
             if tif_paths:
                 slot["photo_absolute_path"] = tif_paths[0]

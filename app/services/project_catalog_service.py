@@ -97,12 +97,51 @@ def ensure_workspace_meta(
     display_name: Optional[str] = None,
     raw: Optional[dict] = None,
 ) -> dict:
-    """Ensure a workspace has stable ``workspace_meta`` in its own DB."""
+    """Ensure a workspace has stable ``workspace_meta`` in its own DB.
+
+    v0.56: 用私有连接并关闭(不再把子工作区文件锁扣到退出); 已有记录且调用方
+    没带任何新信息时=纯读, 不再每次重写 updated_at。
+    """
+    from app.db.db_manager import open_project_db_private
+
     workspace = Path(normalize_path(workspace_dir))
-    conn = open_project_db(str(workspace), create=True)
+    # §7 旧: conn = open_project_db(str(workspace), create=True)  # 缓存连接, 锁泄漏
+    conn = open_project_db_private(str(workspace), create=True)
+    try:
+        return _ensure_workspace_meta_on(
+            conn,
+            workspace,
+            project_id=project_id,
+            root_dir=root_dir,
+            role=role,
+            display_name=display_name,
+            raw=raw,
+        )
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _ensure_workspace_meta_on(
+    conn,
+    workspace: Path,
+    *,
+    project_id: Optional[str],
+    root_dir: Optional[str],
+    role: str,
+    display_name: Optional[str],
+    raw: Optional[dict],
+) -> dict:
     row = _fetch_one_row(conn, "SELECT * FROM workspace_meta LIMIT 1")
     ts = _utc_now_iso()
     root_hint = normalize_path(root_dir) if root_dir else None
+    if row is not None and all(
+        v is None for v in (project_id, root_hint, display_name, raw)
+    ) and role == "workspace":
+        # 纯读: 无任何新信息, 不写 (v0.55 每次调用都 UPDATE updated_at)
+        return dict(row)
     if row is None:
         workspace_id = str(uuid.uuid4())
         conn.execute(
@@ -151,6 +190,30 @@ def ensure_workspace_meta(
         conn.commit()
         row = _fetch_one_row(conn, "SELECT * FROM workspace_meta WHERE workspace_id=?", (row["workspace_id"],))
     return dict(row)
+
+
+def read_workspace_meta(workspace_dir: str) -> Optional[dict]:
+    """Pure-read ``workspace_meta`` from a workspace's own DB.
+
+    私有连接 + 立即关闭, 零写入(不建库/不迁移/不碰 updated_at)。
+    库缺失、表缺失(legacy db)或读失败 → None, 调用方走活扫描兜底。
+    """
+    from app.db.db_manager import open_project_db_private
+
+    try:
+        conn = open_project_db_private(normalize_path(workspace_dir))
+    except Exception:
+        return None
+    try:
+        row = _fetch_one_row(conn, "SELECT * FROM workspace_meta LIMIT 1")
+        return dict(row) if row else None
+    except sqlite3.Error:
+        return None
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 def register_workspace(
@@ -236,7 +299,11 @@ def register_workspace(
 
 def list_registered_workspaces(root_dir: str) -> list[dict]:
     """Return active workspace catalog rows for a survey root."""
-    conn = open_project_db(normalize_path(root_dir), create=True)
+    # §7 旧: conn = open_project_db(..., create=True) —— 纯读却会替缺库的根目录建库。
+    try:
+        conn = open_project_db(normalize_path(root_dir), create=False)
+    except Exception:
+        return []
     return [
         dict(r)
         for r in conn.execute(

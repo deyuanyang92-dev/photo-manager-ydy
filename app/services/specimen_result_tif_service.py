@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from app.db.db_manager import open_project_db
+from app.db.db_manager import open_project_db, open_project_db_private
 from app.db.result_tif_schema import ensure_result_tif_index_table
 from app.utils.path_utils import normalize_path
 
@@ -37,9 +37,21 @@ def sync_workspace_result_tifs(workspace_dir: str) -> int:
     if not root:
         return 0
     try:
-        conn = open_project_db(root)
+        # §7 旧: conn = open_project_db(root)  # 缓存连接 → 子工作区文件锁扣到退出
+        conn = open_project_db_private(root)
     except Exception:
         return 0
+    try:
+        return _sync_on_conn(conn, root)
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _sync_on_conn(conn: sqlite3.Connection, root: str) -> int:
+    from app.services import project_service as ps
 
     ensure_result_tif_index_table(conn)
     res = ps.get_project_results(root)
@@ -137,7 +149,16 @@ def lookup_result_tifs_for_workspace(workspace_dir: str, uid: str) -> list[str]:
     if not root or not uid:
         return []
     try:
-        conn = open_project_db(root)
+        # §7 旧: conn = open_project_db(root)  # 缓存连接, 锁泄漏
+        conn = open_project_db_private(root)
+    except Exception:
+        return []
+    try:
         return list_result_tif_paths(conn, uid)
     except Exception:
         return []
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
