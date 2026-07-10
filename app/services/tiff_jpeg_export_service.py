@@ -509,12 +509,30 @@ def convert_tiff_to_jpeg(
             **metadata_kwargs,
         )
     finally:
-        after_stat = src.stat()
-        if (
-            after_stat.st_size != before_stat.st_size
-            or after_stat.st_mtime_ns != before_stat.st_mtime_ns
-        ):
+        # 只读红线断言。§7 旧实现:
+        #   after_stat = src.stat()
+        #   if (size/mtime 变了): raise RuntimeError("源 TIFF 被意外修改")
+        # 问题: (1) finally 里无条件 raise 会顶替 try 中的真实异常(解码/保存
+        # 错误被吞); (2) 源文件消失时 stat 抛 FileNotFoundError 同样掩盖原错;
+        # (3) 保存成功后才触发时留下半成品孤儿 JPEG。
+        import sys as _sys
+
+        mismatch = False
+        try:
+            after_stat = src.stat()
+            mismatch = (
+                after_stat.st_size != before_stat.st_size
+                or after_stat.st_mtime_ns != before_stat.st_mtime_ns
+            )
+        except OSError:
+            mismatch = True  # 源没了/读不了, 同样视为违反只读红线
+        if mismatch and _sys.exc_info()[0] is None:
+            try:
+                out_path.unlink(missing_ok=True)  # 不留孤儿 JPEG
+            except OSError:
+                pass
             raise RuntimeError("源 TIFF 被意外修改")
+        # 已有异常在传播时不再顶替 —— 原始错误优先。
 
     written = out_path.stat().st_size
     w, h = rgb.size

@@ -244,3 +244,43 @@ def test_resolve_output_path_mirror(tmp_path, sample_tiff) -> None:
         source_root=tmp_path,
     )
     assert rel == out_root / "specimen.jpg"
+
+
+def test_convert_error_not_masked_by_readonly_assert(tmp_path, sample_tiff, monkeypatch) -> None:
+    """v0.56: 解码/保存的真实异常不得被 finally 里的只读断言顶替(诊断信息保真)."""
+    from app.services import tiff_jpeg_export_service as svc
+
+    def boom(_path, _edge):
+        with open(sample_tiff, "ab") as fh:
+            fh.write(b"x")  # 模拟外部同时改动源文件
+        raise ValueError("decode failed")
+
+    monkeypatch.setattr(svc, "_load_pil_image", boom)
+    monkeypatch.setattr(svc, "_load_via_thumbnail_fallback", boom)
+
+    with pytest.raises(ValueError, match="decode failed"):
+        svc.convert_tiff_to_jpeg(
+            str(sample_tiff),
+            str(tmp_path / "out.jpg"),
+            svc.TiffJpegExportSettings(),
+        )
+
+
+def test_readonly_violation_removes_orphan_jpeg(tmp_path, sample_tiff, monkeypatch) -> None:
+    """v0.56: 只读红线触发(保存成功但源被改)时, 抛错前应清掉半成品 JPEG."""
+    from app.services import tiff_jpeg_export_service as svc
+
+    real_to_rgb = svc._to_rgb
+
+    def touch_then_pass(image, background):
+        with open(sample_tiff, "ab") as fh:
+            fh.write(b"x")
+        return real_to_rgb(image, background)
+
+    monkeypatch.setattr(svc, "_to_rgb", touch_then_pass)
+    out = tmp_path / "out.jpg"
+
+    with pytest.raises(RuntimeError, match="源 TIFF 被意外修改"):
+        svc.convert_tiff_to_jpeg(str(sample_tiff), str(out), svc.TiffJpegExportSettings())
+
+    assert not out.exists(), "红线触发时不得留下孤儿 JPEG"
