@@ -361,30 +361,78 @@ pytest tests/test_capture_workflow_service.py -q -k "unbind or rebind or unbound
 pytest tests/test_workbench_wiring.py -q -k UnboundResultsVisible
 ```
 
-## 还原原片的落点（2026-07-10 用户裁定）
+## 还原原片的落点（2026-07-10 用户裁定；2026-07-11 覆盖策略修订）
 
-「还原原片」**不得每次弹目录选择框**。合成错了要撤回时，原片就该回到它出发的地方：
+「还原原片」**不得每次弹目录选择框**。合成/整理错了要撤回时，原片就该回到它出发的地方：
 
 - 默认落点 = 当前工作区的**待处理区** `incoming-jpg/`（`_restore_target_dir()`，
   目录名走 `_resolve_capture_subdirs()`，兼容遗留的「新拍JPG」）。
-- 同名 JPG **一律跳过，不覆盖**（还原是「加回原片」，绝不动已有文件），因此也
-  取消了「目标文件夹非空 → 是否覆盖」的二次弹窗。
-- 还原完成后立刻 `_refresh_monitor()`，原片马上出现在「待处理照片」里，可以直接重新合成。
+- **还原前必须确认**（一点击不得直接写盘）：说明落点、是否覆盖同名、ZIP 是否退役。
+  默认按钮为「否」。用户取消则什么都不做。
+- **整理错了必须能恢复原片**：确认后若有同名，用 ZIP 内归档原片覆盖。
+  禁止再静默跳过成「已还原 0 / 已跳过 N」却弹「还原完成」。
+- 组内 ZIP 走「撤销整理」时，`restore_archive_to_original_paths(..., overwrite=True)`：
+  用户已确认撤销，必须把 ZIP 内容写回原路径。
+- 还原写出 0 张时提示「未能还原」，**不**撤 ZIP 登记。
+- 还原成功后立刻 `_refresh_monitor()`，原片马上出现在「待处理照片」里，可重新合成。
 - 只有**当前没有打开项目**（无处可还原）时，才退回让用户选目录。
 
+### 一键写盘/删改前确认（2026-07-11）
+
+与「还原」同原则：会归档删 JPG、改绑成果、清空队列等操作，**入口先确认**（默认否）。
+
+| 动作 | 确认位置 | 备注 |
+|------|----------|------|
+| 整理 / 批量整理 | `_confirm_archive_organise` | 说明是否会删 JPG；批量只弹一次 |
+| 合成+整理 / 批量合成+整理 | 同上，入口一次 | 后续 `silent_batch` 不再弹 |
+| 补处理 | 启动 worker 前 | 同上 |
+| 自动归档 / 外部 TIF 自动整理 | **不弹** | 用户已开自动归档 |
+| 改绑 / 关联到右侧编号 | 执行前 | |
+| 取消归属 / 清空队列 | 执行前 | 多选归属只弹一次 |
+| 删除/清空分组按钮 | 按钮槽 | 不删磁盘文件；`delete_group()` API 本身不弹 |
+| 更新成果文件名 | 重命名前 | |
+
+回归：`pytest tests/test_restore_archive_target.py tests/test_result_rebind_unbind.py tests/test_monitor_panel.py -q`
 ### 还原 = 撤销整理（2026-07-10 用户第二次裁定，勿再理解成「抽副本」）
 
 用户点组内 ZIP 的「还原原片」是想**撤回这次整理**。原片回到待处理区后，ZIP 若还
 挂在成果区 = 状态矛盾（同一批 JPG 既在待处理又在归档里，看起来像什么都没发生）。
 
 - ZIP **属于某编号的组** → 走「撤销整理」（`_on_undo_organise`）：JPG 还原回原位
-  + ZIP 移入 `_retired-zip/` 备份（不裸删）+ 组退回 `composed` → 成果区那行 ZIP
-  消失、TIF 保留（母版红线）。
-- 组存在但**没记录原 JPG 路径**（改绑挂上的成果）→ 抽副本到待处理区，成功后同样
-  清 `archive_zip` + 退役 ZIP + 组回 `composed`（`_finalize_pending_restore`）。
+  （**覆盖**同名）+ **直接删除 ZIP**（原片已回待处理区，无需 `_retired-zip` 备份）+
+  组退回 `composed` → 成果区那行 ZIP 消失、TIF 保留（母版红线）。
+  （2026-07-11 用户裁定：不要备份，还原成功 ZIP 就该没了。）
+- 组存在但**没记录原 JPG 路径**（改绑挂上的成果）→ 抽副本到待处理区（同名则询问覆盖），
+  成功后同样清 `archive_zip` + **删除 ZIP** + 组回 `composed`（`_finalize_pending_restore`）。
   **还原失败绝不撤登记**——原片没回来时归档记录不能丢。
-- **孤儿 ZIP**（不属于任何组）→ 只抽副本到待处理区，ZIP 原地不动。
+- **孤儿 ZIP**（不属于任何组）→ 只抽副本到待处理区（同名询问覆盖），ZIP 原地不动。
 
 实现：`app/views/workbench_supplementary_workflow.py::_restore_target_dir` /
 `_on_restore_archive` / `_owning_group_for_zip` / `_finalize_pending_restore`；
+`_retire_zip` 现为删除项目内 ZIP（旧移备份逻辑已注释保留）。
 回归锚点：`pytest tests/test_restore_archive_target.py -q`
+
+## 协作:标本数据同步的时钟偏斜护栏（2026-07-11）
+
+**背景红线:** LWW（last-writer-wins）靠墙钟 `collab_updated_at` 排序。一台时钟快的
+机器，它的标本行时间戳永远"更新"，在合并里永远赢 —— 别人真正更新的编辑推不动它，
+直到真实时间追上那个偏差。**任务状态同步早有护栏**（`collab_store.merge_from_peer`
+的 `trust_remote_clock`），**标本数据同步一度漏了**，这是数据静默丢失的真实入口。
+
+**护栏语义（已镜像到标本层，勿再删除）:**
+- `write_specimens_to_local_db(..., trust_remote_clock=False, skew_guarded_out=[])`：
+  远端时钟不可信 + 远端某列与本地不同 → **拒绝覆盖该行、保留本地**，把冲突记进
+  `skew_guarded_out`（`{uid,field,local,remote}`）。默认 `True` 保持旧 LWW（向后兼容）。
+- 判定只比**内容列**，排除 `collab_updated_at` / `raw_json`（同步元数据不同 ≠ 用户数据冲突）。
+- 缺失行照常 INSERT（那不是"覆盖"）；不可信时钟下即使内容相同也不写（不能把本地
+  时间戳更新成不可信的快钟值）。
+- `CollabService._sync_specimens_from_peer` 合并前 `_ensure_peer_clock_skew` 测偏斜，
+  超 `CLOCK_SKEW_THRESHOLD_MS`(5s) 即 `trust=False`；被守护的冲突写 warn 级活动日志
+  （与任务状态同款告警通道）。
+
+**实践仍要求:** 所有协作机器开自动校时。护栏只防"静默丢数据"，不代表偏斜无害
+（撞号 30s 窗口检测在大偏斜下仍会漏报）。
+
+**回归锚点:** `pytest tests/test_collab_specimen_skew.py -q`（7 项：单元护栏 + 端到端）。
+实现:`app/services/collab_specimen_sync.py::write_specimens_to_local_db`、
+`app/services/collab_service.py::_write_specimens_to_local_db` / `_sync_specimens_from_peer`。

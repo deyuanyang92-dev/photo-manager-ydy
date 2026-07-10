@@ -1641,10 +1641,32 @@ class CollabService(QObject):
         """Read specimen records from local project DB (used by FastAPI endpoint)."""
         return get_local_specimens(self._project_dir, uid)
 
-    def _write_specimens_to_local_db(self, specimens: list[dict]) -> int:
-        """Merge incoming specimen records into local project DB (LWW)."""
-        written = write_specimens_to_local_db(self._project_dir, specimens)
-        if written:
+    def _write_specimens_to_local_db(
+        self, specimens: list[dict], *, trust_remote_clock: bool = True
+    ) -> int:
+        """Merge incoming specimen records into local project DB (LWW).
+
+        ``trust_remote_clock=False`` 时启用时钟偏斜护栏:拒绝用不可信快钟的
+        远端值覆盖本地不同的标本列,并把被守护的冲突记进 warn 级活动日志
+        (与任务状态同步同款处置)。
+        """
+        guarded: list[dict] = []
+        written = write_specimens_to_local_db(
+            self._project_dir,
+            specimens,
+            trust_remote_clock=trust_remote_clock,
+            skew_guarded_out=guarded,
+        )
+        for g in guarded:
+            self._log_activity(
+                "conflict", g["uid"],
+                detail=(
+                    f"时钟偏斜过大，已忽略远端标本字段 {g['field']}="
+                    f"{g['remote']!r}，保留本地 {g['local']!r}"
+                ),
+                severity="warn",
+            )
+        if written or guarded:
             self.specimens_updated.emit()
         return written
 
@@ -1700,6 +1722,11 @@ class CollabService(QObject):
         if not self._data_sync_allowed(peer):
             return 0
         try:
+            # 与任务状态同步同款:合并前测一次时钟偏斜。偏斜超阈值 ⇒ 不信任
+            # 远端墙钟排序,标本 LWW 启用护栏(否则快钟机的标本永远赢)。
+            self._ensure_peer_clock_skew(peer)
+            skew = peer.clock_skew_ms
+            trust = skew is None or abs(skew) <= CLOCK_SKEW_THRESHOLD_MS
             httpx = get_httpx()
             resp = httpx.get(
                 f"{peer.base_url}/api/collab/specimens",
@@ -1712,7 +1739,9 @@ class CollabService(QObject):
             if resp.status_code == 200:
                 specimens = resp.json()
                 if isinstance(specimens, list) and specimens:
-                    return self._write_specimens_to_local_db(specimens)
+                    return self._write_specimens_to_local_db(
+                        specimens, trust_remote_clock=trust
+                    )
         except Exception as exc:  # noqa: BLE001
             logger.debug("collab: specimen pull from %s failed: %s", peer.base_url, exc)
         return 0
