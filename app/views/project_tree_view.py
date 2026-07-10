@@ -3537,6 +3537,9 @@ class ProjectTreeView(BaseView):
 
     def _show_unified_multi_photos(self, dirs: list[str]) -> None:
         """多断面成片：单网格平铺全部照片."""
+        # ⚠ 未接线 (v0.56 标注): v0.55 的内容模式切换设计已放弃, 中栏固定为
+        # 数据汇总 (_apply_content_mode 直达 _show_data_summary_scope), 本方法
+        # 现无任何调用方。按 §7 保留不删; 若恢复多内容模式, 从 _apply_content_mode 分发。
         self._grid_head.setText("成片预览")
         merged = self._collect_merged_groups(dirs)
         total = sum(len(g.get("items") or []) for g in merged)
@@ -3611,6 +3614,9 @@ class ProjectTreeView(BaseView):
         self._set_grid_breadcrumb(None)
 
     def _show_single_workspace_grid(self, path: str) -> None:
+        # ⚠ 未接线 (v0.56 标注): v0.55 的内容模式切换设计已放弃, 中栏固定为
+        # 数据汇总 (_apply_content_mode 直达 _show_data_summary_scope), 本方法
+        # 现无任何调用方。按 §7 保留不删; 若恢复多内容模式, 从 _apply_content_mode 分发。
         from app.services.project_service import get_project_results
 
         self._grid_head.setText("成片预览")
@@ -3632,6 +3638,9 @@ class ProjectTreeView(BaseView):
         self._sync_density_slider(density)
 
     def _show_folder_children_grid(self, item: QTreeWidgetItem) -> None:
+        # ⚠ 未接线 (v0.56 标注): v0.55 的内容模式切换设计已放弃, 中栏固定为
+        # 数据汇总 (_apply_content_mode 直达 _show_data_summary_scope), 本方法
+        # 现无任何调用方。按 §7 保留不删; 若恢复多内容模式, 从 _apply_content_mode 分发。
         self._grid_head.setText("下级代表图")
         items: list[dict] = []
         for idx in range(item.childCount()):
@@ -3732,6 +3741,9 @@ class ProjectTreeView(BaseView):
         复用 (spec §3):groups 直接拼接;ungrouped 合成单个「未分组」section
         (incoming 散片进未分组,spec §6 红线).任一断面读取失败静默跳过.
         """
+        # ⚠ 未接线 (v0.56 标注): v0.55 的内容模式切换设计已放弃, 中栏固定为
+        # 数据汇总 (_apply_content_mode 直达 _show_data_summary_scope), 本方法
+        # 现无任何调用方。按 §7 保留不删; 若恢复多内容模式, 从 _apply_content_mode 分发。
         from app.services import project_service as _ps
         merged: list[dict] = []
         ungrouped_all: list[dict] = []
