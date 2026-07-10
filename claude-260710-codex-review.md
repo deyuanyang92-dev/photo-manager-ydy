@@ -55,13 +55,19 @@
 
 ### Q3 循环依赖的最小打断点
 
-**结论：数字本身未确证,先立测量基线再动手。** codex 说 4 组,v0.55 审计说 6 组
-(architecture-audit-v0.55.md「P1:依赖方向存在例外」第 4 条),两者必有一个基于过时
-快照。建议先落一个 `scripts/check_import_cycles.py`(AST import 图 + SCC),把组数、
-成员、边列进 CI 报告 —— 之后每组的最小打断点才有讨论对象。方向性意见(未确证,
-待脚本证实后逐组独立提交):主窗口/设置组以「settings schema 对象下沉 config 层」断;
-目录/索引组以「索引服务只依赖目录服务的返回 DTO」断;禁止用函数内延迟 import 掩盖
-(codex §10 第 3 条,同意)。
+**结论(已实测,`scripts/check_import_cycles.py`,AST + Tarjan SCC,排除
+TYPE_CHECKING 块):顶层运行时 import 环 = 0 组;延迟 import 构成的概念环 = 3 组。**
+codex 的 4 与 v0.55 审计的 6 都不准(前者含一个 TYPE_CHECKING 假阳性,后者是旧快照)。
+
+| 组 | 成员 | 定性与最小打断点 |
+|---|---|---|
+| 1 | workbench_view + 3 个 workflow mixin + retroactive_modal(5 模块) | mixin 家族固有形态:mixin 引用宿主类型。**非掩盖,不必打断**;若要消除,mixin 侧仅 TYPE_CHECKING 引用宿主即可 |
+| 2 | main_window ↔ settings_view ↔ settings_ui_workflow ↔ helicon_config_dialog(4 模块) | 真·层级混串(widget→view→…→main_window)。最小断点:`settings_ui_workflow -> main_window` 这条边,改为 helicon 状态经 ctx/信号通知,不 import 主窗口 |
+| 3 | project_catalog_service ↔ workspace_index_service(2 模块) | 双向各一条延迟边(register 挂钩 refresh / KPI 读 meta)。最小断点:`refresh` 挂钩改由调用方(catalog 的调用者)显式触发,或抽 meta 读取到独立小模块 |
+
+图规模基线:291 模块 / 631 顶层边 / 1041 全边。脚本退出码 1 可挂 CI 冻结新增
+(codex P1-06 验收「静态依赖检测降到 0」应修订为:**顶层保持 0,延迟环冻结在 3 不涨,
+组 2 是唯一值得主动打断的**)。
 
 ### Q4 ProjectTreeView 第一刀怎么只拆 UI
 
