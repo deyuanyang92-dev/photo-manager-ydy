@@ -304,7 +304,8 @@ def test_active_specimen_row_has_active_style_and_badge(ctx, db):
         w for w in row.findChildren(QLabel)
         if w.objectName() == "SpecimenActivePill"
     ]
-    assert badges and badges[0].text() == "当前"
+    # 激活 pill 文案含「当前」(前缀圆点为视觉标记,2026-07-11 卡片重设计)
+    assert badges and "当前" in badges[0].text()
 
 
 def test_inactive_specimen_row_has_explicit_inactive_badge(ctx, db):
@@ -504,7 +505,9 @@ def test_long_uid_wraps_without_static_ellipsis(ctx, db):
 
     assert uid_labels
     assert "…" not in uid_labels[0].text()
-    assert uid_labels[0].text().replace("\n", "") == uid
+    # 完整编号必须无损可读:去掉折行辅助字符(旧 '\n' / 新零宽空格 U+200B)后 == 原编号
+    cleaned = uid_labels[0].text().replace("\n", "").replace("​", "")
+    assert cleaned == uid
 
 
 def test_clicking_rna_badge_filters_to_rna_specimens(ctx, db, qtbot):
@@ -634,9 +637,10 @@ def test_long_uid_card_is_tall_enough_to_show_full_uid(ctx, db):
             f"{uid}: 卡片高 {item.sizeHint().height()}px < 内容所需 {need}px → 裁字"
         )
 
-    assert heights[long_uid] > heights[short_uid], (
-        "折行更多的长编号卡片必须比短编号更高"
-    )
+    # 真正要守的红线是上面 loop 里的「不裁字」(item 高 >= 内容所需)。
+    # 2026-07-11 卡片重设计后编号独占整行、更紧凑, 长短编号都可能落在同一基准
+    # 高度里 —— 不再要求长编号卡片严格更高, 只要都不裁字即可。
+    assert heights[long_uid] >= heights[short_uid]
     sb.close()
 
 

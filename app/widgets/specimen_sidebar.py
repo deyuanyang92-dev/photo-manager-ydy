@@ -683,39 +683,43 @@ class SpecimenSidebar(QWidget):
         v.setContentsMargins(7, 5, 7, 5)
         v.setSpacing(2)
 
+        # ── 第 1 行:完整编号,独占整行(不再与状态 pill 抢宽度)──
+        # 编号很长(7-8 段),独占整行才放得下、折行也好看。_display_uid 在每个
+        # '-' 后插零宽空格 → Qt 优先按段折行,段本身不被从中间劈开。
         uid_lbl = QLabel(self._display_uid(uid))
         uid_lbl.setObjectName("SpecimenUid")
         uid_lbl.setToolTip(uid)  # 折行后仍可悬停看完整编号
         uid_lbl.setMinimumWidth(0)
         uid_lbl.setWordWrap(True)
-        # §7 旧: setSizePolicy(Expanding, Preferred) —— 未开 heightForWidth,
-        # 布局不知道折行后需要多高, 配合写死的 90px 卡片高度 → 长编号被裁掉尾段。
-        # uid_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        # heightForWidth 透传, 否则布局不知折行后需要多高(长编号会被裁尾段)。
         _uid_sp = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         _uid_sp.setHeightForWidth(True)
         uid_lbl.setSizePolicy(_uid_sp)
         uid_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        v.addWidget(uid_lbl)
 
-        status_pill = QLabel("当前" if active else "未激活")
+        # ── 第 2 行:物种名(左) + 激活状态 pill(右)──
+        # 状态 pill 从编号行下移到这里(用户要求),给编号腾出整行。
+        status_pill = QLabel("● 当前" if active else "未激活")
         status_pill.setObjectName(
             "SpecimenActivePill" if active else "SpecimenInactivePill"
         )
-        status_pill.setToolTip("")
+        status_pill.setToolTip("当前拍摄编号" if active else "未激活(点「激活此编号」设为当前)")
         status_pill.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-
-        title_row = QHBoxLayout()
-        title_row.setContentsMargins(0, 0, 0, 0)
-        title_row.setSpacing(6)
-        title_row.addWidget(uid_lbl, stretch=1)
-        title_row.addWidget(status_pill)
-        v.addLayout(title_row)
 
         name_text = name or name_cn
         nm = QLabel(name_text or "未填写物种信息")
         nm.setObjectName("SpecimenSubtext" if name_text else "SpecimenMissingText")
         nm.setToolTip("")
         nm.setWordWrap(False)
-        v.addWidget(nm)
+        nm.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+
+        name_row = QHBoxLayout()
+        name_row.setContentsMargins(0, 0, 0, 0)
+        name_row.setSpacing(6)
+        name_row.addWidget(nm, stretch=1)
+        name_row.addWidget(status_pill)
+        v.addLayout(name_row)
 
         # ── Phase dots ──
         current = self._phase_for(uid, svc)
@@ -752,13 +756,14 @@ class SpecimenSidebar(QWidget):
 
         dots_row = QHBoxLayout()
         dots_row.setContentsMargins(0, 0, 0, 0)
-        dots_row.setSpacing(6)
+        dots_row.setSpacing(4)
         for code, obj_name, tip in self._PHASE_DOTS:
             dot = QPushButton()
             dot.setObjectName(obj_name)
             # 强制正方固定尺寸 —— 仅靠 QSS max-width 拗不过按钮默认 padding，会被撑成
             # 矩形；setFixedSize 锁死，配 QSS border-radius=半径 → 真·小圆点。
-            dot.setFixedSize(12, 12)
+            # 用户要求缩小: 12→9。
+            dot.setFixedSize(9, 9)
             dot.setCheckable(True)
             dot.setChecked(code == current)
             dot.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -889,16 +894,16 @@ class SpecimenSidebar(QWidget):
 
     @staticmethod
     def _display_uid(uid: str) -> str:
-        """Readable sidebar UID: keep the full value, wrap long IDs by segment."""
+        """侧栏编号显示:完整值,在每个 '-' 后插零宽空格,让 Qt 优先按段折行。
+
+        §7 旧:在第 3 段后硬插 '\\n' + wordWrap 再折 → 长编号被劈成难看的 3 行、
+        且中间那段可能被从中间截断。改用零宽空格(U+200B):短编号一行放下,长编号
+        按 '-' 段边界自然折行,段本身永不被劈开。tooltip 仍是原始未加工的完整编号。
+        """
         text = str(uid or "").strip()
-        if len(text) <= 30 or "-" not in text:
+        if "-" not in text:
             return text
-        parts = text.split("-")
-        if len(parts) < 5:
-            return text
-        head = "-".join(parts[:3])
-        tail = "-".join(parts[3:])
-        return f"{head}-\n{tail}"
+        return text.replace("-", "-​")
 
     def _normalize_project_specimen_uids(self, db, project_dir: str) -> None:
         """Migrate old lowercase UID rows to the canonical uppercase spelling.
