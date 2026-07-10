@@ -3830,8 +3830,11 @@ class TestRightRailWebFaithful:
         from app.views.workbench_view import WorkbenchView
         w = WorkbenchView(_make_ctx())
 
+        # §7 旧: required 用 _widget_natural_width(偏好宽) —— 2026-07-11 起右栏
+        # 最小值改用硬最小值(minimumSizeHint), header 拆行后能收窄而不裁字段
+        # (窄屏三栏才放得下)。契约:最小值 ≥ 内容硬最小 + 竖滚动条宽即可。
         required = (
-            w._widget_natural_width(w._right_rail_widget)
+            w._right_rail_widget.minimumSizeHint().width()
             + w._right_scroll.verticalScrollBar().sizeHint().width()
         )
 
@@ -7627,9 +7630,10 @@ class TestThreeColumnLayoutFits:
             + v._centre_min_width()
             + v._right_rail_min_width()
         )
-        # 1366 是最常见的笔记本宽度; 留出窗口边框余量后仍要放得下。
-        assert total <= 1310, (
-            f"三栏最小宽度之和 {total}px 超过 1310px 窗口 → 会互相挤穿"
+        # 用户屏幕可见宽约 1155(小屏/远程桌面常见)。三栏最小和必须放得进,
+        # 否则内容被裁到够不着(2026-07-11 用户报障)。留余量锁在 1130。
+        assert total <= 1130, (
+            f"三栏最小宽度之和 {total}px 超过 1130px → 小屏会被裁掉够不着"
         )
 
     def test_centre_min_uses_hard_minimum_not_preferred(self):

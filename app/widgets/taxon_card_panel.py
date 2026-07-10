@@ -130,36 +130,14 @@ class TaxonCardPanel(QWidget):
         self._root.setContentsMargins(20, 16, 20, 16)
         self._root.setSpacing(12)
 
-        # Header: title + actions (编辑 / 来源 / ☰ / ▾)
+        # §7 旧: 标题 + WoRMS查 + 编辑 + 来源 + ☰ + ▾ 全挤一行, 硬撑 451px
+        # 最小宽 → 右栏因此过宽、窄屏三栏放不下(2026-07-11 用户报障)。拆两行:
+        # 标题行(标题 + 字段/收起 小按钮) + 操作行(WoRMS查 + 编辑 + 来源)。
         hdr = QHBoxLayout()
         hdr.setContentsMargins(0, 0, 0, 0)
         title = QLabel("分类标签")
         title.setObjectName("CardTitle")
-        hdr.addWidget(title)
-
-        # WoRMS quick-fill (moved from metadata panel — fills Latin only)
-        self._worms_btn = QPushButton("WoRMS 查")
-        self._worms_btn.setObjectName("WormsFill")
-        self._worms_btn.setFixedHeight(26)
-        self._worms_btn.setToolTip("从 WoRMS 快捷查找物种，填充拉丁分类信息（不覆盖中文）")
-        self._worms_btn.clicked.connect(self._on_worms_quick_fill)
-        hdr.addWidget(self._worms_btn)
-        hdr.addStretch()
-
-        edit_btn = QPushButton("编辑")
-        edit_btn.setObjectName("Outline")
-        edit_btn.setFixedHeight(26)
-        edit_btn.setToolTip("一次编辑五级拉丁名和中名")
-        edit_btn.clicked.connect(self.open_edit_requested.emit)
-        hdr.addWidget(edit_btn)
-
-        self._source_combo = QComboBox()
-        self._source_combo.setObjectName("SourceCombo")
-        self._source_combo.setFixedHeight(26)
-        self._source_combo.addItem("原始库", "original")
-        self._source_combo.addItem("WoRMS库", "worms")
-        self._source_combo.setToolTip("候选来源")
-        hdr.addWidget(self._source_combo)
+        hdr.addWidget(title, stretch=1)
 
         self._fields_btn = QPushButton("☰")
         self._fields_btn.setObjectName("Ghost")
@@ -175,6 +153,34 @@ class TaxonCardPanel(QWidget):
         self._collapse_btn.clicked.connect(lambda: self.set_collapsed(not self._collapsed))
         hdr.addWidget(self._collapse_btn)
         self._root.addLayout(hdr)
+
+        # 操作行:WoRMS查 + 编辑 + 来源(右对齐), 独占一行不挤标题。
+        actions = QHBoxLayout()
+        actions.setContentsMargins(0, 0, 0, 0)
+        actions.setSpacing(6)
+        self._worms_btn = QPushButton("WoRMS 查")
+        self._worms_btn.setObjectName("WormsFill")
+        self._worms_btn.setFixedHeight(26)
+        self._worms_btn.setToolTip("从 WoRMS 快捷查找物种，填充拉丁分类信息（不覆盖中文）")
+        self._worms_btn.clicked.connect(self._on_worms_quick_fill)
+        actions.addWidget(self._worms_btn)
+        actions.addStretch()
+
+        edit_btn = QPushButton("编辑")
+        edit_btn.setObjectName("Outline")
+        edit_btn.setFixedHeight(26)
+        edit_btn.setToolTip("一次编辑五级拉丁名和中名")
+        edit_btn.clicked.connect(self.open_edit_requested.emit)
+        actions.addWidget(edit_btn)
+
+        self._source_combo = QComboBox()
+        self._source_combo.setObjectName("SourceCombo")
+        self._source_combo.setFixedHeight(26)
+        self._source_combo.addItem("原始库", "original")
+        self._source_combo.addItem("WoRMS库", "worms")
+        self._source_combo.setToolTip("候选来源")
+        actions.addWidget(self._source_combo)
+        self._root.addLayout(actions)
 
         # Validation warning area (hidden until mismatches)
         self._warn = QLabel("")

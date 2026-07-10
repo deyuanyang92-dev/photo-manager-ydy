@@ -147,6 +147,9 @@ class MainWindow(QMainWindow):
     def resizeEvent(self, event) -> None:  # noqa: N802 — Qt override
         super().resizeEvent(event)
         self._sync_startup_placeholder_geometry()
+        # 窗口一打开就比屏幕宽(旧的过宽 restore 状态 / 高 DPI)也要夹回屏幕内,
+        # 不只在拖动时。最大化状态下 _clamp_into_screen 自会跳过。
+        self._clamp_into_screen()
 
     def moveEvent(self, event) -> None:  # noqa: N802 — Qt override
         super().moveEvent(event)

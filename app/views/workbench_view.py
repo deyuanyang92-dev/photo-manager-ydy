@@ -97,7 +97,7 @@ _WORKBENCH_OUTER_SPLITTER_STATE_KEY = "workbench/layout_outer_splitter"
 _WORKBENCH_CENTRE_SPLITTER_STATE_KEY = "workbench/layout_centre_splitter"
 # Column floors/ceilings keep drag-resize usable on typical desktop widths.
 _SIDEBAR_WIDTH_FLOOR = 160
-_SIDEBAR_WIDTH_CEIL = 300
+_SIDEBAR_WIDTH_CEIL = 276  # 侧栏卡片内容硬最小值≈276; 再宽只是留白, 窄屏时省下的宽给中/右栏
 _CENTRE_WIDTH_FLOOR = 240
 _RIGHT_RAIL_WIDTH_FLOOR = 200
 _RIGHT_RAIL_WIDTH_CEIL = 360
@@ -189,8 +189,10 @@ class WorkbenchView(WorkbenchSpecimenIdentityMixin, WorkbenchMediaWorkflowMixin,
         return max(_CENTRE_WIDTH_FLOOR, hard_min)
 
     def _right_rail_min_width(self) -> int:
+        # §7 旧: 用 _widget_natural_width(偏好宽) —— 同中栏, 那是"想要多宽"不是
+        # "最少多宽", 会过度占宽把窄屏挤穿。改用硬最小值(minimumSizeHint)。
         content = getattr(self, "_right_rail_widget", None)
-        base = self._widget_natural_width(content) if content is not None else 1
+        base = content.minimumSizeHint().width() if content is not None else 1
         scroll = getattr(self, "_right_scroll", None)
         if scroll is not None:
             base += scroll.verticalScrollBar().sizeHint().width()
@@ -281,7 +283,7 @@ class WorkbenchView(WorkbenchSpecimenIdentityMixin, WorkbenchMediaWorkflowMixin,
         # ── Body container (header + dir-strip + splitter) ─────────────────
         body = QWidget()
         body_lay = QVBoxLayout(body)
-        body_lay.setContentsMargins(24, 18, 24, 18)
+        body_lay.setContentsMargins(14, 18, 14, 18)  # 左右边距收窄, 给三栏腾宽(2026-07-11)
         body_lay.setSpacing(14)
         root.addWidget(body, stretch=1)
 

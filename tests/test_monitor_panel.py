@@ -1106,3 +1106,23 @@ class TestComposePreviewToggle:
 
         assert panel.compose_preview_enabled() is False
         assert states == []
+
+
+class TestToolbarWraps:
+    """中栏工具栏用 FlowLayout: 宽时 1 行、窄时折 2 行, 不横向滚动/不裁切
+    (2026-07-11 用户报障: 横向滚动把「预览」按钮切了, 要求换行)。"""
+
+    def test_toolbar_uses_flow_layout(self, panel):
+        from app.widgets._flow_layout import FlowLayout
+        assert isinstance(panel._toolbar_flow, FlowLayout)
+
+    def test_toolbar_min_width_is_single_button_not_sum(self, panel):
+        """FlowLayout 最小宽 = 单个最宽子项, 不是所有按钮之和 —— 否则又撑爆邻栏。"""
+        host = panel._toolbar_flow.parentWidget()
+        # 8+ 个按钮之和约 600px; flow 最小宽必须远小于它(能折行)。
+        assert host.minimumSizeHint().width() < 300
+
+    def test_preview_checkbox_still_present(self, panel):
+        from PyQt6.QtWidgets import QCheckBox
+        cbs = [c for c in panel.findChildren(QCheckBox) if c.text() == "预览"]
+        assert cbs, "预览 复选框必须仍在(换行不得丢控件)"
