@@ -142,11 +142,18 @@ class _ScaledImagePreview(QLabel):
             label_h = max(target_h, scaled.height())
         else:
             target_w = max(1, int(source_w * self._zoom_percent / 100))
-            target_h = max(1, int(source_h * self._zoom_percent / 100))
-            scaled = self._source_pixmap.scaled(
+            # §7 旧实现: 宽高各自 int() 截断后交给 KeepAspectRatio 适配, target_h 的截断
+            # 会把宽度再挤小 1px(150% 缩放 1080 → 1619 而非 1620), 缩放百分比失真。
+            # target_h = max(1, int(source_h * self._zoom_percent / 100))
+            # scaled = self._source_pixmap.scaled(
+            #     target_w,
+            #     target_h,
+            #     Qt.AspectRatioMode.KeepAspectRatio,
+            #     Qt.TransformationMode.SmoothTransformation,
+            # )
+            # 新实现: 宽度精确等于 源宽×百分比, 高度由 Qt 保持宽高比推导。
+            scaled = self._source_pixmap.scaledToWidth(
                 target_w,
-                target_h,
-                Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation,
             )
             label_w = scaled.width()
