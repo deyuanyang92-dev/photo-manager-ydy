@@ -989,3 +989,35 @@ class TestSeedRegionSettings:
             assert pf["collector"] == "杨德援"
         finally:
             db_manager.close_all()
+
+
+# ── user_projects.json 原子写: temp + os.replace, 写半截断不再丢整表 ──────────
+
+
+class TestAtomicUserProjectsWrite:
+    def test_record_recent_workspace_publishes_atomically(self, tmp_path, monkeypatch):
+        import os as _os
+
+        from app.services import project_service as ps
+
+        calls = []
+        real_replace = _os.replace
+
+        def spy(src, dst):
+            calls.append((str(src), str(dst)))
+            return real_replace(src, dst)
+
+        monkeypatch.setattr(ps.os, "replace", spy)
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        json_path = tmp_path / "user_projects.json"
+        ps.record_recent_workspace(str(json_path), str(ws))
+
+        assert calls, "user_projects.json 必须经 temp + os.replace 原子发布"
+        data = json.loads(json_path.read_text(encoding="utf-8"))
+        assert data["projects"], "写入内容必须完整可读"
+        leftovers = [
+            p for p in tmp_path.iterdir()
+            if p.name.startswith("user_projects") and p.suffix != ".json"
+        ]
+        assert not leftovers, f"不得残留临时文件: {leftovers}"

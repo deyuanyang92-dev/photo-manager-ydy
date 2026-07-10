@@ -357,14 +357,32 @@ def load_user_projects(path: str | Path | None = None) -> list[dict]:
     return list_projects(str(path or resolve_user_projects_json()))
 
 
+def _atomic_write_user_projects(out: Path, projects: list[dict]) -> None:
+    """temp + os.replace 原子发布 ``user_projects.json``。
+
+    直接 ``write_text`` 写一半崩溃会截断整份最近项目列表，而 ``list_projects``
+    对解析错误静默返回 ``[]`` —— 整表无声消失。同目录临时文件 + ``os.replace``
+    保证读者永远只看到完整旧版或完整新版。
+    """
+    out.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(
+        {"version": 1, "projects": projects}, ensure_ascii=False, indent=2
+    )
+    tmp = out.with_name(f"{out.name}.{os.getpid()}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, out)
+
+
 def save_user_projects(projects: list[dict]) -> None:
     """Persist the project list to the app-local user_projects.json."""
     out = Path(default_user_projects_json_path())
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(
-        json.dumps({"version": 1, "projects": projects}, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    # §7 旧: 直接 write_text, 写半截断丢整表
+    # out.parent.mkdir(parents=True, exist_ok=True)
+    # out.write_text(
+    #     json.dumps({"version": 1, "projects": projects}, ensure_ascii=False, indent=2),
+    #     encoding="utf-8",
+    # )
+    _atomic_write_user_projects(out, projects)
 
 
 def _workspace_display_name(resolved: str, root: Optional[str]) -> str:
@@ -410,11 +428,13 @@ def record_recent_workspace(
             entry["root"] = normalize_path(root)
         projects.append(entry)
         out = Path(localize_path(user_projects_json_path))
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(
-            json.dumps({"version": 1, "projects": projects}, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        # §7 旧: 直接 write_text, 写半截断丢整表
+        # out.parent.mkdir(parents=True, exist_ok=True)
+        # out.write_text(
+        #     json.dumps({"version": 1, "projects": projects}, ensure_ascii=False, indent=2),
+        #     encoding="utf-8",
+        # )
+        _atomic_write_user_projects(out, projects)
         clear_project_list_cache(user_projects_json_path)
     return projects
 
@@ -446,11 +466,13 @@ def relocate_project_directory(
     if not updated:
         return False
     out = Path(localize_path(user_projects_json_path))
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(
-        json.dumps({"version": 1, "projects": projects}, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    # §7 旧: 直接 write_text, 写半截断丢整表
+    # out.parent.mkdir(parents=True, exist_ok=True)
+    # out.write_text(
+    #     json.dumps({"version": 1, "projects": projects}, ensure_ascii=False, indent=2),
+    #     encoding="utf-8",
+    # )
+    _atomic_write_user_projects(out, projects)
     clear_project_list_cache(user_projects_json_path)
     return True
 
@@ -508,11 +530,13 @@ def save_project_descriptor(
         sync_fill_empty_only = False
 
     out = Path(localize_path(user_projects_json_path))
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(
-        json.dumps({"version": 1, "projects": projects}, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    # §7 旧: 直接 write_text, 写半截断丢整表
+    # out.parent.mkdir(parents=True, exist_ok=True)
+    # out.write_text(
+    #     json.dumps({"version": 1, "projects": projects}, ensure_ascii=False, indent=2),
+    #     encoding="utf-8",
+    # )
+    _atomic_write_user_projects(out, projects)
     clear_project_list_cache(user_projects_json_path)
     if sync_entry is not None:
         sync_project_descriptor_to_settings(

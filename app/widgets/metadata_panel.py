@@ -386,7 +386,31 @@ class MetadataPanel(QWidget):
         self._geocode_worker.error_occurred.connect(
             lambda msg, t=token: self._on_geocode_error(msg, t)
         )
+        self._track_worker(self._geocode_worker)
         self._geocode_worker.start()
+
+    def _track_worker(self, worker) -> None:
+        """引用保活到 finished:连点会覆盖 self._geocode_worker/_gps_worker,
+        无父 QThread 失去最后一个 Python 引用即被回收而线程仍在跑 →
+        "QThread: Destroyed while thread is still running" 原生崩溃。
+        (对照规范样板 worms_view.py:461 的 quit/wait/deleteLater 链。)"""
+        live = getattr(self, "_live_workers", None)
+        if live is None:
+            live = set()
+            self._live_workers = live
+        live.add(worker)
+
+        def _release() -> None:
+            live.discard(worker)
+            try:
+                worker.deleteLater()
+            except RuntimeError:
+                pass
+
+        try:
+            worker.finished.connect(_release)
+        except (AttributeError, TypeError):
+            pass
 
     def _is_stale_geocode_response(self, token) -> bool:
         return token is not None and token != getattr(self, "_geocode_token", 0)
@@ -439,6 +463,7 @@ class MetadataPanel(QWidget):
         self._gps_worker = _GpsWorker()
         self._gps_worker.result_ready.connect(self._on_gps_result)
         self._gps_worker.error_occurred.connect(self._on_gps_error)
+        self._track_worker(self._gps_worker)
         self._gps_worker.start()
 
     def _on_gps_result(self, lat: float, lon: float) -> None:

@@ -305,3 +305,53 @@ class TestGeocode:
         with mock.patch.object(panel, "_geocode_worker", create=True):
             panel._auto_fill_geo_area_from_lon_lat()
         assert panel._geo_area.text() == "手填地名"
+
+
+# ── worker 生命周期: 引用保活到 finished, 防 "Destroyed while thread is still running" ──
+
+
+class TestWorkerLifetime:
+    """连点地理编码会覆盖 self._geocode_worker —— 无父 QThread 失去最后一个
+    Python 引用即被回收, 线程仍在跑 → 原生崩溃。修复 = _track_worker 保活集合。"""
+
+    def test_track_worker_keeps_reference_until_finished(self, qtbot):
+        from app.widgets.metadata_panel import MetadataPanel
+        from PyQt6.QtCore import QThread
+
+        panel = MetadataPanel(_make_ctx())
+        qtbot.addWidget(panel)
+
+        class _Noop(QThread):
+            def run(self):
+                pass
+
+        w = _Noop()
+        panel._track_worker(w)
+        assert w in panel._live_workers, "启动前必须进入保活集合"
+        with qtbot.waitSignal(w.finished, timeout=3000):
+            w.start()
+        qtbot.waitUntil(lambda: w not in panel._live_workers, timeout=3000)
+
+    def test_geocode_start_registers_live_worker(self, qtbot, monkeypatch):
+        from app.widgets import metadata_panel as mp
+
+        panel = mp.MetadataPanel(_make_ctx())
+        qtbot.addWidget(panel)
+
+        started = []
+
+        class _FakeWorker:
+            def __init__(self, lat, lon, parent=None):
+                self.result_ready = mock.MagicMock()
+                self.error_occurred = mock.MagicMock()
+                self.finished = mock.MagicMock()
+
+            def start(self):
+                started.append(self)
+
+        monkeypatch.setattr(mp, "_NominatimWorker", _FakeWorker)
+        panel._lat.setText("21.5")
+        panel._lon.setText("109.5")
+        panel._auto_fill_geo_area_from_lon_lat()
+        assert started, "sanity: worker 应被启动"
+        assert started[0] in panel._live_workers
