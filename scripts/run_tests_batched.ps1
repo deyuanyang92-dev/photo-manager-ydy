@@ -86,6 +86,16 @@ foreach ($file in $files) {
     }
     $results.Add($result)
     Write-Output ("{0}: {1}" -f $relativePath, $status)
+    if ($exitCode -ne 0) {
+        if (-not [string]::IsNullOrWhiteSpace($stdout)) {
+            Write-Output ("--- {0} stdout ---" -f $relativePath)
+            Write-Output $stdout.TrimEnd()
+        }
+        if (-not [string]::IsNullOrWhiteSpace($stderr)) {
+            Write-Output ("--- {0} stderr ---" -f $relativePath)
+            Write-Output $stderr.TrimEnd()
+        }
+    }
 }
 
 if ($ResultPath) {
