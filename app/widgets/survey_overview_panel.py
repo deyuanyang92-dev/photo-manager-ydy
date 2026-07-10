@@ -40,6 +40,9 @@ class _StatCard(QFrame):
     def set_value(self, text: str) -> None:
         self._value.setText(text)
 
+    def set_title(self, text: str) -> None:
+        self._title.setText(text)
+
 
 class _OverviewSection(QFrame):
     """可折叠区块 — 默认收起, 标题行显示一行摘要."""
@@ -136,7 +139,11 @@ class SurveyOverviewPanel(QWidget):
         cards.setHorizontalSpacing(6)
         cards.setVerticalSpacing(6)
         self._card_specimens = _StatCard("标本编号")
-        self._card_photos = _StatCard("成片照片")
+        # self._card_photos = _StatCard("成片照片")  # §7 旧: 静态标题, 两种口径共用一卡易混淆
+        # photo_count 双口径是刻意的, 标签必须说清数的是什么:
+        #   概览模式 = get_project_results total(含未归编号成片) → 全部成片
+        #   数据汇总模式 = 筛选范围内 uid 归组成片 → 编号成片
+        self._card_photos = _StatCard("全部成片")
         self._card_rna = _StatCard("已取 RNA")
         self._card_species = _StatCard("物种数")
         self._card_workspaces = _StatCard("断面数")
@@ -227,6 +234,7 @@ class SurveyOverviewPanel(QWidget):
             label_list = [labels.get(w) for w in self._workspaces]
         overview = aggregate_survey_overview(self._workspaces, labels=label_list)
         self._fill_overview(overview, labels)
+        self._card_photos.set_title("全部成片")
         self._species_panel.set_workspaces(self._workspaces, labels=labels)
 
     def _fill_overview(
@@ -302,6 +310,7 @@ class SurveyOverviewPanel(QWidget):
         """筛选后的 KPI / 分布（数据汇总模式）."""
         self._workspaces = [str(w) for w in (workspace_dirs or []) if w]
         self._fill_overview(stats, labels)
+        self._card_photos.set_title("编号成片")
         if scope_label:
             self._scope.setText(scope_label)
         self._species_panel.set_workspaces(self._workspaces, labels=labels)

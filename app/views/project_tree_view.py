@@ -2964,10 +2964,12 @@ class ProjectTreeView(BaseView):
         n_photo = stats.get("photo_count", 0)
         n_rna = stats.get("rna_count", 0)
         cond_note = f" · {len(self._summary_conditions)} 个条件" if self._summary_conditions else " · 全部"
+        # "照片"→"成片": 此处数的是筛选范围内 uid 归组的母版 TIF 成片
+        # (右栏概览的「全部成片」含未归编号, 口径不同是刻意的, 标签必须区分)。
         self._summary_stats_lbl.setText(
-            f"{n_spec} 编号 · {n_photo} 照片 · RNA {n_rna}{cond_note}"
+            f"{n_spec} 编号 · {n_photo} 成片 · RNA {n_rna}{cond_note}"
         )
-        self._grid_count_lbl.setText(f"{n_spec} 编号 · {n_photo} 张")
+        self._grid_count_lbl.setText(f"{n_spec} 编号 · {n_photo} 张成片")
         # self._summary_all_columns = cwq.summary_all_columns(dirs)  # §7 旧: 主线程逐库 PRAGMA; 已随查询进 worker
         self._summary_all_columns = all_columns
         self._summary_visible_columns = cwq.resolve_summary_visible_columns(
@@ -3864,6 +3866,9 @@ class ProjectTreeView(BaseView):
     def on_deactivate(self) -> None:
         """切走页面:清空合并网格(保留 worker 线程供下次进入)."""
         self._stop_tiff_preview_warmup_worker()
+        # 进行中的汇总查询一并取消: 回来时 on_activate 会重新派发, 过期
+        # 结果本就会被 token 丢弃, 让它跑完只是白烧 IO。
+        self._stop_summary_query_worker(wait_ms=200)
         self._save_tree_split_state()
         self._save_grid_inner_split_state()
         self._save_summary_body_split_state()

@@ -895,7 +895,15 @@ class SettingsTabsMixin:
         self._lang_combo.addItem(tr("English"), "en")
         self._lang_combo.setToolTip(tr("语言切换会立即生效。"))
         self._lang_combo.currentIndexChanged.connect(self._on_language_changed)
-        theme_form.addRow(tr("界面语言"), self._lang_combo)
+        # theme_form.addRow(tr("界面语言"), self._lang_combo)  # §7 暂藏 (2026-07-10 用户拍板)
+        # en.json 仅覆盖 ~190/约2000 条 UI 字符串, 切 English 是"花脸"界面 ——
+        # 补译完成前不展示开关, 不承诺兑现不了的功能。已切到 en 的用户保留
+        # 此行作回退出口(否则藏了开关就切不回来)。机制代码全保留。
+        from app.config.i18n import current_language
+        if current_language() != "zh":
+            theme_form.addRow(tr("界面语言"), self._lang_combo)
+        else:
+            self._lang_combo.hide()
 
         theme_note = QLabel(tr("保留当前风格，同时提供两套新设计用于对比整体观感。"))
         theme_note.setObjectName("MutedSmall")
