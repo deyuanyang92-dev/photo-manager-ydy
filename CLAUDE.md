@@ -92,7 +92,12 @@ a throwaway in-memory DB — no hand-maintained column list) →
 version row; v2 = `specimen_result_tif_index`, see `app/db/result_tif_schema.py` +
 `specimen_result_tif_service.py`, the index of master-TIF absolute paths used by summary /
 photo-pick). Division of labor: new tables/columns go in schema.sql; data/index backfills go in
-migrations.py.
+migrations.py. **Cross-workspace sweeps never use the cached connection**: anything that
+touches *other* workspaces' dbs (KPI aggregation, result-tif index, summary enrich) opens
+`open_project_db_private()` and closes it in `finally` — a cached conn per child holds its
+file lock until exit (Windows: folder can't be moved/deleted; the historic shutdown-lock bug).
+Read paths must not mutate child dbs (no `create=True`, no schema migration, no
+`updated_at` rewrites) — `read_workspace_meta` is the pure-read API.
 
 **Cross-view communication.** Views never call each other. Handoffs use ad-hoc attributes set
 directly on `ctx`: e.g. `ctx.pending_label_uid` (workbench → labels), `ctx.worms_fill_specimen`
