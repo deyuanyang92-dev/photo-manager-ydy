@@ -398,7 +398,7 @@ class TestSummaryScope:
         assert hasattr(view_no_project, "_btn_sources")
         assert view_no_project._scope_combo.count() == 3
 
-    def test_selected_scope_loads_multiple_project_dirs(self, tmp_path) -> None:
+    def test_selected_scope_loads_multiple_project_dirs(self, tmp_path, qtbot) -> None:
         from app.db import db_manager
         from app.views.summary_view import SummaryView
 
@@ -432,6 +432,9 @@ class TestSummaryScope:
             v._summary_scope = "selected"
             v._selected_project_dirs = [str(dir_a), str(dir_b)]
             v.on_activate()
+            # 多项目加载已入 worker 线程(主线程不假死), 结果异步回填
+            qtbot.waitUntil(lambda: len(v._specimens) == 2, timeout=8000)
+            v._stop_summary_load_worker(wait_ms=2000)
 
             assert len(v._specimens) == 2
             statuses = sorted(v._grouping_for_specimen(sp)["status"] for sp in v._specimens)
@@ -864,3 +867,46 @@ class TestDwcExportButton:
             header = next(reader)
         assert "occurrenceID" in header
         assert "scientificName" in header
+
+
+class TestMultiProjectLoadWorker:
+    def test_multi_load_runs_in_worker_thread(self, tmp_path, qtbot) -> None:
+        """「全部/选中项目」汇总必须在 worker 线程加载, 不得阻塞主线程."""
+        import threading
+
+        from app.db import db_manager
+        from app.services import project_summary_service as pss
+        from app.views.summary_view import SummaryView
+
+        root = tmp_path / "survey"
+        dir_a = root / "断面A"
+        dir_a.mkdir(parents=True)
+        db_manager.close_all()
+        try:
+            conn = db_manager.open_project_db(str(dir_a), create=True)
+            conn.execute("INSERT INTO specimens (uid) VALUES ('U-1')")
+            conn.commit()
+
+            seen: list = []
+            real = pss.collect_specimen_summary_rows
+
+            def spy(*a, **k):
+                seen.append(threading.current_thread())
+                return real(*a, **k)
+
+            import unittest.mock as mock
+            with mock.patch.object(
+                pss, "collect_specimen_summary_rows", side_effect=spy
+            ):
+                ctx = _make_ctx(db=None)
+                ctx.current_project_dir = str(dir_a)
+                v = SummaryView(ctx)
+                v._summary_scope = "selected"
+                v._selected_project_dirs = [str(dir_a)]
+                v.on_activate()
+                qtbot.waitUntil(lambda: len(v._specimens) == 1, timeout=8000)
+                v._stop_summary_load_worker(wait_ms=2000)
+
+            assert seen and seen[0] is not threading.main_thread()
+        finally:
+            db_manager.close_all()

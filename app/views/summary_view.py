@@ -26,7 +26,7 @@ from datetime import date as _date
 from pathlib import Path
 from typing import Optional
 
-from PyQt6.QtCore import Qt, QDate, QSortFilterProxyModel
+from PyQt6.QtCore import Qt, QDate, QSortFilterProxyModel, QThread, pyqtSignal
 from PyQt6.QtGui import QColor, QBrush, QStandardItem, QStandardItemModel
 from PyQt6.QtWidgets import (
     QCheckBox,
@@ -241,6 +241,31 @@ _SCOPE_ALL = "all"
 _SCOPE_SELECTED = "selected"
 _GROUPING_KEY_SEP = "\0"
 _TABLE_AUTOSIZE_CELL_LIMIT = 6000
+
+# 停不下来的加载线程退休名单(模式同 project_tree/data_filter): 模块级引用
+# 防 GC → destroyed-while-running 原生 abort。
+_RETIRED_LOAD_WORKERS: list = []
+
+
+class _SummaryLoadWorker(QThread):
+    """「全部/选中项目」汇总加载后台线程 — 遍历所有项目逐库查询不进主线程."""
+
+    finished_payload = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, dirs: list[str], root: str, parent=None) -> None:
+        super().__init__(parent)
+        self._dirs = list(dirs)
+        self._root = root
+
+    def run(self) -> None:
+        try:
+            from app.services import project_summary_service as pss
+            payload = pss.collect_specimen_summary_rows(self._dirs, self._root)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+            return
+        self.finished_payload.emit(payload)
 
 # Colour constants — refreshed from the LIVE active theme by _refresh_palette()
 # (called at the top of each view's _setup_ui).  Previously hardcoded deep-teal,
@@ -723,14 +748,79 @@ class SummaryView(BaseView):
         self._dashboard_snapshot = None
 
         if self._summary_scope in (_SCOPE_ALL, _SCOPE_SELECTED):
-            if self._load_multi_project_data():
-                self._rebuild_filter_combo()
-                self._rebuild_table()
+            # §7 旧: if self._load_multi_project_data(): ... —— 「全部/选中项目」
+            # 在主线程同步遍历所有项目逐库查询, 多野外季项目假死数秒且零反馈。
+            # 现改 worker 派发; 失败/无目录时异步回落当前项目路径。
+            if self._dispatch_multi_project_load():
                 return
 
         self._load_current_project_data()
         self._rebuild_filter_combo()
         self._rebuild_table()
+
+    def _dispatch_multi_project_load(self) -> bool:
+        """多项目汇总入 worker; 返回 False = 无可扫目录(走当前项目回落)."""
+        dirs, root = self._summary_dirs_for_scope()
+        if not dirs:
+            return False
+        token = getattr(self, "_load_token", 0) + 1
+        self._load_token = token
+        self._stop_summary_load_worker(wait_ms=200)
+
+        try:
+            self._count_lbl.setText(f"加载中… ({len(dirs)} 个项目)")
+        except Exception:
+            pass
+
+        worker = _SummaryLoadWorker(dirs, root, parent=self)
+        worker.finished_payload.connect(
+            lambda payload, t=token, d=list(dirs), r=root:
+                self._on_multi_load_done(t, d, r, payload)
+        )
+        worker.failed.connect(lambda _msg, t=token: self._on_multi_load_failed(t))
+        self._load_worker = worker
+        worker.start()
+        return True
+
+    def _on_multi_load_done(
+        self, token: int, dirs: list[str], root: str, payload: dict
+    ) -> None:
+        if token != getattr(self, "_load_token", 0):
+            return
+        self._apply_multi_payload(payload, dirs, root)
+        self._rebuild_filter_combo()
+        self._rebuild_table()
+
+    def _on_multi_load_failed(self, token: int) -> None:
+        if token != getattr(self, "_load_token", 0):
+            return
+        # 与旧同步路径的 return False 同款回落: 当前项目数据
+        self._load_current_project_data()
+        self._rebuild_filter_combo()
+        self._rebuild_table()
+
+    def _stop_summary_load_worker(self, wait_ms: int = 200) -> None:
+        worker = getattr(self, "_load_worker", None)
+        if worker is None:
+            return
+        try:
+            if worker.isRunning() and not worker.wait(wait_ms):
+                for sig in ("finished_payload", "failed"):
+                    try:
+                        getattr(worker, sig).disconnect()
+                    except Exception:
+                        pass
+                try:
+                    worker.setParent(None)
+                except Exception:
+                    pass
+                _RETIRED_LOAD_WORKERS.append(worker)
+        except Exception:
+            pass
+        self._load_worker = None
+
+    def stop_background_work(self) -> None:
+        self._stop_summary_load_worker(wait_ms=2000)
 
     def _load_current_project_data(self) -> None:
         """Load the current open DB. Kept separate for in-memory test DBs."""
@@ -786,6 +876,7 @@ class SummaryView(BaseView):
             self._loaded_root = current_dir
 
     def _load_multi_project_data(self) -> bool:
+        """同步多项目加载(兼容保留; 生产路径已改 _dispatch_multi_project_load)."""
         dirs, root = self._summary_dirs_for_scope()
         if not dirs:
             return False
@@ -794,14 +885,18 @@ class SummaryView(BaseView):
             payload = pss.collect_specimen_summary_rows(dirs, root)
         except Exception:
             return False
+        self._apply_multi_payload(payload, list(dirs), root)
+        return True
 
+    def _apply_multi_payload(
+        self, payload: dict, dirs: list[str], root: str
+    ) -> None:
         self._specimens = list(payload.get("specimens") or [])
         self._grouping = dict(payload.get("grouping") or {})
         self._projects = list(payload.get("projects") or [])
         self._dashboard_snapshot = payload.get("dashboard") or None
         self._loaded_project_dirs = list(dirs)
         self._loaded_root = root
-        return True
 
     def _current_project_dir(self) -> str:
         raw = getattr(self.ctx, "current_project_dir", "") or getattr(
@@ -1330,7 +1425,9 @@ class SummaryView(BaseView):
             return
         try:
             from app.services.export_service import export_excel
-            out = export_excel(specs, path)
+            from app.utils import ui as _ui
+            with _ui.busy_cursor():  # 大表写盘期间给出忙反馈(完整异步导出待后续)
+                out = export_excel(specs, path)
             QMessageBox.information(self, "导出成功", f"已保存到：\n{out}")
         except Exception as exc:
             QMessageBox.critical(self, "导出失败", str(exc))
