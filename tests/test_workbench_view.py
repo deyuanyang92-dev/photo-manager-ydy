@@ -7609,3 +7609,62 @@ class TestAutoGroupOrganize:
         with patch("app.widgets.retroactive_modal.RetroactiveModal.exec",
                    return_value=0):
             w._on_auto_group_organize()
+
+
+class TestThreeColumnLayoutFits:
+    """三栏最小宽度之和必须放得进常见窗口(2026-07-11 用户报障:中/右栏挤穿)。
+
+    根因:监控面板工具栏 8 个文字按钮硬撑 600px → 中栏最小值顶到 717,
+    侧栏 300 + 中 717 + 右 507 = 1524 > 窗口 → Qt 强行等分压扁, 内容互挤。
+    """
+
+    def test_column_min_widths_fit_common_window(self):
+        from app.views.workbench_view import WorkbenchView
+        ctx = _make_ctx()
+        v = WorkbenchView(ctx)
+        total = (
+            v._sidebar_min_width()
+            + v._centre_min_width()
+            + v._right_rail_min_width()
+        )
+        # 1366 是最常见的笔记本宽度; 留出窗口边框余量后仍要放得下。
+        assert total <= 1310, (
+            f"三栏最小宽度之和 {total}px 超过 1310px 窗口 → 会互相挤穿"
+        )
+
+    def test_centre_min_uses_hard_minimum_not_preferred(self):
+        """中栏最小值应取硬最小值(minimumSizeHint), 不是贪心的偏好宽。"""
+        from app.views.workbench_view import WorkbenchView
+        ctx = _make_ctx()
+        v = WorkbenchView(ctx)
+        # 工具栏放进横向滚动容器后, 监控面板硬最小值应显著小于旧的 717。
+        assert v._monitor.minimumSizeHint().width() < 600, (
+            "监控面板硬最小值仍过大 → 工具栏未被横向滚动容器解放"
+        )
+
+    def test_degenerate_saved_splitter_state_is_discarded(self):
+        """QSettings 存了坏的旧布局(各列压穿)→ 恢复时应丢弃、退回默认分布。"""
+        from PyQt6.QtCore import QByteArray, QSettings
+        from app.views.workbench_view import (
+            WorkbenchView,
+            _WORKBENCH_OUTER_SPLITTER_STATE_KEY,
+        )
+
+        ctx = _make_ctx()
+        v = WorkbenchView(ctx)
+        v.resize(1310, 780)
+        # 造一个把三栏压到极窄的退化状态存进 QSettings
+        v._outer_splitter.setSizes([50, 50, 50])
+        bad = v._outer_splitter.saveState()
+        real_qs = QSettings("SpecimenPhotoWorkbench", "workbench-layout-test")
+        real_qs.setValue(_WORKBENCH_OUTER_SPLITTER_STATE_KEY, bad)
+        # 用真实 QSettings 让守卫走恢复路径
+        v._ui_settings = lambda: real_qs
+        v.show()
+        v._restore_workbench_outer_splitter()
+        sizes = v._outer_splitter.sizes()
+        # 守卫应拒绝退化状态 → 侧栏/右栏不再被压到远低于最小值
+        assert sizes[0] >= v._sidebar_min_width() - 40
+        assert sizes[2] >= v._right_rail_min_width() - 40
+        v.close()
+        real_qs.clear()

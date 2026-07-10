@@ -692,3 +692,55 @@ def test_on_deactivate_error_never_blocks_navigation():
     win.navigate_to("broken")
     win.navigate_to("dummy")  # 不应抛
     assert win._views["dummy"] is win._stack.currentWidget()
+
+
+class TestWindowClampIntoScreen:
+    """窗口拖动/尺寸不得越出屏幕可用区(2026-07-11 用户报障:窗口拖出屏幕
+    后左/右栏够不着无法操作)。_clamp_into_screen 把整帧夹回可用区。"""
+
+    def _fake_screen(self, x=0, y=0, w=1366, h=768):
+        from unittest.mock import MagicMock
+        from PyQt6.QtCore import QRect
+        scr = MagicMock()
+        scr.availableGeometry.return_value = QRect(x, y, w, h)
+        return scr
+
+    def test_offscreen_left_is_pulled_back(self, monkeypatch):
+        from PyQt6.QtCore import Qt
+        win = _fresh_window()
+        monkeypatch.setattr(win, "screen", lambda: self._fake_screen())
+        win.setWindowState(Qt.WindowState.WindowNoState)  # 清最大化位
+        win.resize(800, 600)
+        win.move(-400, 100)      # 拖到左边越界
+        win._clamp_into_screen()
+        assert win.frameGeometry().x() >= 0, "左边缘被拖出屏幕后应拉回"
+
+    def test_offscreen_right_is_pulled_back(self, monkeypatch):
+        from PyQt6.QtCore import Qt
+        win = _fresh_window()
+        monkeypatch.setattr(win, "screen", lambda: self._fake_screen(w=1366))
+        win.setWindowState(Qt.WindowState.WindowNoState)
+        win.resize(800, 600)
+        win.move(1200, 100)      # 右边越界
+        win._clamp_into_screen()
+        assert win.frameGeometry().right() <= 1366, "右边缘被拖出屏幕后应拉回"
+
+    def test_window_larger_than_screen_is_shrunk(self, monkeypatch):
+        from PyQt6.QtCore import Qt
+        win = _fresh_window()
+        monkeypatch.setattr(win, "screen", lambda: self._fake_screen(w=1200, h=700))
+        win.setWindowState(Qt.WindowState.WindowNoState)
+        win.resize(1500, 900)    # 比屏幕大
+        win._clamp_into_screen()
+        assert win.frameGeometry().width() <= 1200
+        assert win.frameGeometry().height() <= 700
+
+    def test_maximized_is_not_clamped(self, monkeypatch):
+        from PyQt6.QtCore import Qt
+        win = _fresh_window()
+        moved = []
+        monkeypatch.setattr(win, "screen", lambda: self._fake_screen())
+        monkeypatch.setattr(win, "move", lambda *a: moved.append(a))
+        win.setWindowState(win.windowState() | Qt.WindowState.WindowMaximized)
+        win._clamp_into_screen()
+        assert not moved, "最大化状态不应被夹取干预"

@@ -148,6 +148,48 @@ class MainWindow(QMainWindow):
         super().resizeEvent(event)
         self._sync_startup_placeholder_geometry()
 
+    def moveEvent(self, event) -> None:  # noqa: N802 — Qt override
+        super().moveEvent(event)
+        # 拖动时把窗口夹在当前屏幕内, 不让左/右/上/下边缘被拖出屏幕导致
+        # 内容够不着(2026-07-11 用户报障:窗口拖出屏幕后无法操作)。
+        self._clamp_into_screen()
+
+    def _clamp_into_screen(self) -> None:
+        """把窗口帧夹进当前屏幕可用区。带重入守卫(move 会再触发 moveEvent)。
+
+        最大化/全屏时不干预(那些状态由 Qt 管)。比屏幕还大的窗口先缩到屏幕,
+        再把整帧夹回可用区,保证四边都够得着、可操作。
+        """
+        if getattr(self, "_clamping_geometry", False):
+            return
+        state = self.windowState()
+        if state & (Qt.WindowState.WindowMaximized | Qt.WindowState.WindowFullScreen):
+            return
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is None:
+            return
+        avail = screen.availableGeometry()
+        frame = self.frameGeometry()
+
+        self._clamping_geometry = True
+        try:
+            # ① 尺寸:窗口帧比可用区大 → 缩到可用区(用客户区算,扣掉边框余量)。
+            over_w = frame.width() - avail.width()
+            over_h = frame.height() - avail.height()
+            if over_w > 0 or over_h > 0:
+                self.resize(
+                    self.width() - max(0, over_w),
+                    self.height() - max(0, over_h),
+                )
+                frame = self.frameGeometry()
+            # ② 位置:整帧夹进可用区,四边都不越界。
+            nx = max(avail.left(), min(frame.x(), avail.right() - frame.width() + 1))
+            ny = max(avail.top(), min(frame.y(), avail.bottom() - frame.height() + 1))
+            if (nx, ny) != (frame.x(), frame.y()):
+                self.move(nx, ny)
+        finally:
+            self._clamping_geometry = False
+
     def _sync_startup_placeholder_geometry(self) -> None:
         ph = getattr(self, "_startup_placeholder", None)
         host = getattr(self, "_content_host", None)

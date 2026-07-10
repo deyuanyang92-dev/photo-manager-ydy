@@ -178,11 +178,15 @@ class WorkbenchView(WorkbenchSpecimenIdentityMixin, WorkbenchMediaWorkflowMixin,
         )
 
     def _centre_min_width(self) -> int:
-        natural = max(
-            self._widget_natural_width(self._monitor),
-            self._widget_natural_width(self._results),
+        # §7 旧: 用 _widget_natural_width(偏好宽) —— 那是"想要多宽", 不是"最少
+        # 多宽"。中栏用偏好宽当 splitter 最小值会过度占宽, 把右栏挤穿。splitter
+        # 的最小值应取控件的硬最小值(minimumSizeHint), 面板内部有滚动/换行能
+        # 在更窄时正常工作(2026-07-11 三栏挤穿修复)。
+        hard_min = max(
+            self._monitor.minimumSizeHint().width(),
+            self._results.minimumSizeHint().width(),
         )
-        return max(_CENTRE_WIDTH_FLOOR, natural)
+        return max(_CENTRE_WIDTH_FLOOR, hard_min)
 
     def _right_rail_min_width(self) -> int:
         content = getattr(self, "_right_rail_widget", None)
@@ -217,15 +221,29 @@ class WorkbenchView(WorkbenchSpecimenIdentityMixin, WorkbenchMediaWorkflowMixin,
         return restored
 
     def _restore_workbench_outer_splitter(self) -> None:
-        self._restore_splitter_state(
+        defaults = [
+            self._sidebar_min_width(),
+            self._centre_min_width(),
+            self._right_rail_min_width(),
+        ]
+        restored = self._restore_splitter_state(
             self._outer_splitter,
             _WORKBENCH_OUTER_SPLITTER_STATE_KEY,
-            [
-                self._sidebar_min_width(),
-                self._centre_min_width(),
-                self._right_rail_min_width(),
-            ],
+            defaults,
         )
+        # 坏状态守卫: QSettings 里可能存着旧版本布局的 splitter 状态(列数/顺序
+        # 不同, 或各列被压到远低于最小值 → 内容互相挤穿)。restoreState 恢复出
+        # 明显退化的尺寸时, 丢弃它、退回按最小值分布的默认(2026-07-11)。
+        if restored:
+            sizes = self._outer_splitter.sizes()
+            degenerate = (
+                len(sizes) != 3
+                or any(s <= 1 for s in sizes)
+                or sizes[0] < defaults[0] - 40      # 侧栏被压穿
+                or sizes[2] < defaults[2] - 40      # 右栏被压穿
+            )
+            if degenerate:
+                self._outer_splitter.setSizes([max(1, int(v)) for v in defaults])
 
     def _restore_workbench_centre_splitter(self) -> None:
         self._restore_splitter_state(

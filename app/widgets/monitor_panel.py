@@ -687,7 +687,29 @@ class MonitorPanel(QWidget):
         self._raw_count = QLabel("本组原片 0 张")
         self._raw_count.setObjectName("MutedSmall")
         self._raw_count.hide()
-        sec.addLayout(controls)
+
+        # §7 旧: sec.addLayout(controls) —— 8 个文字按钮硬撑 600px 最小宽度,
+        # 把整个中栏最小值顶到 717px。三栏(侧栏 300 + 中 717 + 右 507 = 1524)
+        # 在 <1524px 窗口里放不下 → Qt 强行等分压扁, 中/右栏内容互相挤穿
+        # (2026-07-11 用户报障)。把工具栏放进只横向滚动的容器: 宽度够时
+        # (≥600) 外观完全不变、无滚动条; 窗口窄时工具栏自己横向滚动, 不再
+        # 硬撑 717 → 中栏最小值降到由成果面板决定的 ~332, 三栏就放得下了。
+        _toolbar_host = QWidget()
+        _toolbar_host.setLayout(controls)
+        _toolbar_scroll = QScrollArea()
+        _toolbar_scroll.setObjectName("MonitorToolbarScroll")
+        _toolbar_scroll.setWidget(_toolbar_host)
+        _toolbar_scroll.setWidgetResizable(True)
+        _toolbar_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        _toolbar_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        _toolbar_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        _toolbar_scroll.setMinimumWidth(120)   # 破除 600 硬底, 允许列收窄
+        _toolbar_scroll.setFixedHeight(_toolbar_host.sizeHint().height() + 2)
+        _toolbar_scroll.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        self._toolbar_scroll = _toolbar_scroll
+        sec.addWidget(_toolbar_scroll)
 
         self._workflow_notice_hidden_by_user = False
         self._workflow_notice_collapsed = False
