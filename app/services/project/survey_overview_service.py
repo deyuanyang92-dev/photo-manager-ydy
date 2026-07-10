@@ -118,6 +118,7 @@ def _open_workspace_dbs(workspaces: list[str]) -> list[sqlite3.Connection]:
         db_path = Path(ws) / "_data" / "project.db"
         if not db_path.exists():
             continue
+        conn: Optional[sqlite3.Connection] = None  # 每轮重置, 防跨迭代残留
         try:
             conn = sqlite3.connect(str(db_path))
             conn.row_factory = sqlite3.Row
@@ -129,10 +130,13 @@ def _open_workspace_dbs(workspaces: list[str]) -> list[sqlite3.Connection]:
             else:
                 conn.close()
         except sqlite3.Error:
-            try:
-                conn.close()
-            except Exception:
-                pass
+            # §7 旧: try: conn.close() —— connect 本身抛错时 conn 还是上一轮
+            # 的连接(可能已入列), 误关后续查询直接 ProgrammingError。
+            if conn is not None and conn not in conns:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
     return conns
 
 

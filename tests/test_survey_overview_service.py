@@ -145,3 +145,40 @@ def test_overview_includes_map_points(tmp_path, monkeypatch) -> None:
     assert len(out["map_points"]) == 1
     assert out["map_points"][0]["label"] == "北滩"
 
+
+
+def test_open_workspace_dbs_connect_failure_keeps_prior_conn_usable(
+    tmp_path, monkeypatch
+) -> None:
+    """v0.56: 第 N 个工作区 connect 抛错时, except 分支不得误关上一轮
+    已入列的连接(v0.55 的 conn 变量跨迭代残留 → 后续查询 ProgrammingError)."""
+    from app.services.project import survey_overview_service as sos
+
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    for ws in (a, b):
+        (ws / "_data").mkdir(parents=True)
+        c = sqlite3.connect(str(ws / "_data" / "project.db"))
+        c.execute("CREATE TABLE collection_records (id INTEGER)")
+        c.commit()
+        c.close()
+
+    real_connect = sqlite3.connect
+    calls = {"n": 0}
+
+    def flaky_connect(path, *a_, **k_):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise sqlite3.OperationalError("disk I/O error")
+        return real_connect(path, *a_, **k_)
+
+    monkeypatch.setattr(sos.sqlite3, "connect", flaky_connect)
+
+    conns = sos._open_workspace_dbs([str(a), str(b)])
+    try:
+        assert len(conns) == 1
+        # 上一轮连接必须仍然可用
+        conns[0].execute("SELECT 1").fetchone()
+    finally:
+        for c in conns:
+            c.close()
