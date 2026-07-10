@@ -1,5 +1,6 @@
 __pycache__/
 *.py[cod]
+data/cache/
 .venv/
 venv/
 .pytest_cache/
@@ -23,9 +24,38 @@ build/
 /1/
 截图*.png
 ccswitch.sh
+run_main.log
+test_full.log
+test_output.txt
+test_batch_results.txt
+test_run_latest.txt
+/tmp_main.log
+/tmp_run.log
+test_*.log
+test_*.txt
+
+# 本地临时输出（勿提交）
+tmp/
+artifacts/
+
+# 缩略图解码失败标记
+*.fail
+
+# 根目录会话/调试输出（补充历史名）
+launch.log
+pytest-*.log
+*.stdout
+*.stderr
+
+# Agent/IDE 误生成的根目录垃圾
+, OK if*
 
 # 版权国家标准 PDF（本地参考，勿上传公开 repo）
 /标准/
 
 # Office 临时锁文件
 ~$*
+
+# 软件更新签名私钥（绝不能提交）
+/secrets/
+update_private_key.pem

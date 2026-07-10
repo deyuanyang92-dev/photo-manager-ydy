@@ -121,7 +121,7 @@ class _ClickablePreview(QLabel):
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setToolTip("双击打开标签设计器（自由排版 · 对齐 · 二维码 · 多选）")
+        self.setToolTip("")
 
     def mouseDoubleClickEvent(self, e) -> None:  # noqa: N802
         self.doubleClicked.emit()
@@ -140,7 +140,7 @@ class _PannablePreview(QWidget):
         self._pan_y = 0
         self._press_pt: Optional[QPoint] = None
         self.setCursor(Qt.CursorShape.OpenHandCursor)
-        self.setToolTip("双击放大预览整页 A4 排版")
+        self.setToolTip("")
 
     def mouseDoubleClickEvent(self, e) -> None:
         self.doubleClicked.emit()
@@ -369,11 +369,9 @@ class LabelsView(BaseView):
     def _rebuild_specimen_grid(self) -> None:
         if not hasattr(self, "_spec_grid_layout"):
             return
-        while self._spec_grid_layout.count():
-            item = self._spec_grid_layout.takeAt(0)
-            w = item.widget()
-            if w is not None:
-                w.setParent(None)
+        from app.utils.ui import clear_layout_widgets
+
+        clear_layout_widgets(self._spec_grid_layout)
 
         q = (self._spec_search.text() if hasattr(self, "_spec_search") else "").strip().lower()
         selected = set(self._step1.selected_indices())

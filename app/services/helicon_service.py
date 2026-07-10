@@ -275,6 +275,41 @@ def build_helicon_args(
 _helicon_exe_cache: Optional[str | bool] = None  # None=unchecked, str=found, False=not found
 
 
+def read_stored_helicon_exe_path(settings=None) -> str:
+    """Return user-persisted Helicon exe path from QSettings, if any."""
+    raw = ""
+    if settings is not None:
+        try:
+            qs = getattr(settings, "_qs", settings)
+            raw = str(qs.value(_K_HELICON_EXE, "") or "").strip()
+        except Exception:
+            raw = ""
+    if not raw:
+        try:
+            from PyQt6.QtCore import QSettings
+            raw = str(QSettings().value(_K_HELICON_EXE, "") or "").strip()
+        except Exception:
+            raw = ""
+    return raw
+
+
+def bootstrap_helicon_path_env(settings=None) -> None:
+    """Push persisted Helicon path into HELICON_FOCUS_PATH for detect_helicon()."""
+    stored = read_stored_helicon_exe_path(settings)
+    if stored:
+        os.environ["HELICON_FOCUS_PATH"] = stored
+
+
+def resolve_helicon_exe(settings=None) -> Optional[str]:
+    """Resolve Helicon exe via stored path, env vars, and known install dirs."""
+    stored = read_stored_helicon_exe_path(settings)
+    if stored:
+        found = detect_helicon(custom_path=stored)
+        if found:
+            return found
+    return detect_helicon()
+
+
 def _resolve_helicon_exe(path_input: str) -> Optional[str]:
     """Try to resolve *path_input* to an existing Helicon .exe.
 

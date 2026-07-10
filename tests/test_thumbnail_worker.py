@@ -54,7 +54,9 @@ def test_cover_worker_emits_qimage(tmp_path) -> None:
     assert request_id == 7
     assert isinstance(image, QImage), "worker must emit QImage, not QPixmap"
     assert not image.isNull()
-    assert image.width() <= 32 and image.height() <= 32
+    from app.utils.thumbnail_disk_cache import normalize_thumb_cache_size
+    cache_size = normalize_thumb_cache_size(32)
+    assert image.width() <= cache_size and image.height() <= cache_size
 
 
 def test_cover_worker_missing_file_emits_none(tmp_path) -> None:

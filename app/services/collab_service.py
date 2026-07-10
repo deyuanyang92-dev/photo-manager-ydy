@@ -130,6 +130,7 @@ class CollabService(QObject):
     specimen_status_changed = pyqtSignal(str)  # uid whose collab status changed
     pairing_requested = pyqtSignal(str, str, str)  # ip, hostname, their_group_code
     pairing_accepted  = pyqtSignal(str, str)       # ip, hostname
+    peer_join_review  = pyqtSignal(str, int, str)  # ip, port, display label
     specimens_updated = pyqtSignal()               # local DB got new/updated specimens
     project_bind_suggested = pyqtSignal(str, str, str)  # peer_hostname, project_name, sync_code
     photo_index_received = pyqtSignal(str, str, int, str)  # uid, kind, count, device_id
@@ -148,6 +149,7 @@ class CollabService(QObject):
         self._project_dir: str = ""
         self._group_code: str = ""
         self._session_name: str = ""   # human-readable session label
+        self._operator_name: str = ""  # user-chosen display name (broadcast to peers)
         self._running: bool = False
         self._diagnostics: list[Diagnostic] = []
         self._discovery_error: str = ""
@@ -171,6 +173,12 @@ class CollabService(QObject):
         # 5 s pull-sync re-firing conflict_detected for the same split-brain.
         # Reset on project switch.
         self._claim_collision_prompted: set[str] = set()
+
+        from app.services.collab_peer_trust import CollabPeerTrustStore
+
+        self._peer_trust = CollabPeerTrustStore()
+        # Session-only: avoid duplicate join-review dialogs for one peer.
+        self._peer_review_prompted: set[str] = set()
 
         self._server_thread: Optional[CollabServerThread] = None
         self._discovery_thread: Optional[CollabDiscoveryThread] = None
@@ -304,6 +312,21 @@ class CollabService(QObject):
 
         if not code:
             return False
+
+        if ctx is not None and settings is not None:
+            for key in ("operator_name",):
+                raw_op = getattr(settings, key, "")
+                if isinstance(raw_op, str) and raw_op.strip():
+                    self.set_operator_name(raw_op.strip())
+                    break
+            if not self._operator_name:
+                try:
+                    qs = getattr(settings, "_qs", settings)
+                    saved = str(qs.value("user/current_user", "", type=str)).strip()
+                    if saved:
+                        self.set_operator_name(saved)
+                except Exception:  # noqa: BLE001
+                    pass
 
         if ctx is not None:
             raw_dir = getattr(ctx, "current_project_dir", None)
@@ -468,7 +491,7 @@ class CollabService(QObject):
                       severity: str = "info") -> None:
         """Append an entry to the activity log and emit *activity_logged*."""
         if not actor:
-            actor = self._hostname
+            actor = self._operator_name or self._hostname
         self.activity_log.append(ActivityEntry(
             actor=actor,
             action=action,
@@ -487,6 +510,17 @@ class CollabService(QObject):
     def set_group_code(self, code: str) -> None:
         """Override the auto-derived group code (advanced / cross-project pairing)."""
         self._group_code = (code or "").strip()
+
+    @property
+    def operator_name(self) -> str:
+        return self._operator_name
+
+    def set_operator_name(self, name: str) -> None:
+        """Set the display name broadcast to teammates via /api/node/info."""
+        cleaned = (name or "").strip()
+        self._operator_name = cleaned
+        if cleaned:
+            self._session_name = f"{cleaned}的会话"
 
     # ── Session management (zero-config team collaboration) ───────────────
 
@@ -592,7 +626,128 @@ class CollabService(QObject):
         assignment, release, and conflict checks stay shared across the whole
         team, while specimen rows and media files remain project-scoped.
         """
-        return self._group_matches(peer)
+        return self._group_matches(peer) and self._peer_sync_allowed(peer)
+
+    @staticmethod
+    def _peer_has_operator(peer: PeerInfo) -> bool:
+        return bool(str(getattr(peer, "operator_name", "") or "").strip())
+
+    def _peer_key(self, peer: PeerInfo) -> str:
+        from app.services.collab_peer_trust import peer_key
+
+        return peer_key(peer.ip, peer.port)
+
+    def is_peer_blocked(self, peer: PeerInfo) -> bool:
+        return self._peer_trust.is_blocked(self._peer_key(peer))
+
+    def is_peer_trusted(self, peer: PeerInfo) -> bool:
+        return self._peer_trust.is_trusted(self._peer_key(peer))
+
+    def is_peer_pending_review(self, peer: PeerInfo) -> bool:
+        """Same-team peer with a name but not yet trusted/blocked."""
+        if not self._group_matches(peer):
+            return False
+        if not self._strict_trust_mode():
+            return False
+        key = self._peer_key(peer)
+        if self._peer_trust.is_blocked(key) or self._peer_trust.is_trusted(key):
+            return False
+        return self._peer_has_operator(peer)
+
+    def _strict_trust_mode(self) -> bool:
+        """Once any peer is trusted or blocked, new teammates need approval."""
+        return bool(self._peer_trust.trusted_keys() or self._peer_trust.blocked_keys())
+
+    def _peer_sync_allowed(self, peer: PeerInfo) -> bool:
+        """Gate all sync paths: blocked / unknown operators never sync."""
+        if not self._group_matches(peer):
+            return True
+        key = self._peer_key(peer)
+        if self._peer_trust.is_blocked(key):
+            return False
+        if not self._strict_trust_mode():
+            return True
+        if not self._peer_has_operator(peer):
+            return False
+        return self._peer_trust.is_trusted(key)
+
+    def trust_peer(self, ip: str, port: int) -> None:
+        """Allow sync with a teammate (persisted)."""
+        from app.services.collab_peer_trust import peer_key
+
+        key = peer_key(ip, port)
+        self._peer_trust.trust(key)
+        self._peer_review_prompted.discard(key)
+        with self._peers_lock:
+            peer = self._peers.get(key)
+        if peer is not None:
+            from app.services.collab_status import peer_display_name
+
+            name = peer_display_name(peer)
+            self._log_activity("joined", actor=name, detail=f"{name} 已加入协作组")
+        self.peers_changed.emit()
+        QTimer.singleShot(100, self._sync_all_peers)
+
+    def block_peer(self, ip: str, port: int, *, reason: str = "") -> None:
+        """Locally block a device — remove from peers and skip future sync."""
+        from app.services.collab_peer_trust import peer_key
+
+        key = peer_key(ip, port)
+        self._peer_trust.block(key)
+        self._peer_review_prompted.discard(key)
+        with self._peers_lock:
+            peer = self._peers.pop(key, None)
+        from app.services.collab_status import peer_display_name
+
+        label = peer_display_name(peer) if peer else key
+        detail = reason or f"已屏蔽 {label}，本机不再与其同步"
+        self._log_activity("blocked", actor=label, detail=detail, severity="warn")
+        self.peers_changed.emit()
+
+    def _remove_peer_key(self, key: str) -> None:
+        with self._peers_lock:
+            self._peers.pop(key, None)
+        self.peers_changed.emit()
+
+    def _review_peer_after_enrich(self, peer: PeerInfo) -> None:
+        """Apply trust policy once /node/info is known."""
+        if not self._group_matches(peer):
+            return
+
+        key = self._peer_key(peer)
+        if self._peer_trust.is_blocked(key):
+            self._remove_peer_key(key)
+            return
+
+        if not self._peer_has_operator(peer):
+            self.block_peer(
+                peer.ip,
+                peer.port,
+                reason=f"未知用户（{peer.hostname or peer.ip} 未填写操作者姓名），已自动屏蔽",
+            )
+            return
+
+        if self._peer_trust.is_trusted(key):
+            from app.services.collab_status import peer_display_name
+
+            name = peer_display_name(peer)
+            self._log_activity("joined", actor=name, detail=f"{name} 加入了协作组")
+            return
+
+        if not self._strict_trust_mode():
+            from app.services.collab_status import peer_display_name
+
+            name = peer_display_name(peer)
+            self._log_activity("joined", actor=name, detail=f"{name} 加入了协作组")
+            return
+
+        if key in self._peer_review_prompted:
+            return
+
+        self._peer_review_prompted.add(key)
+        from app.services.collab_status import peer_display_name
+
+        self.peer_join_review.emit(peer.ip, peer.port, peer_display_name(peer))
 
     @staticmethod
     def _normalize_project_label(name: str) -> str:
@@ -627,8 +782,10 @@ class CollabService(QObject):
 
         mine = self._normalize_project_label(self._project_name)
         theirs = self._normalize_project_label(peer.project_name)
-        if not mine or not theirs:
+        if not mine and not theirs:
             return True
+        if not mine or not theirs:
+            return False
         return mine == theirs
 
     def _data_sync_allowed(self, peer: PeerInfo) -> bool:
@@ -638,7 +795,7 @@ class CollabService(QObject):
         use it for UID claims/status; those are intentionally team-scoped via
         ``_task_sync_allowed``.
         """
-        return self._group_matches(peer) and self._project_matches(peer)
+        return self._group_matches(peer) and self._project_matches(peer) and self._peer_sync_allowed(peer)
 
     def _check_project_bind_suggestions(self, peers: list[PeerInfo]) -> None:
         """Detect teammates whose project has the same NAME but a different ID.
@@ -837,6 +994,9 @@ class CollabService(QObject):
             peer.group_code = data.get("groupCode", "")
         if data.get("sessionName"):
             peer.session_name = data["sessionName"]
+        op = str(data.get("operatorName") or "").strip()
+        if op:
+            peer.operator_name = op
         httpx = get_httpx()
         if httpx is not None:
             try:
@@ -898,6 +1058,7 @@ class CollabService(QObject):
                 hostname=data.get("hostname", ""),
                 group_code=data.get("groupCode", ""),
                 session_name=data.get("sessionName", ""),
+                operator_name=str(data.get("operatorName") or "").strip(),
                 project_name=data.get("projectName", ""),
                 project_id=data.get("projectId", ""),
                 manual=True,
@@ -907,10 +1068,15 @@ class CollabService(QObject):
         import concurrent.futures
         with concurrent.futures.ThreadPoolExecutor(max_workers=64) as pool:
             for peer in pool.map(_probe, targets):
-                if peer is not None:
-                    with self._peers_lock:
-                        self._peers[f"{peer.ip}:{peer.port}"] = peer
-                    found.append(peer)
+                if peer is None:
+                    continue
+                key = f"{peer.ip}:{peer.port}"
+                if self._peer_trust.is_blocked(key):
+                    continue
+                with self._peers_lock:
+                    self._peers[key] = peer
+                found.append(peer)
+                self._spawn(lambda p=peer: self._review_peer_after_enrich(p))
 
         if found:
             self.peers_changed.emit()
@@ -929,6 +1095,8 @@ class CollabService(QObject):
         if ip == _get_local_ip():
             return
         key = f"{ip}:{port}"
+        if self._peer_trust.is_blocked(key):
+            return
         # Capture the peer reference INSIDE the lock: a concurrent peer_lost
         # (or a peers_changed slot) can pop the key after we release the lock,
         # and the old ``peer = self._peers[key]`` read below would KeyError.
@@ -936,35 +1104,38 @@ class CollabService(QObject):
             peer = self._peers[key] = PeerInfo(ip=ip, port=port, hostname=hostname)
         logger.info("collab: peer found %s (%s:%d)", hostname, ip, port)
         self.peers_changed.emit()
-        self._log_activity("joined", actor=hostname, detail=f"{hostname} 加入了协作组")
-        # Enrich with group_code / project_name from /api/node/info so the peer
-        # can pass the group filter.  HTTP → do it off the main thread.
-        # §7 keep-old: previously ``peer = self._peers[key]`` was read here,
-        # outside the lock — racy (KeyError if peer lost between).  ``peer`` is
-        # now captured under the lock above; this reference stays valid even if
-        # the key is later popped.
-        # peer = self._peers[key]
-        self._spawn(lambda: (self._fetch_peer_info(peer), self.peers_changed.emit()))
+        self._spawn(lambda: self._after_peer_enriched(peer))
+
+    def _after_peer_enriched(self, peer: PeerInfo) -> None:
+        """Fetch /node/info off-thread, then apply trust / join-review policy."""
+        self._fetch_peer_info(peer)
+        self._review_peer_after_enrich(peer)
+        self.peers_changed.emit()
 
     def _on_peer_lost(self, ip: str, port: int) -> None:
         key = f"{ip}:{port}"
         with self._peers_lock:
             peer = self._peers.pop(key, None)
         hostname = peer.hostname if peer else f"{ip}:{port}"
+        from app.services.collab_status import peer_display_name
+
+        label = peer_display_name(peer) if peer else hostname
         logger.info("collab: peer lost %s:%d", ip, port)
         self.peers_changed.emit()
-        self._log_activity("left", actor=hostname, detail=f"{hostname} 离开了协作组")
+        self._log_activity("left", actor=label, detail=f"{label} 离开了协作组")
 
     def add_manual_peer(self, ip: str, port: int) -> None:
         """Manually register a peer (fallback when mDNS fails across VLANs)."""
         if ip == _get_local_ip():
             return
         key = f"{ip}:{port}"
+        if self._peer_trust.is_blocked(key):
+            return
         with self._peers_lock:
             self._peers[key] = PeerInfo(ip=ip, port=port, manual=True)
+            peer = self._peers[key]
         self.peers_changed.emit()
-        # Immediately attempt to pull info
-        self._fetch_peer_info(self._peers[key])
+        self._spawn(lambda: self._after_peer_enriched(peer))
 
     def remove_manual_peer(self, ip: str, port: int) -> None:
         """Remove a manually added peer."""
@@ -1000,12 +1171,32 @@ class CollabService(QObject):
         """Try to enrich PeerInfo with hostname/projectName from /api/node/info."""
         # §7 keep-old: inlined httpx.get(/info)+status check moved to _fetch_node_info
         data = self._fetch_node_info(peer.base_url, 3.0)
-        if data:
+        if isinstance(data, dict):
             peer.hostname = data.get("hostname", peer.hostname)
             peer.project_name = data.get("projectName", "")
             peer.project_id = data.get("projectId", "")
             peer.group_code = data.get("groupCode", "")
+            op = str(data.get("operatorName") or "").strip()
+            if op:
+                peer.operator_name = op
+            st = data.get("serverTime")
+            if isinstance(st, (int, float)):
+                peer.clock_skew_ms = (time.time() - float(st)) * 1000.0
+            raw_shared = data.get("sharedProjects")
+            if isinstance(raw_shared, list):
+                peer.shared_projects = raw_shared
             peer.last_seen = time.time()
+
+    def _ensure_peer_clock_skew(self, peer: PeerInfo) -> None:
+        """Measure clock skew once per peer before LWW merge (sync path)."""
+        if peer.clock_skew_ms is not None:
+            return
+        data = self._fetch_node_info(peer.base_url, 2.0)
+        if not isinstance(data, dict):
+            return
+        st = data.get("serverTime")
+        if isinstance(st, (int, float)):
+            peer.clock_skew_ms = (time.time() - float(st)) * 1000.0
 
     # ── Sync ──────────────────────────────────────────────────────────────
 
@@ -1091,6 +1282,7 @@ class CollabService(QObject):
         if not self._task_sync_allowed(peer):
             return 0, []
         try:
+            self._ensure_peer_clock_skew(peer)
             httpx = get_httpx()
             t0 = time.monotonic()
             resp = httpx.get(
@@ -1318,11 +1510,13 @@ class CollabService(QObject):
         path = self._drafts_path()
         if path is None:
             return
+        with self._offline_drafts_lock:
+            snapshot = [d.to_dict() for d in self._offline_drafts]
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(
                 json.dumps(
-                    [d.to_dict() for d in self._offline_drafts],
+                    snapshot,
                     ensure_ascii=False,
                     indent=2,
                 ),
@@ -1713,6 +1907,7 @@ class CollabService(QObject):
                 share_dirs.add(str(self._project_dir))
         return {
             "hostname":    self._hostname,
+            "operatorName": self._operator_name,
             "projectName": self._project_name,
             "projectId":   self._project_id,
             "groupCode":   self._group_code,

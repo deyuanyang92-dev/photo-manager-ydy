@@ -125,13 +125,44 @@ def test_picker_filters_previews_and_selects_current(qtbot, tmp_path, monkeypatc
         qtbot.addWidget(picker)
 
         picker._search_edit.setText("beta")
-        assert picker._checks[a].isHidden()
-        assert not picker._checks[b].isHidden()
-        assert "beta_project" in picker._preview_label.text()
+        assert picker._rows[a].isHidden()
+        assert not picker._rows[b].isHidden()
+        assert "beta_project" in picker._rows[b]._detail.text()
 
         picker._current_btn.click()
         assert picker.selected_directories() == {a}
-        assert "alpha_project" in picker._preview_label.text()
-        assert "已选择 1 个项目" in picker._summary_label.text()
+        assert "alpha_project" in picker._rows[a]._check.text()
+        assert "已选择 1 个" in picker._summary_label.text()
+    finally:
+        qs.setValue(key, old)
+
+
+def test_picker_select_all_visible(qtbot, tmp_path, monkeypatch):
+    a = _make_workspace(tmp_path, "proj_a")
+    b = _make_workspace(tmp_path, "proj_b")
+    monkeypatch.setattr(
+        "app.services.project_service.load_user_projects",
+        lambda: [
+            {"name": "proj_a", "directory": a},
+            {"name": "proj_b", "directory": b},
+        ],
+    )
+    from PyQt6.QtCore import QSettings
+    from app.config.settings import _APP, _ORG
+    qs = QSettings(_ORG, _APP)
+    key = "collab/shared_project_dirs"
+    old = qs.value(key, "", type=str)
+    ctx = SimpleNamespace(
+        current_project_dir=a,
+        settings=SimpleNamespace(_qs=qs),
+        collab_service=None,
+    )
+    try:
+        picker = CollabShareProjectPicker(ctx)
+        qtbot.addWidget(picker)
+
+        picker._all_btn.click()
+        assert picker.selected_directories() == {a, b}
+        assert "已选择 2 个" in picker._summary_label.text()
     finally:
         qs.setValue(key, old)

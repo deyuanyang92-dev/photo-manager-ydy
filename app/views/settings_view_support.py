@@ -11,6 +11,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from app.config.theme import COMPARISON_THEME_KEYS
+
 # ── QSettings key constants ───────────────────────────────────────────────────
 
 _K_INCOMING_SUBDIR = "project/incoming_subdir"
@@ -61,7 +63,7 @@ _K_UI_ICON_SEARCH = "ui/icon_search"       # default "🔍"
 _K_SCREENSHOT_TOOL_ENABLED = "ui/screenshot_tool_enabled"  # default false
 _K_DEBUG_USE_REAL_COMPRESSION = "debug/use_real_compression"  # default False
 
-_THEME_CHOICES = ("classic_light", "lab_light", "graphite_focus")
+_THEME_CHOICES = COMPARISON_THEME_KEYS
 
 # Families we surface first in the 字体 picker.  Common Windows/macOS/Linux CJK
 # and Latin faces are always listed because Qt may not enumerate cross-platform

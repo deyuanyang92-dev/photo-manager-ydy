@@ -1,9 +1,9 @@
-"""data_filter_view.py — 数据筛选视图(跨断面 specimen 查询/筛选/编辑).
+"""data_filter_view.py — 数据筛选(跨断面 specimen 查询/筛选/编辑).
 
 spec: docs/specs/2026-07-08-data-filter-view-design.md
 
-独立 nav 页「数据筛选」:
-- 顶部: 数据源多选(最近工作区 list_projects)。
+从「项目树」打开(弹窗), 不在顶栏单独占一页:
+- 顶部: 数据源多选(最近工作区 list_projects + 树所选断面)。
 - 筛选条: 动态字段( specimen_fields PRAGMA+注册表) + 操作符 + 值, 多条件 AND, [+条件]。
 - 状态: 默认只读; [🔒 解锁编辑] 会话登录(密码默认 123 + 修改人姓名)。
 - 统计: 总数 / 已取RNA / 按拍摄人·地区分组计数。
@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections import Counter
+from pathlib import Path
 from typing import Any, Optional
 
 from PyQt6.QtCore import Qt
@@ -49,16 +50,18 @@ from app.views.base_view import BaseView
 _OP_LABELS = {"eq": "等于", "contains": "包含", "is_empty": "为空", "not_empty": "非空"}
 _OP_BY_LABEL = {v: k for k, v in _OP_LABELS.items()}
 
+from app.config.specimen_fields import field_label as specimen_field_label
+
 # 结果表固定列(展示用, 编辑只允许改 specimens 实列)
 _COLUMNS = [
-    ("uid", "编号"),
-    ("_workspace_label", "断面"),
-    ("province", "省"),
-    ("site", "地区"),
-    ("photographer", "拍摄人"),
-    ("storage", "保存方式"),
+    ("uid", specimen_field_label("uid")),
+    ("_workspace_label", specimen_field_label("_workspace_label")),
+    ("province", specimen_field_label("province")),
+    ("site", specimen_field_label("site")),
+    ("photographer", specimen_field_label("photographer")),
+    ("storage", specimen_field_label("storage")),
     ("__rna", "已取RNA"),
-    ("scientific_name", "学名"),
+    ("scientific_name", specimen_field_label("scientific_name")),
 ]
 # 可编辑的实列(解锁后双击改); 派生/断面/编号/计算列禁改
 _EDITABLE_FIELDS = {"province", "site", "photographer", "storage", "scientific_name",
@@ -110,9 +113,15 @@ class DataFilterView(BaseView):
         self._btn_run = QPushButton("查询")
         self._btn_run.setObjectName("Primary")
         self._btn_run.clicked.connect(self._run_query)
+        self._btn_export = QPushButton("导出 CSV")
+        self._btn_export.setObjectName("Outline")
+        self._btn_export.setToolTip("导出当前查询结果（全部汇总字段）")
+        self._btn_export.setEnabled(False)
+        self._btn_export.clicked.connect(self._export_csv)
         cond_head.addWidget(self._btn_add_cond)
         cond_head.addWidget(self._btn_clear_cond)
         cond_head.addStretch(1)
+        cond_head.addWidget(self._btn_export)
         cond_head.addWidget(self._btn_run)
         root.addLayout(cond_head)
         self._cond_box = QVBoxLayout()
@@ -146,6 +155,9 @@ class DataFilterView(BaseView):
         self._table.itemChanged.connect(self._on_cell_changed)
         self._table.horizontalHeader().setStretchLastSection(True)
         self._table.itemSelectionChanged.connect(self._on_selection_changed)
+        from app.utils.tooltip_policy import suppress_popup_tooltip
+
+        suppress_popup_tooltip(self._table)
         root.addWidget(self._table, 1)
 
         # 照片预览(选中编号 → 该 workspace 下成果 tif 缩略, 同步解码 max 280)
@@ -190,6 +202,43 @@ class DataFilterView(BaseView):
             item.setCheckState(Qt.CheckState.Checked if d in was_checked else Qt.CheckState.Unchecked)
             self._src_list.addItem(item)
         self._src_list.blockSignals(False)
+
+    @staticmethod
+    def _norm_workspace_path(path: str) -> str:
+        try:
+            return str(Path(path).expanduser().resolve())
+        except OSError:
+            return str(path)
+
+    def preselect_workspaces(self, directories: list[str]) -> None:
+        """勾选指定断面; 不在最近列表里的也会补进数据源。"""
+        want = {self._norm_workspace_path(d) for d in directories if d}
+        if not want:
+            return
+        existing = {
+            self._norm_workspace_path(str(self._src_list.item(i).data(Qt.ItemDataRole.UserRole)))
+            for i in range(self._src_list.count())
+        }
+        for d in directories:
+            if not d:
+                continue
+            np = self._norm_workspace_path(d)
+            if np in existing:
+                continue
+            label = Path(d).name or d
+            it = QListWidgetItem(label)
+            it.setData(Qt.ItemDataRole.UserRole, d)
+            self._src_list.addItem(it)
+            existing.add(np)
+        self._src_list.blockSignals(True)
+        for i in range(self._src_list.count()):
+            it = self._src_list.item(i)
+            p = self._norm_workspace_path(str(it.data(Qt.ItemDataRole.UserRole)))
+            it.setCheckState(
+                Qt.CheckState.Checked if p in want else Qt.CheckState.Unchecked
+            )
+        self._src_list.blockSignals(False)
+        self._on_source_changed()
 
     def _set_workspaces(self, items: list[tuple[str, str]]) -> None:
         """测试/外部注入数据源 (path, label)。"""
@@ -261,9 +310,11 @@ class DataFilterView(BaseView):
             vcombo.setEditText(value)
 
     def _remove_condition_row(self, bar: QHBoxLayout, row: dict[str, QWidget]) -> None:
+        from app.utils.ui import dispose_widget
+
         for w in row.values():
             if isinstance(w, QWidget):
-                w.setParent(None)
+                dispose_widget(w)
         self._cond_box.removeItem(bar)
         if row in self._cond_rows:
             self._cond_rows.remove(row)
@@ -347,6 +398,37 @@ class DataFilterView(BaseView):
         self._rows = rows
         self._fill_table(rows)
         self._fill_stats(rows)
+        if hasattr(self, "_btn_export"):
+            self._btn_export.setEnabled(bool(rows))
+
+    def _export_csv(self) -> None:
+        if not self._rows:
+            ui.warn(self, "导出", "请先查询出结果再导出。")
+            return
+        path = ui.get_save_file_name(
+            self,
+            "导出筛选结果 CSV",
+            "数据筛选结果.csv",
+            "CSV (*.csv)",
+        )
+        if not path:
+            return
+        from app.services import cross_workspace_query_service as cwq
+
+        ws_paths = sorted({
+            str(r.get("_workspace") or "").strip()
+            for r in self._rows
+            if str(r.get("_workspace") or "").strip()
+        })
+        columns = cwq.summary_all_columns(ws_paths)
+        try:
+            out = cwq.export_filtered_specimens_csv(
+                self._rows, path, columns=columns or None,
+            )
+        except Exception as exc:
+            ui.warn(self, "导出失败", str(exc))
+            return
+        ui.info(self, "导出完成", f"已保存：\n{out}")
 
     def _fill_table(self, rows: list[dict[str, Any]]) -> None:
         self._suspend_cell_signal = True

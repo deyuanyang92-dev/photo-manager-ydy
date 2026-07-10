@@ -20,12 +20,16 @@ class FakeCollabService(QObject):
     def __init__(self) -> None:
         super().__init__()
         self.group_code = ""
+        self.operator_name = ""
         self.started = []
         self.added_peers = []
         self._running = False
 
     def set_group_code(self, code: str) -> None:
         self.group_code = code
+
+    def set_operator_name(self, name: str) -> None:
+        self.operator_name = name
 
     def is_running(self) -> bool:
         return self._running
@@ -83,6 +87,7 @@ def test_join_mode_uses_pairing_code_without_manual_group_or_ip(qtbot, tmp_path)
     code = encode_pairing("192.168.1.44", 5050, "TEAM-ABC-123")
     dlg._adv_toggle.setChecked(True)
     dlg._pairing_edit.setText(code)
+    dlg._operator_edit.setText("小王")
     dlg._go_next()
 
     assert ctx.settings.team_code == "TEAM-ABC-123"
@@ -104,6 +109,7 @@ def test_team_code_is_saved_even_when_service_is_unavailable(qtbot, tmp_path):
     qtbot.addWidget(dlg)
 
     dlg._group_code_edit.setText("TEAM-SAVED")
+    dlg._operator_edit.setText("小王")
     dlg._go_next()
 
     assert ctx.settings.collab_enabled is True

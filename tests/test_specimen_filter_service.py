@@ -88,3 +88,63 @@ def test_field_choices_distinct(tmp_path) -> None:
     assert svc.field_choices([str(a)], "province") == ["浙江", "福建"]
     # 派生维度值固定 是/否
     assert svc.field_choices([str(a)], "storage_is_rna") == ["是", "否"]
+
+
+def test_query_date_between(tmp_path) -> None:
+    conn_rows = [
+        ("u1", "R95E", "张三", "浙江", "Aa"),
+        ("u2", "R95E", "张三", "浙江", "Bb"),
+    ]
+    a = _make_ws(tmp_path / "a", conn_rows)
+    db = a / "_data" / "project.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute("ALTER TABLE specimens ADD COLUMN collection_date TEXT")
+    conn.execute("UPDATE specimens SET collection_date='2024-05-01' WHERE uid='u1'")
+    conn.execute("UPDATE specimens SET collection_date='2024-07-01' WHERE uid='u2'")
+    conn.commit()
+    conn.close()
+    res = svc.query_specimens(
+        [str(a)],
+        [{"field": "collection_date", "op": "between", "value": "2024-06-01|2024-06-30"}],
+    )
+    assert res == []
+    res2 = svc.query_specimens(
+        [str(a)],
+        [{"field": "collection_date", "op": "gte", "value": "2024-06-01"}],
+    )
+    assert {r["uid"] for r in res2} == {"u2"}
+
+
+def test_query_date_between_accepts_compact_ranges(tmp_path) -> None:
+    a = _make_ws(tmp_path / "a", [
+        ("u1", "R95E", "张三", "浙江", "Aa"),
+        ("u2", "R95E", "张三", "浙江", "Bb"),
+        ("u3", "R95E", "张三", "浙江", "Cc"),
+    ])
+    db = a / "_data" / "project.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute("ALTER TABLE specimens ADD COLUMN collection_date TEXT")
+    conn.execute("UPDATE specimens SET collection_date='2025-01-15' WHERE uid='u1'")
+    conn.execute("UPDATE specimens SET collection_date='2026-01-01' WHERE uid='u2'")
+    conn.execute("UPDATE specimens SET collection_date='2026-02-01' WHERE uid='u3'")
+    conn.commit()
+    conn.close()
+
+    res = svc.query_specimens(
+        [str(a)],
+        [{"field": "collection_date", "op": "between", "value": "202501-202601"}],
+    )
+    assert {r["uid"] for r in res} == {"u1", "u2"}
+
+
+def test_query_in_operator_matches_any_value(tmp_path) -> None:
+    a = _make_ws(tmp_path / "a", [
+        ("u1", "R95E", "张三", "浙江", "Aa"),
+        ("u2", "T95E", "李四", "浙江", "Bb"),
+        ("u3", "R75E", "王五", "福建", "Cc"),
+    ])
+    res = svc.query_specimens(
+        [str(a)],
+        [{"field": "photographer", "op": "in", "value": "张三|王五"}],
+    )
+    assert {r["uid"] for r in res} == {"u1", "u3"}

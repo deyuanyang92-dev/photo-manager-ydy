@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from typing import Optional
 
 # ── Shared typography / radius tokens (same across all themes) ─────────────
 
@@ -1117,6 +1118,15 @@ THEME_NAMES: dict[str, str] = {
     "high_contrast": "高对比",
 }
 
+# Curated comparison set exposed to non-technical users.  The complete theme
+# registry remains available for development, while this stable trio keeps the
+# product decision simple: preserved baseline + one light + one dark proposal.
+COMPARISON_THEME_KEYS: tuple[str, ...] = (
+    "classic_light",
+    "lab_light",
+    "graphite_focus",
+)
+
 # Active token dict — updated in-place by apply_theme(); icons.py references
 # this module-level dict so new icon calls always pick up the current palette.
 TOKENS: dict[str, str] = dict(THEME_CLASSIC_LIGHT)
@@ -1362,7 +1372,8 @@ QPushButton#NavSegment:checked {{
     font-weight: 600;
 }}
 
-QToolButton#NavMenuButton {{
+QToolButton#NavMenuButton,
+QToolButton#ThemeSwitcherButton {{
     background-color: {t["panel"]};
     color: {t["text_soft"]};
     border: 1px solid {t["border_medium"]};
@@ -1371,7 +1382,8 @@ QToolButton#NavMenuButton {{
     font-size: {t["font_sm"]};
     font-weight: 600;
 }}
-QToolButton#NavMenuButton:hover {{
+QToolButton#NavMenuButton:hover,
+QToolButton#ThemeSwitcherButton:hover {{
     color: {t["accent_hover"]};
     border-color: {t["accent"]};
     background-color: {t["accent_softer"]};

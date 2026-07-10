@@ -133,6 +133,9 @@ class LabelDesignerEditMixin:
         elif op == "dims":
             self._dims = {"w": float(ch.get("w") or self._dims.get("w", 60)),
                           "h": float(ch.get("h") or self._dims.get("h", 40))}
+            panel = getattr(self, "_panel", None)
+            if panel is not None and hasattr(panel, "sync_label_dims"):
+                panel.sync_label_dims(self._dims)
         # Structural edits (selection/list changed) rebuild the property panel;
         # value edits (the common case — slider drag, spinbox step, typed text)
         # only refresh the canvas + layers so the widget being edited survives.

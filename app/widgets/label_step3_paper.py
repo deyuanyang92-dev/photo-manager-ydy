@@ -172,11 +172,9 @@ class LabelStep3Paper(QWidget):
     # ── Build ──────────────────────────────────────────────────────────────────
 
     def _rebuild(self) -> None:
-        while self._cols_row.count():
-            it = self._cols_row.takeAt(0)
-            w = it.widget()
-            if w is not None:
-                w.setParent(None)
+        from app.utils.ui import clear_layout_widgets
+
+        clear_layout_widgets(self._cols_row)
         self._size_btns = {}
         self._paper_btns = {}
 

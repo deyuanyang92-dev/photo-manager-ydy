@@ -489,6 +489,23 @@ class TestGetProjectResults:
         assert result["groups"][0]["uid"] == "FJ-YGLZ-B2-DLC001-RD75E-20260506"
         assert len(result["groups"][0]["items"]) == 2
 
+    def test_legacy_gxfcg_result_files_group_by_specimen_uid(self, tmp_path):
+        """Legacy names: seq is result #, not storage — one group per specimen."""
+        from app.services.project_service import ensure_project_dirs, get_project_results
+
+        proj = tmp_path / "proj"
+        ensure_project_dirs(str(proj), create_root=True)
+        results = proj / "results"
+        for seq in (1, 2, 10, 11):
+            (results / f"GXFCG-BLW-BZC003-R-{seq}-20260618.tif").write_bytes(b"")
+        result = get_project_results(str(proj))
+        assert result["total"] == 4
+        assert len(result["groups"]) == 1
+        assert result["groups"][0]["uid"] == "GXFCG-BLW-BZC003-R-20260618"
+        assert len(result["groups"][0]["items"]) == 4
+        seqs = sorted(it["seq"] for it in result["groups"][0]["items"])
+        assert seqs == [1, 2, 10, 11]
+
     def test_different_uids_produce_separate_groups(self, tmp_path):
         """TIFs with different UIDs produce separate groups."""
         from app.services.project_service import ensure_project_dirs, get_project_results
@@ -747,6 +764,40 @@ class TestRecordRecentWorkspace:
         projects = record_recent_workspace(str(json_path), str(leaf))
         entry = next(p for p in projects if p.get("directory") == str(leaf.resolve()))
         assert entry["name"] == "断面a"
+
+
+class TestRelocateProjectDirectory:
+    def test_rewrites_stored_path(self, tmp_path):
+        import json as _json
+        from app.services.project_service import relocate_project_directory
+
+        old = tmp_path / "old"
+        new = tmp_path / "new"
+        old.mkdir()
+        new.mkdir()
+        json_path = tmp_path / "user_projects.json"
+        json_path.write_text(
+            _json.dumps({
+                "version": 1,
+                "projects": [{"directory": str(old), "name": "old"}],
+            }),
+            encoding="utf-8",
+        )
+        assert relocate_project_directory(str(json_path), str(old), str(new)) is True
+        data = _json.loads(json_path.read_text(encoding="utf-8"))
+        assert data["projects"][0]["directory"] == str(new.resolve())
+
+    def test_missing_new_path_raises(self, tmp_path):
+        from app.services.project_service import relocate_project_directory
+
+        json_path = tmp_path / "user_projects.json"
+        json_path.write_text('{"version":1,"projects":[]}', encoding="utf-8")
+        with pytest.raises(FileNotFoundError):
+            relocate_project_directory(
+                str(json_path),
+                str(tmp_path / "old"),
+                str(tmp_path / "missing"),
+            )
 
 
 class TestSaveProjectDescriptor:

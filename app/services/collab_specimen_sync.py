@@ -58,10 +58,13 @@ def write_specimens_to_local_db(project_dir: str, specimens: list[dict]) -> int:
     """Merge incoming specimen records into a project DB (LWW).
 
     Per-record rule using ``collab_updated_at`` (ISO-8601, string-orderable):
-      - local row missing               → write
-      - remote stamp >  local stamp     → write (remote is newer)
+      - local row missing               → INSERT (columns present in payload)
+      - remote stamp >  local stamp     → UPDATE only payload columns
       - remote stamp <= local stamp     → skip  (local is same/newer)
       - remote unstamped                → write only if local row missing
+
+    Existing rows are never replaced wholesale — partial payloads cannot wipe
+    columns that were not included in the peer push.
     """
     if not project_dir or not specimens:
         return 0
@@ -74,26 +77,41 @@ def write_specimens_to_local_db(project_dir: str, specimens: list[dict]) -> int:
                 uid = spec.get("uid")
                 if not uid:
                     continue
+                cols = [c for c in SPEC_SYNC_COLS if c in spec]
+                if "uid" not in cols:
+                    continue
                 row = db.execute(
                     "SELECT collab_updated_at FROM specimens WHERE uid=?",
                     (uid,),
                 ).fetchone()
                 remote_ts = str(spec.get("collab_updated_at") or "")
-                if row is not None:
-                    local_ts = str(row[0] or "")
-                    if not remote_ts:
-                        continue          # unstamped remote never overwrites
-                    if local_ts and remote_ts <= local_ts:
-                        continue          # local copy is same or newer
-                cols = [c for c in SPEC_SYNC_COLS if c in spec]
-                if "uid" not in cols:
+                payload = {c: spec.get(c) for c in cols}
+
+                if row is None:
+                    placeholders = ", ".join(f":{c}" for c in cols)
+                    col_str = ", ".join(cols)
+                    db.execute(
+                        f"INSERT INTO specimens ({col_str}) VALUES ({placeholders})",
+                        payload,
+                    )
+                    written += 1
                     continue
-                placeholders = ", ".join(f":{c}" for c in cols)
-                col_str = ", ".join(cols)
+
+                local_ts = str(row[0] or "")
+                if not remote_ts:
+                    continue          # unstamped remote never overwrites
+                if local_ts and remote_ts <= local_ts:
+                    continue          # local copy is same or newer
+
+                update_cols = [c for c in cols if c != "uid"]
+                if not update_cols:
+                    continue
+                set_clause = ", ".join(f"{c}=:{c}" for c in update_cols)
+                update_payload = {c: payload[c] for c in update_cols}
+                update_payload["uid"] = uid
                 db.execute(
-                    f"INSERT OR REPLACE INTO specimens ({col_str}) "
-                    f"VALUES ({placeholders})",
-                    {c: spec.get(c) for c in cols},
+                    f"UPDATE specimens SET {set_clause} WHERE uid=:uid",
+                    update_payload,
                 )
                 written += 1
             db.commit()

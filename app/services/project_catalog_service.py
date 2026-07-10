@@ -221,7 +221,17 @@ def register_workspace(
     )
     conn.commit()
     row = _fetch_one_row(conn, "SELECT * FROM workspaces WHERE workspace_id=?", (meta["workspace_id"],))
-    return {"project": project, "workspace": dict(row), "workspace_meta": meta}
+    result = {"project": project, "workspace": dict(row), "workspace_meta": meta}
+    # 登记后刷新根库索引缓存（失败不阻断进入工作区）
+    try:
+        from app.services.workspace_index_service import refresh_workspace_index
+
+        result["index_cache"] = refresh_workspace_index(
+            str(root), str(workspace), workspace_id=meta["workspace_id"],
+        )
+    except Exception:
+        pass
+    return result
 
 
 def list_registered_workspaces(root_dir: str) -> list[dict]:

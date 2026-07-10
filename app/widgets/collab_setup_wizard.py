@@ -1,4 +1,4 @@
-"""collab_setup_wizard.py — 2-step pairing wizard for collaboration.
+"""collab_setup_wizard.py — team permanent-code pairing wizard.
 
 Step 1: Everyone enters the same team pairing code (+ optional connection paste).
 Step 2: Wait for teammates on LAN, then finish.
@@ -45,7 +45,7 @@ class CollabSetupWizard(QDialog):
     def __init__(self, ctx: "AppContext", parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.ctx = ctx
-        self.setWindowTitle("协作配对向导")
+        self.setWindowTitle("团队永久码")
         self.setMinimumSize(520, 520)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
@@ -60,7 +60,7 @@ class CollabSetupWizard(QDialog):
         root.setContentsMargins(24, 20, 24, 16)
         root.setSpacing(14)
 
-        self._step_label = QLabel("步骤 1/2：团队永久码与共享项目")
+        self._step_label = QLabel("步骤 1/2：设置团队永久码")
         self._step_label.setObjectName("CardTitle")
         root.addWidget(self._step_label)
 
@@ -71,7 +71,7 @@ class CollabSetupWizard(QDialog):
         s1.setSpacing(12)
 
         intro = QLabel(
-            "几个人一起拍时，设置一个团队永久码，并勾选要共享的项目。"
+            "固定团队长期协作时，所有电脑填写同一个团队永久码。项目码是另一种独立方式，请在协作中心首页打开。"
         )
         intro.setObjectName("MutedSmall")
         intro.setWordWrap(True)
@@ -111,7 +111,7 @@ class CollabSetupWizard(QDialog):
         op_label = QLabel("我的名字:")
         op_label.setFixedWidth(88)
         self._operator_edit = QLineEdit()
-        self._operator_edit.setPlaceholderText("例如 小王")
+        self._operator_edit.setPlaceholderText("必填，例如 小王")
         existing = self._settings_value("user/current_user", "")
         if existing:
             self._operator_edit.setText(existing)
@@ -121,6 +121,7 @@ class CollabSetupWizard(QDialog):
 
         self._share_picker = CollabShareProjectPicker(self.ctx)
         s1.addWidget(self._share_picker)
+        self._share_picker.hide()
 
         self._adv_toggle = QPushButton("▸ 备用：粘贴连接码（局域网找不到时用）")
         self._adv_toggle.setObjectName("Ghost")
@@ -157,7 +158,7 @@ class CollabSetupWizard(QDialog):
         s2.setSpacing(12)
 
         wait_hint = QLabel(
-            "团队永久码已保存。下面选择要互传照片的项目；编号任务会随团队永久码自动同步。"
+            "团队永久码已保存。队友使用同一个码后会自动连接；项目码请回到协作中心首页单独打开。"
         )
         wait_hint.setObjectName("MutedSmall")
         wait_hint.setWordWrap(True)
@@ -167,6 +168,7 @@ class CollabSetupWizard(QDialog):
         self._share_project_label.setObjectName("CollabScopeState")
         self._share_project_label.setWordWrap(True)
         s2.addWidget(self._share_project_label)
+        self._share_project_label.hide()
 
         proj_btn_row = QHBoxLayout()
         self._pick_project_btn = QPushButton("选择队友项目…")
@@ -179,6 +181,8 @@ class CollabSetupWizard(QDialog):
         proj_btn_row.addWidget(self._copy_project_btn)
         proj_btn_row.addStretch()
         s2.addLayout(proj_btn_row)
+        self._pick_project_btn.hide()
+        self._copy_project_btn.hide()
         self._refresh_share_project_hint()
 
         team_row = QHBoxLayout()
@@ -342,11 +346,16 @@ class CollabSetupWizard(QDialog):
                     self._group_code_edit.setFocus()
                     return
 
+            operator = self._operator_edit.text().strip()
+            if not operator:
+                self._operator_edit.setFocus()
+                return
+
             self._start_service(code)
             self._share_picker.apply_selection()
             self._connect_pending_pair()
             self._step = 2
-            self._step_label.setText("步骤 2/2：选择共享项目")
+            self._step_label.setText("步骤 2/2：团队连接信息")
             self._team_display.setText(code)
             self._step1.hide()
             self._step2.show()
@@ -358,13 +367,16 @@ class CollabSetupWizard(QDialog):
         elif self._step == 2:
             code = self._group_code_edit.text().strip()
             operator = self._operator_edit.text().strip()
+            if not operator:
+                self._operator_edit.setFocus()
+                return
             self.setup_completed.emit(code, operator)
             self.accept()
 
     def _go_back(self) -> None:
         if self._step == 2:
             self._step = 1
-            self._step_label.setText("步骤 1/2：团队永久码与共享项目")
+            self._step_label.setText("步骤 1/2：设置团队永久码")
             self._step2.hide()
             self._step1.show()
             self._back_btn.hide()
@@ -389,6 +401,8 @@ class CollabSetupWizard(QDialog):
         if svc is None:
             return
 
+        if operator:
+            svc.set_operator_name(operator)
         svc.set_group_code(group_code)
         project_name = getattr(self.ctx, "current_project_dir", "") or getattr(s, "last_project_dir", "") or ""
         if not svc.is_running():
@@ -398,6 +412,14 @@ class CollabSetupWizard(QDialog):
                 project_dir=getattr(self.ctx, "current_project_dir", None) or project_name,
             )
 
+        try:
+            svc.server_ready.disconnect(self._on_server_ready)
+        except TypeError:
+            pass
+        try:
+            svc.peers_changed.disconnect(self._refresh_peers)
+        except TypeError:
+            pass
         svc.server_ready.connect(self._on_server_ready)
         svc.peers_changed.connect(self._refresh_peers)
 

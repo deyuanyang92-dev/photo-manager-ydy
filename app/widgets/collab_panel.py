@@ -384,6 +384,8 @@ class CollabPanel(QWidget):
         svc.activity_logged.connect(self._refresh_activity)
         svc.pairing_requested.connect(self._on_pairing_requested)
         svc.pairing_accepted.connect(self._on_pairing_accepted)
+        if hasattr(svc, "peer_join_review"):
+            svc.peer_join_review.connect(self._on_peer_join_review)
         svc.project_bind_suggested.connect(self._on_project_bind_suggested)
         if hasattr(svc, "photo_index_received"):
             svc.photo_index_received.connect(self._on_photo_index_received)
@@ -845,6 +847,30 @@ class CollabPanel(QWidget):
                 svc.accept_pairing(from_ip, peer_port, their_code)
                 self._refresh_devices()
                 self._refresh_health()
+
+    def _on_peer_join_review(self, ip: str, port: int, label: str) -> None:
+        from PyQt6.QtWidgets import QMessageBox
+
+        from app.utils import ui
+
+        reply = ui.question(
+            self,
+            "新设备加入",
+            f"<b>{label}</b>（{ip}）请求加入你的协作团队。\n是否允许与本机同步？",
+            buttons=(
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            ),
+            default=QMessageBox.StandardButton.No,
+        )
+        svc = self._svc
+        if svc is None:
+            return
+        if reply == QMessageBox.StandardButton.Yes:
+            svc.trust_peer(ip, port)
+        else:
+            svc.block_peer(ip, port)
+        self._refresh_devices()
+        self._refresh_health()
 
     def _on_project_bind_suggested(self, peer_name: str, project_name: str,
                                    sync_code: str) -> None:

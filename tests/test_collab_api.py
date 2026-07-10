@@ -54,3 +54,42 @@ class TestGetHttpx:
         get_httpx()           # warm the cache
         assert get_httpx() is httpx
 
+
+class TestLanGuardOnCoreEndpoints:
+    """Sensitive endpoints reject non-LAN callers (ASGI client = loopback OK)."""
+
+    def _app(self):
+        from app.services.collab_service import TaskStore, _build_fastapi_app
+        return _build_fastapi_app(
+            TaskStore(),
+            lambda: {"groupCode": "G1", "projectId": "P1", "serverTime": 0},
+        )
+
+    def test_node_info_requires_lan(self):
+        import asyncio
+        import httpx
+
+        app = self._app()
+
+        async def request():
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                return await client.get("/api/node/info")
+
+        resp = asyncio.run(request())
+        assert resp.status_code == 200
+
+    def test_tasks_list_requires_lan(self):
+        import asyncio
+        import httpx
+
+        app = self._app()
+
+        async def request():
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                return await client.get("/api/collab/tasks", params={"groupCode": "G1"})
+
+        resp = asyncio.run(request())
+        assert resp.status_code == 200
+

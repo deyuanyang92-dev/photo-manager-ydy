@@ -52,6 +52,22 @@ class AppContext:
         self.edit_unlocked: bool = False
         self.edit_actor: str = ""           # 当前解锁操作员(审计 / 修改人姓名)
 
+    def ensure_collab_service(self) -> Optional["CollabService"]:
+        """Create the LAN collab service on first use (saves startup memory)."""
+        if self.collab_service is not None:
+            return self.collab_service
+        try:
+            from app.services.collab_service import CollabService
+
+            svc = CollabService()
+            self.collab_service = svc
+            svc.set_group_code(self.settings.team_code)
+            if self._project_dir and hasattr(svc, "set_project_dir"):
+                svc.set_project_dir(self._project_dir)
+            return svc
+        except Exception:
+            return None
+
     # ── Project dir ───────────────────────────────────────────────────
 
     @property

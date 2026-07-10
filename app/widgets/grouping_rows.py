@@ -119,7 +119,7 @@ class _CrossGroupList(QListWidget):
         # Add to this list widget.
         new_item = QListWidgetItem(item.text())
         new_item.setData(Qt.ItemDataRole.UserRole, jpg_path)
-        new_item.setToolTip(jpg_path)
+        new_item.setToolTip("")
         self.addItem(new_item)
 
         event.setDropAction(Qt.DropAction.MoveAction)
@@ -185,7 +185,7 @@ class _ComposedRow(QFrame):
         tiff_name = Path(tiff_path).name if tiff_path else "(无 TIFF)"
         tiff_lbl = QLabel(tiff_name)
         tiff_lbl.setObjectName("Mono")
-        tiff_lbl.setToolTip(tiff_path)
+        tiff_lbl.setToolTip("")
         tiff_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         if tiff_path:
             tiff_lbl.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -348,7 +348,7 @@ class _ThumbAreaResizeHandle(QFrame):
         self.setObjectName("ThumbResizeGrip")
         self.setFixedHeight(8)
         self.setCursor(Qt.CursorShape.SizeVerCursor)
-        self.setToolTip("上下拖动，调整缩略图区域高度")
+        self.setToolTip("")
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
@@ -451,21 +451,19 @@ class _DraftGroupRow(QFrame):
         self._jpg_list.setSpacing(3)
         self._jpg_list.setUniformItemSizes(True)
         self._jpg_list.setFixedHeight(124)  # 2 行 50px 缩略图；不 stretch —— 否则把下方按钮挤出视口
-        self._jpg_list.setToolTip(
-            "从监控区或文件夹拖入 JPG/TIF；组内可排序；右键移除；可组间拖动"
-        )
+        self._jpg_list.setToolTip("")
         for p in self._group.jpg_paths:
             item = QListWidgetItem(self._thumb_icon(p), "")
             item.setData(Qt.ItemDataRole.UserRole, p)
             item.setData(Qt.ItemDataRole.UserRole + 1, "jpg")
-            item.setToolTip(Path(p).name)
+            item.setToolTip("")
             self._jpg_list.addItem(item)
         tiff_path = self._group.composed_tiff_path or ""
         if tiff_path:
             tiff_item = QListWidgetItem(self._tiff_icon(), Path(tiff_path).name)
             tiff_item.setData(Qt.ItemDataRole.UserRole, tiff_path)
             tiff_item.setData(Qt.ItemDataRole.UserRole + 1, "tiff")
-            tiff_item.setToolTip(tiff_path)
+            tiff_item.setToolTip("")
             tiff_item.setFlags(Qt.ItemFlag.NoItemFlags)
             self._jpg_list.addItem(tiff_item)
         if not self._group.jpg_paths and not tiff_path:
@@ -485,7 +483,7 @@ class _DraftGroupRow(QFrame):
             tiff_name_lbl.setTextInteractionFlags(
                 Qt.TextInteractionFlag.TextSelectableByMouse
             )
-            tiff_name_lbl.setToolTip(tiff_path)
+            tiff_name_lbl.setToolTip("")
             tiff_name_lbl.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
             tiff_name_lbl.customContextMenuRequested.connect(
                 lambda pos, label=tiff_name_lbl: self._show_tiff_menu(

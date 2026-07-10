@@ -66,6 +66,7 @@ ALL_VIEW_SPECS: tuple[LazyViewSpec, ...] = (
     LazyViewSpec("worms", "WoRMS 分类库", "app.views.worms_view", "WormsView"),
     LazyViewSpec("taxonomy", "内置分类库", "app.views.taxonomy_view", "TaxonomyView"),
     LazyViewSpec("coords", "坐标工具", "app.views.coords_view", "CoordsView"),
+    LazyViewSpec("tiff_jpeg_tool", "TIFF 转 JPG", "app.views.tiff_jpeg_tool_view", "TiffJpegToolView"),
     LazyViewSpec("summary", "项目汇总", "app.views.summary_view", "SummaryView"),
     LazyViewSpec(
         "collection_records",
@@ -73,7 +74,6 @@ ALL_VIEW_SPECS: tuple[LazyViewSpec, ...] = (
         "app.views.collection_records_view",
         "CollectionRecordsView",
     ),
-    LazyViewSpec("data_filter", "数据筛选", "app.views.data_filter_view", "DataFilterView"),
     LazyViewSpec("collection_map", "采集地图", "app.views.collection_map_view", "CollectionMapView"),
     LazyViewSpec("settings", "配置", "app.views.settings_view", "SettingsView"),
 )

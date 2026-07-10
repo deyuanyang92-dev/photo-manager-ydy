@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Optional
 
 from app.utils.path_utils import normalize_path, is_wsl_runtime
+from app.services.specimen.attribution_types import AttributionCtx
 
 
 # Path.resolve() hits the filesystem (an lstat per path component + symlink
@@ -78,24 +79,6 @@ class ScanResult:
     processed_tiff_count: int = 0
     incoming_jpg_dir: str = ""
     results_dir: str = ""
-
-
-@dataclass
-class AttributionCtx:
-    """Pre-built attribution context; passed to attribute_jpg.
-
-    Fields mirror the return value of buildAttribution() in monitor-service.js.
-    """
-    # P0: explicit unassign blacklist (resolved absolute paths)
-    explicit_unassigns: set = field(default_factory=set)
-    # P1: grouping-confirmed path → uid
-    path_to_uid: dict = field(default_factory=dict)
-    # P2: manual-assign path → uid
-    assign_to_uid: dict = field(default_factory=dict)
-    # P3: sorted activation events [{specimenUniqueId, eventAt}]
-    activations: list = field(default_factory=list)
-    # JPGs already consumed by an organized group whose ZIP exists.
-    organized_group_paths: set = field(default_factory=set)
 
 
 # ── Pure attribution function ─────────────────────────────────────────────────

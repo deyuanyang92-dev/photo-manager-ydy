@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
+# NOTE: ``Any`` is used for typed record/workflow payloads passed through
+# worker/result helpers; keep this import explicit for static checks and IDEs.
 
 from PyQt6.QtWidgets import QDialog, QMessageBox
 

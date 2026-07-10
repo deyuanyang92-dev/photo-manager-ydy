@@ -266,9 +266,9 @@ class NamingPanel(QWidget):
             return frame, grid
 
         # Auto-derived naming segments (web .auto class)
-        self._province = _make_compact_line_edit("如 FJ", auto=True)
+        self._province = _make_compact_line_edit("如 GXFCG / FJ", auto=True)
         self._province.setMinimumWidth(60)
-        self._site = _make_compact_line_edit("如 YGLZ", auto=True)
+        self._site = _make_compact_line_edit("如 BLW / YGLZ", auto=True)
         self._site.setMinimumWidth(60)
         self._station = _make_compact_line_edit("如 B2", auto=True)
         self._species_id = _make_compact_line_edit("如 DLC001 / MIX01 / 管号")
@@ -278,12 +278,12 @@ class NamingPanel(QWidget):
         geo_grid.setColumnStretch(0, 1)
         geo_grid.setColumnStretch(1, 1)
         geo_grid.setColumnStretch(2, 1)
-        geo_grid.addWidget(_field("地区", self._province, required=True,
+        geo_grid.addWidget(_field("省/市", self._province, required=True,
                                   key="province",
-                                  help_text="地区代码，如 FJ＝福建；通常由项目自动推导"), 0, 0)
-        geo_grid.addWidget(_field("样地", self._site, required=True,
+                                  help_text="省/市代码，如 GXFCG、FJ；通常由项目自动推导"), 0, 0)
+        geo_grid.addWidget(_field("地区/样地", self._site, required=True,
                                   key="site",
-                                  help_text="样地代码，如 YGLZ；通常自动推导"), 0, 1)
+                                  help_text="地区/样地代码，如 BLW、YGLZ；通常自动推导"), 0, 1)
         geo_grid.addWidget(_field("站位", self._station,
                                   key="station",
                                   help_text="采集站位，如 B2；缺省时唯一编号自动少一段"), 0, 2)
@@ -293,9 +293,10 @@ class NamingPanel(QWidget):
         identity_grid.setColumnStretch(0, 0)
         identity_grid.setColumnStretch(1, 0)
         identity_grid.setColumnStretch(2, 1)
-        identity_grid.addWidget(_field("样品/物种标签", self._species_id, required=True,
+        identity_grid.addWidget(_field("物种编号", self._species_id, required=True,
                                        key="species_id",
-                                       help_text="可填物种缩写编号或现场混合管标签；这是唯一编号的一段，不是完整 voucher number"), 0, 0)
+                                       help_text="UID 中的一段，如 BZC003、DLC001；"
+                                       "不是完整标本号，也不是保存方式 R"), 0, 0)
 
         # Sequence hint + 填入建议 — inline (no popup), aligned under the field column.
         seq_cell = QWidget()
@@ -1512,13 +1513,13 @@ class NamingPanel(QWidget):
             issues.append("缺少必填：" + "、".join(missing))
 
         if province and not province.isalpha():
-            issues.append("地区应为字母（如 FJ）")
+            issues.append("省/市应为字母（如 GXFCG、FJ）")
         if site and len(site) < 2:
-            issues.append("样地代码太短")
+            issues.append("地区/样地代码太短")
         if species_id:
             normalized_label = re.sub(r"[-\s]+", "_", species_id).strip("_")
             if not normalized_label:
-                issues.append("样品/物种标签不能为空")
+                issues.append("物种编号不能为空")
         if col_date and len(col_date) != 8:
             issues.append("采集日期应为 8 位 YYYYMMDD")
         if storage and not any(storage.upper().startswith(c) for c in ("T", "D", "R")):
@@ -1579,7 +1580,7 @@ class NamingPanel(QWidget):
             # 全文说明由灰字行(_pres_detail)承担。
             item = QStandardItem(code)
             item.setData(code, Qt.ItemDataRole.UserRole)
-            item.setToolTip(detail)
+            item.setToolTip("")
             model.appendRow(item)
 
         def _add_separator() -> None:

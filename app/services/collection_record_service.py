@@ -415,6 +415,70 @@ def set_station_coords(
     return int(cur.rowcount or 0)
 
 
+def sync_coords_from_capture(
+    db: sqlite3.Connection,
+    *,
+    province: Optional[str],
+    site: Optional[str],
+    station: Optional[str],
+    collection_date: Optional[str],
+    lon: Any,
+    lat: Any,
+    extra: Optional[dict] = None,
+) -> str:
+    """把拍照界面填的经纬度回写到采集记录（有则更新，无则新建）.
+
+    关联键与 lookup 相同：``province + site + station + collection_date``。
+    - 四键不全 → ``"skipped"``（不写库）
+    - 已有记录 → 只改 ``lon``/``lat``，不碰生境/潮水等其它字段 → ``"updated"``
+    - 无记录 → 新建一行（四键 + 坐标；``extra`` 可带人员/海区等）→ ``"created"``
+
+    空经纬度按 NULL 存（与 upsert 一致）。返回动作标签便于测试/日志。
+    """
+    p = str(province or "").strip()
+    s = str(site or "").strip()
+    st = str(station or "").strip()
+    d = str(collection_date or "").strip()
+    if not (p and s and st and d):
+        return "skipped"
+
+    lon_v = _coerce_record_column_value("lon", lon)
+    lat_v = _coerce_record_column_value("lat", lat)
+    # 两边都空：不新建空壳记录；已有记录则允许清空坐标
+    both_empty = lon_v is None and lat_v is None
+
+    existing = lookup_record(db, p, s, st, d)
+    if existing is not None:
+        db.execute(
+            "UPDATE collection_records SET lon=?, lat=? WHERE id=?",
+            (lon_v, lat_v, existing["id"]),
+        )
+        db.commit()
+        return "updated"
+
+    if both_empty:
+        return "skipped"
+
+    row: dict[str, Any] = {
+        "province": p,
+        "site": s,
+        "station": st,
+        "collection_date": d,
+        "lon": lon_v,
+        "lat": lat_v,
+    }
+    if extra:
+        for key in (
+            "geo_area", "collector", "photographer", "identifier",
+            "photo_date", "station_label", "habitat",
+        ):
+            val = extra.get(key)
+            if val not in (None, ""):
+                row[key] = val
+    upsert_record(db, row)
+    return "created"
+
+
 # ── Auto-fill ─────────────────────────────────────────────────────────────────
 # The subset of record fields the fixed workbench capture cards can hold.
 # Dynamic naming fields (for example habitat) are filled separately by the

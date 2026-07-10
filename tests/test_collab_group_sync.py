@@ -389,14 +389,17 @@ class TestSyncPeerGroupFilter:
         svc = CollabService()
         svc.set_group_code("G1")
         peer = PeerInfo(ip="1.2.3.4", port=5050, group_code="G1")
+        info_resp = MagicMock()
+        info_resp.status_code = 200
+        info_resp.json.return_value = {"serverTime": 1_700_000_000.0}
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.json.return_value = [
             {"uid": "U9", "status": "created", "updatedAt": "2026-01-01T00:00:00+00:00"}
         ]
-        with patch("httpx.get", return_value=mock_resp) as mock_get:
+        with patch("httpx.get", side_effect=[info_resp, mock_resp]) as mock_get:
             changed = svc._sync_peer(peer)
-        mock_get.assert_called_once()
+        assert mock_get.call_count == 2
         assert changed == 1
         assert svc.store.exists("U9")
 
@@ -411,14 +414,17 @@ class TestSyncPeerGroupFilter:
             group_code="G1",
             project_id="P-OTHER",
         )
+        info_resp = MagicMock()
+        info_resp.status_code = 200
+        info_resp.json.return_value = {"serverTime": 1_700_000_000.0}
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.json.return_value = [
             {"uid": "U10", "status": "created", "updatedAt": "2026-01-01T00:00:00+00:00"}
         ]
-        with patch("httpx.get", return_value=mock_resp) as mock_get:
+        with patch("httpx.get", side_effect=[info_resp, mock_resp]) as mock_get:
             changed = svc._sync_peer(peer)
-        mock_get.assert_called_once()
+        assert mock_get.call_count == 2
         assert changed == 1
         assert svc.store.exists("U10")
         assert svc._data_sync_allowed(peer) is False

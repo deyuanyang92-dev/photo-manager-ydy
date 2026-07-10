@@ -306,6 +306,9 @@ class SettingsTabsMixin:
         self._preset_list.setAlternatingRowColors(True)
         self._preset_list.setToolTip("已保存的合成参数预设，双击应用")
         self._preset_list.itemDoubleClicked.connect(self._apply_selected_preset)
+        from app.utils.tooltip_policy import suppress_popup_tooltip
+
+        suppress_popup_tooltip(self._preset_list)
         preset_v.addWidget(self._preset_list)
 
         # 渲染参数编辑器 —— 复刻 Helicon Focus 桌面端 "Rendering" 面板:
@@ -911,6 +914,18 @@ class SettingsTabsMixin:
         perf_note.setWordWrap(True)
         theme_form.addRow("", perf_note)
 
+        self._project_tree_ux_v2_chk = QCheckBox(tr("项目树精简界面（推荐）"))
+        self._project_tree_ux_v2_chk.setToolTip(
+            tr("顶栏更干净、筛选不误全选、右栏固定「进入」；取消勾选可立即退回旧版布局。")
+        )
+        self._project_tree_ux_v2_chk.stateChanged.connect(self._on_project_tree_ux_v2_changed)
+        theme_form.addRow(tr("项目树"), self._project_tree_ux_v2_chk)
+
+        tree_ux_note = QLabel(tr("关闭后恢复旧顶栏四枚切换钮与中栏全部控件；立即生效。"))
+        tree_ux_note.setObjectName("MutedSmall")
+        tree_ux_note.setWordWrap(True)
+        theme_form.addRow("", tree_ux_note)
+
         tab.body.addWidget(theme_box)
         tab.body.addSpacing(12)
 
@@ -1118,6 +1133,18 @@ class SettingsTabsMixin:
         update_btn.clicked.connect(self._request_update_check)
         form.addRow("软件更新", update_btn)
 
+        self._auto_update_chk = QCheckBox("启动时自动检查更新（发现新版本才提示）")
+        self._auto_update_chk.setToolTip(
+            "对标 VS Code/Cursor：后台静默检查，可在提示里选择「跳过此版本」。"
+        )
+        from PyQt6.QtCore import QSettings as _QSettings
+        _qs_upd = _QSettings("SpecimenPhotoWorkbench", "标本照片工作台")
+        self._auto_update_chk.setChecked(
+            str(_qs_upd.value("update/auto_check", "true")).lower() in {"true", "1", "yes"}
+        )
+        self._auto_update_chk.toggled.connect(self._save_auto_update_pref)
+        form.addRow("", self._auto_update_chk)
+
         platform_label = QLabel(
             f"{platform.system()} {platform.release()} / Python {platform.python_version()}"
         )
@@ -1174,5 +1201,10 @@ class SettingsTabsMixin:
         handler = getattr(self.window(), "_on_upgrade_requested", None)
         if callable(handler):
             handler()
+
+    def _save_auto_update_pref(self, enabled: bool) -> None:
+        from PyQt6.QtCore import QSettings
+        qs = QSettings("SpecimenPhotoWorkbench", "标本照片工作台")
+        qs.setValue("update/auto_check", "true" if enabled else "false")
 
     # ── Load / save helpers ───────────────────────────────────────────────

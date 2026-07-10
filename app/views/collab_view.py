@@ -121,7 +121,10 @@ def _style_collab_field(
     else:
         obj = "CollabFieldReadOnly" if readonly else "CollabFieldInput"
     widget.setObjectName(obj)
-    widget.setMinimumHeight(32)
+    widget.setFixedHeight(36)
+    widget.setAlignment(
+        Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+    )
     if placeholder:
         widget.setPlaceholderText(placeholder)
     if readonly:
@@ -167,10 +170,11 @@ def _collab_form_block(
         row = QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(10)
+        row.setAlignment(Qt.AlignmentFlag.AlignVCenter)
         field.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         row.addWidget(field, 1)
         for action in actions:
-            action.setMinimumHeight(34)
+            action.setFixedHeight(36)
             action.setMinimumWidth(100)
             row.addWidget(action, 0)
         block_layout.addLayout(row)
@@ -188,13 +192,15 @@ def _collab_compact_copy_row(
     row = QHBoxLayout()
     row.setContentsMargins(0, 0, 0, 0)
     row.setSpacing(10)
+    row.setAlignment(Qt.AlignmentFlag.AlignVCenter)
     lab = QLabel(label)
     lab.setObjectName("CollabCopyRowLabel")
     lab.setFixedWidth(52)
+    lab.setFixedHeight(36)
     lab.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-    field.setMinimumHeight(32)
+    field.setFixedHeight(36)
     action.setObjectName("Outline")
-    action.setMinimumHeight(32)
+    action.setFixedHeight(36)
     action.setMinimumWidth(96)
     row.addWidget(lab)
     row.addWidget(field, 1)
@@ -232,45 +238,6 @@ def _collab_detail_shell(parent: QWidget | None = None) -> QWidget:
     shell.setObjectName("CollabDetailShell")
     shell.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
     return shell
-
-
-def _collab_step_panel(
-    title: str,
-    detail: str = "",
-    *,
-    entry: bool = False,
-    state: QLabel | None = None,
-) -> tuple[QFrame, QVBoxLayout, QHBoxLayout]:
-    """Shared step card — matches CollabMethodTab / CollabStepPanel language."""
-    panel = QFrame()
-    panel.setObjectName("CollabStepPanel")
-    if entry:
-        panel.setProperty("role", "entry")
-    layout = QVBoxLayout(panel)
-    layout.setContentsMargins(14, 12, 14, 12)
-    layout.setSpacing(8)
-
-    title_lbl = QLabel(title)
-    title_lbl.setObjectName("CollabStepTitle")
-    layout.addWidget(title_lbl)
-
-    if state is not None:
-        layout.addWidget(state)
-
-    if detail:
-        detail_lbl = QLabel(detail)
-        detail_lbl.setObjectName("CollabStepDetail")
-        detail_lbl.setWordWrap(True)
-        layout.addWidget(detail_lbl)
-
-    body = QVBoxLayout()
-    body.setSpacing(10)
-    layout.addLayout(body)
-
-    action_row = QHBoxLayout()
-    action_row.setSpacing(8)
-    layout.addLayout(action_row)
-    return panel, body, action_row
 
 
 # ── CollabView ────────────────────────────────────────────────────────────────
@@ -378,10 +345,11 @@ class CollabView(BaseView):
         self._setup_btn.setMinimumHeight(32)
         self._setup_btn.clicked.connect(self._on_setup_wizard)
 
-        self._share_btn = QPushButton("复制局域网连接码")
+        self._share_btn = QPushButton("复制局域网连接码", self)
         self._share_btn.setObjectName("Outline")
         self._share_btn.setMinimumHeight(32)
         self._share_btn.clicked.connect(self._on_share_addr)
+        self._share_btn.hide()  # inline copy lives in team setup panel; never top-level
 
         self._manual_toggle_btn = QPushButton("手动连接")
         self._manual_toggle_btn.setObjectName("Outline")
@@ -551,11 +519,16 @@ class CollabView(BaseView):
         self._connection_result_banner.setObjectName("CollabConnectionResult")
         self._connection_result_banner.setProperty("role", "idle")
         result_lay = QHBoxLayout(self._connection_result_banner)
-        result_lay.setContentsMargins(12, 10, 12, 10)
-        result_lay.setSpacing(10)
+        result_lay.setContentsMargins(14, 12, 14, 12)
+        result_lay.setSpacing(12)
+        result_lay.setAlignment(Qt.AlignmentFlag.AlignVCenter)
         self._connection_result_icon = QLabel("○")
         self._connection_result_icon.setObjectName("CollabConnectionIcon")
-        result_lay.addWidget(self._connection_result_icon, 0, Qt.AlignmentFlag.AlignTop)
+        self._connection_result_icon.setFixedSize(28, 28)
+        self._connection_result_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        result_lay.addWidget(
+            self._connection_result_icon, 0, Qt.AlignmentFlag.AlignVCenter
+        )
         result_text_col = QVBoxLayout()
         result_text_col.setSpacing(4)
         self._connection_result_title = QLabel("连接结果")
@@ -578,16 +551,16 @@ class CollabView(BaseView):
         dev_title = QLabel("在线设备")
         dev_title.setObjectName("Section")
         device_layout.addWidget(dev_title)
-        self._device_list = QTableWidget(0, 6)
+        self._device_list = QTableWidget(0, 7)
         self._device_list.setObjectName("CollabDeviceTable")
         self._device_list.setHorizontalHeaderLabels(
-            ["主机名", "项目", "团队永久码", "照片", "地址", "延迟"]
+            ["操作者", "主机名", "项目", "团队永久码", "照片", "地址", "延迟"]
         )
         self._device_list.horizontalHeader().setStretchLastSection(False)
         self._device_list.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.ResizeMode.Stretch
         )
-        for col in (1, 2, 3, 4, 5):
+        for col in (1, 2, 3, 4, 5, 6):
             self._device_list.horizontalHeader().setSectionResizeMode(
                 col, QHeaderView.ResizeMode.ResizeToContents
             )
@@ -596,6 +569,11 @@ class CollabView(BaseView):
         self._device_list.setAlternatingRowColors(True)
         self._device_list.verticalHeader().hide()
         self._device_list.setMinimumHeight(140)
+        self._device_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._device_list.customContextMenuRequested.connect(self._on_device_context_menu)
+        from app.utils.tooltip_policy import suppress_popup_tooltip
+
+        suppress_popup_tooltip(self._device_list)
         device_layout.addWidget(self._device_list)
         device_panel.hide()
         activity_layout.addWidget(device_panel)
@@ -905,21 +883,16 @@ class CollabView(BaseView):
 
     def _make_team_setup_panel(self) -> QFrame:
         panel = QFrame()
+        panel.setObjectName("CollabMethodForm")
         panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        _elevate_card(panel)
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(10)
+        layout.setContentsMargins(14, 14, 14, 12)
+        layout.setSpacing(14)
 
-        self._team_setup_status = QLabel("填写永久码和名字后点保存。")
-        self._team_setup_status.setObjectName("CollabScopeState")
-        self._team_setup_status.setWordWrap(True)
-
-        step_entry, entry_body, entry_actions = _collab_step_panel(
-            "团队永久码",
-            "与队友填写相同的永久码即可自动发现；保存后会启动本机协作服务。",
-            entry=True,
-            state=self._team_setup_status,
-        )
+        form_col = QVBoxLayout()
+        form_col.setContentsMargins(0, 0, 0, 0)
+        form_col.setSpacing(14)
 
         self._team_code_edit = _style_collab_field(
             QLineEdit(),
@@ -935,18 +908,18 @@ class CollabView(BaseView):
         icons.set_button_icon(copy_team_btn, "mdi6.content-copy", size=16)
         copy_team_btn.clicked.connect(self._copy_team_code_inline)
         _collab_form_block(
-            entry_body,
-            "永久码",
+            form_col,
+            "团队永久码",
             self._team_code_edit,
             gen_btn,
             copy_team_btn,
             action_below=False,
-            framed=False,
+            framed=True,
         )
 
         pair_row = QHBoxLayout()
         pair_row.setContentsMargins(0, 0, 0, 0)
-        pair_row.setSpacing(16)
+        pair_row.setSpacing(20)
         name_col = QVBoxLayout()
         name_col.setContentsMargins(0, 0, 0, 0)
         name_col.setSpacing(0)
@@ -956,32 +929,47 @@ class CollabView(BaseView):
 
         self._team_operator_edit = _style_collab_field(
             QLineEdit(),
-            placeholder="例如 小王",
+            placeholder="必填，例如 小王",
         )
-        _collab_form_block(name_col, "我的名字", self._team_operator_edit, framed=False)
+        _collab_form_block(name_col, "我的名字", self._team_operator_edit, framed=True)
 
         self._team_pairing_input = _style_collab_field(
             QLineEdit(),
             placeholder="可选：粘贴队友发来的连接码",
         )
-        _collab_form_block(pair_col, "备用连接码", self._team_pairing_input, framed=False)
+        _collab_form_block(pair_col, "备用连接码", self._team_pairing_input, framed=True)
         pair_row.addLayout(name_col, 1)
         pair_row.addLayout(pair_col, 1)
-        entry_body.addLayout(pair_row)
+        form_col.addLayout(pair_row)
+        layout.addLayout(form_col)
 
+        save_row = QHBoxLayout()
+        save_row.setContentsMargins(0, 0, 0, 0)
+        save_row.setSpacing(0)
         self._team_save_btn = QPushButton("保存并启动协作")
         self._team_save_btn.setObjectName("CollabPrimaryAction")
-        self._team_save_btn.setMinimumHeight(32)
+        self._team_save_btn.setFixedHeight(36)
         self._team_save_btn.setMaximumWidth(220)
         self._team_save_btn.clicked.connect(self._save_team_setup_inline)
-        entry_actions.addWidget(self._team_save_btn)
-        entry_actions.addStretch()
-        layout.addWidget(step_entry)
+        save_row.addWidget(self._team_save_btn)
+        save_row.addStretch()
+        layout.addLayout(save_row)
 
-        self._team_post_save_frame, share_body, _share_actions = _collab_step_panel(
-            "分享给队友",
-            "保存后可复制局域网地址或连接码，发给队友粘贴即可。",
-        )
+        self._team_post_save_frame = QFrame()
+        self._team_post_save_frame.setObjectName("CollabMethodFormInset")
+        post_layout = QVBoxLayout(self._team_post_save_frame)
+        post_layout.setContentsMargins(12, 10, 12, 10)
+        post_layout.setSpacing(8)
+
+        section = QLabel("保存后可复制发给队友")
+        section.setObjectName("CollabPostSaveSectionTitle")
+        post_layout.addWidget(section)
+
+        copy_group = QFrame()
+        copy_group.setObjectName("CollabCopyGroup")
+        copy_layout = QVBoxLayout(copy_group)
+        copy_layout.setContentsMargins(10, 8, 10, 8)
+        copy_layout.setSpacing(8)
 
         self._team_addr_display = _style_collab_field(
             QLineEdit(),
@@ -990,15 +978,9 @@ class CollabView(BaseView):
             code=True,
         )
         copy_addr_btn = QPushButton("复制地址")
-        copy_addr_btn.setObjectName("Outline")
-        icons.set_button_icon(copy_addr_btn, "mdi6.content-copy", size=16)
         copy_addr_btn.clicked.connect(self._copy_team_addr_inline)
-        _collab_form_block(
-            share_body,
-            "局域网地址",
-            self._team_addr_display,
-            copy_addr_btn,
-            framed=False,
+        _collab_compact_copy_row(
+            copy_layout, "局域网", self._team_addr_display, copy_addr_btn
         )
 
         self._team_pairing_display = _style_collab_field(
@@ -1008,27 +990,39 @@ class CollabView(BaseView):
             code=True,
         )
         copy_pairing_btn = QPushButton("复制连接码")
-        copy_pairing_btn.setObjectName("Outline")
-        icons.set_button_icon(copy_pairing_btn, "mdi6.content-copy", size=16)
         copy_pairing_btn.clicked.connect(self._copy_team_pairing_inline)
-        _collab_form_block(
-            share_body,
-            "连接码",
-            self._team_pairing_display,
-            copy_pairing_btn,
-            framed=False,
+        _collab_compact_copy_row(
+            copy_layout, "连接码", self._team_pairing_display, copy_pairing_btn
         )
+        post_layout.addWidget(copy_group)
         self._team_post_save_frame.hide()
         layout.addWidget(self._team_post_save_frame)
 
-        aux_panel, _, aux_actions = _collab_step_panel(
-            "辅助操作",
-            "选择要向队友展示的项目范围；发现不了设备时再用手动连接。",
+        footer = QFrame()
+        footer.setObjectName("CollabFormActionBar")
+        footer_layout = QVBoxLayout(footer)
+        footer_layout.setContentsMargins(12, 10, 12, 10)
+        footer_layout.setSpacing(8)
+        footer_title = QLabel("辅助操作")
+        footer_title.setObjectName("CollabFormActionBarTitle")
+        footer_layout.addWidget(footer_title)
+        footer_btn_row = QHBoxLayout()
+        footer_btn_row.setContentsMargins(0, 0, 0, 0)
+        footer_btn_row.setSpacing(10)
+        footer_btn_row.addWidget(self._shared_scope_btn)
+        footer_btn_row.addWidget(self._manual_toggle_btn)
+        footer_btn_row.addStretch()
+        footer_layout.addLayout(footer_btn_row)
+        layout.addWidget(footer)
+
+        self._team_setup_status = QLabel("填写永久码和名字后点保存。")
+        self._team_setup_status.setObjectName("CollabMethodStatus")
+        self._team_setup_status.setWordWrap(True)
+        self._team_setup_status.setMinimumHeight(36)
+        self._team_setup_status.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
         )
-        aux_actions.addWidget(self._shared_scope_btn)
-        aux_actions.addWidget(self._manual_toggle_btn)
-        aux_actions.addStretch()
-        layout.addWidget(aux_panel)
+        layout.addWidget(self._team_setup_status)
         return panel
 
     def _update_team_post_save_visibility(self) -> None:
@@ -1048,7 +1042,7 @@ class CollabView(BaseView):
         if hasattr(self, "_team_example_label"):
             self._team_example_label.setVisible(not has_saved)
         if hasattr(self, "_share_btn"):
-            self._share_btn.setVisible(not has_saved)
+            self._share_btn.hide()
         if hasattr(self, "_team_save_btn"):
             self._team_save_btn.setText(
                 "保存修改" if has_saved else "保存并启动协作"
@@ -1137,6 +1131,12 @@ class CollabView(BaseView):
             self._team_setup_status.setText("请先输入或生成团队永久码。")
             return
 
+        operator = self._team_operator_edit.text().strip()
+        if not operator:
+            self._team_operator_edit.setFocus(Qt.FocusReason.OtherFocusReason)
+            self._team_setup_status.setText("请先填写你的名字，队友才能认出你。")
+            return
+
         settings = getattr(self.ctx, "settings", None)
         self._set_setting("collab/enabled", True)
         self._set_setting("collab/team_code", group_code)
@@ -1148,8 +1148,12 @@ class CollabView(BaseView):
             pass
 
         operator = self._team_operator_edit.text().strip()
-        if operator:
-            self._set_setting("user/current_user", operator)
+        self._set_setting("user/current_user", operator)
+        try:
+            if settings is not None and hasattr(settings, "operator_name"):
+                settings.operator_name = operator
+        except Exception:  # noqa: BLE001
+            pass
 
         svc = self.ctx.ensure_collab_service()
         if svc is None:
@@ -1158,6 +1162,10 @@ class CollabView(BaseView):
             return
 
         self._service = svc
+        try:
+            svc.set_operator_name(operator)
+        except Exception:  # noqa: BLE001
+            pass
         try:
             svc.set_group_code(group_code)
         except Exception:  # noqa: BLE001
@@ -1259,15 +1267,29 @@ class CollabView(BaseView):
         state_label: QLabel,
         *buttons: QPushButton,
     ) -> QFrame:
-        panel, _body, action_row = _collab_step_panel(
-            title,
-            detail,
-            state=state_label,
-        )
+        panel = QFrame()
+        panel.setObjectName("CollabStepPanel")
         panel.setMinimumHeight(148)
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(8)
+
+        title_lbl = QLabel(title)
+        title_lbl.setObjectName("CollabStepTitle")
+        layout.addWidget(title_lbl)
+        layout.addWidget(state_label)
+
+        detail_lbl = QLabel(detail)
+        detail_lbl.setObjectName("CollabStepDetail")
+        detail_lbl.setWordWrap(True)
+        layout.addWidget(detail_lbl, 1)
+
+        action_row = QHBoxLayout()
+        action_row.setSpacing(8)
         for button in buttons:
             action_row.addWidget(button)
         action_row.addStretch()
+        layout.addLayout(action_row)
         return panel
 
     def on_activate(self) -> None:
@@ -1300,6 +1322,8 @@ class CollabView(BaseView):
             self._service.project_bind_suggested.connect(self._on_project_bind_suggested)
         if hasattr(self._service, "photo_index_received"):
             self._service.photo_index_received.connect(self._on_photo_index_received)
+        if hasattr(self._service, "peer_join_review"):
+            self._service.peer_join_review.connect(self._on_peer_join_review)
         self._connected_service = self._service
 
     @pyqtSlot(str, str, int, str)
@@ -1307,6 +1331,31 @@ class CollabView(BaseView):
         self._refresh_tasks()
         if self._service is not None:
             self._refresh_devices()
+
+    @pyqtSlot(str, int, str)
+    def _on_peer_join_review(self, ip: str, port: int, label: str) -> None:
+        """Ask whether to trust a new teammate before syncing."""
+        from PyQt6.QtWidgets import QMessageBox
+
+        from app.utils import ui
+
+        reply = ui.question(
+            self,
+            "新设备加入",
+            f"<b>{label}</b>（{ip}）请求加入你的协作团队。\n是否允许与本机同步？",
+            buttons=(
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            ),
+            default=QMessageBox.StandardButton.No,
+        )
+        svc = self._service
+        if svc is None:
+            return
+        if reply == QMessageBox.StandardButton.Yes:
+            svc.trust_peer(ip, port)
+        else:
+            svc.block_peer(ip, port)
+        self._refresh_devices()
 
     # ── Slots ─────────────────────────────────────────────────────────────
 
@@ -1321,27 +1370,33 @@ class CollabView(BaseView):
     def _refresh_devices(self) -> None:
         if self._service is None:
             return
+        from app.services.collab_status import peer_display_name
+
         peers = self._service.peers()
         if hasattr(self._device_list, "clearSpans"):
             self._device_list.clearSpans()
         self._device_list.setRowCount(len(peers))
         for row, peer in enumerate(peers):
-            self._device_list.setItem(row, 0, _ro_item(peer.hostname or peer.ip))
-            self._device_list.setItem(row, 1, _ro_item(_project_display(peer.project_name)))
-            self._device_list.setItem(row, 2, _ro_item(peer.group_code or "—"))
+            operator_label = peer_display_name(peer)
+            if self._service.is_peer_pending_review(peer):
+                operator_label = f"{operator_label}（待确认）"
+            op_item = _ro_item(operator_label)
+            self._device_list.setItem(row, 0, op_item)
+            host_item = _ro_item(peer.hostname or peer.ip)
+            self._device_list.setItem(row, 1, host_item)
+            self._device_list.setItem(row, 2, _ro_item(_project_display(peer.project_name)))
+            self._device_list.setItem(row, 3, _ro_item(peer.group_code or "—"))
             media_label = self._peer_media_sync_label(peer)
+            if self._service.is_peer_pending_review(peer):
+                media_label = "待确认"
             media_item = _ro_item(media_label)
-            if media_label == "仅任务":
-                media_item.setToolTip("同组但项目同步码不同；任务可见，照片不会同步。")
-            elif media_label == "可同步":
-                media_item.setToolTip("同组且项目同步码相同，可以同步照片/TIF/ZIP。")
-            self._device_list.setItem(row, 3, media_item)
+            self._device_list.setItem(row, 4, media_item)
             addr_text = f"{peer.ip}:{peer.port}"
             if peer.manual:
                 addr_text += " ✎"
-            self._device_list.setItem(row, 4, _ro_item(addr_text))
+            self._device_list.setItem(row, 5, _ro_item(addr_text))
             lat = f"{peer.latency_ms:.0f} ms" if peer.latency_ms is not None else "—"
-            self._device_list.setItem(row, 5, _ro_item(lat))
+            self._device_list.setItem(row, 6, _ro_item(lat))
 
         if not peers:
             self._device_list.setRowCount(1)
@@ -1359,6 +1414,25 @@ class CollabView(BaseView):
         self._refresh_project_filter(tasks, peers)
         self._refresh_summary(tasks, peers)
         self._refresh_activity_visibility(peers, tasks)
+
+    def _on_device_context_menu(self, pos) -> None:
+        if self._service is None:
+            return
+        row = self._device_list.rowAt(pos.y())
+        peers = self._service.peers()
+        if row < 0 or row >= len(peers):
+            return
+        peer = peers[row]
+        menu = QMenu(self)
+        allow_act = menu.addAction("允许同步")
+        block_act = menu.addAction("屏蔽此设备")
+        chosen = menu.exec(self._device_list.viewport().mapToGlobal(pos))
+        if chosen is allow_act:
+            self._service.trust_peer(peer.ip, peer.port)
+            self._refresh_devices()
+        elif chosen is block_act:
+            self._service.block_peer(peer.ip, peer.port)
+            self._refresh_devices()
 
     @pyqtSlot()
     def _refresh_tasks(self) -> None:
@@ -1666,11 +1740,7 @@ class CollabView(BaseView):
         self._project_code_btn.setEnabled(True)
         share_enabled = status.state not in {"no_service", "not_started"}
         self._share_btn.setEnabled(share_enabled)
-        post_save_visible = (
-            hasattr(self, "_team_post_save_frame")
-            and self._team_post_save_frame.isVisible()
-        )
-        self._share_btn.setVisible(share_enabled and not post_save_visible)
+        self._share_btn.hide()
         manual_enabled = status.state not in {"no_service", "not_started"}
         self._manual_toggle_btn.setEnabled(manual_enabled)
         self._manual_toggle_btn.setVisible(manual_enabled)

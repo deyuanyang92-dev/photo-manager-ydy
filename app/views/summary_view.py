@@ -194,8 +194,8 @@ def _build_all_cols() -> list[dict]:
         {"key": "family",       "label": "科拉丁",        "get": lambda s, g: s.family or ""},
         {"key": "genusCn",      "label": "属",            "get": lambda s, g: s.genus_cn or s.genus or ""},
         {"key": "genus",        "label": "属拉丁",        "get": lambda s, g: s.genus or ""},
-        {"key": "province",     "label": "省份",          "get": lambda s, g: s.province or ""},
-        {"key": "site",         "label": "样地",          "get": lambda s, g: s.site or ""},
+        {"key": "province",     "label": "省/市",          "get": lambda s, g: s.province or ""},
+        {"key": "site",         "label": "地区/样地",      "get": lambda s, g: s.site or ""},
         {"key": "station",      "label": "站位",          "get": lambda s, g: s.station or ""},
         {"key": "geoArea",      "label": "采集地",        "get": lambda s, g: _specimen_geo_area_label(s)},
         {"key": "lon",          "label": "经度",          "get": lambda s, g: str(s.lon) if s.lon is not None else ""},
@@ -647,6 +647,9 @@ class SummaryView(BaseView):
         self._table.verticalHeader().setDefaultSectionSize(24)
         self._table.horizontalHeader().setStretchLastSection(False)
         self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        from app.utils.tooltip_policy import suppress_popup_tooltip
+
+        suppress_popup_tooltip(self._table)
         root.addWidget(self._table, stretch=1)
 
     def _build_dashboard(self) -> QFrame:

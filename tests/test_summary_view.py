@@ -649,11 +649,11 @@ class TestDateFilter:
 # ── Registry ──────────────────────────────────────────────────────────────────
 
 class TestRegistry:
-    def test_summary_at_index_8(self) -> None:
-        # 协作成为主菜单页后，SummaryView 后移到 8。
-        from app.views.registry import ALL_VIEWS
+    def test_summary_registered_by_stable_view_id(self) -> None:
+        from app.views.registry import ALL_VIEW_SPECS
         from app.views.summary_view import SummaryView
-        assert ALL_VIEWS[8] is SummaryView
+        spec = next(item for item in ALL_VIEW_SPECS if item.view_id == "summary")
+        assert spec.resolve() is SummaryView
 
     def test_collab_in_all_views(self) -> None:
         from app.views.registry import ALL_VIEWS
@@ -666,7 +666,7 @@ class TestRegistry:
         assert titles == [
             "照片工作区", "协作", "最近使用", "项目树", "标签打印",
             "WoRMS 分类库", "内置分类库", "坐标工具",
-            "项目汇总", "采集记录", "采集地图", "配置",
+            "TIFF 转 JPG", "项目汇总", "采集记录", "采集地图", "配置",
         ]
 
 

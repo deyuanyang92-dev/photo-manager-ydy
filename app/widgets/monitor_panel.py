@@ -87,6 +87,16 @@ _FILE_THUMB_CACHE: "OrderedDict[tuple[str, int, int], Optional[QPixmap]]" = Orde
 _FILE_THUMB_ICON_CACHE: dict[str, QPixmap] = {}
 
 
+def clear_file_thumb_cache() -> None:
+    """Drop monitor-panel QPixmap thumbnails (e.g. when leaving workbench)."""
+    _FILE_THUMB_CACHE.clear()
+
+
+def _file_thumb_cache_limit() -> int:
+    from app.config.memory_profile import MONITOR_THUMB_CACHE_LIMIT
+    return MONITOR_THUMB_CACHE_LIMIT
+
+
 def _file_thumb_cache_key(path: str) -> tuple[str, int, int] | None:
     try:
         p = Path(path)
@@ -102,11 +112,11 @@ def _file_thumb_pixmap(path: str) -> Optional[QPixmap]:
         _FILE_THUMB_CACHE.move_to_end(key)
         return _FILE_THUMB_CACHE[key]
 
-    pm = decode_image_thumbnail(path, _FILE_THUMB_DECODE_SIZE)
+    pm = decode_image_thumbnail(path, _FILE_THUMB_DECODE_SIZE, use_cache=False)
     if key is not None:
         _FILE_THUMB_CACHE[key] = pm
         _FILE_THUMB_CACHE.move_to_end(key)
-        while len(_FILE_THUMB_CACHE) > _FILE_THUMB_CACHE_LIMIT:
+        while len(_FILE_THUMB_CACHE) > _file_thumb_cache_limit():
             _FILE_THUMB_CACHE.popitem(last=False)
     return pm
 
@@ -206,7 +216,7 @@ class _FileCard(QFrame):
         self._thumb_label.setObjectName("FileThumb")
         self._thumb_label.setFixedSize(self._thumb_size, self._thumb_size)
         self._thumb_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._thumb_label.setToolTip(getattr(self._entry, "path", ""))
+        self._thumb_label.setToolTip("")
         if self._defer_thumbnail and kind in {"jpg", "tiff"}:
             self._apply_thumbnail_placeholder(kind)
         else:
@@ -222,7 +232,7 @@ class _FileCard(QFrame):
         name = getattr(self._entry, "name", None) or Path(getattr(self._entry, "path", "")).name
         name_lbl = QLabel(name)
         name_lbl.setObjectName("FileName")
-        name_lbl.setToolTip(getattr(self._entry, "path", name))
+        name_lbl.setToolTip("")
         body_lay.addWidget(name_lbl)
 
         # Attribution/status row.
@@ -239,7 +249,7 @@ class _FileCard(QFrame):
         else:
             attr_lbl = QLabel(uid or "只读")
             attr_lbl.setObjectName("FileUidMuted")
-        attr_lbl.setToolTip(uid or "")
+        attr_lbl.setToolTip("")
         attr_lbl.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         attr_row.addWidget(attr_lbl)
         c_text, c_obj = _CORNER.get(corner_state, _CORNER["raw"])
@@ -1273,8 +1283,11 @@ class MonitorPanel(QWidget):
             self._thumb_timer.start()
 
     def _load_next_thumbnail_batch(self) -> None:
+        from app.config.memory_profile import MONITOR_THUMB_BATCH_SIZE
+
         loaded = 0
-        while self._thumb_queue and loaded < 4:
+        batch = max(1, int(MONITOR_THUMB_BATCH_SIZE))
+        while self._thumb_queue and loaded < batch:
             card = self._thumb_queue.popleft()
             try:
                 if card.parent() is not None:
@@ -1301,10 +1314,11 @@ class MonitorPanel(QWidget):
             # Drop cards for files that vanished.
             for key in list(self._card_by_key):
                 if key not in desired:
+                    from app.utils.ui import dispose_widget
+
                     card = self._card_by_key.pop(key)
                     self._card_sig_by_key.pop(key, None)
-                    card.setParent(None)
-                    card.deleteLater()
+                    dispose_widget(card)
 
             # Detach all remaining cards from the grid (reposition without delete).
             while self._grid.count():
@@ -1317,8 +1331,9 @@ class MonitorPanel(QWidget):
                 card = self._card_by_key.get(key)
                 if card is None or self._card_sig_by_key.get(key) != sig:
                     if card is not None:
-                        card.setParent(None)
-                        card.deleteLater()
+                        from app.utils.ui import dispose_widget
+
+                        dispose_widget(card)
                     card = self._make_card(f)
                     self._card_by_key[key] = card
                     self._card_sig_by_key[key] = sig

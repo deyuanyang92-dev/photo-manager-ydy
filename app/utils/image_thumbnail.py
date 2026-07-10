@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import threading
 from collections import OrderedDict
 from contextlib import redirect_stderr
 from io import StringIO
@@ -25,11 +26,33 @@ from typing import Optional
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QImage, QImageReader, QPixmap
 
+from app.config.preview_profile import current_preview_master_size
+from app.utils.thumbnail_disk_cache import (
+    clear_disk_thumbnail_cache,
+    mark_disk_thumbnail_failed,
+    normalize_thumb_cache_size,
+    preview_jpeg_file_path,
+    read_disk_thumbnail,
+    write_disk_thumbnail,
+)
+
+
+def _tiff_preview_master_size() -> int:
+    return current_preview_master_size()
+
+_TIFF_SUFFIXES = {".tif", ".tiff"}
+
 _THUMB_CACHE_LIMIT = 384
 _CACHE_MISS = object()
 _CACHE_NEGATIVE = object()
 # Cache now stores QImage (thread-safe). Key: (resolved_path, mtime_ns, size, max_size).
 _THUMB_CACHE: "OrderedDict[tuple, object]" = OrderedDict()
+_THUMB_CACHE_LOCK = threading.Lock()
+
+
+def _effective_thumb_cache_limit() -> int:
+    from app.config.memory_profile import THUMB_CACHE_LIMIT
+    return THUMB_CACHE_LIMIT
 
 
 def clear_thumbnail_cache(path: str | None = None) -> None:
@@ -38,23 +61,28 @@ def clear_thumbnail_cache(path: str | None = None) -> None:
     Passing a path clears all cached sizes for that file.  ``None`` clears the
     whole cache, useful for tests or after bulk image edits.
     """
-    if path is None:
-        _THUMB_CACHE.clear()
-        return
-    try:
-        resolved = str(Path(path).resolve())
-    except OSError:
-        resolved = str(path)
-    for key in list(_THUMB_CACHE):
-        if key[0] == resolved:
-            _THUMB_CACHE.pop(key, None)
+    with _THUMB_CACHE_LOCK:
+        if path is None:
+            _THUMB_CACHE.clear()
+        else:
+            try:
+                resolved = str(Path(path).resolve())
+            except OSError:
+                resolved = str(path)
+            for key in list(_THUMB_CACHE):
+                if key[0] == resolved:
+                    _THUMB_CACHE.pop(key, None)
+    clear_disk_thumbnail_cache(path)
 
 
 def _cache_key(path: str, max_size: int | None) -> tuple[str, int, int, int] | None:
     try:
         p = Path(path)
         st = p.stat()
-        size_key = -1 if max_size is None else int(max_size)
+        if max_size is None:
+            size_key = -1
+        else:
+            size_key = int(normalize_thumb_cache_size(max_size) or max_size)
         return (str(p.resolve()), int(st.st_mtime_ns), int(st.st_size), size_key)
     except Exception:
         return None
@@ -63,10 +91,11 @@ def _cache_key(path: str, max_size: int | None) -> tuple[str, int, int, int] | N
 def _cache_get(key):
     """Return an independent ``QImage`` copy (cache stores copies; mutating the
     returned handle detaches via copy-on-write and never poisons the cache)."""
-    if key is None or key not in _THUMB_CACHE:
-        return _CACHE_MISS
-    _THUMB_CACHE.move_to_end(key)
-    cached = _THUMB_CACHE[key]
+    with _THUMB_CACHE_LOCK:
+        if key is None or key not in _THUMB_CACHE:
+            return _CACHE_MISS
+        _THUMB_CACHE.move_to_end(key)
+        cached = _THUMB_CACHE[key]
     if cached is _CACHE_NEGATIVE:
         return None
     return QImage(cached)  # copy -> distinct handle, same pixels
@@ -75,10 +104,33 @@ def _cache_get(key):
 def _cache_put(key, image: Optional[QImage]) -> None:
     if key is None:
         return
-    _THUMB_CACHE[key] = QImage(image) if image is not None else _CACHE_NEGATIVE
-    _THUMB_CACHE.move_to_end(key)
-    while len(_THUMB_CACHE) > _THUMB_CACHE_LIMIT:
-        _THUMB_CACHE.popitem(last=False)
+    with _THUMB_CACHE_LOCK:
+        _THUMB_CACHE[key] = QImage(image) if image is not None else _CACHE_NEGATIVE
+        _THUMB_CACHE.move_to_end(key)
+        while len(_THUMB_CACHE) > _effective_thumb_cache_limit():
+            _THUMB_CACHE.popitem(last=False)
+
+
+def try_cached_image_data(path: str, max_size: int = 280) -> Optional[QImage]:
+    """Memory/disk cache lookup only — never runs a full decode (GUI-thread safe)."""
+    if not path:
+        return None
+    try:
+        from app.utils.path_utils import localize_path
+        path = localize_path(path)
+    except Exception:
+        pass
+    key = _cache_key(path, max_size)
+    if key is None:
+        return None
+    cached = _cache_get(key)
+    if cached is not _CACHE_MISS:
+        return cached
+    disk = read_disk_thumbnail(path, max_size)
+    if disk is not None and not disk.isNull():
+        _cache_put(key, disk)
+        return QImage(disk)
+    return None
 
 
 # ── New thread-safe public API (spec §5) ───────────────────────────────────────
@@ -93,8 +145,157 @@ def decode_image_data(
 
     Workers call this. Returns ``None`` for missing/undecodable files. The
     returned handle is independent of the cache; mutating it is safe.
+
+    TIFF masters are converted to bounded JPEG proxies on disk (see
+    :func:`ensure_tiff_preview_jpeg`) so later previews skip full TIFF decode.
     """
-    return _decode_image(path, max(1, int(max_size)) if max_size is not None else None, use_cache=use_cache)
+    ms = max(1, int(max_size)) if max_size is not None else None
+    if _is_tiff_path(path):
+        return tiff_to_preview_image(path, ms or 256, use_cache=use_cache)
+    return _decode_image(path, ms, use_cache=use_cache)
+
+
+def tiff_to_preview_image(
+    path: str,
+    max_size: int = 256,
+    *,
+    use_cache: bool = True,
+) -> Optional[QImage]:
+    """Convert a TIFF master to a display-sized preview ``QImage``.
+
+    Pipeline: TIFF → JPEG master (once, on disk) → scale to *max_size* for grid.
+    """
+    return _tiff_preview_via_master_jpeg(
+        path,
+        max(1, int(max_size)) if max_size is not None else 256,
+        use_cache=use_cache,
+    )
+
+
+def scale_preview_image(image: QImage, max_edge: int) -> QImage:
+    """Downscale a JPEG/QImage preview to *max_edge* (px on long side). No upscale."""
+    if image is None or image.isNull():
+        return image
+    edge = max(1, int(max_edge))
+    if image.width() <= edge and image.height() <= edge:
+        return image
+    return image.scaled(
+        edge,
+        edge,
+        Qt.AspectRatioMode.KeepAspectRatio,
+        Qt.TransformationMode.SmoothTransformation,
+    )
+
+
+def load_jpeg_preview_scaled(jpg_path: str, display_size: int) -> Optional[QImage]:
+    """Load a cached JPEG proxy and scale to *display_size*."""
+    try:
+        img = QImage(str(jpg_path))
+    except Exception:
+        return None
+    if img.isNull():
+        return None
+    return scale_preview_image(img, display_size)
+
+
+def ensure_tiff_master_jpeg(path: str) -> Optional[str]:
+    """Ensure the TIFF master JPEG proxy exists at the configured master size."""
+    if not _is_tiff_path(path):
+        return None
+    try:
+        from app.utils.path_utils import localize_path
+        path = localize_path(path)
+    except Exception:
+        pass
+    master = _tiff_preview_master_size()
+    jpg = preview_jpeg_file_path(path, master)
+    if jpg is not None:
+        return str(jpg)
+    img = _decode_tiff_master(path, use_cache=True)
+    if img is None or img.isNull():
+        return None
+    jpg = preview_jpeg_file_path(path, master)
+    return str(jpg) if jpg is not None else None
+
+
+def ensure_tiff_preview_jpeg(path: str, max_size: int = 256) -> Optional[str]:
+    """Ensure a JPEG preview exists for *path*; return master proxy path."""
+    _ = max_size  # display size is applied via :func:`scale_preview_image`
+    return ensure_tiff_master_jpeg(path)
+
+
+def tiff_preview_jpeg_path(path: str, max_size: int = 256) -> Optional[str]:
+    """Return cached JPEG proxy path for a TIFF preview, if already generated."""
+    if not _is_tiff_path(path):
+        return None
+    try:
+        from app.utils.path_utils import localize_path
+        path = localize_path(path)
+    except Exception:
+        pass
+    bucket = (
+        _tiff_preview_master_size()
+        if int(max_size) < _tiff_preview_master_size()
+        else int(normalize_thumb_cache_size(max_size) or max_size)
+    )
+    jpg = preview_jpeg_file_path(path, bucket)
+    return str(jpg) if jpg is not None else None
+
+
+def _localize_existing(path: str) -> Optional[str]:
+    try:
+        from app.utils.path_utils import localize_path
+        path = localize_path(path)
+    except Exception:
+        pass
+    try:
+        if os.path.exists(path):
+            return path
+    except Exception:
+        pass
+    return None
+
+
+def _tiff_preview_via_master_jpeg(
+    path: str,
+    display_size: int,
+    *,
+    use_cache: bool,
+) -> Optional[QImage]:
+    local = _localize_existing(path)
+    if not local:
+        return None
+    key = _cache_key(local, display_size)
+    if use_cache and key is not None:
+        cached = _cache_get(key)
+        if cached is not _CACHE_MISS:
+            return cached
+
+    master_jpg = ensure_tiff_master_jpeg(local)
+    if master_jpg:
+        scaled = load_jpeg_preview_scaled(master_jpg, display_size)
+        if scaled is not None and not scaled.isNull():
+            if use_cache and key is not None:
+                _cache_put(key, scaled)
+            return scaled
+
+    master_img = _decode_tiff_master(local, use_cache=use_cache)
+    if master_img is None or master_img.isNull():
+        return None
+    scaled = scale_preview_image(master_img, display_size)
+    if use_cache and key is not None:
+        _cache_put(key, scaled)
+    return scaled
+
+
+def _decode_tiff_master(path: str, *, use_cache: bool) -> Optional[QImage]:
+    """Decode TIFF once at the configured master size and persist JPEG master."""
+    return _decode_image(
+        path,
+        _tiff_preview_master_size(),
+        use_cache=use_cache,
+        tiff_fast_path=True,
+    )
 
 
 def make_pixmap(image: Optional[QImage]) -> Optional[QPixmap]:
@@ -134,11 +335,16 @@ def decode_image_pixmap(
 
 # ── Internal decode chain (returns QImage) ────────────────────────────────────
 
+def _is_tiff_path(path: str) -> bool:
+    return Path(path).suffix.lower() in _TIFF_SUFFIXES
+
+
 def _decode_image(
     path: str,
     max_size: int | None,
     *,
     use_cache: bool,
+    tiff_fast_path: bool = False,
 ) -> Optional[QImage]:
     if not path:
         return None
@@ -153,40 +359,61 @@ def _decode_image(
     except Exception:
         return None
 
+    bucket = normalize_thumb_cache_size(max_size)
     key = _cache_key(path, max_size)
     if use_cache:
         cached = _cache_get(key)
         if cached is not _CACHE_MISS:
             return cached
+        disk = read_disk_thumbnail(path, max_size)
+        if disk is not None and not disk.isNull():
+            _cache_put(key, disk)
+            return QImage(disk)
 
-    img = _decode_with_qt(path, max_size)
-    if img is not None:
-        if use_cache:
-            _cache_put(key, img)
-        return img
+    if tiff_fast_path or _is_tiff_path(path):
+        img = _decode_tiff_raster(path, bucket)
+    else:
+        img = _decode_raster(path, bucket)
 
-    img = _decode_with_pillow(path, max_size)
-    if img is not None:
-        if use_cache:
-            _cache_put(key, img)
-        return img
-
-    img = _decode_with_tifffile(path, max_size)
-    if img is not None:
-        if use_cache:
-            _cache_put(key, img)
-        return img
-
-    img = _decode_malformed_lzw_tiff(path, max_size)
-    if img is not None:
-        if use_cache:
-            _cache_put(key, img)
-        return img
-
-    img = _decode_with_imagemagick(path, max_size)
     if use_cache:
-        _cache_put(key, img)
+        if img is not None and not img.isNull():
+            _cache_put(key, img)
+            write_disk_thumbnail(path, max_size, img)
+        else:
+            _cache_put(key, None)
+            if _is_tiff_path(path):
+                mark_disk_thumbnail_failed(path, max_size)
     return img
+
+
+def _decode_tiff_raster(path: str, bucket: int | None) -> Optional[QImage]:
+    """TIFF preview: prefer embedded JPEG / ImageMagick thumbnail before full decode."""
+    for fn in (
+        _decode_tiff_embedded_jpeg,
+        _decode_with_imagemagick,
+        _decode_with_pillow,
+        _decode_with_qt,
+        _decode_with_tifffile,
+        _decode_malformed_lzw_tiff,
+    ):
+        img = fn(path, bucket)
+        if img is not None and not img.isNull():
+            return img
+    return None
+
+
+def _decode_raster(path: str, bucket: int | None) -> Optional[QImage]:
+    for fn in (
+        _decode_with_qt,
+        _decode_with_pillow,
+        _decode_with_tifffile,
+        _decode_malformed_lzw_tiff,
+        _decode_with_imagemagick,
+    ):
+        img = fn(path, bucket)
+        if img is not None and not img.isNull():
+            return img
+    return None
 
 
 def _decode_with_qt(path: str, max_size: int | None) -> Optional[QImage]:
@@ -228,6 +455,32 @@ def _pil_image_to_qimage(image, max_size: int | None) -> Optional[QImage]:
         stride = int(arr.shape[1] * channels)
     out = QImage(arr.tobytes(), int(arr.shape[1]), int(arr.shape[0]), stride, fmt)
     return out.copy()  # detach from the numpy buffer
+
+
+def _decode_tiff_embedded_jpeg(path: str, max_size: int | None) -> Optional[QImage]:
+    """Fast path: decode embedded JPEG strip inside a TIFF (common Helicon output)."""
+    if Path(path).suffix.lower() not in {".tif", ".tiff"}:
+        return None
+    try:
+        from io import BytesIO
+
+        from PIL import Image
+
+        with open(path, "rb") as fh:
+            with Image.open(fh) as im:
+                tags = getattr(im, "tag_v2", None) or {}
+                offset = tags.get(513)
+                length = tags.get(514)
+                if offset is None or length is None:
+                    return None
+                fh.seek(int(offset))
+                data = fh.read(int(length))
+        if not data:
+            return None
+        with Image.open(BytesIO(data)) as jpeg:
+            return _pil_image_to_qimage(jpeg, max_size)
+    except Exception:
+        return None
 
 
 def _decode_with_pillow(path: str, max_size: int | None) -> Optional[QImage]:

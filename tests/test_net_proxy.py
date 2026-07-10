@@ -35,7 +35,10 @@ class _FakeProxyHandler(http.server.BaseHTTPRequestHandler):
 
 @pytest.fixture()
 def fake_proxy():
-    srv = http.server.HTTPServer(("127.0.0.1", 0), _FakeProxyHandler)
+    try:
+        srv = http.server.HTTPServer(("127.0.0.1", 0), _FakeProxyHandler)
+    except PermissionError:
+        pytest.skip("sandbox cannot bind a local socket for fake proxy")
     th = threading.Thread(target=srv.serve_forever, daemon=True)
     th.start()
     yield "127.0.0.1", srv.server_address[1]

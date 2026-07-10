@@ -14,9 +14,11 @@ from app.services.helicon_service import (
     build_helicon_cmd,
     detect_helicon,
     reset_helicon_cache,
+    resolve_helicon_exe,
     write_helicon_input_list,
     resolve_existing_image_path,
     HELICON_EXE_NAMES,
+    _K_HELICON_EXE,
 )
 from app.utils.path_utils import wsl_to_windows
 
@@ -280,3 +282,13 @@ class TestDetectHelicon:
         result = detect_helicon()
         # Should not find it now
         assert result is None or (isinstance(result, str) and result != str(fake_exe))
+
+    def test_resolve_helicon_exe_uses_stored_settings_path(self, tmp_path):
+        fake_exe = tmp_path / "HeliconFocus.exe"
+        fake_exe.write_bytes(b"fake")
+        from app.app_context import AppContext
+
+        ctx = AppContext()
+        ctx.settings._qs.setValue(_K_HELICON_EXE, str(fake_exe))
+        reset_helicon_cache()
+        assert resolve_helicon_exe(ctx.settings) == str(fake_exe)

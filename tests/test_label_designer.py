@@ -596,9 +596,9 @@ class TestQrEditing:
         d._on_dragged(5.0, 3.0)
         before = qr_metrics(d._tmpl, d._dims)["sizeMm"]
 
-        sliders = d._panel.findChildren(QSlider)
-        assert len(sliders) == 1
-        sliders[0].setValue(60)
+        slider = d._panel.findChild(QSlider, "QrSizeSlider")
+        assert slider is not None
+        slider.setValue(60)
 
         after = qr_metrics(d._tmpl, d._dims)["sizeMm"]
         assert after == pytest.approx(18.0)
@@ -635,15 +635,17 @@ class TestLiveValueEditKeepsPanelAlive:
         assert abs(d._tmpl["qr"]["sizePct"] - 0.6) < 1e-6
 
     def test_dims_edit_keeps_spinbox_widgets_alive(self, qt_app):
-        from PyQt6.QtWidgets import QDoubleSpinBox
         d = _dlg(qt_app)
         d._select("label", -1, -1)
-        before = [id(s) for s in d._panel.findChildren(QDoubleSpinBox)]
-        assert len(before) >= 2                   # corner + w + h
+        w_spin = d._panel._label_w_spin
+        h_spin = d._panel._label_h_spin
+        assert w_spin is not None and h_spin is not None
+        before_w, before_h = id(w_spin), id(h_spin)
         d._apply_edit({"op": "dims", "w": 80.0, "h": 40.0})
-        after = [id(s) for s in d._panel.findChildren(QDoubleSpinBox)]
-        assert after == before                    # same widget objects survive
+        assert id(d._panel._label_w_spin) == before_w
+        assert id(d._panel._label_h_spin) == before_h
         assert d._dims["w"] == 80.0
+        assert d._panel._label_w_spin.value() == 80.0
 
     def test_structural_edit_still_rebuilds_panel(self, qt_app, monkeypatch):
         d = _dlg(qt_app)

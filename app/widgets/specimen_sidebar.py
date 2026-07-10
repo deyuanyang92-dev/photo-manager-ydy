@@ -543,7 +543,7 @@ class SpecimenSidebar(QWidget):
                 )
                 item = QListWidgetItem()
                 item.setData(Qt.ItemDataRole.UserRole, uid)
-                item.setToolTip(uid)
+                item.setToolTip("")
                 item.setSizeHint(QSize(0, 96 if active else 90))
                 self._list.addItem(item)
                 self._list.setItemWidget(item, row)
@@ -658,7 +658,7 @@ class SpecimenSidebar(QWidget):
 
         uid_lbl = QLabel(self._display_uid(uid))
         uid_lbl.setObjectName("SpecimenUid")
-        uid_lbl.setToolTip(uid)
+        uid_lbl.setToolTip("")
         uid_lbl.setMinimumWidth(0)
         uid_lbl.setWordWrap(True)
         uid_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
@@ -668,11 +668,7 @@ class SpecimenSidebar(QWidget):
         status_pill.setObjectName(
             "SpecimenActivePill" if active else "SpecimenInactivePill"
         )
-        status_pill.setToolTip(
-            "当前拍摄和自动归属使用这个编号"
-            if active else
-            "这个编号当前没有激活"
-        )
+        status_pill.setToolTip("")
         status_pill.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
         title_row = QHBoxLayout()
@@ -685,7 +681,7 @@ class SpecimenSidebar(QWidget):
         name_text = name or name_cn
         nm = QLabel(name_text or "未填写物种信息")
         nm.setObjectName("SpecimenSubtext" if name_text else "SpecimenMissingText")
-        nm.setToolTip(name_text or "未填写物种信息")
+        nm.setToolTip("")
         nm.setWordWrap(False)
         v.addWidget(nm)
 

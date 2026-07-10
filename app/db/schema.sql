@@ -43,6 +43,19 @@ CREATE TABLE IF NOT EXISTS seen_files (
   first_seen_at TEXT
 );
 
+-- 成果母版 TIF 绝对路径（数据汇总记录 / 导出 TIF；缩略图 JPEG 代理不入此表）
+CREATE TABLE IF NOT EXISTS specimen_result_tif_index (
+  uid TEXT NOT NULL,
+  seq INTEGER,
+  absolute_path TEXT NOT NULL,
+  file_name TEXT,
+  mtime_iso TEXT,
+  updated_at TEXT,
+  PRIMARY KEY (uid, absolute_path)
+);
+CREATE INDEX IF NOT EXISTS idx_result_tif_uid_seq
+  ON specimen_result_tif_index(uid, seq);
+
 CREATE TABLE IF NOT EXISTS _import_manifest (
   source_file TEXT PRIMARY KEY,  -- 如 user_specimens.json
   sha256 TEXT, row_count INTEGER, imported_at TEXT
@@ -94,6 +107,13 @@ CREATE TABLE IF NOT EXISTS workspace_index_cache (
   result_count INTEGER DEFAULT 0,
   missing_coord_count INTEGER DEFAULT 0,
   taxonomy_incomplete_count INTEGER DEFAULT 0,
+  updated_at TEXT
+);
+
+-- 逻辑 schema 版本（编号 migration 用）；与 CREATE IF NOT EXISTS 补表/补列互补
+CREATE TABLE IF NOT EXISTS _schema_meta (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  version INTEGER NOT NULL DEFAULT 0,
   updated_at TEXT
 );
 

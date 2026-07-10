@@ -228,7 +228,7 @@ class _ComposeWorkbenchDialog(QDialog):
             item = QListWidgetItem(src_list)
             cb = QCheckBox(Path(path).name)
             cb.setChecked(True)
-            cb.setToolTip(path)
+            cb.setToolTip("")
             thumb = self._load_source_preview_pixmap(path)
             if thumb is not None and not thumb.isNull():
                 cb.setIcon(QIcon(thumb))
@@ -254,7 +254,7 @@ class _ComposeWorkbenchDialog(QDialog):
             f" border:1px dashed {t['border_medium']}; border-radius:8px;"
             " padding:8px; font-size:12px;"
         )
-        self._tiff_preview.setToolTip(self._tiff_path)
+        self._tiff_preview.setToolTip("")
         self._preview_scroll = QScrollArea()
         self._preview_scroll.setWidgetResizable(False)
         self._preview_scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)

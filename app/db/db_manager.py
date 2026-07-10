@@ -220,10 +220,16 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     state becomes unreadable (shows "尚未压缩") and explicit-column writes crash
     ("no column named archive_zip"). ``_migrate_add_missing_columns`` closes that
     gap additively, before the view is rebuilt.
+
+    After structural sync, numbered data migrations in ``app.db.migrations`` run
+    so future upgrades (backfill / index init) have a stable version hook.
     """
     schema_sql = _SCHEMA_SQL_PATH.read_text(encoding="utf-8")
     conn.executescript(schema_sql)
     _migrate_add_missing_columns(conn, schema_sql)
+    from app.db.migrations import run_pending_migrations
+
+    run_pending_migrations(conn)
     conn.executescript(_DARWIN_CORE_SQL)
     conn.commit()
 

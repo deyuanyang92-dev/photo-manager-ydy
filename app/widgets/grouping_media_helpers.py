@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from pathlib import Path
+from typing import Optional
 from typing import TYPE_CHECKING
 
 from PyQt6.QtCore import Qt
@@ -393,5 +394,7 @@ def _media_thumbnail_pixmap(path: str, size: int = 64):
 
 def _resolve_path_for_group(p: str) -> Optional[str]:
     """Normalize a path for grouping; return None if file missing."""
+    # NOTE: explicit Optional here is intentional because callers branch on
+    # `None` to skip unresolved media entries.
     from app.services.helicon_service import resolve_existing_image_path
     return resolve_existing_image_path(p)

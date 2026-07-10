@@ -28,6 +28,28 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QImage, QPainter, QPixmap, QPixmapCache
+
+
+def _grid_stub(*, unified: bool = False):
+    from app.widgets.uid_grouped_grid import UidGroupedGrid
+
+    class Stub:
+        _failed_paths: set[str] = set()
+        _pending_paths: set[str] = set()
+
+        def thumb_size(self) -> int:
+            return UidGroupedGrid.THUMB_SIZE
+
+        def caption_fg(self) -> QColor:
+            return QColor("#334155")
+
+        def caption_bg(self) -> QColor:
+            return QColor("#eef2f6")
+
+        def unified_grid(self) -> bool:
+            return unified
+
+    return Stub()
 from PyQt6.QtTest import QSignalSpy, QTest
 from PyQt6.QtWidgets import QApplication
 
@@ -108,7 +130,7 @@ def test_set_groups_creates_sections_with_counts_and_summary(tmp_path):
                 {"path": "/a.tif", "name": "a.tif", "seq": 1},
                 {"path": "/b.tif", "name": "b.tif", "seq": 2},
             ]},
-            {"uid": "浙江-三门湾-B3-007-A1-20240302", "items": [
+            {"uid": "浙江-三门湾-B3-DLC007-A1-20240302", "items": [
                 {"path": "/c.tif", "name": "c.tif", "seq": 1},
             ]},
         ]
@@ -118,12 +140,12 @@ def test_set_groups_creates_sections_with_counts_and_summary(tmp_path):
         assert grid.section(1).model.rowCount() == 1
         # header abbreviation
         assert grid.section(0).title_label.text() == "<b>B2-001</b>"
-        assert grid.section(1).title_label.text() == "<b>B3-007</b>"
+        assert grid.section(1).title_label.text() == "<b>B3-DLC007</b>"
         # count label
         assert grid.section(0).count_label.text() == "×2"
         assert grid.section(1).count_label.text() == "×1"
-        # tooltip carries the full UID
-        assert grid.section(0).title_label.toolTip() == "浙江-三门湾-B2-001-A1-20240301"
+        # Headers stay unobtrusive while the user scrolls or resizes the grid.
+        assert grid.section(0).title_label.toolTip() == ""
         # summary line
         summary = grid.summary_text()
         assert "2 个编号" in summary
@@ -178,6 +200,92 @@ def test_clear_resets_summary(tmp_path):
         ]}])
         grid.clear()
         assert grid.section_count() == 0
+    finally:
+        grid.teardown()
+
+
+def test_unified_grid_merges_groups_into_one_list(tmp_path):
+    """项目树成片预览：单网格铺满中栏，无 per-UID 灰条."""
+    from app.widgets.uid_grouped_grid import UidGroupedGrid, UidSectionModel
+    grid = UidGroupedGrid()
+    try:
+        groups = [
+            {"uid": "浙江-三门湾-B2-001-A1-20240301", "items": [
+                {"path": "/a.tif", "name": "a.tif", "seq": 1},
+            ]},
+            {"uid": "浙江-三门湾-B3-DLC007-A1-20240302", "items": [
+                {"path": "/b.tif", "name": "b.tif", "seq": 2},
+                {"path": "/c.tif", "name": "c.tif", "seq": 3},
+            ]},
+        ]
+        grid.set_unified_grid(True)
+        grid.set_groups(groups)
+        assert grid.unified_grid()
+        assert grid.section_count() == 1
+        sec = grid.section(0)
+        assert sec.list_view.objectName() == "uidUnifiedGrid"
+        assert sec.model.rowCount() == 3
+        ix = sec.model.index(1)
+        assert ix.data(UidSectionModel.UID_ROLE) == "浙江-三门湾-B3-DLC007-A1-20240302"
+        assert "浙江-三门湾-DLC007" in str(ix.data())
+        assert "3 张照片" in grid.summary_text()
+        assert "2 个编号" in grid.summary_text()
+    finally:
+        grid.teardown()
+
+
+def test_set_unified_grid_false_restores_section_headers(tmp_path):
+    from app.widgets.uid_grouped_grid import UidGroupedGrid
+    grid = UidGroupedGrid()
+    try:
+        groups = [{"uid": "P-S-ST-001-A1-2024", "items": [
+            {"path": "/a", "name": "a", "seq": 1},
+        ]}]
+        grid.set_unified_grid(True)
+        grid.set_groups(groups)
+        assert grid.section_count() == 1
+        grid.set_unified_grid(False)
+        assert not grid.unified_grid()
+        assert grid.section_count() == 1
+        assert grid.section(0).title_label.text() == "<b>ST-001</b>"
+        assert grid.section(0).list_view.objectName() == "uidSectionList"
+    finally:
+        grid.teardown()
+
+
+def test_set_sort_mode_reorders_unified_items(tmp_path):
+    from app.widgets.uid_grouped_grid import UidGroupedGrid, UidSectionModel
+    grid = UidGroupedGrid()
+    try:
+        groups = [
+            {"uid": "Z-uid", "items": [{"path": "/z", "name": "z.tif", "seq": 1}]},
+            {"uid": "A-uid", "items": [{"path": "/a", "name": "a.tif", "seq": 1}]},
+        ]
+        grid.set_unified_grid(True)
+        grid.set_groups(groups)
+        m = grid.section(0).model
+        uids = [m.data(m.index(i), UidSectionModel.UID_ROLE) for i in range(m.rowCount())]
+        assert uids == ["A-uid", "Z-uid"]
+    finally:
+        grid.teardown()
+
+
+def test_density_index_scales_thumb_for_single_column():
+    from app.config import project_tree_layout as ptl
+    from app.widgets.uid_grouped_grid import UidGroupedGrid
+    grid = UidGroupedGrid()
+    try:
+        grid.resize(800, 600)
+        grid.show()
+        QApplication.processEvents()
+        dense = ptl.density_index_for_columns(8)
+        sparse = ptl.density_index_for_columns(1)
+        grid.set_density_index(dense)
+        small = grid.thumb_size()
+        grid.set_density_index(sparse)
+        large = grid.thumb_size()
+        assert large > small
+        assert ptl.columns_for_density_index(sparse) == 1
     finally:
         grid.teardown()
 
@@ -276,14 +384,14 @@ def test_only_visible_cells_post_decode_requests(tmp_path):
         grid.set_groups([{"uid": "P-S-ST-001-A1-2024", "items": items}])
         grid.resize(400, 200)
         grid.show()
-        for _ in range(5):
-            QApplication.processEvents()
-            QTest.qWait(15)
-        grid.section(0).list_view.viewport().repaint()
-        for _ in range(5):
-            QApplication.processEvents()
-            QTest.qWait(15)
-        # Whatever the viewport painted, it cannot be all 200.
+        sec = grid.section(0)
+        _, _cw, ch = __import__(
+            "app.config.project_tree_layout", fromlist=["cell_dims"]
+        ).cell_dims(grid.thumb_size())
+        sec.list_view.setFixedHeight(ch * 3 + 4)
+        QApplication.processEvents()
+        sec.list_view.viewport().repaint()
+        QApplication.processEvents()
         posted = len(grid._pending) + len(grid._failed_paths)
         assert posted < 200, (
             f"delegate painted {posted} cells (of 200) — virtualization should "
@@ -386,7 +494,25 @@ def test_delegate_paint_invokes_request_fn_on_miss(tmp_path):
         {"path": p_cached, "name": "cached.png", "seq": 1},
         {"path": p_miss, "name": "miss.png", "seq": 2},
     ])
-    delegate = _ThumbDelegate(fake_request, section_idx=7)
+
+    class _GridStub:
+        _failed_paths: set[str] = set()
+        _pending_paths: set[str] = set()
+
+        def thumb_size(self) -> int:
+            from app.widgets.uid_grouped_grid import _THUMB_SIZE
+            return _THUMB_SIZE
+
+        def caption_fg(self) -> QColor:
+            return QColor("#334155")
+
+        def caption_bg(self) -> QColor:
+            return QColor("#eef2f6")
+
+        def unified_grid(self) -> bool:
+            return False
+
+    delegate = _ThumbDelegate(_GridStub(), fake_request, section_idx=7)
 
     canvas = QPixmap(_THUMB_CELL_W(), _THUMB_CELL_H())
     canvas.fill(QColor("#000000"))
@@ -411,8 +537,11 @@ def test_delegate_paint_skips_request_when_path_empty():
     from app.widgets.uid_grouped_grid import _ThumbDelegate, UidSectionModel
 
     requests: list[tuple[int, int, str]] = []
+
     delegate = _ThumbDelegate(
-        lambda s, r, p: requests.append((s, r, p)), section_idx=0
+        _grid_stub(),
+        lambda s, r, p: requests.append((s, r, p)),
+        section_idx=0,
     )
     model = UidSectionModel("", [{"path": "", "name": "", "seq": None}])
 
@@ -607,3 +736,142 @@ def test_widget_module_does_not_construct_qpixmap_on_worker_thread():
     assert "decode_image_pixmap" not in source
     # The only image→pixmap bridge used is make_pixmap (main thread).
     assert "make_pixmap" in source
+
+
+def test_grid_list_has_context_menu_policy(tmp_path):
+    from app.widgets.uid_grouped_grid import UidGroupedGrid
+
+    path = tmp_path / "a.jpg"
+    from PyQt6.QtGui import QColor, QImage
+
+    img = QImage(32, 32, QImage.Format.Format_RGB32)
+    img.fill(QColor("#336699"))
+    assert img.save(str(path))
+    grid = UidGroupedGrid()
+    grid.set_paths([str(path)])
+    sec = grid.section(0)
+    assert sec is not None
+    assert sec.list_view.contextMenuPolicy() == Qt.ContextMenuPolicy.CustomContextMenu
+    grid.teardown()
+
+
+def test_merge_groups_by_catalog_key_combines_same_unique_id():
+    from app.widgets.uid_grouped_grid import merge_groups_by_catalog_key
+
+    merged = merge_groups_by_catalog_key([
+        {
+            "uid": "GXFCG-BLW-BZC003-R-20260618",
+            "items": [{"path": "/a.tif", "name": "a.tif", "seq": 1}],
+        },
+        {
+            "uid": "GXFCG-BLW-BZC003-R-20260618",
+            "items": [{"path": "/b.tif", "name": "b.tif", "seq": 2}],
+        },
+        {
+            "uid": "GXFCG-BLW-PGC001-R-20260618",
+            "items": [{"path": "/c.tif", "name": "c.tif", "seq": 1}],
+        },
+    ])
+    assert len(merged) == 2
+    assert len(merged[0]["items"]) == 2
+    assert len(merged[1]["items"]) == 1
+
+
+def test_uid_catalog_merges_same_unique_id(qtbot):
+    from app.widgets.uid_grouped_grid import UidGroupedGrid
+
+    grid = UidGroupedGrid()
+    qtbot.addWidget(grid)
+    uid = "GXFCG-BLW-BZC003-R-20260618"
+    grid.set_groups([
+        {"uid": uid, "items": [{"path": "/a.tif", "name": "a.tif", "seq": 1}]},
+        {"uid": uid, "items": [{"path": "/b.tif", "name": "b.tif", "seq": 2}]},
+    ])
+    catalog = grid.uid_catalog()
+    assert len(catalog) == 1
+    assert catalog[0]["abbrev"] == "GXFCG-BLW-BZC003"
+    assert catalog[0]["count"] == 2
+    assert grid.scroll_to_uid("GXFCG-BLW-BZC003") is True
+    grid.teardown()
+
+
+def test_uid_catalog_and_scroll_to_uid(qtbot):
+    from app.widgets.uid_grouped_grid import UidGroupedGrid
+
+    grid = UidGroupedGrid()
+    qtbot.addWidget(grid)
+    grid.set_groups([
+        {
+            "uid": "GXFCG-BLW-B2-SC001-R-20260621",
+            "items": [{"path": "/a.tif", "name": "a.tif", "seq": 1}],
+        },
+        {
+            "uid": "GXFCG-BLW-B3-SC002-T95E-20260622",
+            "items": [{"path": "/b.tif", "name": "b.tif", "seq": 1}],
+        },
+    ])
+    catalog = grid.uid_catalog()
+    assert len(catalog) == 2
+    assert catalog[0]["abbrev"] == "GXFCG-BLW-SC001"
+    assert grid.scroll_to_uid(catalog[1]["uid"]) is True
+    first = grid.first_photo_for_uid(catalog[0]["uid"])
+    assert first is not None and first[0] == "/a.tif"
+    grid.teardown()
+
+
+def test_uid_catalog_unified_mode(qtbot):
+    from app.widgets.uid_grouped_grid import UidGroupedGrid
+
+    grid = UidGroupedGrid()
+    qtbot.addWidget(grid)
+    grid.set_unified_grid(True)
+    grid.set_groups([
+        {
+            "uid": "浙江-三门湾-B2-1-R95E-260621",
+            "items": [{"path": "/a.tif", "name": "a.tif", "seq": 1}],
+        },
+    ])
+    assert len(grid.uid_catalog()) == 1
+    assert grid.scroll_to_uid("浙江-三门湾-B2-1-R95E-260621") is True
+    grid.teardown()
+
+
+def test_format_grid_caption_smart_and_core():
+    from app.config import project_tree_layout as ptl
+    from app.utils.naming import uid_display_core, uid_group_key
+
+    uid = "GXFCG-BLW-BZC003-R-20260618"
+    item = {"path": "/a.tif", "name": "a.tif", "seq": 3, "uid": uid, "_uid": uid}
+    kw = dict(
+        group_uid="",
+        unified=True,
+        catalog_counts={uid_group_key(uid): 5},
+        effective_uid_fn=lambda gu, it: str(gu or it.get("_uid") or it.get("uid") or ""),
+    )
+    assert ptl.format_grid_caption(item, mode="smart", **kw) == "GXFCG-BLW-BZC003 · #3"
+    assert ptl.format_grid_caption(item, mode="core", **kw) == "GXFCG-BLW-BZC003"
+    assert ptl.format_grid_caption(item, mode="core_seq", **kw) == "GXFCG-BLW-BZC003 · #3"
+    kw_single = dict(kw, catalog_counts={uid_group_key(uid): 1})
+    assert ptl.format_grid_caption(item, mode="smart", **kw_single) == "GXFCG-BLW-BZC003"
+    assert uid_display_core(uid) == "GXFCG-BLW-BZC003"
+
+
+def test_unified_caption_mode_core_only(qtbot):
+    from app.widgets.uid_grouped_grid import UidGroupedGrid
+
+    grid = UidGroupedGrid()
+    qtbot.addWidget(grid)
+    grid.set_unified_grid(True)
+    grid.set_caption_mode("core")
+    uid = "GXFCG-BLW-BZC003-R-20260618"
+    grid.set_groups([
+        {"uid": uid, "items": [{"path": "/a.tif", "name": "a.tif", "seq": 1}]},
+        {"uid": uid, "items": [{"path": "/b.tif", "name": "b.tif", "seq": 10}]},
+    ])
+    m = grid.section(0).model
+    assert m.data(m.index(0)) == "GXFCG-BLW-BZC003"
+    assert m.data(m.index(1)) == "GXFCG-BLW-BZC003"
+    grid.set_caption_mode("core_seq")
+    m = grid.section(0).model
+    assert "· #10" in m.data(m.index(1))
+    grid.teardown()

@@ -71,6 +71,33 @@ def test_run_query_fills_table_and_stats(qtbot, qapp, tmp_path, monkeypatch) -> 
     assert "已取RNA 1" in v._stats_lbl.text()
 
 
+def test_preselect_workspaces_checks_matching_dirs(qtbot, qapp, tmp_path) -> None:
+    a = tmp_path / "断面a"
+    b = tmp_path / "断面b"
+    _make_ws(a, [("u1", "R95E", "张三", "浙江", "Aa")])
+    _make_ws(b, [("u2", "T95E", "李四", "福建", "Bb")])
+    ctx = _Ctx()
+    v = DataFilterView(ctx)
+    qtbot.addWidget(v)
+    v._set_workspaces([(str(a), "断面a"), (str(b), "断面b")])
+    v.preselect_workspaces([str(a)])
+    checked = {v._src_list.item(i).text() for i in range(v._src_list.count())
+               if v._src_list.item(i).checkState() == Qt.CheckState.Checked}
+    assert checked == {"断面a"}
+
+
+def test_preselect_adds_missing_workspace(qtbot, qapp, tmp_path) -> None:
+    ws = tmp_path / "树里选的"
+    _make_ws(ws, [("u1", "R95E", "张三", "浙江", "Aa")])
+    ctx = _Ctx()
+    v = DataFilterView(ctx)
+    qtbot.addWidget(v)
+    v._refresh_workspaces()
+    v.preselect_workspaces([str(ws)])
+    labels = {v._src_list.item(i).text() for i in range(v._src_list.count())}
+    assert "树里选的" in labels
+
+
 def test_unlock_wrong_password_keeps_locked(qtbot, qapp, monkeypatch) -> None:
     from app.utils import ui as _ui
     monkeypatch.setattr(_ui, "warn", lambda *a, **k: None)  # 吞掉模态弹窗
@@ -151,3 +178,27 @@ def test_find_specimen_photo_matches_uid_prefix(qtbot, qapp, tmp_path) -> None:
     (ws2 / "results" / "freeform" / f"{uid}-005.tif").write_bytes(b"")
     path2 = v._find_specimen_photo(uid, str(ws2))
     assert path2 is not None and path2.endswith("-005.tif")
+
+
+def test_export_csv_button_writes_file(qtbot, qapp, tmp_path, monkeypatch) -> None:
+    a = tmp_path / "断面a"
+    _make_ws(a, [("u1", "R95E", "张三", "浙江", "Aa")])
+    ctx = _Ctx()
+    v = DataFilterView(ctx)
+    qtbot.addWidget(v)
+    v._set_workspaces([(str(a), "断面a")])
+    for i in range(v._src_list.count()):
+        v._src_list.item(i).setCheckState(Qt.CheckState.Checked)
+    monkeypatch.setattr(v, "_collect_conditions", lambda: [])
+    v._run_query()
+    assert v._btn_export.isEnabled()
+    out = tmp_path / "out.csv"
+    monkeypatch.setattr(
+        "app.utils.ui.get_save_file_name",
+        lambda *_a, **_k: str(out),
+    )
+    monkeypatch.setattr("app.utils.ui.info", lambda *_a, **_k: None)
+    v._export_csv()
+    assert out.exists()
+    text = out.read_text(encoding="utf-8-sig")
+    assert "u1" in text

@@ -22,6 +22,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 
+from PyQt6.QtCore import QEvent
 from PyQt6.QtWidgets import QApplication, QMenu, QPushButton, QSizePolicy, QToolButton
 
 from app.app_context import AppContext
@@ -40,6 +41,20 @@ def qt_app():
     if _APP is None:
         _APP = QApplication.instance() or QApplication([])
     return _APP
+
+
+@pytest.fixture(autouse=True)
+def _close_main_windows_after_test(qt_app):
+    """Keep Qt ownership deterministic across the module's many window tests."""
+    yield
+    qt_app.processEvents()
+    for widget in list(qt_app.topLevelWidgets()):
+        if isinstance(widget, MainWindow):
+            widget.close()
+            widget.deleteLater()
+    qt_app.processEvents()
+    QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    qt_app.processEvents()
 
 
 class _DummyView(BaseView):
@@ -172,6 +187,7 @@ def test_function_menu_groups_all_registered_views():
     tools_menu = win._nav_group_menus["tools"]
     assert [a.text() for a in tools_menu.actions() if a.isVisible()] == [
         "标签打印",
+        "TIFF 转 JPG",
         "采集地图",
     ]
     system_menu = win._nav_group_menus["system"]
@@ -412,6 +428,7 @@ def test_retranslate_ui_updates_shell_and_grouped_menu():
     assert win._nav_buttons[0].text() == "Photo Workspace"
     assert [a.text() for a in win._nav_group_menus["tools"].actions() if a.isVisible()] == [
         "Label Printing",
+        "TIFF 转 JPG",
         "Collection Map",
     ]
     assert "Alt+A" in win._shot_actions["region"].text()
@@ -428,7 +445,7 @@ def test_restore_state_selects_default():
     assert any(b.isChecked() for b in win._nav_buttons)
 
 
-def test_restore_state_fast_startup_skips_last_heavy_page():
+def test_restore_state_fast_startup_skips_last_heavy_page(qtbot):
     win = _fresh_window()
 
     class _Second(_DummyView):
@@ -443,26 +460,46 @@ def test_restore_state_fast_startup_skips_last_heavy_page():
 
     assert win._nav_buttons[0].isChecked()
     assert not win._nav_buttons[1].isChecked()
-    assert "dummy" in win._views
     assert "dummy2" not in win._views
     assert win.ctx.settings.last_nav_index == 1
+    # Workbench builds on the next event-loop tick (not during restore_state).
+    qtbot.waitUntil(lambda: "dummy" in win._views, timeout=2000)
+    assert "dummy" in win._views
+
+
+def test_close_cancels_deferred_startup_activation(qtbot):
+    win = _fresh_window()
+    win.register_view(_DummyView)
+    win._startup_activation_timer.start(200)
+
+    win.close()
+    qtbot.wait(250)
+
+    assert not win._startup_activation_timer.isActive()
+    assert "dummy" not in win._views
 
 
 # ── Full registry boots through the new chrome ─────────────────────────────
 
 def test_all_views_register():
-    win = _fresh_window()
-    for cls in ALL_VIEWS:
-        win.register_view(cls)
-    assert len(win._nav_buttons) == len(ALL_VIEWS)
-    # Lazy build: nothing constructed until visited.
-    assert win._stack.count() == 0
-    # Visiting every view builds them all without error.
-    for cls in ALL_VIEWS:
-        win.navigate_to(cls.view_id)
-    assert win._stack.count() == len(ALL_VIEWS)
-    # settings cog navigation target exists.
-    assert "settings" in win._views
+    code = (
+        "import os; os.environ['QT_QPA_PLATFORM']='offscreen';"
+        "from PyQt6.QtWidgets import QApplication; app=QApplication([]);"
+        "from app.app_context import AppContext;"
+        "from app.main_window import MainWindow;"
+        "from app.views.registry import ALL_VIEWS;"
+        "win=MainWindow(AppContext());"
+        "[win.register_view(cls) for cls in ALL_VIEWS];"
+        "assert len(win._nav_buttons) == len(ALL_VIEWS);"
+        "assert win._stack.count() == 0;"
+        "[win.navigate_to(cls.view_id) for cls in ALL_VIEWS];"
+        "assert win._stack.count() == len(ALL_VIEWS);"
+        "assert 'settings' in win._views;"
+        "win.close(); app.processEvents(); print('OK', flush=True)"
+    )
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert "OK" in result.stdout
 
 
 # ── Shutdown closes cached DB connections (no "must reboot" lock leak) ─────
@@ -580,3 +617,25 @@ def test_startup_stderr_logging_ignores_broken_pipe(monkeypatch):
     monkeypatch.setattr(main.sys, "stderr", _BrokenStderr())
 
     main._safe_stderr_print("启动窗口目标屏幕: test")
+
+
+def test_refresh_helicon_status_shows_available_when_detected(qtbot, monkeypatch, tmp_path):
+    win = _fresh_window()
+    fake_exe = tmp_path / "HeliconFocus.exe"
+    fake_exe.write_bytes(b"fake")
+
+    import app.services.helicon_service as hs
+
+    monkeypatch.setattr(hs, "resolve_helicon_exe", lambda settings=None: str(fake_exe))
+    win.refresh_helicon_status()
+    assert win._status_helicon.text() == "Helicon: 可用"
+
+
+def test_refresh_helicon_status_shows_missing_when_not_detected(qtbot, monkeypatch):
+    win = _fresh_window()
+
+    import app.services.helicon_service as hs
+
+    monkeypatch.setattr(hs, "resolve_helicon_exe", lambda settings=None: None)
+    win.refresh_helicon_status()
+    assert win._status_helicon.text() == "Helicon: 未检测"

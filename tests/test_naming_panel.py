@@ -149,7 +149,7 @@ class TestSectionVisibilityPersistence:
 # ── 保存方式下拉:收起只显缩写 (oracle app.js:9268-9271) ─────────────────────
 
 class TestStorageComboDisplay:
-    """Option 文本只放 code,detail 进 tooltip;全文说明由灰字行承担。"""
+    """Option 只显示 code；详细说明由下方灰字行承担。"""
 
     def _method_rows(self, panel):
         from PyQt6.QtCore import Qt
@@ -164,14 +164,12 @@ class TestStorageComboDisplay:
 
     def test_method_items_show_code_only(self, panel):
         from PyQt6.QtCore import Qt
-        from app.services.project_settings_service import BUILTIN_STORAGES
-        details = {entry["code"]: entry["detail"] for entry in BUILTIN_STORAGES}
         rows = [r for r in self._method_rows(panel)
                 if r.data(Qt.ItemDataRole.UserRole) == "T95E"]
         assert rows, "T95E row missing from storage combo"
         item = rows[0]
         assert item.text() == "T95E", f"expected code-only text, got {item.text()!r}"
-        assert item.toolTip() == details["T95E"]
+        assert item.toolTip() == ""
 
     def test_project_override_refreshes_detail(self, qapp):
         import sqlite3
@@ -222,8 +220,8 @@ def test_date_section_visible_for_input(panel):
 def test_required_fields_marked(panel):
     """标本 UID 必填字段带红*; 站位/成果序号/拍照备注 选填(无*)。
 
-    必填(红*): 地区/样地/样品/物种标签/保存方式/采集日期/拍摄日期
-      - 地区/样地虽由项目级默认预填, 仍标必填(值须存在)
+    必填(红*): 省/市/地区/样地/物种编号/保存方式/采集日期/拍摄日期
+      - 省/市、地区/样地虽由项目级默认预填, 仍标必填(值须存在)
       - 拍摄日期 2026-06-14 改定必填(原选填)
     """
     labels = _labels_with_name(panel, "CompactFieldLabel")
@@ -233,7 +231,7 @@ def test_required_fields_marked(panel):
         assert matches, f"{kw} field label not found"
         return "*" in matches[0].text()
 
-    for kw in ("地区", "样地", "样品/物种标签", "保存方式", "采集日期", "拍摄日期"):
+    for kw in ("省/市", "地区/样地", "物种编号", "保存方式", "采集日期", "拍摄日期"):
         assert has_star(kw), f"{kw} should be required (*)"
     # 站位选填(缺则 UID 少一段, 非 bug)
     station = [l for l in labels if "站位" in l.text()]

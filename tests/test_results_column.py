@@ -161,8 +161,8 @@ def test_lightbox_uses_shared_preview_decoder(qtbot, tmp_path, monkeypatch):
     assert "无法预览" not in dlg._image_label.text()
 
 
-def test_lightbox_preview_keeps_native_resolution(qtbot, tmp_path):
-    """Large TIFF previews must not be capped to the thumbnail decode size."""
+def test_lightbox_preview_uses_bounded_tiff_proxy(qtbot, tmp_path):
+    """Large TIFF previews use the configured bounded proxy, not the master."""
     from PIL import Image
     from app.widgets.results_column import _TiffLightboxDialog
 
@@ -172,8 +172,10 @@ def test_lightbox_preview_keeps_native_resolution(qtbot, tmp_path):
     dlg = _TiffLightboxDialog([tif], initial_index=0)
     qtbot.addWidget(dlg)
 
-    assert dlg._base_pixmap.width() == 3600
-    assert dlg._base_pixmap.height() == 1200
+    from app.config.preview_profile import current_preview_master_size
+    assert dlg._base_pixmap.width() <= current_preview_master_size()
+    assert dlg._base_pixmap.height() <= current_preview_master_size()
+    assert dlg._base_pixmap.width() / dlg._base_pixmap.height() == pytest.approx(3.0, rel=0.02)
 
 
 def test_lightbox_scales_preview_for_screen_pixel_ratio(qtbot, tmp_path, monkeypatch):
@@ -192,10 +194,10 @@ def test_lightbox_scales_preview_for_screen_pixel_ratio(qtbot, tmp_path, monkeyp
 
     pixmap = dlg._image_label.pixmap()
     assert pixmap is not None
-    assert pixmap.width() == 2000
-    assert pixmap.height() == 1200
-    assert dlg._image_label.width() == 1000
-    assert dlg._image_label.height() == 600
+    assert pixmap.width() == dlg._base_pixmap.width()
+    assert pixmap.height() == dlg._base_pixmap.height()
+    assert dlg._image_label.width() == round(dlg._base_pixmap.width() / 2.0)
+    assert dlg._image_label.height() == round(dlg._base_pixmap.height() / 2.0)
 
 
 def test_lightbox_sharpens_downscaled_preview_by_default(qtbot, tmp_path, monkeypatch):
@@ -217,7 +219,10 @@ def test_lightbox_sharpens_downscaled_preview_by_default(qtbot, tmp_path, monkey
     monkeypatch.setattr(dlg, "_sharpen_preview_pixmap", fake_sharpen)
 
     dlg._set_zoom_percent(50)
-    assert calls == [(500, 250)]
+    assert calls == [(
+        round(dlg._base_pixmap.width() * 0.5),
+        round(dlg._base_pixmap.height() * 0.5),
+    )]
 
     dlg._sharpen_btn.setChecked(False)
     calls.clear()

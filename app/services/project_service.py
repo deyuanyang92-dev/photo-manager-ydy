@@ -419,6 +419,42 @@ def record_recent_workspace(
     return projects
 
 
+def relocate_project_directory(
+    user_projects_json_path: str,
+    old_path: str,
+    new_path: str,
+) -> bool:
+    """Point a recorded workspace at a new folder (drive letter / path drift).
+
+    Updates ``user_projects.json`` when *old_path* matches a stored directory.
+    Returns True if at least one entry was rewritten.
+    """
+    old_resolved = normalize_path(old_path)
+    new_resolved = normalize_path(new_path)
+    if not Path(new_resolved).is_dir():
+        raise FileNotFoundError(f"新路径不存在或不可访问: {new_resolved}")
+
+    projects = list_projects(user_projects_json_path)
+    updated = False
+    for entry in projects:
+        directory = entry.get("directory") or entry.get("dir") or ""
+        if directory and _same_path(directory, old_resolved):
+            entry["directory"] = new_resolved
+            entry["dir"] = new_resolved
+            entry["name"] = entry.get("name") or Path(new_resolved).name
+            updated = True
+    if not updated:
+        return False
+    out = Path(localize_path(user_projects_json_path))
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(
+        json.dumps({"version": 1, "projects": projects}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    clear_project_list_cache(user_projects_json_path)
+    return True
+
+
 def save_project_descriptor(
     user_projects_json_path: str,
     project: dict,
@@ -801,7 +837,9 @@ def get_project_results(project_dir: str) -> dict:
     Oracle: server.js GET /api/project/results (lines 2874-2922).
     """
     import re as _re
-    import sqlite3 as _sqlite3
+
+    from app.services.project_settings_service import DEFAULT_NAMING_RULES, get_effective
+    from app.utils.naming import normalize_naming_components, normalize_uid, parse_tiff_result_detail
 
     root = Path(normalize_path(project_dir))
     results_root = root / RESULTS_DIR
@@ -809,9 +847,12 @@ def get_project_results(project_dir: str) -> dict:
 
     _tif_re = _re.compile(r"\.tiff?$", _re.IGNORECASE)
 
-    # ── Name-parsing (mirrors parseTiffBasename in server.js) ─────────────────
-    # Pattern: region-site-station-speciesId-seq-storage-dateSegment(.tif)
-    # seq and storage can be absent (6-segment = uniqueId, 7-segment = resultId).
+    naming_rules = get_effective(str(root), "naming_rules", DEFAULT_NAMING_RULES)
+    naming_components = normalize_naming_components(
+        naming_rules.get("components") or DEFAULT_NAMING_RULES["components"]
+    )
+
+    # Fallback regex when configured naming rules cannot parse (standard 7/6-segment).
     _TIFF_7 = _re.compile(
         r"^([^-]+)-([^-]+)-([^-]+)-([^-]+)-(\d+)-([^-]+)-([^-.]+)\.tiff?$",
         _re.IGNORECASE,
@@ -822,11 +863,19 @@ def get_project_results(project_dir: str) -> dict:
     )
 
     def parse_result_tiff_name(name: str):
-        """Return (uid, seq) or (None, None)."""
+        """Return (uid, seq) or (None, None). Prefer project naming rules."""
+        stem = name
+        if stem.lower().endswith((".tif", ".tiff")):
+            stem = stem.rsplit(".", 1)[0]
+        detail = parse_tiff_result_detail(stem, naming_components)
+        if detail and detail.uid:
+            return normalize_uid(detail.uid), detail.sequence
         m = _TIFF_7.match(name)
         if m:
             province, site, station, species_id, seq_s, storage, date_seg = m.groups()
-            uid = f"{province}-{site}-{station}-{species_id}-{storage}-{date_seg}"
+            uid = normalize_uid(
+                f"{province}-{site}-{station}-{species_id}-{storage}-{date_seg}"
+            )
             try:
                 return uid, int(seq_s)
             except (ValueError, TypeError):
@@ -834,7 +883,9 @@ def get_project_results(project_dir: str) -> dict:
         m = _TIFF_6.match(name)
         if m:
             province, site, station, species_id, storage, date_seg = m.groups()
-            uid = f"{province}-{site}-{station}-{species_id}-{storage}-{date_seg}"
+            uid = normalize_uid(
+                f"{province}-{site}-{station}-{species_id}-{storage}-{date_seg}"
+            )
             return uid, None
         return None, None
 

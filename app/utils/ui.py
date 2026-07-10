@@ -37,6 +37,7 @@ from PyQt6.QtWidgets import (
     QApplication,
     QDialog,
     QFileDialog,
+    QLayout,
     QListView,
     QMessageBox,
     QTreeView,
@@ -66,6 +67,47 @@ def top_window(w: Optional[QWidget]) -> Optional[QWidget]:
     while root.parent() is not None and isinstance(root.parent(), QWidget):
         root = root.parent()  # type: ignore[assignment]
     return root
+
+
+def dispose_widget(widget: Optional[QWidget]) -> None:
+    """Hide and schedule *widget* for deletion without orphan top-level windows.
+
+    ``setParent(None)`` before ``deleteLater()`` promotes a widget to its own OS
+    window (often titled with the app name or a section label).  Always use
+    this helper when removing dynamic UI pieces from layouts.
+    """
+    if widget is None:
+        return
+    widget.hide()
+    widget.deleteLater()
+
+
+def clear_layout_widgets(layout: Optional[QLayout], *, flush_events: bool = False) -> None:
+    """Remove and dispose every QWidget owned by *layout*."""
+    if layout is None:
+        return
+    while layout.count():
+        item = layout.takeAt(0)
+        if item is None:
+            continue
+        child_layout = item.layout()
+        if child_layout is not None:
+            clear_layout_widgets(child_layout, flush_events=flush_events)
+            continue
+        dispose_widget(item.widget())
+    if flush_events:
+        app = QApplication.instance()
+        if app is not None:
+            app.processEvents()
+            app.processEvents()
+
+
+def remove_widget_from_layout(layout: Optional[QLayout], widget: Optional[QWidget]) -> None:
+    """Detach *widget* from *layout* and dispose it safely."""
+    if layout is None or widget is None:
+        return
+    layout.removeWidget(widget)
+    dispose_widget(widget)
 
 
 def center_on(dialog: QDialog, parent: Optional[QWidget]) -> None:

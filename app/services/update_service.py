@@ -1,7 +1,21 @@
-"""Self-update helpers for the Windows portable package."""
+"""Self-update helpers for the Windows portable package.
+
+对标专业软件（VS Code / Cursor / Chrome）的更新工程：
+
+  • 完整性校验：GitHub 提供的大小 + SHA-256（``verify_downloaded_package``）。
+  • **真实性校验**：Ed25519 分离签名（``verify_update_signature``）。发布方用私钥对
+    整个 zip 签名，随发布上传 ``<zip>.sig``（base64）。应用内嵌公钥
+    (``UPDATE_PUBLIC_KEY_B64``)，配置后即强制校验——防止发布账号被盗或包被替换。
+    生成/签名工具见 ``scripts/gen_update_keys.py`` 与 ``scripts/sign_release.py``。
+  • 发布说明（changelog）：``ReleaseInfo.body`` 取自 GitHub release 正文。
+  • 提权应用：安装目录不可写（如 Program Files）时以管理员身份运行替换脚本。
+  • 用户资料保留：``PROTECTED_RELATIVE_PATHS`` + PowerShell 备份/恢复；项目数据与
+    QSettings 都在安装目录之外，天然不受影响。
+"""
 
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass
 import http.client
 import hashlib
@@ -26,6 +40,15 @@ LATEST_RELEASE_API = f"https://api.github.com/repos/{REPO}/releases/latest"
 LATEST_RELEASE_PAGE = f"https://github.com/{REPO}/releases/latest"
 WINDOWS_ASSET_RE = re.compile(r"SpecimenPhotoWorkbench-.*-win64\.zip$", re.I)
 APP_EXE_NAME = "SpecimenPhotoWorkbench.exe"
+
+# ── Update authenticity (Ed25519 detached signature) ─────────────────────────
+# base64 of the raw 32-byte Ed25519 *public* key. Empty = signature not enforced
+# (keeps unsigned legacy releases working). Once you run
+# ``scripts/gen_update_keys.py`` and paste the public key here (and sign each
+# release with the matching private key), verification becomes mandatory.
+# Can also be overridden at runtime via SPECIMEN_UPDATE_PUBKEY for staged rollout.
+UPDATE_PUBLIC_KEY_B64 = ""
+_PUBKEY_ENV = "SPECIMEN_UPDATE_PUBKEY"
 PACKAGED_ERROR_RE = re.compile(r"Traceback|PermissionError|ModuleNotFoundError|ImportError", re.I)
 DEFAULT_NETWORK_ATTEMPTS = 3
 DEFAULT_RETRY_DELAY_SECONDS = 1.0
@@ -53,6 +76,8 @@ class ReleaseInfo:
     asset_size: int
     page_url: str
     asset_digest: str = ""
+    signature_url: str = ""   # URL of the <asset>.sig detached Ed25519 signature
+    body: str = ""            # release notes / changelog (markdown from GitHub)
 
 
 @dataclass(frozen=True)
@@ -61,6 +86,7 @@ class PreparedUpdate:
     work_dir: Path
     package_dir: Path
     script_path: Path
+    requires_elevation: bool = False
 
 
 class UpdateNetworkError(RuntimeError):
@@ -110,13 +136,23 @@ def is_newer_version(candidate: str, current: str) -> bool:
 
 def release_from_api_payload(payload: dict) -> ReleaseInfo:
     assets = payload.get("assets") or []
+
+    def _download_url(asset: dict) -> str:
+        return str(asset.get("browser_download_url") or asset.get("url") or "")
+
     for asset in assets:
         name = str(asset.get("name") or "")
         if not WINDOWS_ASSET_RE.match(name):
             continue
-        url = str(asset.get("browser_download_url") or asset.get("url") or "")
+        url = _download_url(asset)
         if not url:
             continue
+        sig_name = f"{name}.sig"
+        signature_url = ""
+        for other in assets:
+            if str(other.get("name") or "") == sig_name:
+                signature_url = _download_url(other)
+                break
         return ReleaseInfo(
             tag_name=str(payload.get("tag_name") or ""),
             asset_name=name,
@@ -124,6 +160,8 @@ def release_from_api_payload(payload: dict) -> ReleaseInfo:
             asset_size=int(asset.get("size") or 0),
             page_url=str(payload.get("html_url") or ""),
             asset_digest=str(asset.get("digest") or ""),
+            signature_url=signature_url,
+            body=str(payload.get("body") or ""),
         )
     raise ValueError("latest release does not contain a Windows portable zip")
 
@@ -243,6 +281,90 @@ def verify_downloaded_package(release: ReleaseInfo, zip_path: str | Path) -> Non
             actual = sha256_file(zip_path)
             if actual.lower() != expected.lower():
                 raise ValueError("downloaded update SHA-256 mismatch")
+
+
+def update_public_key_b64() -> str:
+    """Effective public key: runtime env overrides the embedded constant."""
+    return os.environ.get(_PUBKEY_ENV, "").strip() or UPDATE_PUBLIC_KEY_B64.strip()
+
+
+def signature_required() -> bool:
+    """Whether authenticity verification is enforced (a public key is configured)."""
+    return bool(update_public_key_b64())
+
+
+def fetch_signature(
+    url: str,
+    *,
+    timeout: int = 20,
+    attempts: int = DEFAULT_NETWORK_ATTEMPTS,
+    retry_delay: float = DEFAULT_RETRY_DELAY_SECONDS,
+) -> str:
+    """Download the small base64 ``.sig`` text and return it stripped."""
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "SpecimenPhotoWorkbench-Updater"},
+    )
+    attempts = max(1, int(attempts))
+    for attempt in range(1, attempts + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.read().decode("utf-8").strip()
+        except Exception as exc:  # noqa: BLE001
+            if not _is_retryable_update_error(exc) or attempt >= attempts:
+                if _is_retryable_update_error(exc):
+                    raise _network_error("下载更新签名", exc) from exc
+                raise
+            _sleep_before_retry(attempt, retry_delay)
+    raise AssertionError("unreachable")
+
+
+def verify_update_signature(
+    zip_path: str | Path,
+    signature_b64: str,
+    *,
+    public_key_b64: str | None = None,
+) -> bool:
+    """Verify an Ed25519 detached signature over the raw zip bytes.
+
+    Returns True on success. Returns False when no public key is configured
+    (signature not enforced). Raises ValueError on a bad/mismatched signature.
+    """
+    key_b64 = public_key_b64 if public_key_b64 is not None else update_public_key_b64()
+    if not key_b64:
+        return False
+    try:
+        from cryptography.exceptions import InvalidSignature
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+            Ed25519PublicKey,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(
+            "cryptography 库不可用，无法验证更新签名。请安装 cryptography 后重试。"
+        ) from exc
+    try:
+        pub = Ed25519PublicKey.from_public_bytes(base64.b64decode(key_b64))
+        signature = base64.b64decode(str(signature_b64).strip())
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(f"更新签名/公钥编码无效：{exc}") from exc
+    data = Path(zip_path).read_bytes()
+    try:
+        pub.verify(signature, data)
+    except InvalidSignature as exc:
+        raise ValueError("更新包签名验证失败：可能被篡改或来源不可信。") from exc
+    return True
+
+
+def install_requires_elevation(install_dir: str | Path | None = None) -> bool:
+    """True when the install directory is not writable by the current user."""
+    target = Path(install_dir) if install_dir else install_dir_for_executable()
+    probe = target / ".spw-update-write-test"
+    try:
+        probe.write_text("x", encoding="utf-8")
+        probe.unlink()
+        return False
+    except Exception:  # noqa: BLE001
+        return True
 
 
 def _zip_target(package_dir: Path, info: zipfile.ZipInfo) -> Path:
@@ -501,6 +623,15 @@ def prepare_update(
     zip_path = work_dir / release.asset_name
     download_file(release.asset_url, zip_path, progress_cb=progress_cb)
     verify_downloaded_package(release, zip_path)
+    # Authenticity: if a public key is configured, the release MUST carry a valid
+    # Ed25519 signature. Refuse to apply otherwise (prevents forged packages).
+    if signature_required():
+        if not release.signature_url:
+            raise ValueError(
+                "更新已启用签名校验，但该版本缺少 .sig 签名文件，拒绝安装。"
+            )
+        signature_b64 = fetch_signature(release.signature_url)
+        verify_update_signature(zip_path, signature_b64)
     package_dir = extract_update_zip(zip_path, work_dir / "package")
     if smoke is None:
         smoke = can_self_update(executable=executable)
@@ -525,12 +656,35 @@ def prepare_update(
         work_dir=work_dir,
         package_dir=package_dir,
         script_path=script_path,
+        requires_elevation=install_requires_elevation(install_dir),
     )
 
 
-def launch_update_script(script_path: str | Path) -> None:
+def launch_update_script(script_path: str | Path, *, elevate: bool = False) -> None:
     import subprocess
 
+    script_path = Path(script_path)
+    if elevate:
+        # Relaunch the apply script elevated (UAC prompt). Needed when the install
+        # dir is under Program Files or otherwise not user-writable.
+        inner = (
+            "Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList "
+            "@('-NoProfile','-ExecutionPolicy','Bypass','-File',"
+            f"'{ps_quote(script_path)[1:-1]}')"
+        )
+        subprocess.Popen(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                inner,
+            ],
+            cwd=str(script_path.parent),
+            close_fds=True,
+        )
+        return
     subprocess.Popen(
         [
             "powershell.exe",
@@ -540,6 +694,6 @@ def launch_update_script(script_path: str | Path) -> None:
             "-File",
             str(script_path),
         ],
-        cwd=str(Path(script_path).parent),
+        cwd=str(script_path.parent),
         close_fds=True,
     )

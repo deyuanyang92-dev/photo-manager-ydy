@@ -218,3 +218,9 @@ class SettingsHeliconActionsMixin:
                 self._show_status("✗ 自定义路径无效，自动探测也未找到 Helicon Focus", 5000)
             else:
                 self._show_status("✗ 未检测到 Helicon Focus（Windows 专有工具，Linux 下需通过 WSL 路径配置）", 5000)
+        win = self.window()
+        if hasattr(win, "refresh_helicon_status"):
+            try:
+                win.refresh_helicon_status()
+            except Exception:
+                pass

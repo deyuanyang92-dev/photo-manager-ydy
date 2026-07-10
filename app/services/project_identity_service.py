@@ -115,6 +115,26 @@ def set_project_identity(
     return project_id
 
 
+def reset_project_identity(
+    db,
+    *,
+    project_name: str = "",
+    previous_project_id: str = "",
+) -> str:
+    """Assign a fresh project identity, breaking any previous project-code link."""
+    project_id = uuid.uuid4().hex
+    data = {
+        "projectId": project_id,
+        "projectName": str(project_name or ""),
+        "updatedAt": _now_iso(),
+        "resetAt": _now_iso(),
+    }
+    if previous_project_id and previous_project_id != project_id:
+        data["previousProjectId"] = previous_project_id
+    save_setting(db, PROJECT_IDENTITY_KEY, data)
+    return project_id
+
+
 def _normalise_project_id(project_id: str) -> str:
     value = str(project_id or "").strip().lower()
     if not _PROJECT_ID_RE.fullmatch(value):

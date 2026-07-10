@@ -34,9 +34,10 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING, Optional
 
-from PyQt6.QtCore import QSize, Qt
-from PyQt6.QtGui import QAction, QCloseEvent, QKeySequence, QShortcut
+from PyQt6.QtCore import QSize, Qt, QTimer
+from PyQt6.QtGui import QAction, QActionGroup, QCloseEvent, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
+    QApplication,
     QButtonGroup,
     QFrame,
     QHBoxLayout,
@@ -85,8 +86,15 @@ class MainWindow(QMainWindow):
         self._nav_pin_actions: dict[str, QAction] = {}
         self._nav_group_menus: dict[str, QMenu] = {}
         self._shot_actions: dict[str, QAction] = {}
+        self._theme_actions: dict[str, QAction] = {}
         self._nav_group = QButtonGroup(self)
         self._nav_group.setExclusive(True)
+        self._startup_activation_timer = QTimer(self)
+        self._startup_activation_timer.setSingleShot(True)
+        self._startup_activation_timer.timeout.connect(self._activate_initial_view)
+        self._helicon_status_timer = QTimer(self)
+        self._helicon_status_timer.setSingleShot(True)
+        self._helicon_status_timer.timeout.connect(self._refresh_helicon_status)
 
         self.setWindowTitle(tr("标本影像"))
         self.resize(1440, 900)
@@ -100,6 +108,7 @@ class MainWindow(QMainWindow):
         self._build_shell()
         self._build_status_bar()
         self._wire_collab_status_bar()
+        self._wire_helicon_status_bar()
         self._wire_screenshot()
 
     # ── Shell layout ──────────────────────────────────────────────────────
@@ -117,12 +126,47 @@ class MainWindow(QMainWindow):
         # Context bar (project + active badge + quick actions)
         layout.addWidget(self._build_context_bar())
 
-        # Content stack
+        # Content stack — only real views live in QStackedWidget (lazy-build
+        # contract: register_view leaves _stack.count() at 0 until first visit).
+        self._content_host = QWidget()
+        self._content_host.setObjectName("ContentHost")
+        host_lay = QVBoxLayout(self._content_host)
+        host_lay.setContentsMargins(0, 0, 0, 0)
+        host_lay.setSpacing(0)
         self._stack = QStackedWidget()
         self._stack.setObjectName("ContentStack")
-        layout.addWidget(self._stack, stretch=1)
+        host_lay.addWidget(self._stack, stretch=1)
+        self._startup_placeholder = QLabel(tr("正在加载工作台，请稍候…"), self._content_host)
+        self._startup_placeholder.setObjectName("StartupPlaceholder")
+        self._startup_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._startup_placeholder.hide()
+        layout.addWidget(self._content_host, stretch=1)
 
         self.setCentralWidget(container)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 — Qt override
+        super().resizeEvent(event)
+        self._sync_startup_placeholder_geometry()
+
+    def _sync_startup_placeholder_geometry(self) -> None:
+        ph = getattr(self, "_startup_placeholder", None)
+        host = getattr(self, "_content_host", None)
+        if ph is None or host is None or not ph.isVisible():
+            return
+        ph.setGeometry(host.rect())
+
+    def _show_startup_placeholder(self) -> None:
+        ph = getattr(self, "_startup_placeholder", None)
+        if ph is None:
+            return
+        ph.show()
+        ph.raise_()
+        self._sync_startup_placeholder_geometry()
+
+    def _hide_startup_placeholder(self) -> None:
+        ph = getattr(self, "_startup_placeholder", None)
+        if ph is not None and ph.isVisible():
+            ph.hide()
 
     def _build_topbar(self) -> QFrame:
         bar = QFrame()
@@ -133,13 +177,13 @@ class MainWindow(QMainWindow):
         lay.setSpacing(0)
 
         # Brand: vector microscope mark + serif wordmark
-        brand_mark = QLabel()
-        brand_mark.setObjectName("BrandMark")
-        brand_mark.setPixmap(
+        self._brand_mark = QLabel()
+        self._brand_mark.setObjectName("BrandMark")
+        self._brand_mark.setPixmap(
             icons.icon("mdi6.microscope", color=icons.TONE_ACCENT).pixmap(22, 22)
         )
-        brand_mark.setFixedSize(24, 24)
-        lay.addWidget(brand_mark)
+        self._brand_mark.setFixedSize(24, 24)
+        lay.addWidget(self._brand_mark)
         lay.addSpacing(8)
         self._brand = QLabel(tr("标本影像管理"))
         self._brand.setObjectName("BrandWord")
@@ -264,6 +308,40 @@ class MainWindow(QMainWindow):
         lay.addSpacing(10)
         lay.addWidget(self._topbar_divider())
         lay.addSpacing(10)
+
+        self._theme_btn = QToolButton()
+        self._theme_btn.setObjectName("ThemeSwitcherButton")
+        self._theme_btn.setAccessibleName(tr("界面风格"))
+        self._theme_btn.setToolTip(tr("切换后立即生效，并在下次启动时保持"))
+        self._theme_btn.setFixedSize(42, 34)
+        self._theme_btn.setIcon(
+            icons.icon("mdi6.palette-outline", color=icons.TONE_MUTED,
+                       color_active=icons.TONE_ACCENT_HOVER)
+        )
+        self._theme_btn.setIconSize(QSize(18, 18))
+        self._theme_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._theme_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self._theme_menu = QMenu(self._theme_btn)
+        self._theme_menu.setTitle(tr("界面风格"))
+        self._theme_menu.setMinimumWidth(176)
+        self._theme_action_group = QActionGroup(self._theme_menu)
+        self._theme_action_group.setExclusive(True)
+        from app.config.theme import COMPARISON_THEME_KEYS, THEME_NAMES
+        for theme_key in COMPARISON_THEME_KEYS:
+            action = self._theme_menu.addAction(tr(THEME_NAMES[theme_key]))
+            action.setCheckable(True)
+            action.setData(theme_key)
+            action.setToolTip(tr("切换后立即生效，并在下次启动时保持"))
+            action.triggered.connect(
+                lambda checked=False, key=theme_key: checked and self.apply_visual_theme(key)
+            )
+            self._theme_action_group.addAction(action)
+            self._theme_actions[theme_key] = action
+        self._theme_btn.setMenu(self._theme_menu)
+        self._sync_theme_controls(self.ctx.settings.current_theme)
+        lay.addWidget(self._theme_btn)
+
+        lay.addSpacing(4)
 
         self._settings_btn = QPushButton()
         self._settings_btn.setObjectName("IconGhost")
@@ -427,7 +505,7 @@ class MainWindow(QMainWindow):
         self._nav_buttons.append(btn)
         self._nav_row.addWidget(btn)
         self._add_view_to_nav_menu(view_cls, idx)
-        # 老用户 pin 列表升级: 新加入 _DEFAULT_PINNED_NAV 的 view(如 data_filter),
+        # 老用户 pin 列表升级: 新加入 _DEFAULT_PINNED_NAV 的 view,
         # 若老 setting 没固定过它, 自动 pin 显示(否则用户发现不了新页)。
         raw_pins = self.ctx.settings._qs.value("ui/topbar_pinned_views", "", type=str) or ""
         if raw_pins and raw_pins != "__none__" and view_id in _DEFAULT_PINNED_NAV:
@@ -436,10 +514,14 @@ class MainWindow(QMainWindow):
                 pins.add(view_id)
                 self._save_nav_pins(pins)
                 btn.setVisible(True)  # 刚升级 pin, 立即可见(QSettings 写后读在 drvfs 上可能延迟)
-        # 默认 pin 的 view(含新加的 data_filter)直接可见, 不依赖 _is_nav_pinned
+        # 默认 pin 的 view 直接可见, 不依赖 _is_nav_pinned
         # 重读 QSettings — drvfs 上写后读有延迟, 会读到旧值导致新 tab 不显示。
         btn.setVisible(view_id in _DEFAULT_PINNED_NAV or self._is_nav_pinned(view_id))
         # View is NOT built here — see _ensure_view (lazy, first-activation).
+
+    def view_stack_count(self) -> int:
+        """Registered view pages in the stack (lazy-build contract; no placeholder)."""
+        return self._stack.count()
 
     def _add_view_to_nav_menu(self, view_cls: object, idx: int) -> None:
         view_id = self._view_ref_id(view_cls)
@@ -593,12 +675,102 @@ class MainWindow(QMainWindow):
 
     def _recolor_nav_icons(self, active_idx: int) -> None:
         """Tint the active segment's glyph accent; others stay muted."""
+        from app.config.theme import TOKENS
+
         for i, b in enumerate(self._nav_buttons):
             vid = b.property("view_id")
             glyph = _NAV_GLYPHS.get(vid, "mdi6.circle-outline")
-            tone = icons.TONE_ACCENT_HOVER if i == active_idx else icons.TONE_MUTED
+            tone = TOKENS["accent_hover"] if i == active_idx else TOKENS["muted"]
             b.setIcon(icons.icon(glyph, color=tone,
-                                 color_active=icons.TONE_ACCENT_HOVER))
+                                 color_active=TOKENS["accent_hover"]))
+
+    def _sync_theme_controls(self, theme_key: str) -> None:
+        """Keep the shell menu and an already-open Settings page in sync."""
+        from app.config.theme import COMPARISON_THEME_KEYS, THEME_NAMES
+
+        key = theme_key if theme_key in COMPARISON_THEME_KEYS else "classic_light"
+        for action_key, action in self._theme_actions.items():
+            action.blockSignals(True)
+            action.setChecked(action_key == key)
+            action.blockSignals(False)
+        if hasattr(self, "_theme_btn"):
+            self._theme_btn.setToolTip(
+                f"{tr('界面风格')}: {tr(THEME_NAMES[key])}\n"
+                f"{tr('切换后立即生效，并在下次启动时保持')}"
+            )
+
+        settings_view = self._views.get("settings")
+        combo = getattr(settings_view, "_theme_combo", None)
+        if combo is not None:
+            idx = combo.findData(key)
+            if idx >= 0 and combo.currentIndex() != idx:
+                combo.blockSignals(True)
+                combo.setCurrentIndex(idx)
+                combo.blockSignals(False)
+
+    def _refresh_theme_sensitive_icons(self) -> None:
+        """Re-render shell icons whose colours are captured in QIcon objects."""
+        from app.config.theme import TOKENS
+
+        muted = TOKENS["muted"]
+        accent = TOKENS["accent"]
+        accent_hover = TOKENS["accent_hover"]
+        on_accent = TOKENS.get("accent_fg", TOKENS["bg"])
+        self._brand_mark.setPixmap(
+            icons.icon("mdi6.microscope", color=accent).pixmap(22, 22)
+        )
+        self._theme_btn.setIcon(
+            icons.icon("mdi6.palette-outline", color=muted,
+                       color_active=accent_hover)
+        )
+        self._settings_btn.setIcon(
+            icons.icon("mdi6.cog-outline", color=muted,
+                       color_active=accent_hover)
+        )
+        self._nav_menu_btn.setIcon(
+            icons.icon("mdi6.toolbox-outline", color=muted,
+                       color_active=accent_hover)
+        )
+        self._shot_btn.setIcon(
+            icons.icon("mdi6.scissors-cutting", color=muted,
+                       color_active=accent_hover)
+        )
+        self._update_btn.setIcon(
+            icons.icon("mdi6.update", color=muted,
+                       color_active=accent_hover)
+        )
+        icons.set_button_icon(
+            self._btn_helicon,
+            "mdi6.image-filter-center-focus",
+            color=on_accent,
+            size=15,
+        )
+
+    def apply_visual_theme(self, theme_key: str) -> str:
+        """Apply and persist one curated visual proposal without touching data."""
+        from app.config.theme import COMPARISON_THEME_KEYS, THEME_NAMES, apply_theme
+
+        key = str(theme_key or "classic_light")
+        if key not in COMPARISON_THEME_KEYS:
+            key = "classic_light"
+        self.ctx.settings.current_theme = key
+        self.ctx.settings.flush_to_disk()
+        app = QApplication.instance()
+        if app is not None:
+            app.setStyleSheet(apply_theme(key))
+        self._sync_theme_controls(key)
+        self._refresh_theme_sensitive_icons()
+        active_idx = next(
+            (i for i, button in enumerate(self._nav_buttons) if button.isChecked()),
+            -1,
+        )
+        self._recolor_nav_icons(active_idx)
+        for view in self._views.values():
+            view.update()
+        self.statusBar().showMessage(
+            f"{tr('界面风格')}: {tr(THEME_NAMES[key])}", 2400
+        )
+        return key
 
     def retranslate_ui(self) -> None:
         """Apply the active language to the shell and loaded views immediately."""
@@ -623,6 +795,13 @@ class MainWindow(QMainWindow):
         self._btn_compress.setText(tr("归档"))
         self._btn_compress.setToolTip(tr("整理归档（JPG→ZIP）"))
         self._settings_btn.setToolTip(tr("配置"))
+        self._theme_menu.setTitle(tr("界面风格"))
+        self._theme_btn.setAccessibleName(tr("界面风格"))
+        from app.config.theme import THEME_NAMES
+        for theme_key, action in self._theme_actions.items():
+            action.setText(tr(THEME_NAMES[theme_key]))
+            action.setToolTip(tr("切换后立即生效，并在下次启动时保持"))
+        self._sync_theme_controls(self.ctx.settings.current_theme)
         self._btn_helicon.setToolTip(tr("Helicon Focus 景深合成"))
         self._active_label.setText(tr("激活标本"))
         self._btn_new.setText(tr("新增编号"))
@@ -662,7 +841,7 @@ class MainWindow(QMainWindow):
         self.refresh_context_bar()
         if not self._views:
             self._status_collab.setText(tr("协作: 离线"))
-            self._status_helicon.setText(tr("Helicon: 未检测"))
+        self._refresh_helicon_status()
 
         for view in list(self._views.values()):
             handler = getattr(view, "retranslate_ui", None)
@@ -702,6 +881,19 @@ class MainWindow(QMainWindow):
                 return
         self.statusBar().showMessage(tr("未找到页面: {}").format(view_id), 4000)
 
+    def _select_nav_index(self, idx: int) -> None:
+        """Highlight a nav segment without building or activating the page."""
+        if idx < 0 or idx >= len(self._view_classes):
+            return
+        btn = self._nav_buttons[idx]
+        if not btn.isChecked():
+            btn.setChecked(True)
+        for i, cls in enumerate(self._view_classes):
+            action = self._nav_menu_actions.get(self._view_ref_id(cls))
+            if action is not None:
+                action.setChecked(i == idx)
+        self._recolor_nav_icons(idx)
+
     def _activate_index(self, idx: int, *, persist: bool = True) -> None:
         if idx < 0 or idx >= len(self._view_classes):
             return
@@ -714,9 +906,15 @@ class MainWindow(QMainWindow):
                 action.setChecked(i == idx)
         self._recolor_nav_icons(idx)
         view_cls = self._view_classes[idx]
+        title = tr(self._view_ref_title(view_cls))
+        self.statusBar().showMessage(tr("正在加载: {}…").format(title))
+        app = QApplication.instance()
+        if app is not None:
+            app.processEvents()
         with ui.busy_cursor():
             view = self._ensure_view(view_cls)
             if view:
+                self._hide_startup_placeholder()
                 self._stack.setCurrentWidget(view)
                 view.on_activate()
         if persist:
@@ -885,6 +1083,10 @@ class MainWindow(QMainWindow):
     def set_status_helicon(self, text: str) -> None:
         self._status_helicon.setText(text)
 
+    def refresh_helicon_status(self) -> None:
+        """Refresh bottom-bar Helicon segment from current detection state."""
+        self._refresh_helicon_status()
+
     # ── Screenshot ────────────────────────────────────────────────────────
 
     def screenshot_shortcut_seq(self) -> str:
@@ -1040,7 +1242,26 @@ class MainWindow(QMainWindow):
             if 0 <= last_idx < len(self._view_classes):
                 self._activate_index(last_idx)
                 return
-        self._activate_index(0, persist=False)
+        # Fast startup: show the shell first, then build the workbench page on
+        # the next event-loop tick.  Synchronous WorkbenchView construction on
+        # 2 GB Windows machines blocked the GUI thread long enough that Windows
+        # reported "not responding" before any error dialog could appear.
+        self._select_nav_index(0)
+        try:
+            from app.config.memory_profile import is_low_memory_machine
+            low_mem = is_low_memory_machine()
+        except Exception:
+            low_mem = bool(getattr(self.ctx.settings, "performance_mode", False))
+        # Next event-loop tick for normal machines; longer defer on low RAM.
+        delay_ms = 800 if low_mem else 0
+        if getattr(self.ctx.settings, "performance_mode", False) and not low_mem:
+            delay_ms = max(delay_ms, 250)
+        self._show_startup_placeholder()
+        self._startup_activation_timer.start(delay_ms)
+
+    def _activate_initial_view(self) -> None:
+        if not getattr(self, "_torn_down", False):
+            self._activate_index(0, persist=False)
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self.ctx.settings.save_geometry(self.saveGeometry())
@@ -1080,6 +1301,10 @@ class MainWindow(QMainWindow):
         if getattr(self, "_torn_down", False):
             return
         self._torn_down = True
+        for timer_name in ("_startup_activation_timer", "_helicon_status_timer"):
+            timer = getattr(self, timer_name, None)
+            if timer is not None:
+                timer.stop()
         # Stop every view's background QThread / subprocess FIRST (Helicon
         # compose, WoRMS batch job, …) so none can keep a SQLite handle alive
         # while we close the DB connections below.
@@ -1133,6 +1358,21 @@ class MainWindow(QMainWindow):
         )
         self._refresh_collab_status()
 
+    def _wire_helicon_status_bar(self) -> None:
+        """Detect Helicon once at startup and keep the status segment in sync."""
+        self._helicon_status_timer.start(0)
+
+    def _refresh_helicon_status(self) -> None:
+        try:
+            from app.services.helicon_service import resolve_helicon_exe
+            found = resolve_helicon_exe(self.ctx.settings)
+        except Exception:
+            found = None
+        if found:
+            self.set_status_helicon(tr("Helicon: 可用"))
+        else:
+            self.set_status_helicon(tr("Helicon: 未检测"))
+
     def _refresh_collab_status(self) -> None:
         svc = getattr(self.ctx, "collab_service", None)
         peers = svc.peers() if svc is not None else []
@@ -1154,6 +1394,7 @@ _NAV_GLYPHS: dict[str, str] = {
     "worms":     "mdi6.waves",
     "taxonomy":  "mdi6.dna",
     "coords":    "mdi6.map-marker-outline",
+    "tiff_jpeg_tool": "mdi6.image-filter-hdr",
     "summary":   "mdi6.chart-box-outline",
     "collection_records": "mdi6.clipboard-list-outline",
     "collection_map": "mdi6.map-marker-multiple",
@@ -1168,7 +1409,6 @@ _DEFAULT_PINNED_NAV: tuple[str, ...] = (
     "collab",
     "project_tree",
     "collection_records",
-    "data_filter",
 )
 
 
@@ -1191,6 +1431,7 @@ _NAV_GROUP_FOR_VIEW: dict[str, str] = {
     "worms": "taxonomy",
     "taxonomy": "taxonomy",
     "coords": "collection",
+    "tiff_jpeg_tool": "tools",
     "collection_records": "collection",
     "collection_map": "tools",
     "settings": "system",

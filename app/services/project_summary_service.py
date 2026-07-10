@@ -737,7 +737,7 @@ _TAXON_CHECKLIST_HEADERS: tuple[tuple[str, str], ...] = (
     ("物种拉丁名", "scientific_name"),
     ("物种中文名", "scientific_name_cn"),
     ("证据记录数", "evidence_count"),
-    ("样品/物种标签", "sample_labels"),
+    ("物种编号", "sample_labels"),
     ("凭证/样品编号", "uids"),
     ("备注", "notes"),
 )
@@ -950,7 +950,7 @@ _SAMPLE_PROCESSING_HEADERS: tuple[tuple[str, str], ...] = (
     ("地区", "province"),
     ("样地", "site"),
     ("站位", "station"),
-    ("样品/物种标签", "sample_label"),
+    ("物种编号", "sample_label"),
     ("保存方式", "storage"),
     ("采集日期", "collection_date"),
     ("分类状态", "taxonomy_status"),

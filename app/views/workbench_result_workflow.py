@@ -442,6 +442,17 @@ class WorkbenchResultWorkflowMixin:
                 )
             if commit:
                 db.commit()
+            # 拍照界面经纬度 → 回写/新建采集记录（四键对齐；有则更新坐标，无则建行）
+            try:
+                self._sync_collection_record_coords(
+                    db,
+                    lon=lon_val,
+                    lat=lat_val,
+                    fields=fields,
+                    commit=commit,
+                )
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -455,6 +466,45 @@ class WorkbenchResultWorkflowMixin:
                 svc.push_specimen(uid)
             except Exception:
                 pass
+
+    def _sync_collection_record_coords(
+        self,
+        db,
+        *,
+        lon,
+        lat,
+        fields: dict,
+        commit: bool = True,
+    ) -> None:
+        """Persist capture lon/lat into collection_records (create if missing)."""
+        from app.services import collection_record_service as crs
+
+        naming = self._naming
+        province, site, station, col_date = naming.current_keys()
+        # collection_date 以命名卡为准；fields 里也有一份作兜底
+        if not col_date:
+            col_date = str(fields.get("collection_date") or "").strip()
+        action = crs.sync_coords_from_capture(
+            db,
+            province=province,
+            site=site,
+            station=station,
+            collection_date=col_date,
+            lon=lon,
+            lat=lat,
+            extra={
+                "geo_area": fields.get("geo_area"),
+                "collector": fields.get("collector"),
+                "photographer": fields.get("photographer"),
+                "identifier": fields.get("identifier"),
+                "photo_date": fields.get("photo_date"),
+            },
+        )
+        if action != "skipped" and commit:
+            # sync_coords_from_capture 内部已 commit；若外层 commit=False
+            #（批量保存路径）则上面的 upsert 已自行 commit —— 保持与现有
+            # collection_record_service 一致。此处无需再 commit。
+            pass
 
     # ── WoRMS fill hook ───────────────────────────────────────────────────────
 

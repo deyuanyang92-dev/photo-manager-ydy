@@ -132,6 +132,30 @@ def test_apply_project_sync_code_to_directory_binds_selected_workspace(tmp_path)
     assert read_project_id_for_directory(a) == "a" * 32
 
 
+def test_legacy_workspace_without_project_settings_table_does_not_crash_listing(
+    tmp_path, monkeypatch,
+):
+    legacy = tmp_path / "legacy_proj"
+    (legacy / "_data").mkdir(parents=True)
+    import sqlite3
+
+    conn = sqlite3.connect(legacy / "_data" / "project.db")
+    conn.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY)")
+    conn.commit()
+    conn.close()
+    legacy_path = str(legacy.resolve())
+    monkeypatch.setattr(
+        "app.services.project_service.load_user_projects",
+        lambda: [{"name": "legacy_proj", "directory": legacy_path}],
+    )
+
+    candidates = list_local_share_candidates()
+
+    assert len(candidates) == 1
+    assert candidates[0].project_id == ""
+    assert read_project_id_for_directory(legacy_path) == ""
+
+
 def test_build_shared_projects_payload(tmp_path):
     a = _make_workspace(tmp_path, "proj_a")
     payload = build_shared_projects_payload([a])

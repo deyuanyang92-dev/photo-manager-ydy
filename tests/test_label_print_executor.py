@@ -1,6 +1,16 @@
+import pytest
+
 from PyQt6.QtWidgets import QDialog
 
 from app.services.label_print_executor import LabelPrintExecutor
+
+
+@pytest.fixture(autouse=True)
+def _isolate_real_printer_discovery(monkeypatch):
+    """Unit tests must not enumerate physical serial printers on the host."""
+    from app.services import niimbot_print_service
+
+    monkeypatch.setattr(niimbot_print_service, "available_printers", lambda: [])
 
 
 class _WindowsUnavailable:

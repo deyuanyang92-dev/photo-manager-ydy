@@ -70,13 +70,19 @@ class SurveySummaryPanel(QWidget):
         inventory() → 当前聚合结果 list[dict] (供测试 / 外部读取)。
         workspaces() → 当前加载的工作区目录列表。
 
-    labels 形如 ``{workspace_dir: 断面名}``,与 ``aggregate_taxon_inventory``
-    的 ``labels`` 列表参数等价 (本面板内部把 dict 转成顺序对齐的列表)。
+    *embedded*: 嵌入调查概览折叠区时隐藏自身标题行, 由外层区块标题承担。
     """
 
-    def __init__(self, ctx: Any = None, parent: Optional[QWidget] = None) -> None:
+    def __init__(
+        self,
+        ctx: Any = None,
+        parent: Optional[QWidget] = None,
+        *,
+        embedded: bool = False,
+    ) -> None:
         super().__init__(parent)
         self._ctx = ctx
+        self._embedded = embedded
         self._inventory: list[dict] = []
         self._workspaces: list[str] = []
         self._labels: Optional[list[str]] = None
@@ -85,14 +91,18 @@ class SurveySummaryPanel(QWidget):
     # ── UI 构建 ────────────────────────────────────────────────────────────────
     def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setContentsMargins(8 if self._embedded else 8, 4 if self._embedded else 8, 8, 8)
 
-        self._title = QLabel("物种名录")
-        self._title.setStyleSheet("font-weight:600;")
+        if not self._embedded:
+            self._title = QLabel("物种名录")
+            self._title.setStyleSheet("font-weight:600;")
+            layout.addWidget(self._title)
         self._status = QLabel("未加载")
         self._status.setStyleSheet("color:#666;")
-        layout.addWidget(self._title)
-        layout.addWidget(self._status)
+        if self._embedded:
+            self._status.hide()
+        else:
+            layout.addWidget(self._status)
 
         self._table = QTableWidget(0, len(_HEADERS))
         self._table.setHorizontalHeaderLabels(_HEADERS)
@@ -107,7 +117,9 @@ class SurveySummaryPanel(QWidget):
         # 学名列(0)拉宽;数值列末尾收窄。
         self._table.setColumnWidth(0, 200)
         self._table.setColumnWidth(len(_HEADERS) - 1, 90)
-        layout.addWidget(self._table, stretch=1)
+        if self._embedded:
+            self._table.setMinimumHeight(140)
+        layout.addWidget(self._table, stretch=1 if not self._embedded else 0)
 
         # 底部导出按钮
         btn_row = QHBoxLayout()

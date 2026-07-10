@@ -258,6 +258,117 @@ def test_run_packaged_smoke_rejects_traceback(monkeypatch, tmp_path):
         update_service.run_packaged_smoke(exe)
 
 
+def test_release_payload_captures_body_and_signature():
+    payload = {
+        "tag_name": "v0.60",
+        "html_url": "https://github.com/example/releases/tag/v0.60",
+        "body": "## 更新内容\n- 修复若干问题",
+        "assets": [
+            {
+                "name": "SpecimenPhotoWorkbench-v0.60-win64.zip",
+                "browser_download_url": "https://x/app.zip",
+                "size": 999,
+            },
+            {
+                "name": "SpecimenPhotoWorkbench-v0.60-win64.zip.sig",
+                "browser_download_url": "https://x/app.zip.sig",
+            },
+        ],
+    }
+
+    release = update_service.release_from_api_payload(payload)
+
+    assert release.signature_url == "https://x/app.zip.sig"
+    assert "更新内容" in release.body
+
+
+def _ed25519_keypair():
+    import base64
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    priv = Ed25519PrivateKey.generate()
+    pub_raw = priv.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    return priv, base64.b64encode(pub_raw).decode("ascii")
+
+
+def test_verify_update_signature_roundtrip(tmp_path):
+    import base64
+
+    zip_path = tmp_path / "app.zip"
+    zip_path.write_bytes(b"pretend-this-is-a-zip")
+    priv, pub_b64 = _ed25519_keypair()
+    sig_b64 = base64.b64encode(priv.sign(zip_path.read_bytes())).decode("ascii")
+
+    assert update_service.verify_update_signature(
+        zip_path, sig_b64, public_key_b64=pub_b64
+    ) is True
+
+    # 没有公钥 → 视为未启用校验，返回 False（不抛错）
+    assert update_service.verify_update_signature(
+        zip_path, sig_b64, public_key_b64=""
+    ) is False
+
+    # 篡改内容 → 校验失败
+    zip_path.write_bytes(b"tampered")
+    with pytest.raises(ValueError, match="签名验证失败"):
+        update_service.verify_update_signature(zip_path, sig_b64, public_key_b64=pub_b64)
+
+
+def test_signature_required_follows_env_key(monkeypatch):
+    monkeypatch.delenv("SPECIMEN_UPDATE_PUBKEY", raising=False)
+    monkeypatch.setattr(update_service, "UPDATE_PUBLIC_KEY_B64", "", raising=False)
+    assert update_service.signature_required() is False
+
+    monkeypatch.setenv("SPECIMEN_UPDATE_PUBKEY", "abc")
+    assert update_service.signature_required() is True
+    assert update_service.update_public_key_b64() == "abc"
+
+
+def test_prepare_update_rejects_missing_signature_when_key_set(monkeypatch, tmp_path):
+    _priv, pub_b64 = _ed25519_keypair()
+    monkeypatch.setenv("SPECIMEN_UPDATE_PUBKEY", pub_b64)
+    monkeypatch.setattr(update_service, "download_file", lambda *a, **k: None)
+    monkeypatch.setattr(update_service, "verify_downloaded_package", lambda *a, **k: None)
+    monkeypatch.setattr(update_service.tempfile, "gettempdir", lambda: str(tmp_path))
+
+    release = update_service.ReleaseInfo(
+        tag_name="v0.60",
+        asset_name="SpecimenPhotoWorkbench-v0.60-win64.zip",
+        asset_url="https://x/app.zip",
+        asset_size=0,
+        page_url="https://x",
+        signature_url="",  # 没有 .sig
+    )
+
+    with pytest.raises(ValueError, match="缺少 .sig|签名"):
+        update_service.prepare_update(release, executable=r"C:\x\python.exe", smoke=False)
+
+
+def test_install_requires_elevation_false_on_writable_dir(tmp_path):
+    assert update_service.install_requires_elevation(tmp_path) is False
+
+
+def test_launch_update_script_elevate_uses_runas(monkeypatch, tmp_path):
+    import subprocess
+
+    calls = []
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: calls.append((a, k)))
+    script = tmp_path / "apply-update.ps1"
+    script.write_text("echo hi", encoding="utf-8")
+
+    update_service.launch_update_script(script, elevate=False)
+    update_service.launch_update_script(script, elevate=True)
+
+    plain_args = " ".join(calls[0][0][0])
+    elevated_args = " ".join(calls[1][0][0])
+    assert "-File" in plain_args
+    assert "RunAs" in elevated_args
+
+
 def test_make_update_script_waits_copies_and_restarts():
     script = update_service.make_update_script(
         install_dir=Path(r"C:\Apps\SpecimenPhotoWorkbench"),

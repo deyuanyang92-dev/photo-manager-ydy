@@ -369,6 +369,9 @@ class CollectionRecordsView(BaseView):
             | QAbstractItemView.EditTrigger.AnyKeyPressed
         )
         self._grid.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        from app.utils.tooltip_policy import suppress_popup_tooltip
+
+        suppress_popup_tooltip(self._grid)
         v.addWidget(self._grid, 1)
         return pane
 
@@ -419,6 +422,9 @@ class CollectionRecordsView(BaseView):
         self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._table.customContextMenuRequested.connect(self._show_table_context_menu)
         self._table.horizontalHeader().setStretchLastSection(True)
+        from app.utils.tooltip_policy import suppress_popup_tooltip
+
+        suppress_popup_tooltip(self._table)
         v.addWidget(self._table, 1)
         return pane
 
@@ -477,12 +483,9 @@ class CollectionRecordsView(BaseView):
 
     def _clear_editor_form(self) -> None:
         layout = self._editor_form
-        while layout.count():
-            it = layout.takeAt(0)
-            w = it.widget()
-            if w is not None:
-                w.setParent(None)
-                w.deleteLater()
+        from app.utils.ui import clear_layout_widgets
+
+        clear_layout_widgets(layout)
         self._fields = {}
 
     def _rebuild_editor(self, zone: str) -> None:

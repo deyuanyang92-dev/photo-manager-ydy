@@ -335,7 +335,7 @@ def _same_file(local_path: Path, remote: FileManifestEntry) -> bool:
             return False
         if remote.sha256:
             return sha256_file(local_path) == remote.sha256
-        return True
+        return False
     except OSError:
         return False
 

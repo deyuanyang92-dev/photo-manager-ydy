@@ -387,52 +387,85 @@ def _install_exception_hook(win) -> None:
     sys.excepthook = _hook
 
 
-_is_wsl = (
-    sys.platform.startswith("linux")
-    and "microsoft" in Path("/proc/version").read_text(errors="ignore").lower()
-)
+def _detect_is_wsl() -> bool:
+    """Safe WSL check — never raise on missing/unreadable /proc/version."""
+    if not sys.platform.startswith("linux"):
+        return False
+    try:
+        text = Path("/proc/version").read_text(errors="ignore").lower()
+    except OSError:
+        return False
+    return "microsoft" in text
 
-if importlib.util.find_spec("PyQt6") is None:
-    _print_missing_pyqt6_help()
-    sys.exit(2)
 
-if _is_wsl and not _CHECK_GUI and not os.environ.get("QT_QPA_PLATFORM"):
-    _detect_wslg_display()
-    probes: list[QtPlatformProbe] = []
-    for candidate in _qt_candidates():
-        probe = _probe_qt_platform(candidate)
-        probes.append(probe)
-        if probe.ok:
-            os.environ["QT_QPA_PLATFORM"] = candidate
-            break
-    else:
+_is_wsl = _detect_is_wsl()
+
+
+def _bootstrap_cli_runtime() -> None:
+    """WSL Qt probe / --check-gui. Call only from CLI entry — never on import.
+
+    Importing ``main`` (tests, ``from main import …``) must not ``sys.exit``.
+    """
+    if importlib.util.find_spec("PyQt6") is None:
+        _print_missing_pyqt6_help()
+        sys.exit(2)
+
+    if _is_wsl and not _CHECK_GUI and not os.environ.get("QT_QPA_PLATFORM"):
+        _detect_wslg_display()
+        probes: list[QtPlatformProbe] = []
+        for candidate in _qt_candidates():
+            probe = _probe_qt_platform(candidate)
+            probes.append(probe)
+            if probe.ok:
+                os.environ["QT_QPA_PLATFORM"] = candidate
+                break
+        else:
+            _print_gui_help(probes)
+            sys.exit(2)
+
+    if _CHECK_GUI:
+        if _is_wsl and not os.environ.get("QT_QPA_PLATFORM"):
+            _detect_wslg_display()
+        platforms = (
+            [os.environ["QT_QPA_PLATFORM"]]
+            if os.environ.get("QT_QPA_PLATFORM")
+            else _qt_candidates()
+        )
+        probes = [_probe_qt_platform(platform, retries=1) for platform in platforms]
+        if any(probe.ok for probe in probes):
+            _print_gui_diagnostics(probes)
+            sys.exit(0)
         _print_gui_help(probes)
         sys.exit(2)
 
-if _CHECK_GUI:
-    if _is_wsl and not os.environ.get("QT_QPA_PLATFORM"):
-        _detect_wslg_display()
-    platforms = [os.environ["QT_QPA_PLATFORM"]] if os.environ.get("QT_QPA_PLATFORM") else _qt_candidates()
-    probes = [_probe_qt_platform(platform, retries=1) for platform in platforms]
-    if any(probe.ok for probe in probes):
-        _print_gui_diagnostics(probes)
-        sys.exit(0)
-    _print_gui_help(probes)
-    sys.exit(2)
 
+# Qt / app imports: allow ``from main import _choose_startup_screen`` without
+# forcing a process exit when PyQt6 is absent (CLI path re-checks below).
 try:
     from PyQt6.QtCore import QTimer
     from PyQt6.QtWidgets import QApplication
-except ImportError as exc:
-    _print_missing_qt_runtime_help(str(exc))
-    sys.exit(2)
 
-from app.app_context import AppContext
-from app.config.settings import AppSettings
-from app.config.theme import apply_default_font, apply_theme, load_fonts, set_typography
-from app.main_window import MainWindow
-from app.utils import diagnostics
-from app.views.registry import ALL_VIEW_SPECS
+    from app.app_context import AppContext
+    from app.config.settings import AppSettings
+    from app.config.theme import apply_default_font, apply_theme, load_fonts, set_typography
+    from app.main_window import MainWindow
+    from app.utils import diagnostics
+    from app.views.registry import ALL_VIEW_SPECS
+
+    _QT_IMPORT_ERROR: BaseException | None = None
+except ImportError as _qt_exc:  # noqa: BLE001 — soft-fail for library import
+    QTimer = None  # type: ignore[misc, assignment]
+    QApplication = None  # type: ignore[misc, assignment]
+    AppContext = None  # type: ignore[misc, assignment]
+    AppSettings = None  # type: ignore[misc, assignment]
+    apply_default_font = None  # type: ignore[misc, assignment]
+    apply_theme = None  # type: ignore[misc, assignment]
+    load_fonts = None  # type: ignore[misc, assignment]
+    set_typography = None  # type: ignore[misc, assignment]
+    MainWindow = None  # type: ignore[misc, assignment]
+    diagnostics = None  # type: ignore[misc, assignment]
+    ALL_VIEW_SPECS = ()  # type: ignore[misc, assignment]
+    _QT_IMPORT_ERROR = _qt_exc
 
 
 def _acquire_single_instance_lock() -> bool:
@@ -493,6 +526,13 @@ def _acquire_single_instance_lock() -> bool:
 
 
 def main() -> int:
+    if _QT_IMPORT_ERROR is not None:
+        _print_missing_qt_runtime_help(str(_QT_IMPORT_ERROR))
+        return 2
+    if QApplication is None or diagnostics is None:
+        _print_missing_pyqt6_help()
+        return 2
+
     log_path = diagnostics.setup_logging()
     logging.getLogger(__name__).info(
         "Application starting argv=%s cwd=%s log=%s",
@@ -543,6 +583,8 @@ def main() -> int:
     # Apply the user's saved 字体 / 字体大小 (设置→界面) before pinning the default
     # font + building the theme QSS, so first paint already uses them.
     _s = AppSettings()
+    from app.services.helicon_service import bootstrap_helicon_path_env
+    bootstrap_helicon_path_env(_s)
     set_typography(scale=_s.ui_font_scale, family=_s.ui_font_family)
     # Pin the default font to an installed CJK family BEFORE any widget is
     # built — otherwise first-paint layout uses Qt's CJK-less default ("Ubuntu"
@@ -560,32 +602,34 @@ def main() -> int:
     # Performance mode must be set before apply_theme (QSS drops gradients) and
     # before any card widget is built (apply_card_shadow becomes a no-op).
     from app.config import effects as _fx
+    from app.config.memory_profile import apply_memory_profile, is_low_memory_machine
     if _is_wsl and not _s._qs.contains("appearance/performance_mode"):
         _s.performance_mode = True
+    elif is_low_memory_machine() and not _s._qs.contains("appearance/performance_mode"):
+        _s.performance_mode = True
     _fx.PERFORMANCE_MODE = _s.performance_mode
+    apply_memory_profile(performance_mode=_s.performance_mode)
     app.setStyleSheet(apply_theme(_s.current_theme))
+
+    from PyQt6.QtGui import QPixmapCache
+    from app.config.memory_profile import QPIXMAP_CACHE_KB
+    QPixmapCache.setCacheLimit(QPIXMAP_CACHE_KB)
 
     # ── App context (shared state + DI container) ─────────────────────
     ctx = AppContext()
 
     # ── Collaboration service (P2P mDNS + FastAPI) ────────────────────
-    # The service object always exists (so Settings can start it on demand),
-    # but it only starts when the user has enabled collaboration AND set a
-    # group code.  Empty code = no group = no sync.  Failures are swallowed —
-    # collab is optional.
+    # Lazy: CollabService is created only when collaboration is enabled
+    # (or the user opens collab settings).  Saves startup RAM on 2 GB PCs.
     try:
-        from app.services.collab_service import CollabService
-        svc = CollabService()
-        ctx.collab_service = svc
-        group_code = ctx.settings.team_code
-        svc.set_group_code(group_code)
-        if ctx.settings.collab_enabled and group_code:
-            project_name = ctx.settings.last_project_dir or ""
-            svc.start(
-                project_name=project_name,
-                group_code=group_code,
-                project_dir=ctx.settings.last_project_dir or "",
-            )
+        if ctx.settings.collab_enabled and ctx.settings.team_code:
+            svc = ctx.ensure_collab_service()
+            if svc is not None:
+                svc.start(
+                    project_name=ctx.settings.last_project_dir or "",
+                    group_code=ctx.settings.team_code,
+                    project_dir=ctx.settings.last_project_dir or "",
+                )
     except Exception:  # noqa: BLE001
         pass  # fastapi/uvicorn not installed or network unavailable
 
@@ -649,8 +693,15 @@ def main() -> int:
         _safe_stderr_print("offscreen 启动冒烟通过：主窗口已构造完成。")
         return 0
 
+    # 对标 VS Code/Cursor：启动后延迟做一次后台静默检查更新（发现未跳过的新版本才提示）。
+    try:
+        win.start_background_update_check()
+    except Exception:  # noqa: BLE001
+        pass
+
     return app.exec()
 
 
 if __name__ == "__main__":
+    _bootstrap_cli_runtime()
     sys.exit(main())

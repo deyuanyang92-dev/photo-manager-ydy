@@ -51,45 +51,16 @@ def _read_workspace_id(db) -> Optional[str]:
 
 
 def _read_image_metadata(path: str) -> dict:
-    meta: dict = {}
-    try:
-        from PIL import ExifTags, Image
+    from app.utils.tiff_exif_read import read_tiff_exif_metadata
 
-        with Image.open(path) as img:
-            meta["image_width"] = img.width
-            meta["image_height"] = img.height
-            raw_exif = {}
-            try:
-                exif = img.getexif()
-            except Exception:
-                exif = None
-            if exif:
-                tags = ExifTags.TAGS
-                for key, value in exif.items():
-                    name = tags.get(key, str(key))
-                    try:
-                        json.dumps(value)
-                        raw_exif[name] = value
-                    except TypeError:
-                        raw_exif[name] = str(value)
-                meta["camera_make"] = raw_exif.get("Make")
-                meta["camera_model"] = raw_exif.get("Model")
-                meta["lens_model"] = raw_exif.get("LensModel")
-                meta["exposure_time"] = str(raw_exif.get("ExposureTime") or "")
-                meta["f_number"] = str(raw_exif.get("FNumber") or "")
-                meta["iso"] = str(raw_exif.get("ISOSpeedRatings") or raw_exif.get("PhotographicSensitivity") or "")
-                meta["focal_length"] = str(raw_exif.get("FocalLength") or "")
-                meta["exif_datetime"] = (
-                    raw_exif.get("DateTimeOriginal")
-                    or raw_exif.get("DateTimeDigitized")
-                    or raw_exif.get("DateTime")
-                )
-                meta["raw_exif_json"] = json.dumps(raw_exif, ensure_ascii=False)
-            else:
-                meta["raw_exif_json"] = "{}"
-    except Exception:
-        meta.setdefault("raw_exif_json", "{}")
+    meta = read_tiff_exif_metadata(path)
+    meta.setdefault("raw_exif_json", "{}")
     return meta
+
+
+def read_image_exif_metadata(path: str) -> dict:
+    """Read width/height and common camera EXIF fields from an image file."""
+    return _read_image_metadata(path)
 
 
 def upsert_photo_file(

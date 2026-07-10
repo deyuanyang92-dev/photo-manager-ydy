@@ -32,7 +32,15 @@ pytest tests/ -v                                 # full suite
 pytest tests/test_import_service.py -v           # one file
 pytest tests/test_naming_uid.py::test_<name> -v  # one test
 QT_QPA_PLATFORM=offscreen pytest tests/ -v       # view/widget tests headless (pytest-qt)
+
+python scripts/run_core_regression.py --list     # named regression suites for high-risk flows
+python scripts/run_core_regression.py naming     # run one suite (quick/naming/workbench/...)
 ```
+
+Windows (PowerShell): `scripts\run_tests_batched.ps1` runs the whole suite one pytest process
+per file (sidesteps the full-run hang, see Conventions); `scripts\build_windows.ps1` builds the
+portable PyInstaller package → `dist\SpecimenPhotoWorkbench-<ver>-win64.zip`. App version constant
+lives in `app/config/version.py::APP_VERSION`.
 
 External CLIs are detected at runtime, never bundled-by-default: `cjxl`/`djxl` (libjxl-tools /
 brew jpeg-xl), Helicon Focus (detected only, never distributed). Their absence must degrade
@@ -51,14 +59,21 @@ configured; the **test suite is the only quality gate** (TDD red→green→commi
 
 **DI + view registry shell.** `main.py` builds one `AppContext` (the single dependency-injection
 container: settings + current project dir + DB access) and one `MainWindow`, then registers every
-class in `app/views/registry.py::ALL_VIEWS`. Views never import each other — they reach shared
-state only through `ctx`.
+spec in `app/views/registry.py::ALL_VIEW_SPECS` (a tuple of `LazyViewSpec`). Views never import
+each other — they reach shared state only through `ctx`.
 
 - `app/app_context.py` — `AppContext`; `ctx.get_db()` returns the SQLite connection for the
-  current project (or `None` if no project loaded).
+  current project (or `None` if no project loaded). Also carries session-scoped flags reused as
+  cross-view handoff state, e.g. `ctx.edit_unlocked` / `ctx.edit_actor` (data-filter edit lock).
+- `app/views/registry.py` — `LazyViewSpec(view_id, nav_title, module, class_name)`: the real view
+  module is imported lazily on first page open (`.resolve()`), not at startup. `register_view`
+  accepts either a `LazyViewSpec` or a concrete `BaseView` subclass (legacy path). Stack index ==
+  tuple order == web prototype topbar order.
 - `app/main_window.py` — `QMainWindow` shell: top-bar segmented nav + context bar + bottom
-  `QStatusBar`, with a `QStackedWidget` holding one page per view. `register_view(cls)` builds the
-  view eagerly so stack index == nav order. Nav order = web prototype topbar order.
+  `QStatusBar`, with a `QStackedWidget` holding one page per view. **Nav pin system:** only specs
+  in `_DEFAULT_PINNED_NAV` (or pinned via QSettings `ui/topbar_pinned_views`) show as top-bar
+  buttons; the rest live in the 工具箱 overflow menu (`_nav_menu`, grouped by function). All nav
+  labels go through `tr()` for i18n (see below).
 - `app/views/base_view.py` — every page subclasses `BaseView`, defining class attrs
   `view_id` (snake_case, unique, used as objectName), `nav_title`, `nav_icon`, building UI in
   `_setup_ui()`, and overriding `on_activate()` (called on every page entry; runs on main thread).
@@ -70,7 +85,14 @@ state only through `ctx`.
 sets WAL + `foreign_keys=ON`, runs idempotent `ensure_schema()`, and **caches the connection by
 resolved path**. Schema in `app/db/schema.sql`; `darwin_core` is a VIEW (re-created via
 `DROP VIEW IF EXISTS`). Every table carries a `raw_json` column holding the full original object —
-the zero-field-loss fallback.
+the zero-field-loss fallback. `ensure_schema()` = executescript(schema.sql) →
+`_migrate_add_missing_columns` (auto-ALTER: diffs the live DB against schema.sql materialized in
+a throwaway in-memory DB — no hand-maintained column list) →
+`app/db/migrations.py::run_pending_migrations` (numbered migrations tracked in the `_schema_meta`
+version row; v2 = `specimen_result_tif_index`, see `app/db/result_tif_schema.py` +
+`specimen_result_tif_service.py`, the index of master-TIF absolute paths used by summary /
+photo-pick). Division of labor: new tables/columns go in schema.sql; data/index backfills go in
+migrations.py.
 
 **Cross-view communication.** Views never call each other. Handoffs use ad-hoc attributes set
 directly on `ctx`: e.g. `ctx.pending_label_uid` (workbench → labels), `ctx.worms_fill_specimen`
@@ -95,12 +117,29 @@ mis-placement). Never call `QFileDialog`/`QMessageBox` directly. `app/config/ico
 `apply_card_shadow()` because QSS cannot express `box-shadow`; call it when a panel needs
 elevation.
 
-**Collab subsystem.** `app/services/collab_service.py` embeds FastAPI + uvicorn on port 5050
-in `CollabServerThread` and auto-discovers peers via zeroconf mDNS in `CollabDiscoveryThread`.
-A 5 s `QTimer` drives `CollabSyncWorker` for HTTP pulls. Conflict policy: creating a UID that
-already exists on any online peer returns HTTP 409 — caller must abandon or rename. When mDNS
-fails (VLANs, Windows Firewall), call `CollabService.add_manual_peer(ip, port)`. Offline edits
-queue in `collab_offline_queue.py` and flush on reconnect.
+**Collab subsystem.** `app/services/collab_service.py` is the facade (`CollabService(QObject)`
+owns all threads/timers/signals) over split flat modules it re-exports for back-compat:
+`collab_types` (datatypes; shim → `app/services/collab/`), `collab_store` (`TaskStore` + LWW
+merge), `collab_api` (FastAPI endpoints), `collab_net` (`CollabServerThread` — uvicorn, preferred
+port 5050, scans forward for a free one — and `CollabDiscoveryThread` — zeroconf mDNS),
+`collab_specimen_sync` (L2 specimen-row replication), `collab_file_sync` (L3 media
+manifest/download), `collab_status` / `collab_project_bind` / `collab_share_registry` (which
+local projects this machine advertises) / `collab_peer_trust` (trusted/blocked `ip:port` sets —
+same-team peers are NOT synced until trusted). Sync is pull-based: a 5 s `QTimer` fires
+`_sync_all_peers`, which only *schedules* — the cycle runs OFF the Qt main thread in a
+short-lived daemon thread (`_spawn` → `_run_sync_cycle`), guarded by a non-blocking `_sync_lock`
+(slow/dead peer ⇒ skipped firing, never a frozen UI); specimen sync piggybacks every 6th cycle.
+Conflicts: creating a UID that exists on any online peer → HTTP 409, caller abandons or renames;
+LWW merge has a clock-skew guard (`CLOCK_SKEW_THRESHOLD_MS` — a fast-clocked peer cannot silently
+overwrite local status) plus best-effort claim-collision detection (two devices claiming one UID
+within 30 s → warn only, P2P cannot prevent). Every data endpoint is gated by `_require_lan`
+(non-private source IP → 403). When mDNS fails (VLANs, Windows Firewall):
+`CollabService.add_manual_peer(ip, port)` or the periodic subnet scanner. Two distinct offline
+queues, kept separate on purpose: `StatusRetryQueue` in `collab_offline_queue.py` (renamed from
+`OfflineDraftQueue`, alias kept) retries failed *status* pushes; `CollabService._offline_drafts`
+(`collab_drafts.json`) retries failed task *creation/claims*. `remote_collab_service.py` is a
+separate WAN relay *client* stub (Bearer-token invites; no relay server in-repo — do not mix it
+with LAN P2P); `app/api-gateway/` is an empty placeholder dir (README only, nothing executes).
 
 **Export pipeline.** `app/services/export_service.py` produces Excel (34-column, oracle
 `server.js:595-721`), CSV (UTF-8 BOM), and Darwin Core (reads the `darwin_core` SQLite view).
@@ -164,10 +203,12 @@ returns `True`. The static `available() → bool` guard remains the convention f
 widget: callers check it before opening and fall back to manual input when `False`; never import or
 instantiate such widgets unconditionally.
 
-**CollabView** (`app/views/collab_view.py`) implements the collaboration module but is **not**
-registered in `ALL_VIEWS` — it is not a nav tab. Collaboration surfaces inline in the workbench
-sidebar panel, following the web oracle's workspace page layout. Pairing/diagnostics UI lives in
-`collab_pairing.py` + `collab_diagnostics_dialog.py`.
+**CollabView** (`app/views/collab_view.py`) is a top-level nav tab (`view_id="collab"`, second
+entry in `ALL_VIEW_SPECS`). The legacy workbench-sidebar collab drawer
+(`workbench_collab_drawers.py`, `collab_panel.py`) still exists, but the tab is the primary
+surface. Pairing = team permanent-code wizard (`collab_setup_wizard.py`); advertised-project
+selection = `collab_share_project_picker.py` / `collab_aux_dialogs.py` (also the manual-IP
+connect dialog); diagnostics in `collab_diagnostics_dialog.py`.
 
 **Project folder-tree (this branch's feature).** A "project" is a root folder; *any* subfolder at
 *any* depth (断面/区域/样地/航次…) can itself be a photo workspace. `project_tree_service.py` does a
@@ -177,7 +218,12 @@ pure read-only scan (never creates dirs/DBs); `is_workspace(dir)` = the node alr
 and lets the user enter any node as a workspace. Per-project settings (personnel, codeLabels,
 tiffFields, customStorages, projectMeta — oracle app.js objects) persist in the `project_settings`
 table via `project_settings_service.py`; child workspaces **inherit** parent settings (the
-`folder-tree-inherit` branch). Editing UI is `project_settings_drawer.py`.
+`folder-tree-inherit` branch). Editing UI is `project_settings_drawer.py`. Around the tree:
+`project_catalog_service.py` (the survey ROOT's `_data/project.db` catalogs which child dirs are
+managed workspaces), `project_adopt_service.py` (adopt an existing folder with **zero migration**
+— only creates `_data/project.db` + registers; the first 进入 runs full workspace init), and
+`workspace_index_service.py` (per-workspace stats cached in the root db's
+`workspace_index_cache`; refresh is explicit, reads fall back to a live scan).
 
 **采集记录 (collection records) — beyond the web oracle.** `collection_record_service.py` is CRUD
 over the `collection_records` table, a field-collection log keyed by
@@ -208,6 +254,79 @@ WITHOUT an active specimen: it resolves the specimen from the TIFF filename (uni
 stripped) and validates the selection (≥1 JPG, exactly 1 TIFF, no unsupported) — ports
 `app.js:3808-3824` + `4097-4123`. It only decides *what*/*which specimen*; actual cjxl/ZIP/safety
 gates stay in `archive_service.py`. `supp_compression_worker.py` runs it off the UI thread.
+
+**Cross-断面 survey hub (three-column ProjectTreeView).** `ProjectTreeView` implements
+`docs/specs/2026-07-08-survey-summary-view.md`. Left = multi-select folder tree (Ctrl/Shift
+断面 multi-select; double-click enters a workspace unless ≥2 nodes are selected) plus a project
+card view (`project_card.py`, cover image via `cover_pick_service`). Center = 数据汇总 panel:
+inline `SpecimenFilterPanel`, a column-pickable / Excel-style-filterable 编号表
+(`summary_column_picker_dialog.py`, `summary_column_filter_dialog.py`; in-memory sort/filter in
+`app/utils/summary_table_ops.py`) and a UID-grouped virtualized photo grid
+(`uid_grouped_grid.py` + `project_tree_uid_index.py` jump rail). Right = `SurveyOverviewPanel`
+(KPI numbers + OSM mini-map + species list). Shared query entry:
+`cross_workspace_query_service.py::query_summary_scope` (metadata filter → photo association →
+stats; also owns the summary-column API). Aggregators: `survey_overview_service.py` (shim →
+`services/project/`) and `taxon_inventory_service.py` (species inventory, dedup by
+`scientific_name`) — all read-only, tolerant of missing/corrupt/locked workspace dbs (skip,
+never throw). Toolbar: 汇总导出…, 站位物种, and 数据筛选… (opens the dialog below).
+
+**数据筛选 (data filter) — beyond the web oracle.** `DataFilterView` is a **modal dialog**, not a
+nav page (demoted from `ALL_VIEW_SPECS`; opened via
+`app/widgets/data_filter_dialog.py::open_data_filter_dialog` from the project-tree toolbar, with
+the tree-selected workspaces preselected). Cross-workspace field filtering ("哪些编号取了 RNA",
+"某拍摄人拍了多少", "某地区有多少标本"). Four pieces, all dynamic — **no field list is
+hardcoded** so schema upgrades need no code change:
+- `app/config/specimen_fields.py` — filterable fields = `PRAGMA table_info(specimens)` ∪
+  `FIELD_META` (中文 labels only) ∪ `DERIVED` (computed dimensions like `storage_is_rna` =
+  R-prefix match per oracle `app.js:300`). `filterable_fields(db)` introspects at runtime.
+- `app/services/specimen_filter_service.py` — `query_specimens(workspaces, conditions, labels)`:
+  read-only SELECT across each workspace's `_data/project.db`, in-memory merge, AND-filter
+  (derived dims post-filter). **Pure SELECT, never writes** (red-line style).
+- `app/services/edit_lock_service.py` — edit gate for this page only. Password (sha256, default
+  `"123"`, stored in `data/app_config.json`, plaintext never persisted) + mandatory modifier name.
+  `unlock(ctx, actor, plain)` sets `ctx.edit_unlocked=True` + `ctx.edit_actor=actor` for the
+  session; `lock(ctx)` resets. Edits call `require_unlock(ctx)`. **Default mode is read-only preview.**
+- Result row = specimen list + photo thumbnail (`_find_specimen_photo` reads `<uid>*.tif` from the
+  workspace's `results`/`freeform`) + per-field statistics. Edits audit-log the actor.
+
+**项目汇总 (SummaryView)** (`view_id="summary"`) — cross-project specimen summary table as a nav
+page: project-filter dropdown, collapsible field-selection panel (26 default / 34 total columns),
+Excel / CSV / Darwin Core export. Backed by `project_summary_service.py` (merges specimens +
+collection_records + grouping across workspace DBs, zero new tables) and `export_service`.
+Distinct from the project-tree center 数据汇总 panel; the overlap is known and intentional.
+
+**TIFF 转 JPG tool** (`view_id="tiff_jpeg_tool"`) — batch TIFF→JPEG export page.
+`tiff_jpeg_export_service.py`: presets smart/web/general/archive/max, `recommend_export_settings`
+(smart mode picks quality/resize/subsampling from dims/bit-depth), ThreadPoolExecutor ≤4, PIL
+decode with QImage-thumbnail fallback; QThread worker in `app/workers/`. **Masters are
+read-only** — the service asserts source stat unchanged after each write. Other pages hand off
+via `ctx.pending_tiff_jpeg_sources` / `ctx.pending_tiff_jpeg_preset_id`.
+
+**Preview/perf layer.** `app/utils/thumbnail_disk_cache.py` — persistent JPEG thumbnail cache
+under `data/cache/thumbnails/`, key = sha256(resolved path, mtime_ns, size, size-bucket) so file
+edits auto-invalidate; a TIFF is decoded ONCE to a 720 px master JPEG
+(`TIFF_PREVIEW_MASTER_SIZE`), grid-density changes only rescale it.
+`tiff_preview_warmup_service.py` + its worker pre-warm those masters in the background after a
+数据汇总 load. `app/config/memory_profile.py` sets in-memory cache ceilings once at startup
+(halved in low-RAM/performance mode); `app/config/preview_profile.py` holds preview master size +
+JPEG quality synced from AppSettings. `app/utils/tiff_exif_read.py` reads camera EXIF from the
+master TIFF (Pillow IFD → tifffile → optional `exiftool` CLI → embedded preview-JPEG strip).
+
+**Auto-update.** `app/services/update_service.py` + `app/widgets/update_controller.py`. Feed =
+GitHub Releases of `deyuanyang92-dev/photo-manager-ydy` (win64 zip asset); integrity = size +
+GitHub-provided sha256; authenticity = optional Ed25519 detached `.sig` (embedded
+`UPDATE_PUBLIC_KEY_B64`, env override `SPECIMEN_UPDATE_PUBKEY`; once a key is configured, an
+unsigned release is refused). Self-update only runs as the frozen Windows exe; apply = generated
+PowerShell script (backup → swap → offscreen `--smoke` test → rollback on failure) that preserves
+`PROTECTED_RELATIVE_PATHS` user data; zip extraction is hardened (path-traversal/symlink/entry
+caps). `UpdateController` does the silent 6-hourly background check. Keypair/signing tooling:
+`scripts/gen_update_keys.py`, `scripts/sign_release.py`. NB: `activation_service.py` is NOT
+licensing — it is *specimen* activation (one active specimen at a time + append-only event log in
+`_data/state.json`, an oracle port).
+
+**i18n (CN/EN).** `app/config/i18n.py` provides `tr(中文源)` → looks up `resources/en.json`; source
+strings are Chinese, English is the translation. All UI text goes through `tr()`; language switch
+takes effect on restart. Wrap new user-facing strings in `tr()`.
 
 ## Hard red lines (never violate — these are the reason the project exists)
 
@@ -252,9 +371,25 @@ gates stay in `archive_service.py`. `supp_compression_worker.py` runs it off the
 
 - All new code is TDD: write a failing test (incl. a contract/invariant test for any red-line
   behavior), confirm red, implement, confirm green, commit. Don't mock away sha256 / safety gates.
-- Module views: subclass `BaseView`, add to `ALL_VIEWS`; `MainWindow` wires nav + stack.
-- UI text is Chinese-first. Commits follow Conventional Commits (`feat(scope): ...`), Chinese
-  subjects are the norm here.
+  **Run a single test file** (`pytest tests/<file> -v`), not the whole suite — full runs hit a
+  WorkbenchView self-loop QTimer leak / collab SegFault that hangs the run; the per-file path is
+  stable. `conftest.py` has an autouse fixture isolating `data/user_projects.json` to tmp to stop
+  cross-test pollution.
+- Module views: subclass `BaseView`, add a `LazyViewSpec` to `ALL_VIEW_SPECS` (NOT `ALL_VIEWS`,
+  which is the legacy concrete-class compatibility shim); `MainWindow` wires nav + stack.
+- UI text is Chinese-first, wrapped in `tr()`. Commits follow Conventional Commits
+  (`feat(scope): ...`), Chinese subjects are the norm here.
+- **Keep old code commented, don't delete** (project rule, "§7" in commit comments): when replacing
+  existing logic, comment the old lines out with `#` and write the new implementation beside them.
+  Old code stays until explicitly told to remove. This applies to ported oracle logic in particular
+  — the commented original is the cross-reference to the JS file:line.
+- File placement follows `docs/architecture/directory-boundaries.md` (+ per-dir READMEs in
+  `app/services|views|widgets`). `app/services/` subdomain dirs (`project/`, `specimen/`,
+  `taxonomy/`, `label/`, `collab/`) are incremental-migration anchors: new services prefer a
+  subdomain; a moved module leaves a same-name compat shim (`sys.modules` alias — e.g.
+  `cover_pick_service.py`, `survey_overview_service.py`) so old import paths keep working — never
+  rewrite imports repo-wide. View vs widget: registrable in `registry.py` ⇒ view; assembled by
+  multiple views ⇒ widget.
 - `docs/adr/` = accepted decisions; `docs/specs/` = per-module implementation specs;
   `docs/shots/` = web-vs-Qt comparison screenshots (capture scripts alongside).
 

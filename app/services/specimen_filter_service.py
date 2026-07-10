@@ -13,11 +13,13 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+import re
 from typing import Any, Optional
 
 from app.config.specimen_fields import eval_derived, is_derived
+from app.utils.specimen_date_filter import date_in_range, is_date_field
 
-__all__ = ["query_specimens", "field_choices"]
+__all__ = ["query_specimens", "field_choices", "operators_for_field"]
 
 
 def _workspace_rows(workspace: str) -> list[dict[str, Any]]:
@@ -40,6 +42,63 @@ def _workspace_rows(workspace: str) -> list[dict[str, Any]]:
     return [dict(zip(cols, r)) for r in rows]
 
 
+def operators_for_field(field: str) -> list[str]:
+    """Return supported filter operator keys for a field."""
+    if is_derived(field):
+        return ["eq"]
+    if is_date_field(field):
+        return ["eq", "gte", "lte", "between", "in", "is_empty", "not_empty"]
+    return ["eq", "in", "contains", "is_empty", "not_empty"]
+
+
+def _split_values(value: object) -> list[str]:
+    """Split a user-entered multi-value list."""
+    text = str(value or "").strip()
+    if not text:
+        return []
+    return [
+        part.strip()
+        for part in re.split(r"[|,，;；\n]+", text)
+        if part.strip()
+    ]
+
+
+def _expand_date_token(token: object, *, end: bool = False) -> str:
+    """Expand partial dates for inclusive lexical comparison.
+
+    Supports ``YYYY``, ``YYYYMM``, ``YYYYMMDD``, ``YYYY-MM`` and ``YYYY-MM-DD``.
+    """
+    text = str(token or "").strip().replace("/", "-")
+    if not text:
+        return ""
+    digits = re.sub(r"\D", "", text)
+    if not digits:
+        return text
+    if len(digits) == 4:
+        return f"{digits}-12-31" if end else f"{digits}-01-01"
+    if len(digits) == 6:
+        year, month = digits[:4], digits[4:6]
+        return f"{year}-{month}-31" if end else f"{year}-{month}-01"
+    if len(digits) >= 8:
+        return f"{digits[:4]}-{digits[4:6]}-{digits[6:8]}"
+    return text
+
+
+def _parse_between_value(value: object) -> tuple[str, str]:
+    """Parse common range notations into inclusive start/end dates."""
+    text = str(value or "").strip()
+    if not text:
+        return "", ""
+    for sep in ("|", "~", "～", "至", "到", ".."):
+        if sep in text:
+            lo, hi = text.split(sep, 1)
+            return _expand_date_token(lo), _expand_date_token(hi, end=True)
+    compact = re.fullmatch(r"\s*(\d{4}|\d{6}|\d{8})\s*-\s*(\d{4}|\d{6}|\d{8})\s*", text)
+    if compact:
+        return _expand_date_token(compact.group(1)), _expand_date_token(compact.group(2), end=True)
+    return _expand_date_token(text), _expand_date_token(text, end=True)
+
+
 def _match_one(row: dict[str, Any], cond: dict[str, Any]) -> bool:
     field = str(cond.get("field") or "")
     op = str(cond.get("op") or "eq")
@@ -53,8 +112,34 @@ def _match_one(row: dict[str, Any], cond: dict[str, Any]) -> bool:
 
     cell = row.get(field)
     s = "" if cell is None else str(cell)
+
+    if is_date_field(field):
+        if op == "is_empty":
+            return not s.strip()
+        if op == "not_empty":
+            return bool(s.strip())
+        if op == "eq":
+            lo = _expand_date_token(val)
+            hi = _expand_date_token(val, end=True)
+            return date_in_range(s, lo, hi)
+        if op == "in":
+            return any(
+                date_in_range(s, _expand_date_token(v), _expand_date_token(v, end=True))
+                for v in _split_values(val)
+            )
+        if op == "gte":
+            return date_in_range(s, _expand_date_token(val), None)
+        if op == "lte":
+            return date_in_range(s, None, _expand_date_token(val, end=True))
+        if op == "between":
+            lo, hi = _parse_between_value(val)
+            return date_in_range(s, lo, hi)
+        return False
+
     if op == "eq":
         return s == str(val)
+    if op == "in":
+        return s in set(_split_values(val))
     if op == "contains":
         return (str(val) in s) if str(val).strip() else True
     if op == "is_empty":
@@ -92,10 +177,16 @@ def query_specimens(
     return out
 
 
-def field_choices(workspaces: list[str], field: str) -> list[str]:
+def field_choices(
+    workspaces: list[str],
+    field: str,
+    *,
+    limit: int = 800,
+) -> list[str]:
     """某字段在所有工作区中的非空 distinct 值(升序), 供筛选下拉。
 
     派生维度(is_derived)固定返回 ``["是", "否"]``。
+    ``limit`` 防止超大字段(如 uid)撑爆下拉；超出时仍返回前 N 项。
     """
     if is_derived(field):
         return ["是", "否"]
@@ -107,7 +198,13 @@ def field_choices(workspaces: list[str], field: str) -> list[str]:
         try:
             conn = sqlite3.connect(str(db_path))
             try:
-                rows = conn.execute(f'SELECT "{field}" FROM specimens').fetchall()
+                # DISTINCT + 上限，避免全表扫进内存后再截断
+                rows = conn.execute(
+                    f'SELECT DISTINCT "{field}" FROM specimens '
+                    f'WHERE "{field}" IS NOT NULL AND TRIM("{field}") != "" '
+                    f"ORDER BY 1 LIMIT ?",
+                    (max(1, int(limit)),),
+                ).fetchall()
             finally:
                 conn.close()
         except sqlite3.Error:
@@ -118,4 +215,8 @@ def field_choices(workspaces: list[str], field: str) -> list[str]:
             s = str(v).strip()
             if s:
                 vals.add(s)
-    return sorted(vals)
+            if len(vals) >= limit:
+                break
+        if len(vals) >= limit:
+            break
+    return sorted(vals)[:limit]

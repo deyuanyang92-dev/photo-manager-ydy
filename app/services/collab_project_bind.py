@@ -121,9 +121,9 @@ def describe_project_sync_state(service: Any, peers: Iterable[Any] | None = None
     from app.services.collab_share_registry import load_shared_dirs
 
     if service is None:
-        return "共享项目：协作未启动"
+        return "项目码：可直接打开项目码，选择本机项目后生成或粘贴"
     if not getattr(service, "group_code", ""):
-        return "共享项目：请先设置团队永久码"
+        return "项目码：可直接使用；在线队友列表需要团队永久码"
 
     settings_qs = None
     try:
@@ -144,12 +144,12 @@ def describe_project_sync_state(service: Any, peers: Iterable[Any] | None = None
             label += f" 等{share_count}个"
         share_line = f"本机共享 {share_count} 个项目（{label}）"
     elif not str(getattr(service, "project_id", "") or ""):
-        return "共享项目：请先打开项目并勾选要共享的项目"
+        return "项目码：请先打开项目，或在项目码窗口选择本机项目"
     else:
         share_line = "本机共享：当前项目"
 
     if not str(getattr(service, "project_id", "") or ""):
-        return f"共享项目：{share_line} · 打开项目后可与队友配对"
+        return f"项目码：{share_line} · 打开项目后可与队友配对"
 
     local_id = str(getattr(service, "project_id", "") or "")
     local_name = _project_display(
@@ -169,13 +169,13 @@ def describe_project_sync_state(service: Any, peers: Iterable[Any] | None = None
         extra = len(synced) - 3
         if extra > 0:
             hosts += f" 等{len(synced)}台"
-        return f"共享项目：{share_line} · 「{local_name}」已与 {hosts} 同步"
+        return f"项目码：{share_line} · 「{local_name}」已与 {hosts} 同步"
 
     if same_name_options(service, peer_list):
-        return f"共享项目：{share_line} · 「{local_name}」可同名配对"
+        return f"项目码：{share_line} · 「{local_name}」可同名配对"
 
     options = list_bind_options(service, peer_list)
     if options:
-        return f"共享项目：{share_line} · 可选 {len(options)} 个队友项目"
+        return f"项目码：{share_line} · 可选 {len(options)} 个队友项目"
 
-    return f"共享项目：{share_line} · 「{local_name}」尚未与队友配对"
+    return f"项目码：{share_line} · 「{local_name}」尚未与队友配对"

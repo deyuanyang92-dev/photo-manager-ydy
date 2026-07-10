@@ -8,8 +8,9 @@ import pytest
 
 pytest.importorskip("PyQt6")
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QItemSelectionModel, Qt
 from PyQt6.QtGui import QColor, QPixmap
+from PyQt6.QtWidgets import QAbstractItemView, QHBoxLayout, QLabel
 
 from app.views.project_tree_view import ProjectTreeView, _KIND_ROLE
 
@@ -17,6 +18,9 @@ from app.views.project_tree_view import ProjectTreeView, _KIND_ROLE
 class _FakeSettings:
     def __init__(self):
         self._root = None
+        self._view_mode = "rooted"
+        self._layout_mode = "tree"
+        self._thumb_size = 112
 
     @property
     def project_tree_root(self):
@@ -25,6 +29,144 @@ class _FakeSettings:
     @project_tree_root.setter
     def project_tree_root(self, v):
         self._root = v
+        if v is not None:
+            self._view_mode = "rooted"
+
+    @property
+    def project_tree_view_mode(self):
+        return self._view_mode
+
+    @project_tree_view_mode.setter
+    def project_tree_view_mode(self, v):
+        self._view_mode = v
+
+    @property
+    def project_tree_layout_mode(self):
+        return self._layout_mode
+
+    @project_tree_layout_mode.setter
+    def project_tree_layout_mode(self, v):
+        self._layout_mode = v
+
+    @property
+    def project_tree_ux_v2(self):
+        return getattr(self, "_ux_v2", True)
+
+    @project_tree_ux_v2.setter
+    def project_tree_ux_v2(self, v):
+        self._ux_v2 = bool(v)
+
+    @property
+    def project_tree_tip_dismissed(self):
+        return getattr(self, "_tip_dismissed", False)
+
+    @project_tree_tip_dismissed.setter
+    def project_tree_tip_dismissed(self, v):
+        self._tip_dismissed = bool(v)
+
+    @property
+    def project_tree_thumb_size(self):
+        return getattr(self, "_thumb_size", __import__("app.config.project_tree_layout", fromlist=["DEFAULT_THUMB_SIZE"]).DEFAULT_THUMB_SIZE)
+
+    @project_tree_thumb_size.setter
+    def project_tree_thumb_size(self, v):
+        from app.config.project_tree_layout import clamp_thumb_size
+        self._thumb_size = clamp_thumb_size(v)
+
+    @property
+    def project_tree_grid_density(self):
+        from app.config.project_tree_layout import DEFAULT_GRID_DENSITY_INDEX
+        return getattr(self, "_grid_density", DEFAULT_GRID_DENSITY_INDEX)
+
+    @project_tree_grid_density.setter
+    def project_tree_grid_density(self, v):
+        from app.config.project_tree_layout import clamp_density_index
+        self._grid_density = clamp_density_index(v)
+
+    @property
+    def project_tree_grid_sort(self):
+        from app.config.project_tree_layout import DEFAULT_GRID_SORT
+        return getattr(self, "_grid_sort", DEFAULT_GRID_SORT)
+
+    @project_tree_grid_sort.setter
+    def project_tree_grid_sort(self, v):
+        from app.config.project_tree_layout import normalize_grid_sort
+        self._grid_sort = normalize_grid_sort(v)
+
+    @property
+    def project_tree_grid_caption(self):
+        from app.config.project_tree_layout import DEFAULT_GRID_CAPTION
+        return getattr(self, "_grid_caption", DEFAULT_GRID_CAPTION)
+
+    @project_tree_grid_caption.setter
+    def project_tree_grid_caption(self, v):
+        from app.config.project_tree_layout import normalize_grid_caption_mode
+        self._grid_caption = normalize_grid_caption_mode(v)
+
+    @property
+    def project_tree_content_mode(self):
+        from app.config.project_tree_layout import DEFAULT_CONTENT_MODE
+        return getattr(self, "_content_mode", DEFAULT_CONTENT_MODE)
+
+    @project_tree_content_mode.setter
+    def project_tree_content_mode(self, v):
+        from app.config.project_tree_layout import normalize_content_mode
+        self._content_mode = normalize_content_mode(v)
+
+    @property
+    def project_tree_show_photos(self):
+        return getattr(self, "_show_photos", True)
+
+    @project_tree_show_photos.setter
+    def project_tree_show_photos(self, v):
+        self._show_photos = bool(v)
+
+    @property
+    def project_tree_split_state(self):
+        return getattr(self, "_split_state", None)
+
+    @project_tree_split_state.setter
+    def project_tree_split_state(self, v):
+        self._split_state = v
+
+    @property
+    def project_tree_grid_inner_split_state(self):
+        return getattr(self, "_grid_inner_split_state", None)
+
+    @project_tree_grid_inner_split_state.setter
+    def project_tree_grid_inner_split_state(self, v):
+        self._grid_inner_split_state = v
+
+    @property
+    def project_tree_summary_body_split_state(self):
+        return getattr(self, "_summary_body_split_state", None)
+
+    @project_tree_summary_body_split_state.setter
+    def project_tree_summary_body_split_state(self, v):
+        self._summary_body_split_state = v
+
+    @property
+    def performance_mode(self):
+        return False
+
+    @property
+    def project_tree_preview_master_size(self):
+        from app.config.project_tree_layout import DEFAULT_PREVIEW_MASTER_SIZE
+        return DEFAULT_PREVIEW_MASTER_SIZE
+
+    @project_tree_preview_master_size.setter
+    def project_tree_preview_master_size(self, v):
+        pass
+
+    @property
+    def project_tree_summary_visible_columns(self):
+        from app.services.cross_workspace_query_service import DEFAULT_SUMMARY_VISIBLE_KEYS
+
+        return getattr(self, "_summary_visible_columns", list(DEFAULT_SUMMARY_VISIBLE_KEYS))
+
+    @project_tree_summary_visible_columns.setter
+    def project_tree_summary_visible_columns(self, keys):
+        self._summary_visible_columns = list(keys or [])
 
 
 class _FakeCtx:
@@ -583,38 +725,530 @@ def test_show_all_projects_clears_root(qtbot, tmp_path, ctx) -> None:
     ]}), encoding="utf-8")
 
     ctx.settings.project_tree_root = str(tmp_path / "ws1")  # 锁 ws1
+    ctx.settings.project_tree_view_mode = "rooted"
     view = ProjectTreeView(ctx)
     qtbot.addWidget(view)
     view.on_activate()
     # 锁 root → rooted scan ws1, 只 ws1
     assert view._tree.topLevelItemCount() >= 1
     view._show_all_projects()
-    # 清 root → flat list 全部
-    assert ctx.settings.project_tree_root is None
+    assert ctx.settings.project_tree_view_mode == "all"
     assert view._root is None
     names = [view._tree.topLevelItem(i).text(0) for i in range(view._tree.topLevelItemCount())]
     assert any("ws1" in n for n in names) and any("ws2" in n for n in names), "flat 该显全部"
 
 
-def test_select_all_filter_pure_nav(qtbot, tmp_path, ctx):
-    """A 重构: 项目树纯导航. 「全部」filter 只切列表显隐 + 单选详情, 不再汇总.
+def test_grid_quick_buttons_apply_column_presets(qtbot, ctx):
+    from app.config import project_tree_layout as ptl
 
-    多选汇总 / 编号网格 / 字段筛选 已迁至「数据筛选」页 (DataFilterView, 自有测试).
-    """
-    root = tmp_path / "survey"
-    for n in ("断面a", "断面b", "空文件夹"):
-        (root / n).mkdir(parents=True)
-    _make_workspace(root / "断面a")
-    _make_workspace(root / "断面b")
-    ctx.settings.project_tree_root = str(root)
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    assert set(view._grid_cols_buttons.keys()) == set(ptl.GRID_QUICK_COLUMN_PRESETS)
+    view._on_grid_cols_clicked(8)
+    assert ptl.columns_for_density_index(ctx.settings.project_tree_grid_density) == 8
+    assert view._grid_cols_buttons[8].isChecked()
+    view._on_grid_cols_clicked(1)
+    assert ptl.columns_for_density_index(ctx.settings.project_tree_grid_density) == 1
+    assert view._grid_cols_buttons[1].isChecked()
+
+
+def test_select_all_filter_with_three_column_grid(qtbot, tmp_path, ctx, monkeypatch):
+    """全部项目模式: 「全选工作区」选中全部已登记项目."""
+    import json as _json
+    from app.services import project_service as ps
+
+    jp = tmp_path / "user_projects.json"
+    for name in ("ws1", "ws2", "ws3"):
+        _make_workspace(tmp_path / name)
+    jp.write_text(_json.dumps({
+        "version": 1,
+        "projects": [
+            {"directory": str(tmp_path / n), "name": n}
+            for n in ("ws1", "ws2", "ws3")
+        ],
+    }), encoding="utf-8")
+    monkeypatch.setattr(ps, "default_user_projects_json_path", lambda: str(jp))
+
+    ctx.settings.project_tree_view_mode = "all"
     view = ProjectTreeView(ctx)
     qtbot.addWidget(view)
     view.on_activate()
-    # 切来切去不应崩; A 后无汇总, 单选详情
-    view._set_kind_filter("workspace")
-    view._set_kind_filter("all")
-    view._set_kind_filter("region" if "region" in view._kind_filter_buttons else "all")
-    view._set_kind_filter("all")
-    assert view._tree.topLevelItemCount() >= 1, "树仍在"
-    assert not hasattr(view, "_right_stack"), "A 重构后项目树无 _right_stack"
+    assert len(view._tree.selectedItems()) == 3
+    view._tree.clearSelection()
+    view._btn_select_all_ws.click()
+    assert len(view._tree.selectedItems()) == 3
+    assert len(view._effective_scope_labeled()) == 3
+    assert hasattr(view, "_right_stack"), "三栏应有右栏 stack"
+    assert hasattr(view, "_grid_panel"), "三栏应有中栏网格"
 
+
+def test_default_view_mode_is_all_projects(qtbot, tmp_path, ctx, monkeypatch):
+    """默认进入「全部项目」，不因上次根目录而隐藏其它项目。"""
+    import json as _json
+    from app.services import project_service as ps
+
+    jp = tmp_path / "user_projects.json"
+    _make_workspace(tmp_path / "ws-a")
+    _make_workspace(tmp_path / "ws-b")
+    jp.write_text(_json.dumps({
+        "version": 1,
+        "projects": [
+            {"directory": str(tmp_path / "ws-a"), "name": "ws-a"},
+            {"directory": str(tmp_path / "ws-b"), "name": "ws-b"},
+        ],
+    }), encoding="utf-8")
+    monkeypatch.setattr(ps, "default_user_projects_json_path", lambda: str(jp))
+
+    ctx.settings.project_tree_root = str(tmp_path / "ws-a")
+    ctx.settings.project_tree_view_mode = "all"
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    view.on_activate()
+
+    assert view._btn_mode_all.isChecked()
+    names = [view._tree.topLevelItem(i).text(0) for i in range(view._tree.topLevelItemCount())]
+    assert any("ws-a" in n for n in names)
+    assert any("ws-b" in n for n in names)
+
+
+def test_relocate_selected_path_updates_registry(qtbot, tmp_path, ctx, monkeypatch):
+    import json as _json
+    from app.services import project_service as ps
+    from app.utils import ui as _ui
+
+    old = tmp_path / "old-path"
+    new = tmp_path / "new-path"
+    _make_workspace(old)
+    new.mkdir()
+    _make_workspace(new)
+
+    jp = tmp_path / "user_projects.json"
+    jp.write_text(_json.dumps({
+        "version": 1,
+        "projects": [{"directory": str(old), "name": "old-path"}],
+    }), encoding="utf-8")
+    monkeypatch.setattr(ps, "default_user_projects_json_path", lambda: str(jp))
+    monkeypatch.setattr(_ui, "get_existing_directory", lambda *a, **k: str(new))
+    monkeypatch.setattr(_ui, "info", lambda *a, **k: None)
+
+    ctx.settings.project_tree_view_mode = "all"
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    view.on_activate()
+    view._tree.setCurrentItem(view._tree.topLevelItem(0))
+    view._relocate_selected_path()
+
+    projects = ps.list_projects(str(jp))
+    assert projects[0]["directory"] == str(new.resolve())
+
+
+def test_content_mode_migrates_overview_to_data_summary() -> None:
+    from app.config import project_tree_layout as ptl
+
+    assert ptl.normalize_content_mode("overview") == "data_summary"
+    assert ptl.DEFAULT_CONTENT_MODE == "data_summary"
+    assert ptl.CONTENT_MODES == (("data_summary", "数据汇总"),)
+
+
+def test_toggle_photo_panel_hides_grid_and_expands_table(qtbot, tmp_path, ctx, monkeypatch):
+    """数据量大时：关掉成片，编号表占满中间栏."""
+    import json as _json
+    from app.config import project_tree_layout as ptl
+    from app.services import project_service as ps
+
+    jp = tmp_path / "user_projects.json"
+    _make_workspace(tmp_path / "ws1")
+    jp.write_text(_json.dumps({
+        "version": 1,
+        "projects": [{"directory": str(tmp_path / "ws1"), "name": "ws1"}],
+    }), encoding="utf-8")
+    monkeypatch.setattr(ps, "default_user_projects_json_path", lambda: str(jp))
+    ctx.settings.project_tree_view_mode = "all"
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    view.on_activate()
+    try:
+        assert view._btn_toggle_photos.isChecked()
+        assert not view._photo_block.isHidden()
+        view._btn_toggle_photos.click()
+        assert view._photo_block.isHidden()
+        assert view.ctx.settings.project_tree_show_photos is False
+        split = view._summary_body_split
+        assert split.count() == 2
+        sizes = split.sizes()
+        assert sizes[1] == 0
+        assert sizes[0] >= ptl.SUMMARY_BODY_TABLE_MIN
+        view._btn_toggle_photos.click()
+        assert not view._photo_block.isHidden()
+        assert view.ctx.settings.project_tree_show_photos is True
+    finally:
+        view.stop_background_work()
+
+
+def test_summary_body_splitter_allows_resize(qtbot, ctx):
+    from app.config import project_tree_layout as ptl
+
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    view.resize(900, 700)
+    view.show()
+    qtbot.waitExposed(view)
+    view._grid_body.show()
+    view._data_summary_panel.show()
+    view._photo_block.show()
+    try:
+        split = view._summary_body_split
+        assert split is not None
+        assert split.orientation() == Qt.Orientation.Vertical
+        assert split.count() == 2
+        assert split.widget(0) is view._summary_table_host
+        assert split.widget(1) is view._photo_block
+        split.resize(800, 500)
+        split.setSizes([120, 380])
+        sizes = split.sizes()
+        assert sizes[0] >= ptl.SUMMARY_BODY_TABLE_MIN
+        assert sizes[1] >= ptl.SUMMARY_BODY_PHOTO_MIN
+        assert view._specimen_table.maximumHeight() == 16777215
+    finally:
+        view.stop_background_work()
+
+
+def test_specimen_summary_table_uses_windows_extended_selection(qtbot, ctx):
+    """编号列表应支持 Windows 常用 Ctrl+A / Shift 范围多选."""
+    from PyQt6.QtTest import QTest
+
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    try:
+        view._summary_visible_columns = [("uid", "编号")]
+        view._rebuild_specimen_table_structure()
+        view._populate_specimen_table([
+            {"uid": "GXFCG-BLW-SC001-D79-20260618"},
+            {"uid": "GXFCG-BLW-SC002-RD79-20260618"},
+            {"uid": "GXFCG-BLW-PGC001-D-20260618"},
+        ])
+        table = view._specimen_table
+        assert table.selectionMode() == QAbstractItemView.SelectionMode.ExtendedSelection
+        table.setFocus()
+        table.setCurrentCell(0, 0)
+
+        QTest.keyClick(table, Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
+        selected_rows = {ix.row() for ix in table.selectionModel().selectedRows()}
+        assert selected_rows == {0, 1, 2}
+
+        table.clearSelection()
+        table.setCurrentCell(0, 0)
+        QTest.keyClick(table, Qt.Key.Key_Down, Qt.KeyboardModifier.ShiftModifier)
+        selected_rows = {ix.row() for ix in table.selectionModel().selectedRows()}
+        assert selected_rows == {0, 1}
+    finally:
+        view.stop_background_work()
+
+
+def test_specimen_table_supports_row_and_column_reorder(qtbot, ctx):
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    try:
+        table = view._specimen_table
+        assert table.dragDropMode() == QAbstractItemView.DragDropMode.InternalMove
+        assert table.dragEnabled() is True
+        assert table.acceptDrops() is True
+        hdr = table.horizontalHeader()
+        assert hdr.sectionsMovable() is True
+    finally:
+        view.stop_background_work()
+
+
+def test_groups_for_summary_display_filters_selected_uids(qtbot, ctx):
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    try:
+        view._current_merged = [
+            {"uid": "A", "items": [{"path": "/a1.jpg"}]},
+            {"uid": "B", "items": [{"path": "/b1.jpg"}, {"path": "/b2.jpg"}]},
+            {"uid": "C", "items": []},
+        ]
+        view._summary_visible_columns = [("uid", "编号")]
+        view._rebuild_specimen_table_structure()
+        view._populate_specimen_table([
+            {"uid": "A"},
+            {"uid": "B"},
+            {"uid": "C"},
+        ])
+        filtered = view._groups_for_summary_display(uid_filter={"B"})
+        assert [g["uid"] for g in filtered] == ["B"]
+        assert sum(len(g.get("items") or []) for g in filtered) == 2
+    finally:
+        view.stop_background_work()
+
+
+def test_table_selection_filters_summary_grid(qtbot, ctx):
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    applied: list[list] = []
+
+    def _capture(groups):
+        applied.append(list(groups))
+
+    view._apply_summary_groups_to_grid = _capture  # type: ignore[method-assign]
+    try:
+        view._current_merged = [
+            {"uid": "A", "items": [{"path": "/a1.jpg"}]},
+            {"uid": "B", "items": [{"path": "/b1.jpg"}]},
+        ]
+        view._summary_visible_columns = [("uid", "编号")]
+        view._rebuild_specimen_table_structure()
+        view._populate_specimen_table([{"uid": "A"}, {"uid": "B"}])
+        view._specimen_table.clearSelection()
+        view._on_specimen_table_selection_changed()
+        assert [g["uid"] for g in applied[-1]] == ["A", "B"]
+
+        view._specimen_table.setCurrentCell(
+            1,
+            0,
+            QItemSelectionModel.SelectionFlag.ClearAndSelect
+            | QItemSelectionModel.SelectionFlag.Rows,
+        )
+        view._on_specimen_table_selection_changed()
+        assert [g["uid"] for g in applied[-1]] == ["B"]
+        assert "已选 1 编号" in view._grid_count_lbl.text()
+    finally:
+        view.stop_background_work()
+
+
+def test_order_specimen_rows_respects_manual_uid_order(qtbot, ctx):
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    try:
+        rows = [
+            {"uid": "A"},
+            {"uid": "B"},
+            {"uid": "C"},
+        ]
+        view._summary_row_uid_order = ["C", "A", "B"]
+        ordered = view._order_specimen_rows(rows)
+        assert [r["uid"] for r in ordered] == ["C", "A", "B"]
+    finally:
+        view.stop_background_work()
+
+
+def test_ux_v2_hides_legacy_header_chips(qtbot, ctx):
+    """精简模式：顶栏隐藏「全部/按根」chip，退回后恢复."""
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    view.show()
+    try:
+        assert ctx.settings.project_tree_ux_v2 is True
+        assert view._mode_row_host.isHidden() is True
+        assert view._btn_pick.isHidden() is True
+        assert view._btn_display.isHidden() is False
+        assert view._thumb_row_host.isHidden() is True
+        assert view._right_action_bar.isHidden() is False
+
+        ctx.settings.project_tree_ux_v2 = False
+        view._apply_ux_profile()
+        assert view._mode_row_host.isHidden() is False
+        assert view._btn_pick.isHidden() is False
+        assert view._btn_display.isHidden() is True
+        assert view._thumb_row_host.isHidden() is False
+        assert view._right_action_bar.isHidden() is True
+    finally:
+        view.stop_background_work()
+
+
+def test_kind_filter_all_does_not_auto_select_in_ux_v2(qtbot, tmp_path, ctx, monkeypatch):
+    """精简模式：点「全部」只过滤，不强制全选."""
+    import json as _json
+    from app.services import project_service as ps
+
+    jp = tmp_path / "user_projects.json"
+    for name in ("ws1", "ws2"):
+        _make_workspace(tmp_path / name)
+    jp.write_text(_json.dumps({
+        "version": 1,
+        "projects": [
+            {"name": "ws1", "directory": str(tmp_path / "ws1")},
+            {"name": "ws2", "directory": str(tmp_path / "ws2")},
+        ],
+    }), encoding="utf-8")
+    monkeypatch.setattr(ps, "default_user_projects_json_path", lambda: jp)
+    ctx.settings.project_tree_view_mode = "all"
+    ctx.settings.project_tree_ux_v2 = True
+
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    try:
+        view.on_activate()
+        view._tree.clearSelection()
+        assert view._tree.selectedItems() == []
+        view._set_kind_filter("workspace")
+        view._set_kind_filter("all")
+        # 精简模式不应因点「全部」而自动全选
+        assert len(view._tree.selectedItems()) == 0
+    finally:
+        view.stop_background_work()
+
+
+def test_kind_filter_all_auto_selects_in_legacy_ux(qtbot, tmp_path, ctx, monkeypatch):
+    """旧版：点「全部」仍会全选工作区（可退回行为）."""
+    import json as _json
+    from app.services import project_service as ps
+
+    jp = tmp_path / "user_projects.json"
+    for name in ("ws1", "ws2"):
+        _make_workspace(tmp_path / name)
+    jp.write_text(_json.dumps({
+        "version": 1,
+        "projects": [
+            {"name": "ws1", "directory": str(tmp_path / "ws1")},
+            {"name": "ws2", "directory": str(tmp_path / "ws2")},
+        ],
+    }), encoding="utf-8")
+    monkeypatch.setattr(ps, "default_user_projects_json_path", lambda: jp)
+    ctx.settings.project_tree_view_mode = "all"
+    ctx.settings.project_tree_ux_v2 = False
+
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    try:
+        view.on_activate()
+        view._tree.clearSelection()
+        view._set_kind_filter("workspace")
+        view._set_kind_filter("all")
+        assert len(view._tree.selectedItems()) >= 2
+    finally:
+        view.stop_background_work()
+
+
+def test_summarize_from_cards_selects_tree_workspaces(qtbot, tmp_path, ctx, monkeypatch):
+    """卡片「查看汇总」切到树视图并选中对应工作区."""
+    import json as _json
+    from app.services import project_service as ps
+    from app.views.project_tree_view import _PATH_ROLE
+
+    jp = tmp_path / "user_projects.json"
+    ws1 = tmp_path / "ws1"
+    ws2 = tmp_path / "ws2"
+    for p in (ws1, ws2):
+        _make_workspace(p)
+    jp.write_text(_json.dumps({
+        "version": 1,
+        "projects": [
+            {"name": "ws1", "directory": str(ws1)},
+            {"name": "ws2", "directory": str(ws2)},
+        ],
+    }), encoding="utf-8")
+    monkeypatch.setattr(ps, "default_user_projects_json_path", lambda: jp)
+    ctx.settings.project_tree_view_mode = "all"
+    ctx.settings.project_tree_layout_mode = "cards"
+
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    try:
+        view.on_activate()
+        assert view._body_stack.currentIndex() == 1
+        view._summarize_from_cards([str(ws1), str(ws2)])
+        assert view._body_stack.currentIndex() == 0
+        selected = {
+            str(Path(it.data(0, _PATH_ROLE)).resolve())
+            for it in view._tree.selectedItems()
+            if it.data(0, _PATH_ROLE)
+        }
+        assert selected == {str(ws1.resolve()), str(ws2.resolve())}
+    finally:
+        view.stop_background_work()
+
+
+def test_layout_switch_preserves_selection(qtbot, tmp_path, ctx, monkeypatch):
+    """树↔卡片切换时保留选中工作区."""
+    import json as _json
+    from app.services import project_service as ps
+    from app.views.project_tree_view import _PATH_ROLE
+
+    jp = tmp_path / "user_projects.json"
+    ws1 = tmp_path / "ws1"
+    ws2 = tmp_path / "ws2"
+    for p in (ws1, ws2):
+        _make_workspace(p)
+    jp.write_text(_json.dumps({
+        "version": 1,
+        "projects": [
+            {"name": "ws1", "directory": str(ws1)},
+            {"name": "ws2", "directory": str(ws2)},
+        ],
+    }), encoding="utf-8")
+    monkeypatch.setattr(ps, "default_user_projects_json_path", lambda: jp)
+    ctx.settings.project_tree_view_mode = "all"
+    ctx.settings.project_tree_layout_mode = "tree"
+
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    try:
+        view.on_activate()
+        view._select_tree_paths([str(ws1), str(ws2)])
+        assert len(view._tree.selectedItems()) >= 2
+        view._set_layout_mode("cards")
+        assert set(view._card_grid.selected_directories()) == {
+            str(ws1), str(ws2),
+        } or {
+            str(ws1.resolve()), str(ws2.resolve()),
+        }.issubset({
+            str(Path(d).resolve()) for d in view._card_grid.selected_directories()
+        })
+        selected_cards = {
+            str(Path(d).resolve()) for d in view._card_grid.selected_directories()
+        }
+        assert selected_cards == {str(ws1.resolve()), str(ws2.resolve())}
+
+        view._set_layout_mode("tree")
+        selected_tree = {
+            str(Path(it.data(0, _PATH_ROLE)).resolve())
+            for it in view._tree.selectedItems()
+            if it.data(0, _PATH_ROLE)
+        }
+        assert selected_tree == {str(ws1.resolve()), str(ws2.resolve())}
+    finally:
+        view.stop_background_work()
+
+
+def test_tip_bar_can_be_dismissed(qtbot, ctx):
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    view.show()
+    try:
+        ctx.settings.project_tree_ux_v2 = True
+        ctx.settings.project_tree_tip_dismissed = False
+        view._apply_ux_profile()
+        assert view._tip_bar.isHidden() is False
+        view._dismiss_tip_bar()
+        assert ctx.settings.project_tree_tip_dismissed is True
+        assert view._tip_bar.isHidden() is True
+    finally:
+        view.stop_background_work()
+
+
+def test_compact_project_tree_chrome_uses_horizontal_header_and_metrics(qtbot, ctx):
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    try:
+        page_margins = view.layout().contentsMargins()
+        assert page_margins.top() == 8
+        assert view.layout().spacing() == 8
+
+        header = view.findChild(type(view._tip_bar), "ProjectTreeHeader")
+        title = view.findChild(QLabel, "ProjectTreeTitle")
+        assert header is not None
+        assert title is not None
+        assert header.layout().indexOf(title) >= 0
+        assert header.layout().indexOf(view._root_lbl) >= 0
+        assert header.layout().contentsMargins().top() == 6
+
+        tip_margins = view._tip_bar.layout().contentsMargins()
+        assert tip_margins.top() == 4
+        assert view._metric_regions is None
+        left_layout = view._tree_metrics_inline.parentWidget().layout()
+        metric_layout = left_layout.itemAt(0).layout()
+        assert isinstance(metric_layout, QHBoxLayout)
+        assert metric_layout.indexOf(view._tree_metrics_inline) >= 0
+    finally:
+        view.stop_background_work()

@@ -453,10 +453,34 @@ class TestCollabServiceOffline:
         svc = self._make_service()
         info = svc._node_info()
         assert "hostname" in info
+        assert "operatorName" in info
         assert "projectName" in info
         assert "projectId" in info
         assert "lanIp" in info
         assert "port" in info
+
+    def test_set_operator_name_broadcast_in_node_info(self):
+        svc = self._make_service()
+        svc.set_operator_name("小王")
+        info = svc._node_info()
+        assert info["operatorName"] == "小王"
+        assert info["sessionName"] == "小王的会话"
+
+    def test_fetch_peer_info_reads_operator_name(self):
+        svc = self._make_service()
+        peer = PeerInfo(ip="10.0.0.2", port=5050, hostname="DESKTOP-2")
+        with patch.object(
+            svc,
+            "_fetch_node_info",
+            return_value={
+                "hostname": "DESKTOP-2",
+                "operatorName": "小李",
+                "projectName": "proj",
+                "groupCode": "G1",
+            },
+        ):
+            svc._fetch_peer_info(peer)
+        assert peer.operator_name == "小李"
 
     def test_apply_project_sync_code_updates_project_identity(self, tmp_path):
         project = tmp_path / "proj"
@@ -694,7 +718,8 @@ class TestSubnetScan:
     def _resp(self, group="G1"):
         r = MagicMock(status_code=200)
         r.json.return_value = {"hostname": "host-x", "groupCode": group,
-                               "projectName": "P", "serverTime": 0.0}
+                               "projectName": "P", "operatorName": "测试员",
+                               "serverTime": 0.0}
         return r
 
     def test_scan_adds_reachable_peer(self):
@@ -746,6 +771,7 @@ class TestMdnsEnrich:
         def fake_fetch(peer):
             peer.group_code = "G1"
             peer.project_name = "P"
+            peer.operator_name = "测试员"
 
         svc._fetch_peer_info = fake_fetch
         svc._on_peer_found("1.2.3.4", 5050, "host-b")
@@ -841,13 +867,32 @@ _os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 _QT_APP = None
 
 
-@pytest.fixture(scope="module", autouse=False)
+@pytest.fixture(scope="module", autouse=True)
 def qt_app():
     global _QT_APP
     from PyQt6.QtWidgets import QApplication
     if _QT_APP is None:
         _QT_APP = QApplication.instance() or QApplication([])
     return _QT_APP
+
+
+@pytest.fixture(autouse=True)
+def _isolate_real_collab_network(monkeypatch):
+    """Keep unit tests off real uvicorn/mDNS threads and host sockets."""
+    def _start_without_network(
+        self,
+        project_name="",
+        preferred_port=5050,
+        group_code="",
+        project_dir="",
+    ):
+        self._project_name = project_name
+        self._project_dir = project_dir or self._project_dir
+        self._group_code = str(group_code or self._group_code).strip()
+        self._port = preferred_port
+        self._running = True
+
+    monkeypatch.setattr(CollabService, "start", _start_without_network)
 
 
 # ── CollabView offscreen smoke test ──────────────────────────────────────────
@@ -1016,6 +1061,7 @@ class TestCollabViewSmoke:
             ip="192.168.1.20",
             port=5050,
             hostname="shoot-pc",
+            operator_name="小李",
             project_name="/work/Project-B",
             project_id="PROJECT-B",
             group_code="TEAM-1",
@@ -1025,10 +1071,11 @@ class TestCollabViewSmoke:
         view = CollabView(ctx)
         view.on_activate()
 
-        assert view._device_list.item(0, 0).text() == "shoot-pc"
-        assert view._device_list.item(0, 1).text() == "Project-B"
-        assert view._device_list.item(0, 2).text() == "TEAM-1"
-        assert view._device_list.item(0, 3).text() == "可同步"
+        assert view._device_list.item(0, 0).text() == "小李"
+        assert view._device_list.item(0, 1).text() == "shoot-pc"
+        assert view._device_list.item(0, 2).text() == "Project-B"
+        assert view._device_list.item(0, 3).text() == "TEAM-1"
+        assert view._device_list.item(0, 4).text() == "可同步"
         view.close()
         svc.stop()
 
@@ -1504,6 +1551,37 @@ class TestSpecimenLwwMerge:
         assert written == 1
         assert self._local_notes(svc, "U3") == "本地值"
         assert self._local_notes(svc, "U4") == "全新记录"
+
+    def test_partial_remote_update_preserves_other_columns(self, tmp_path):
+        svc = self._svc_with_project(tmp_path)
+        db = db_manager.open_project_db_private(svc._project_dir)
+        try:
+            db.execute(
+                "INSERT INTO specimens (uid, notes, scientific_name, collab_updated_at) "
+                "VALUES (?,?,?,?)",
+                ("U6", "完整本地", "Species alpha", "2026-01-01T00:00:00+00:00"),
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        written = svc._write_specimens_to_local_db([{
+            "uid": "U6",
+            "notes": "只改备注",
+            "collab_updated_at": "2026-06-01T00:00:00+00:00",
+        }])
+        assert written == 1
+
+        db = db_manager.open_project_db_private(svc._project_dir)
+        try:
+            row = db.execute(
+                "SELECT notes, scientific_name FROM specimens WHERE uid=?",
+                ("U6",),
+            ).fetchone()
+        finally:
+            db.close()
+        assert row[0] == "只改备注"
+        assert row[1] == "Species alpha"
 
     def test_push_specimen_stamps_local_record(self, tmp_path):
         svc = self._svc_with_project(tmp_path)

@@ -380,3 +380,36 @@ class TestMessageBoxHelpers:
         # First arg to warning() should be the root, not child
         called_parent = m.call_args.args[0]
         assert called_parent is root
+
+
+# ── dispose_widget / clear_layout_widgets ─────────────────────────────────────
+
+class TestWidgetDisposal:
+    def test_setparent_none_promotes_widget_to_window(self, qapp):
+        from PyQt6.QtWidgets import QFrame, QVBoxLayout
+        from app.utils.ui import dispose_widget
+
+        host = QWidget()
+        lay = QVBoxLayout(host)
+        child = QFrame(host)
+        child.setWindowTitle("PGC001-R")
+        lay.addWidget(child)
+        lay.removeWidget(child)
+        child.setParent(None)
+        try:
+            assert child.isWindow()
+        finally:
+            dispose_widget(child)
+
+    def test_dispose_widget_keeps_widget_non_window(self, qapp):
+        from PyQt6.QtWidgets import QFrame, QVBoxLayout
+        from app.utils.ui import dispose_widget
+
+        host = QWidget()
+        lay = QVBoxLayout(host)
+        child = QFrame(host)
+        child.setWindowTitle("未分组")
+        lay.addWidget(child)
+        lay.removeWidget(child)
+        dispose_widget(child)
+        assert not child.isWindow()

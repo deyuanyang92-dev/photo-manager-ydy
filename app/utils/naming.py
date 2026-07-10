@@ -6,7 +6,7 @@ Mirrors:
   - naming-validator.js: parseTiffBasename, suggestedTiffName,
     validateTiffBasename, specimenDateSegment
 
-7-segment format:  地区-样地-站位-物种编号-[序号-]保存方式-日期段
+7-segment format:  省/市-地区/样地-站位-物种编号-[序号-]保存方式-日期段
   Full result ID:   FJ-XM-B2-DLC001-1-T95E-20260601
   UniqueId:         FJ-XM-B2-DLC001-T95E-20260601        (no seq)
   Legacy v002:      FJ-XM-DLC001-T95E-20260601           (no station)
@@ -362,6 +362,67 @@ def parse_uid(uid: Optional[str]) -> Optional[dict]:
         }
 
     return None
+
+
+def uid_display_core(uid: Optional[str]) -> str:
+    """Short label: ``province-site-speciesId`` (e.g. ``GXFCG-BLW-BZC003``).
+
+    Matches grouping-panel ``uid_core_key`` intent for legacy layouts while
+    using semantic fields when ``parse_uid`` succeeds (drops station/storage/date).
+    """
+    parsed = parse_uid(uid)
+    if parsed:
+        province = str(parsed.get("province") or "").strip()
+        site = str(parsed.get("site") or "").strip()
+        species = str(parsed.get("speciesId") or "").strip()
+        if province and site and species:
+            return normalize_uid(f"{province}-{site}-{species}")
+    text = str(uid or "").strip()
+    if not text:
+        return "未分组"
+    parts = [p for p in text.split("-") if p]
+    if len(parts) >= 3:
+        return normalize_uid("-".join(parts[:3]))
+    return normalize_uid(text)
+
+
+def uid_display_core_storage(uid: Optional[str]) -> str:
+    """Core prefix plus preservation code, e.g. ``GXFCG-BLW-BZC003-R``."""
+    parsed = parse_uid(uid)
+    if parsed:
+        core = uid_display_core(uid)
+        storage = str(parsed.get("storage") or "").strip()
+        if core != "未分组" and storage:
+            return normalize_uid(f"{core}-{storage}")
+    return uid_display_core(uid)
+
+
+def uid_display_station_species(uid: Optional[str]) -> str:
+    """Workbench card style: ``station-speciesId`` or ``speciesId-storage``."""
+    parsed = parse_uid(uid)
+    if parsed:
+        station = str(parsed.get("station") or "").strip()
+        species = str(parsed.get("speciesId") or "").strip()
+        storage = str(parsed.get("storage") or "").strip()
+        if station and species:
+            return f"{station}-{species}"
+        if species and storage:
+            return f"{species}-{storage}"
+        if species:
+            return species
+    text = str(uid or "").strip()
+    if not text:
+        return "未分组"
+    parts = text.split("-")
+    if len(parts) >= 4 and parts[2] and parts[3]:
+        return f"{parts[2]}-{parts[3]}"
+    return text if len(text) <= 24 else ("…" + text[-23:])
+
+
+def uid_group_key(uid: Optional[str]) -> str:
+    """Canonical grouping key = normalized specimen uniqueId."""
+    text = normalize_uid(str(uid or "").strip())
+    return text if text else "__ungrouped__"
 
 
 def build_uid(

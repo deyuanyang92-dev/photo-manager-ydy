@@ -140,6 +140,12 @@ class SettingsPersistenceMixin:
         self._perf_mode_chk.setChecked(self.ctx.settings.performance_mode)
         self._perf_mode_chk.blockSignals(False)
 
+        self._project_tree_ux_v2_chk.blockSignals(True)
+        self._project_tree_ux_v2_chk.setChecked(
+            bool(getattr(self.ctx.settings, "project_tree_ux_v2", True))
+        )
+        self._project_tree_ux_v2_chk.blockSignals(False)
+
         try:
             font_scale = float(qs.value(_sv._K_UI_FONT_SCALE, 1.0))
         except (TypeError, ValueError):
@@ -194,6 +200,26 @@ class SettingsPersistenceMixin:
         from app.utils import ui
         ui.info(self, "性能模式", "已保存。重启软件后生效。")
 
+    def _on_project_tree_ux_v2_changed(self) -> None:
+        self.ctx.settings.project_tree_ux_v2 = self._project_tree_ux_v2_chk.isChecked()
+        self.ctx.settings.flush_to_disk()
+        # 已打开的项目树页立即切换布局（若尚未打开则下次进入时生效）
+        try:
+            mw = self.window()
+            views = getattr(mw, "_views", None) or {}
+            page = views.get("project_tree")
+            if page is not None and hasattr(page, "_apply_ux_profile"):
+                page._apply_ux_profile()
+        except Exception:
+            pass
+        from app.utils import ui
+        on = self._project_tree_ux_v2_chk.isChecked()
+        ui.info(
+            self,
+            "项目树界面",
+            "已切换为精简界面。" if on else "已退回旧版布局。",
+        )
+
     def _on_language_changed(self) -> None:
         lang = self._lang_combo.currentData() or "zh"
         self.ctx.settings.current_language = str(lang)
@@ -210,13 +236,16 @@ class SettingsPersistenceMixin:
     def _on_theme_changed(self) -> None:
         current_tab = self._tabs.currentIndex()
         key = self._theme_combo.currentData() or "classic_light"
-        self.ctx.settings.current_theme = str(key)
-        self.ctx.settings.flush_to_disk()
-
-        from app.config.theme import apply_theme
-        app = QApplication.instance()
-        if app is not None:
-            app.setStyleSheet(apply_theme(str(key)))
+        shell_handler = getattr(self.window(), "apply_visual_theme", None)
+        if callable(shell_handler):
+            shell_handler(str(key))
+        else:
+            self.ctx.settings.current_theme = str(key)
+            self.ctx.settings.flush_to_disk()
+            from app.config.theme import apply_theme
+            app = QApplication.instance()
+            if app is not None:
+                app.setStyleSheet(apply_theme(str(key)))
         _sv._refresh_palette()
         self._setup_ui()
         self._tabs.setCurrentIndex(min(current_tab, self._tabs.count() - 1))

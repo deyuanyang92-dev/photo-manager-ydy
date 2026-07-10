@@ -92,9 +92,11 @@ class CollabDiagnosticsDialog(QDialog):
         return self._svc.run_diagnostics()
 
     def _refresh_diagnostics_view(self) -> None:
+        from app.utils.ui import dispose_widget
+
         # Clear old rows
         for w in self._row_widgets:
-            w.setParent(None)
+            dispose_widget(w)
         self._row_widgets.clear()
 
         diags = self._diagnostics()

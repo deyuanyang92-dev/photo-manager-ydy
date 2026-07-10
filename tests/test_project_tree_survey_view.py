@@ -46,6 +46,112 @@ class _FakeSettings:
     @project_tree_root.setter
     def project_tree_root(self, v):
         self._root = v
+        if v is not None:
+            self._view_mode = "rooted"
+
+    @property
+    def project_tree_view_mode(self):
+        return getattr(self, "_view_mode", "all")
+
+    @project_tree_view_mode.setter
+    def project_tree_view_mode(self, v):
+        self._view_mode = v
+
+    @property
+    def project_tree_layout_mode(self):
+        return "tree"
+
+    @property
+    def project_tree_grid_density(self):
+        from app.config.project_tree_layout import DEFAULT_GRID_DENSITY_INDEX
+        return DEFAULT_GRID_DENSITY_INDEX
+
+    @project_tree_grid_density.setter
+    def project_tree_grid_density(self, v):
+        pass
+
+    @property
+    def project_tree_grid_sort(self):
+        from app.config.project_tree_layout import DEFAULT_GRID_SORT
+        return DEFAULT_GRID_SORT
+
+    @project_tree_grid_sort.setter
+    def project_tree_grid_sort(self, v):
+        pass
+
+    @property
+    def project_tree_grid_caption(self):
+        from app.config.project_tree_layout import DEFAULT_GRID_CAPTION
+        return DEFAULT_GRID_CAPTION
+
+    @project_tree_grid_caption.setter
+    def project_tree_grid_caption(self, v):
+        pass
+
+    @property
+    def project_tree_split_state(self):
+        return None
+
+    @project_tree_split_state.setter
+    def project_tree_split_state(self, v):
+        pass
+
+    @property
+    def project_tree_grid_inner_split_state(self):
+        return None
+
+    @project_tree_grid_inner_split_state.setter
+    def project_tree_grid_inner_split_state(self, v):
+        pass
+
+    @property
+    def project_tree_summary_body_split_state(self):
+        return None
+
+    @project_tree_summary_body_split_state.setter
+    def project_tree_summary_body_split_state(self, v):
+        pass
+
+    @property
+    def project_tree_content_mode(self):
+        from app.config.project_tree_layout import DEFAULT_CONTENT_MODE
+        return getattr(self, "_content_mode", DEFAULT_CONTENT_MODE)
+
+    @project_tree_content_mode.setter
+    def project_tree_content_mode(self, v):
+        from app.config.project_tree_layout import normalize_content_mode
+        self._content_mode = normalize_content_mode(v)
+
+    @property
+    def project_tree_show_photos(self):
+        return getattr(self, "_show_photos", True)
+
+    @project_tree_show_photos.setter
+    def project_tree_show_photos(self, v):
+        self._show_photos = bool(v)
+
+    @property
+    def project_tree_preview_master_size(self):
+        from app.config.project_tree_layout import DEFAULT_PREVIEW_MASTER_SIZE
+        return DEFAULT_PREVIEW_MASTER_SIZE
+
+    @project_tree_preview_master_size.setter
+    def project_tree_preview_master_size(self, v):
+        pass
+
+    @property
+    def performance_mode(self):
+        return False
+
+    @property
+    def project_tree_summary_visible_columns(self):
+        from app.services.cross_workspace_query_service import DEFAULT_SUMMARY_VISIBLE_KEYS
+
+        return getattr(self, "_summary_visible_columns", list(DEFAULT_SUMMARY_VISIBLE_KEYS))
+
+    @project_tree_summary_visible_columns.setter
+    def project_tree_summary_visible_columns(self, keys):
+        self._summary_visible_columns = list(keys or [])
 
 
 class _FakeCtx:
@@ -169,6 +275,7 @@ def survey_root(tmp_path, ctx):
         ],
     )
     ctx.settings.project_tree_root = str(root)
+    ctx.settings.project_tree_view_mode = "rooted"
     return root
 
 
@@ -207,8 +314,9 @@ def test_multi_select_two_workspaces_shows_survey_and_merged_grid(
         item_b.setSelected(True)
         view._on_tree_selection_changed()  # 显式触发,确定性断言
 
-        # 右栏 → 物种名录页
-        assert view._right_stack.currentIndex() == 2
+        # 选中后自动加载数据汇总（中间）+ 调查概览（右栏）
+        assert not view._grid_body.isHidden()
+        assert view._right_stack.currentIndex() == 1
         inv = view._survey_panel.inventory()
         species = {row["scientific_name"] for row in inv}
         # 跨断面合并后 3 种,沙蚕出现于两断面
@@ -219,8 +327,7 @@ def test_multi_select_two_workspaces_shows_survey_and_merged_grid(
             for row in inv
         )
 
-        # 中间 UidGroupedGrid 收到合并 groups:断面a 1 组 + 断面b 1 组 = 2 section
-        # (headless 下 isVisible() 受顶层未 show 影响;用 isHidden() 验 setVisible 效果)
+        # 中间 UidGroupedGrid 收到合并 groups（数据汇总模式）
         assert not view._grid_panel.isHidden()
         assert view._uid_grid.section_count() == 2
     finally:
@@ -243,10 +350,9 @@ def test_single_select_shows_detail_page(qtbot, survey_root, ctx, monkeypatch):
         item_a.setSelected(True)
         view._on_tree_selection_changed()
 
-        # 右栏 → 单张详情页 (现状)
-        assert view._right_stack.currentIndex() == 0
-        # 单选隐藏中间网格 (headless 用 isHidden 验 setVisible)
-        assert view._grid_panel.isHidden()
+        # 右栏 → 调查概览；中间自动出图
+        assert view._right_stack.currentIndex() == 1
+        assert not view._grid_body.isHidden()
         # 现有详情字段仍填充
         assert "断面a" in view._detail_name.text()
     finally:
@@ -288,6 +394,29 @@ def test_multi_select_passes_labels_with_node_label(
         label_vals = list(captured.get("labels", {}).values())
         assert any("断面a" in v for v in label_vals)
         assert any("断面b" in v for v in label_vals)
+    finally:
+        view.stop_background_work()
+
+
+def test_select_root_folder_shows_subtree_overview(
+    qtbot, survey_root, ctx, monkeypatch
+):
+    """选调查根目录 → 自动汇总其下全部断面 + 调查概览."""
+    monkeypatch.setattr(
+        "app.services.project_service.get_project_results", _fake_get_results
+    )
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    view.on_activate()
+    try:
+        top = view._tree.topLevelItem(0)
+        view._tree.clearSelection()
+        top.setSelected(True)
+        view._on_tree_selection_changed()
+        assert view._right_stack.currentIndex() == 1
+        assert view._overview_panel._card_workspaces._value.text() == "2"
+        assert not view._grid_body.isHidden()
+        assert view._uid_grid.section_count() >= 1
     finally:
         view.stop_background_work()
 

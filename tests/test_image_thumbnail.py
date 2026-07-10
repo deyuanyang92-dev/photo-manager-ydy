@@ -158,7 +158,10 @@ def test_decode_image_data_returns_qimage(tmp_path) -> None:
     assert img is not None
     assert isinstance(img, QImage), "decode_image_data must return a QImage (thread-safe)"
     assert not img.isNull()
-    assert img.width() <= 32 and img.height() <= 32
+    from app.utils.thumbnail_disk_cache import normalize_thumb_cache_size
+
+    bucket = normalize_thumb_cache_size(32)
+    assert img.width() <= bucket and img.height() <= bucket
 
 
 def test_decode_image_data_uses_qimage_cache(monkeypatch, tmp_path) -> None:

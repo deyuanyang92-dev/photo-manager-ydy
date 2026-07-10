@@ -79,7 +79,12 @@ def project_id_for_directory(directory: str) -> str:
     except (OSError, sqlite3.Error, ProjectUnavailableError):
         return ""
     try:
+        from app.db.db_manager import ensure_schema
+
+        ensure_schema(db)
         return ensure_project_identity(db, project_name=path.name)
+    except (OSError, sqlite3.Error, ProjectUnavailableError):
+        return ""
     finally:
         db.close()
 
@@ -100,6 +105,8 @@ def read_project_id_for_directory(directory: str) -> str:
         return ""
     try:
         return read_project_identity(db)
+    except sqlite3.OperationalError:
+        return ""
     finally:
         db.close()
 
@@ -202,6 +209,30 @@ def apply_project_sync_code_to_directory(directory: str, code: str) -> str:
             db,
             parsed["projectId"],
             project_name=parsed.get("projectName", "") or Path(resolved).name,
+            previous_project_id=previous,
+        )
+    finally:
+        db.close()
+
+
+def reset_project_identity_for_directory(directory: str) -> str:
+    """Break an existing project-code pairing by assigning a fresh local ID."""
+    from app.db.db_manager import open_project_db_private
+    from app.services.project_identity_service import (
+        read_project_identity,
+        reset_project_identity,
+    )
+    from app.services.project_tree_service import is_workspace
+
+    resolved = _normalise_dir(directory)
+    if not is_workspace(resolved):
+        raise ValueError("请选择已经创建的拍照工作区。")
+    db = open_project_db_private(resolved)
+    try:
+        previous = read_project_identity(db)
+        return reset_project_identity(
+            db,
+            project_name=Path(resolved).name,
             previous_project_id=previous,
         )
     finally:

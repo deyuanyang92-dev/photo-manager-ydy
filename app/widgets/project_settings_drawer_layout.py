@@ -455,7 +455,7 @@ class ProjectSettingsLayoutMixin:
         advanced_lay.addWidget(_divider())
 
         # Sample/species label dictionary
-        sp_lbl = QLabel("样品/物种标签说明（可选）")
+        sp_lbl = QLabel("物种编号说明（可选）")
         sp_lbl.setObjectName("Section")
         advanced_lay.addWidget(sp_lbl)
         sp_hint = QLabel("只是给 DLC001、MIX01 这类标签加中文说明，方便查看；不填写也不影响拍照整理。")
@@ -630,7 +630,7 @@ class ProjectSettingsLayoutMixin:
             _settings_form_row("纸张",   self._sample_paper_combo, width=64),
             _settings_form_row("排版",   self._sample_imposition_btn, width=64),
         ])
-        sample_grp.setToolTip("样品瓶 / 酒精保存标签；需要设计或修改模板时，进入「标签打印」页编辑。")
+        sample_grp.setToolTip("")
         lay.addWidget(sample_grp)
 
         # ── RNA签 ────────────────────────────────────────────────────────────
@@ -674,10 +674,7 @@ class ProjectSettingsLayoutMixin:
             _settings_form_row("排版",   self._tissue_imposition_btn, width=64),
             _settings_form_row("策略",   self._tissue_strategy_combo, width=64),
         ])
-        tissue_grp.setToolTip(
-            "瓶签与 RNA签可绑同一台或不同打印机；同台且 RNA 用 A4/A5 合版纸时，"
-            "自动策略会把 RNAlater 标签加入合版队列。模板编辑请进「标签打印」页。"
-        )
+        tissue_grp.setToolTip("")
         lay.addWidget(tissue_grp)
 
         self._niimbot_print_hint = QLabel("")

@@ -23,7 +23,7 @@ sys.path.insert(0, str(_ROOT))
 from PyQt6.QtWidgets import QApplication  # noqa: E402
 
 from app.app_context import AppContext  # noqa: E402
-from app.config.theme import build_theme_qss_file, load_fonts  # noqa: E402
+from app.config.theme import apply_default_font, apply_theme, load_fonts  # noqa: E402
 from app.db.db_manager import open_project_db  # noqa: E402
 from app.main_window import MainWindow  # noqa: E402
 from app.views.registry import ALL_VIEWS  # noqa: E402
@@ -44,7 +44,7 @@ def _seed_project(project_dir: Path) -> None:
     tiff = _touch(results / "FJ-YGLZ-B2-DLC001-1-RD75E-20260506-0508.tif",
                   blob=b"II*\x00demo")
 
-    db = open_project_db(str(project_dir))
+    db = open_project_db(str(project_dir), create=True)
     pdir = str(project_dir.resolve())
 
     specimens = [
@@ -113,9 +113,19 @@ def _seed_project(project_dir: Path) -> None:
 def main() -> int:
     app = QApplication.instance() or QApplication(sys.argv)
     load_fonts(app)
+    if apply_default_font(app) is None and sys.platform == "win32":
+        # Qt's offscreen plugin may not enumerate Windows fonts automatically.
+        from PyQt6.QtGui import QFontDatabase
+
+        for font_path in (
+            Path("C:/Windows/Fonts/msyh.ttc"),
+            Path("C:/Windows/Fonts/msyhbd.ttc"),
+        ):
+            if font_path.is_file() and QFontDatabase.addApplicationFont(str(font_path)) >= 0:
+                break
+        apply_default_font(app)
     theme_name = os.environ.get("APP_THEME", "classic_light")
-    qss = build_theme_qss_file(theme_name)
-    app.setStyleSheet(qss.read_text(encoding="utf-8"))
+    app.setStyleSheet(apply_theme(theme_name))
 
     tmp = Path(tempfile.mkdtemp(prefix="wb-complete-"))
     project_dir = tmp / "FJ-YGLZ-2026"
@@ -136,7 +146,9 @@ def main() -> int:
         app.processEvents()
 
     suffix = "" if theme_name == "classic_light" else f"_{theme_name}"
-    out = Path(__file__).resolve().parent / f"workbench_complete{suffix}.png"
+    out_dir = Path(os.environ.get("APP_SHOT_DIR", Path(__file__).resolve().parent))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = out_dir / f"workbench_complete{suffix}.png"
     pix = win.grab()
     pix.save(str(out))
     size = out.stat().st_size if out.exists() else 0

@@ -22,6 +22,9 @@ pynput>=1.7                   # 系统级全局热键（X11/Windows/macOS；Wayl
 pyserial>=3.5                 # NIIMBOT B203 USB/COM direct label printing
 httpx>=0.27                   # WoRMS 代理
 
+# 软件更新签名校验（Ed25519 分离签名，验证更新包来源真实性）
+cryptography>=42.0
+
 # 协作（FastAPI 内嵌 + mDNS 自动发现）
 fastapi>=0.110
 uvicorn>=0.29
@@ -30,6 +33,7 @@ zeroconf>=0.131
 # 测试
 pytest>=8.0.0
 pytest-qt>=4.4.0
+pytest-timeout>=2.3.1
 
 # 说明：
 #   sqlite3 = Python 内置，无需安装

@@ -282,9 +282,11 @@ class LabelListPanel(QWidget):
     # ── Row construction ─────────────────────────────────────────────────────
 
     def _rebuild_rows(self) -> None:
+        from app.utils.ui import dispose_widget
+
         # Clear
         for frame in self._row_frames.values():
-            frame.setParent(None)
+            dispose_widget(frame)
         self._row_frames.clear()
         self._row_checks.clear()
         self._rna_badges.clear()
@@ -336,11 +338,9 @@ class LabelListPanel(QWidget):
     # ── Grid construction ────────────────────────────────────────────────────
 
     def _rebuild_grid(self) -> None:
-        while self._grid_layout.count():
-            item = self._grid_layout.takeAt(0)
-            w = item.widget()
-            if w is not None:
-                w.setParent(None)
+        from app.utils.ui import clear_layout_widgets
+
+        clear_layout_widgets(self._grid_layout)
         self._tile_frames.clear()
 
         cols = 3

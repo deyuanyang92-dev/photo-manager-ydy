@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from app.services.monitor_service import AttributionCtx
+from app.services.specimen.attribution_types import AttributionCtx
 
 
 # ── File paths ─────────────────────────────────────────────────────────────────

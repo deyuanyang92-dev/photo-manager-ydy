@@ -99,16 +99,19 @@ def _build_fastapi_app(store: TaskStore, node_info_fn: Callable[[], dict],
         return {"ok": True}
 
     @app.get("/api/node/info")
-    async def node_info() -> dict:
+    async def node_info(request: Request) -> dict:
+        _require_lan(request)
         return node_info_fn()
 
     @app.get("/api/collab/tasks")
-    async def list_tasks(groupCode: str = "") -> list:
+    async def list_tasks(request: Request, groupCode: str = "") -> list:
+        _require_lan(request)
         _require_group(groupCode)
         return [t.to_dict() for t in store.list_tasks()]
 
     @app.post("/api/collab/tasks/create")
     async def create_task(request: Request) -> JSONResponse:
+        _require_lan(request)
         body = await request.json()
         uid = body.get("uid")
         if not uid:
@@ -130,6 +133,7 @@ def _build_fastapi_app(store: TaskStore, node_info_fn: Callable[[], dict],
 
     @app.post("/api/collab/tasks/update-status")
     async def update_task_status(request: Request) -> dict:
+        _require_lan(request)
         body = await request.json()
         uid = body.get("uid")
         status_raw = body.get("status")
@@ -171,6 +175,7 @@ def _build_fastapi_app(store: TaskStore, node_info_fn: Callable[[], dict],
     @app.post("/api/collab/tasks/release")
     async def release_task(request: Request) -> dict:
         """Release (delete) a UID claim so it becomes reclaimable by anyone."""
+        _require_lan(request)
         body = await request.json()
         uid = body.get("uid")
         if not uid:
@@ -189,6 +194,7 @@ def _build_fastapi_app(store: TaskStore, node_info_fn: Callable[[], dict],
         The receiving app shows a confirmation dialog; if accepted the devices
         adopt a shared group code and begin syncing.
         """
+        _require_lan(request)
         body = await request.json()
         from_ip = body.get("fromIp", "")
         from_hostname = body.get("fromHostname", "未知设备")
@@ -200,6 +206,7 @@ def _build_fastapi_app(store: TaskStore, node_info_fn: Callable[[], dict],
     @app.post("/api/collab/pairing/accept")
     async def pairing_accept(request: Request) -> dict:
         """Notification that the remote device has accepted our pairing request."""
+        _require_lan(request)
         body = await request.json()
         from_ip = body.get("fromIp", "")
         from_hostname = body.get("fromHostname", "未知设备")
@@ -218,6 +225,7 @@ def _build_fastapi_app(store: TaskStore, node_info_fn: Callable[[], dict],
         their specimen has jpg/tiff/zip files ready.  We acknowledge and let
         the UI subscribe to signals for richer handling.
         """
+        _require_lan(request)
         body = await request.json()
         _require_group_project(body.get("groupCode", ""), body.get("projectId", ""))
         uid = body.get("uid", "")
@@ -259,6 +267,7 @@ def _build_fastapi_app(store: TaskStore, node_info_fn: Callable[[], dict],
     @app.post("/api/collab/specimens/push")
     async def receive_specimen_push(request: Request) -> dict:
         """Accept specimen records pushed from a peer; writes to local DB."""
+        _require_lan(request)
         body = await request.json()
         _require_group_project(body.get("groupCode", ""), body.get("projectId", ""))
         specimens = body.get("specimens", [])
@@ -271,16 +280,18 @@ def _build_fastapi_app(store: TaskStore, node_info_fn: Callable[[], dict],
         return {"ok": True, "written": written}
 
     @app.get("/api/collab/specimens")
-    async def list_specimens(groupCode: str = "", projectId: str = "") -> list:
+    async def list_specimens(request: Request, groupCode: str = "", projectId: str = "") -> list:
         """Return local specimen records for peer sync."""
+        _require_lan(request)
         _require_group_project(groupCode, projectId)
         if specimen_provider_fn is None:
             return []
         return specimen_provider_fn(None)
 
     @app.get("/api/collab/activity")
-    async def get_activity(groupCode: str = "") -> list:
+    async def get_activity(request: Request, groupCode: str = "") -> list:
         """Return recent activity entries from this node."""
+        _require_lan(request)
         _require_group(groupCode)
         if activity_log is None:
             return []

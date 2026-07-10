@@ -51,3 +51,20 @@ def _isolate_user_projects_json(tmp_path, monkeypatch):
     jp.write_text('{"version": 1, "projects": []}', encoding="utf-8")
     monkeypatch.setattr(_ps, "default_user_projects_json_path", lambda: str(jp))
     yield
+
+
+@pytest.fixture(autouse=True)
+def _isolate_collab_peer_trust_qs(tmp_path, monkeypatch):
+    """Each test gets a fresh collab trust/block list (no cross-test pollution)."""
+    from PyQt6.QtCore import QSettings
+
+    from app.services.collab_peer_trust import CollabPeerTrustStore
+
+    path = tmp_path / "collab_peer_trust.ini"
+    qs = QSettings(str(path), QSettings.Format.IniFormat)
+
+    def _init(self, qs_arg=None) -> None:
+        self._qs = qs if qs_arg is None else qs_arg
+
+    monkeypatch.setattr(CollabPeerTrustStore, "__init__", _init)
+    yield

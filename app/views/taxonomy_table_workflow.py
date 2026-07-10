@@ -177,11 +177,9 @@ class TaxonomyTableWorkflowMixin:
         self._table.setItemDelegateForColumn(action_col, self._action_delegate)
         self._table.resizeColumnToContents(action_col)
 
-    def _table_key_press(self, event: "QKeyEvent") -> None:
+    def _table_key_press(self, event: Any) -> None:
         """Handle Ctrl+C on the table: copy selected cells in Excel/CSV format."""
-        from PyQt6.QtCore import QItemSelection
-        from PyQt6.QtGui import QKeyEvent, QKeySequence
-        from PyQt6.QtWidgets import QAbstractItemView
+        from PyQt6.QtGui import QKeySequence
 
         if event.matches(QKeySequence.StandardKey.Copy):
             indexes = self._table.selectionModel().selectedIndexes()

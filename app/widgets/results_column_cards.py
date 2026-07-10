@@ -296,7 +296,7 @@ class _TiffCard(_ResultCardBase):
             name_lbl.setWordWrap(True)
             name_lbl.setMaximumHeight(42)
         full_name = self._info.get("name") or Path(self._info.get("path", "")).name
-        name_lbl.setToolTip(self._info.get("path", full_name))
+        name_lbl.setToolTip("")
         body_lay.addWidget(name_lbl)
 
         registry_lbl = QLabel(f"TIF · {self._registry_line('tiff', self._paired_zip)}")
@@ -305,7 +305,7 @@ class _TiffCard(_ResultCardBase):
         registry_lbl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         if self._result_view_mode == "large_thumbnail":
             registry_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        registry_lbl.setToolTip(self._registry_line("tiff", self._paired_zip))
+        registry_lbl.setToolTip("")
         body_lay.addWidget(registry_lbl)
         return body
 
@@ -395,7 +395,7 @@ class _ArchiveCard(_ResultCardBase):
             name_lbl.setWordWrap(True)
             name_lbl.setMaximumHeight(42)
         full_name = self._info.get("name") or Path(self._info.get("path", "")).name
-        name_lbl.setToolTip(self._info.get("path", full_name))
+        name_lbl.setToolTip("")
         body_lay.addWidget(name_lbl)
 
         size_bytes = self._info.get("size", 0)
@@ -408,7 +408,7 @@ class _ArchiveCard(_ResultCardBase):
         registry_lbl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         if self._result_view_mode == "large_thumbnail":
             registry_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        registry_lbl.setToolTip(self._registry_line("zip", self._paired_tiff))
+        registry_lbl.setToolTip("")
         body_lay.addWidget(registry_lbl)
         return body
 
@@ -589,13 +589,13 @@ class _SpecimenResultHeader(QFrame):
         self._uid = uid
         self.setObjectName("ResultGroupHeader")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setToolTip(f"打开编号：{uid}")
+        self.setToolTip("")
         lay = QHBoxLayout(self)
         lay.setContentsMargins(2, 6, 2, 2)
         lay.setSpacing(8)
         uid_lbl = QLabel(uid)
         uid_lbl.setObjectName("Mono")
-        uid_lbl.setToolTip(uid)
+        uid_lbl.setToolTip("")
         lay.addWidget(uid_lbl, stretch=1)
         count_lbl = QLabel(f"{row_count} 项")
         count_lbl.setObjectName("MutedSmall")

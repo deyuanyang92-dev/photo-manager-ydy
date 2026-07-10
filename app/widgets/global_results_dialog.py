@@ -110,6 +110,9 @@ class GlobalResultsDialog(QDialog):
         self._table.verticalHeader().setVisible(False)
         self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._table.customContextMenuRequested.connect(self._show_context_menu)
+        from app.utils.tooltip_policy import suppress_popup_tooltip
+
+        suppress_popup_tooltip(self._table)
         root.addWidget(self._table, stretch=1)
 
         hint = QLabel("右键可打开文件夹、复制路径、查看入库/关联信息。TIF 和 ZIP 分列显示，便于逐组检查。")
@@ -186,7 +189,7 @@ class GlobalResultsDialog(QDialog):
             for c, value in enumerate(values):
                 item = QStandardItem(value)
                 item.setEditable(False)
-                item.setToolTip(self._tooltip(row, c))
+                item.setToolTip("")
                 item.setForeground(self._brush_for(row, c))
                 model.setItem(r, c, item)
 

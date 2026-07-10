@@ -379,11 +379,9 @@ class LabelStep2Templates(QWidget):
 
     def _rebuild(self) -> None:
         # Clear columns
-        while self._cols_row.count():
-            it = self._cols_row.takeAt(0)
-            w = it.widget()
-            if w is not None:
-                w.setParent(None)
+        from app.utils.ui import clear_layout_widgets
+
+        clear_layout_widgets(self._cols_row)
         self._cards = {}
         self._header_actions = {}
 
@@ -410,11 +408,9 @@ class LabelStep2Templates(QWidget):
         return visible
 
     def _sync_summary_band(self, buckets: list[str]) -> None:
-        while self._summary_lay.count():
-            item = self._summary_lay.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.setParent(None)
+        from app.utils.ui import clear_layout_widgets
+
+        clear_layout_widgets(self._summary_lay)
         self._summary_labels = {}
         for bucket in buckets:
             lib = self._libs[bucket]

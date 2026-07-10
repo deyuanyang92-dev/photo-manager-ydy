@@ -58,7 +58,7 @@ class SettingsCollabWorkflowMixin:
     def _on_collab_enabled_toggled(self, on: bool) -> None:
         """Persist the flag and start/stop the live service immediately."""
         self._save_collab()
-        svc = getattr(self.ctx, "collab_service", None)
+        svc = self.ctx.ensure_collab_service() if on else getattr(self.ctx, "collab_service", None)
         if svc is None:
             return
         try:
@@ -195,7 +195,7 @@ class SettingsCollabWorkflowMixin:
         self._save_collab()
 
     def _on_collab_scan(self) -> None:
-        svc = getattr(self.ctx, "collab_service", None)
+        svc = self.ctx.ensure_collab_service()
         if svc is None:
             from app.utils.ui import info as _info
             _info(self, "搜索局域网", "请先启用协作。")
@@ -213,7 +213,7 @@ class SettingsCollabWorkflowMixin:
         from app.utils.ui import info as _info
         from app.widgets.collab_pairing import encode_pairing, generate_group_code
         from PyQt6.QtWidgets import QApplication
-        svc = getattr(self.ctx, "collab_service", None)
+        svc = self.ctx.ensure_collab_service()
         if svc is None:
             _info(self, "配对码", "请先启用协作。")
             return
@@ -244,7 +244,7 @@ class SettingsCollabWorkflowMixin:
     def _on_collab_join_pairing(self) -> None:
         from app.utils.ui import info as _info, warn as _warn
         from app.widgets.collab_pairing import decode_pairing
-        svc = getattr(self.ctx, "collab_service", None)
+        svc = self.ctx.ensure_collab_service()
         if svc is None:
             _info(self, "配对码", "协作服务不可用。")
             return

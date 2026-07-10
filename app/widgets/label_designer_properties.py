@@ -36,14 +36,28 @@ class _PropertyPanel(QWidget):
         self._root.setContentsMargins(12, 12, 12, 12)
         self._root.setSpacing(8)
         self._tmpl: dict = {}
+        self._label_w_spin: QDoubleSpinBox | None = None
+        self._label_h_spin: QDoubleSpinBox | None = None
         self.show_for("none", -1, -1, {})
 
     def _clear_property_controls(self) -> None:
-        while self._root.count():
-            item = self._root.takeAt(0)
-            w = item.widget()
-            if w is not None:
-                w.setParent(None)
+        from app.utils.ui import clear_layout_widgets
+
+        self._label_w_spin = None
+        self._label_h_spin = None
+        clear_layout_widgets(self._root, flush_events=True)
+
+    def sync_label_dims(self, dims: dict) -> None:
+        """Update W/H spinboxes without rebuilding the panel (live dims edit)."""
+        for spin, key in (
+            (getattr(self, "_label_w_spin", None), "w"),
+            (getattr(self, "_label_h_spin", None), "h"),
+        ):
+            if spin is None:
+                continue
+            spin.blockSignals(True)
+            spin.setValue(float((dims or {}).get(key, 60 if key == "w" else 40)))
+            spin.blockSignals(False)
 
     def _title(self, text: str) -> None:
         lbl = QLabel(text)
@@ -448,6 +462,7 @@ class _PropertyPanel(QWidget):
         ww = QWidget(); ww.setLayout(h); self._root.addWidget(ww)
 
         size = QSlider(Qt.Orientation.Horizontal)
+        size.setObjectName("QrSizeSlider")
         size.setRange(20, 70)
         size.setValue(int(round(float(qr.get("sizePct") or 0.4) * 100)))
         size.valueChanged.connect(lambda v: self.edit.emit({"op": "qr_size", "value": v / 100.0}))
@@ -528,6 +543,8 @@ class _PropertyPanel(QWidget):
             {"op": "dims", "w": v, "h": h_spin.value()}))
         h_spin.valueChanged.connect(lambda v: self.edit.emit(
             {"op": "dims", "w": w_spin.value(), "h": v}))
+        self._label_w_spin = w_spin
+        self._label_h_spin = h_spin
         self._add_property_row("标签宽", w_spin)
         self._add_property_row("标签高", h_spin)
 
@@ -572,4 +589,3 @@ class _PropertyPanel(QWidget):
             self._update_color_btn(btn, c.name())
             self.edit.emit({"op": "field_color", "row": row_idx, "field": field_idx,
                             "value": c.name()})
-

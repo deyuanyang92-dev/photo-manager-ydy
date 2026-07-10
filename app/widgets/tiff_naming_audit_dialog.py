@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import (
 
 from app.services.tiff_naming_service import TiffNamingAudit, export_tiff_naming_audit_csv
 from app.utils import ui
+from app.utils.tooltip_policy import suppress_popup_tooltip
 
 
 class TiffNamingAuditDialog(QDialog):
@@ -59,6 +60,7 @@ class TiffNamingAuditDialog(QDialog):
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        suppress_popup_tooltip(self._table)
 
         for row, item in enumerate(self._audit.items):
             try:
@@ -76,7 +78,7 @@ class TiffNamingAuditDialog(QDialog):
             ]
             for column, value in enumerate(values):
                 cell = QTableWidgetItem(value)
-                cell.setToolTip(item.path if column == 1 else item.reason)
+                cell.setToolTip("")
                 if column == 2:
                     cell.setForeground(QColor("#16856b" if item.valid else "#c43d3d"))
                 self._table.setItem(row, column, cell)

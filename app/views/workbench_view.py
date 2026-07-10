@@ -95,6 +95,12 @@ from app.widgets.specimen_sidebar import SpecimenSidebar
 
 _WORKBENCH_OUTER_SPLITTER_STATE_KEY = "workbench/layout_outer_splitter"
 _WORKBENCH_CENTRE_SPLITTER_STATE_KEY = "workbench/layout_centre_splitter"
+# Column floors/ceilings keep drag-resize usable on typical desktop widths.
+_SIDEBAR_WIDTH_FLOOR = 160
+_SIDEBAR_WIDTH_CEIL = 300
+_CENTRE_WIDTH_FLOOR = 240
+_RIGHT_RAIL_WIDTH_FLOOR = 200
+_RIGHT_RAIL_WIDTH_CEIL = 360
 
 # Extracted workbench dialog/panel classes — re-exported under their original
 # names so `from app.views.workbench_view import _X` keeps working (tests do).
@@ -160,14 +166,23 @@ class WorkbenchView(WorkbenchSpecimenIdentityMixin, WorkbenchMediaWorkflowMixin,
         minimum = widget.minimumSizeHint().width()
         return max(1, hint, minimum)
 
+    @staticmethod
+    def _clamp_column_width(natural: int, floor: int, ceil: int) -> int:
+        return max(floor, min(natural, ceil))
+
     def _sidebar_min_width(self) -> int:
-        return self._widget_natural_width(self._sidebar)
+        return self._clamp_column_width(
+            self._widget_natural_width(self._sidebar),
+            _SIDEBAR_WIDTH_FLOOR,
+            _SIDEBAR_WIDTH_CEIL,
+        )
 
     def _centre_min_width(self) -> int:
-        return max(
+        natural = max(
             self._widget_natural_width(self._monitor),
             self._widget_natural_width(self._results),
         )
+        return max(_CENTRE_WIDTH_FLOOR, natural)
 
     def _right_rail_min_width(self) -> int:
         content = getattr(self, "_right_rail_widget", None)
@@ -175,7 +190,7 @@ class WorkbenchView(WorkbenchSpecimenIdentityMixin, WorkbenchMediaWorkflowMixin,
         scroll = getattr(self, "_right_scroll", None)
         if scroll is not None:
             base += scroll.verticalScrollBar().sizeHint().width()
-        return max(1, base)
+        return max(_RIGHT_RAIL_WIDTH_FLOOR, base)
 
     def _right_rail_collapsed_width(self) -> int:
         button = getattr(self, "_rail_collapse_btn", None)
@@ -520,16 +535,9 @@ class WorkbenchView(WorkbenchSpecimenIdentityMixin, WorkbenchMediaWorkflowMixin,
         self._restore_workbench_outer_splitter()
         outer.splitterMoved.connect(self._save_workbench_outer_splitter)
 
-        # The splitter can still exceed narrow remote desktops; keep horizontal
-        # overflow scrollable instead of clipping the right rail.
-        outer_scroll = QScrollArea()
-        outer_scroll.setObjectName("WorkbenchScroll")
-        outer_scroll.setWidget(outer)
-        outer_scroll.setWidgetResizable(True)
-        outer_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        outer_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        outer_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        body_lay.addWidget(outer_scroll, stretch=1)
+        # Fill the viewport so left | centre | right splitters drag-resize in
+        # place.  A horizontal scroll wrapper made users pan the whole row instead.
+        body_lay.addWidget(outer, stretch=1)
 
         # ── Project settings drawer (overlay, hidden by default) ────────────
         from app.widgets.project_settings_drawer import ProjectSettingsDrawer
@@ -663,11 +671,11 @@ class WorkbenchView(WorkbenchSpecimenIdentityMixin, WorkbenchMediaWorkflowMixin,
             except Exception:
                 pass
 
-        # Helicon status tag
+        # Helicon status tag + bottom status bar
         installed = False
         try:
-            from app.services.helicon_service import detect_helicon
-            installed = bool(detect_helicon())
+            from app.services.helicon_service import resolve_helicon_exe
+            installed = bool(resolve_helicon_exe(self.ctx.settings))
         except Exception:
             installed = False
         if installed:
@@ -678,6 +686,11 @@ class WorkbenchView(WorkbenchSpecimenIdentityMixin, WorkbenchMediaWorkflowMixin,
             self._helicon_tag.setObjectName("TagWarn")
         self._helicon_tag.style().unpolish(self._helicon_tag)
         self._helicon_tag.style().polish(self._helicon_tag)
+        if hasattr(win, "refresh_helicon_status"):
+            try:
+                win.refresh_helicon_status()
+            except Exception:
+                pass
 
         # Dir strip
         if project_dir:
@@ -755,6 +768,16 @@ class WorkbenchView(WorkbenchSpecimenIdentityMixin, WorkbenchMediaWorkflowMixin,
         self._fs_watcher.removePaths(self._fs_watcher.directories())
         self._monitor_scan_pending = False
         self._monitor_scan_request_id += 1
+        try:
+            from PyQt6.QtGui import QPixmapCache
+            from app.utils.image_thumbnail import clear_thumbnail_cache
+            from app.widgets.monitor_panel import clear_file_thumb_cache
+
+            clear_thumbnail_cache()
+            clear_file_thumb_cache()
+            QPixmapCache.clear()
+        except Exception:  # noqa: BLE001
+            pass
 
     def stop_background_work(self) -> None:
         """Cancel an in-flight Helicon compose so its subprocess + QThread

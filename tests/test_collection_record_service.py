@@ -420,3 +420,68 @@ class TestSetStationCoords:
         rec = crs.lookup_record(db, "ZJ", "SMW", "B2", "20260518")
         assert rec["lon"] is None
         assert rec["lat"] is None
+
+
+# ── sync_coords_from_capture（拍照界面 → 采集记录）────────────────────────────
+
+class TestSyncCoordsFromCapture:
+    def test_creates_record_when_missing(self, db):
+        action = crs.sync_coords_from_capture(
+            db,
+            province="ZJ",
+            site="SMW",
+            station="B2",
+            collection_date="20260518",
+            lon="121.5",
+            lat="29.2",
+            extra={"collector": "张三", "geo_area": "三门湾"},
+        )
+        assert action == "created"
+        rec = crs.lookup_record(db, "ZJ", "SMW", "B2", "20260518")
+        assert rec is not None
+        assert rec["lon"] == pytest.approx(121.5)
+        assert rec["lat"] == pytest.approx(29.2)
+        assert rec["collector"] == "张三"
+        assert rec["geo_area"] == "三门湾"
+
+    def test_updates_coords_without_wiping_habitat(self, db):
+        crs.upsert_record(db, _sample(habitat="泥滩", tide="低潮", lon="1", lat="2"))
+        action = crs.sync_coords_from_capture(
+            db,
+            province="ZJ",
+            site="SMW",
+            station="B2",
+            collection_date="20260518",
+            lon="122.1",
+            lat="30.1",
+        )
+        assert action == "updated"
+        rec = crs.lookup_record(db, "ZJ", "SMW", "B2", "20260518")
+        assert rec["lon"] == pytest.approx(122.1)
+        assert rec["lat"] == pytest.approx(30.1)
+        assert rec["habitat"] == "泥滩"
+        assert rec["tide"] == "低潮"
+
+    def test_skips_when_keys_incomplete(self, db):
+        assert crs.sync_coords_from_capture(
+            db,
+            province="ZJ",
+            site="SMW",
+            station="",
+            collection_date="20260518",
+            lon="1",
+            lat="2",
+        ) == "skipped"
+        assert crs.list_records(db) == []
+
+    def test_skips_create_when_coords_empty(self, db):
+        assert crs.sync_coords_from_capture(
+            db,
+            province="ZJ",
+            site="SMW",
+            station="B2",
+            collection_date="20260518",
+            lon="",
+            lat="",
+        ) == "skipped"
+        assert crs.list_records(db) == []

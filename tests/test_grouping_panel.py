@@ -2257,7 +2257,7 @@ def test_related_files_picker_shows_thumbnails_and_compact_distance(qtbot, tmp_p
     assert dlg._table.cellWidget(1, 1).property("hasThumbnail") is True
     assert dlg._table.item(0, 5).text() == "1:05"
     assert tif.name not in dlg._table.item(0, 5).text()
-    assert tif.name in dlg._table.item(0, 5).toolTip()
+    assert dlg._table.item(0, 5).toolTip() == ""
     assert dlg._table.item(1, 5).text() == "TIF"
 
 

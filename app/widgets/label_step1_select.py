@@ -251,11 +251,9 @@ class LabelStep1Select(QWidget):
     # ── Grid construction ─────────────────────────────────────────────────────
 
     def _rebuild_grid(self) -> None:
-        while self._grid.count():
-            it = self._grid.takeAt(0)
-            w = it.widget()
-            if w is not None:
-                w.setParent(None)
+        from app.utils.ui import clear_layout_widgets
+
+        clear_layout_widgets(self._grid)
         self._items.clear()
 
         visible = self._visible_indices()

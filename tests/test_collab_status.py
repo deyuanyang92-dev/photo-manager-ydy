@@ -47,6 +47,19 @@ def test_collab_status_running_group_without_peers_is_no_peers():
     assert status.state == "no_peers"
     assert status.status_badge == "⚪ 未发现其他设备"
     assert "TEAM-1" in status.scope_label
+    assert status.connection_role == "waiting"
+    assert "还未连接成功" in status.connection_title
+    assert "TEAM-1" in status.connection_detail
+
+
+def test_collab_status_same_group_shows_connection_success():
+    svc = _Service(running=True, group_code="TEAM-1", project_id="P1")
+    peer = SimpleNamespace(group_code="TEAM-1", project_id="P2", hostname="lab-pc")
+
+    status = build_collab_status(svc, [peer])
+
+    assert status.connection_role == "success"
+    assert "连接成功" in status.connection_title
 
 
 def test_collab_status_same_group_different_project_is_tasks_only():
@@ -57,7 +70,7 @@ def test_collab_status_same_group_different_project_is_tasks_only():
 
     assert status.state == "tasks_only"
     assert status.status_badge == "🟢 1 台在线"
-    assert status.next_step_label == "下一步：选择共享项目"
+    assert status.next_step_label == "下一步：使用项目码"
 
 
 def test_collab_status_same_group_same_project_is_media_ready():
@@ -69,3 +82,15 @@ def test_collab_status_same_group_same_project_is_media_ready():
     assert status.state == "media_ready"
     assert status.status_badge == "🟢 1 台在线"
     assert status.next_step_label == "照片同步已就绪"
+
+
+def test_peer_display_name_prefers_operator():
+    from app.services.collab_status import peer_display_name
+
+    peer = SimpleNamespace(
+        operator_name="小王",
+        session_name="小王的会话",
+        hostname="DESKTOP-1",
+        ip="10.0.0.2",
+    )
+    assert peer_display_name(peer) == "小王"

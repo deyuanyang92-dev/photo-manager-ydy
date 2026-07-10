@@ -95,7 +95,7 @@ class _MediaLocationPickerDialog(QDialog):
             for label, path in self._shortcuts[:8]:
                 btn = QPushButton(label)
                 btn.setObjectName("Ghost")
-                btn.setToolTip(path)
+                btn.setToolTip("")
                 btn.clicked.connect(lambda _checked=False, p=path: self._go_to_dir(p))
                 shortcut_row.addWidget(btn)
             shortcut_row.addStretch()
@@ -128,6 +128,9 @@ class _MediaLocationPickerDialog(QDialog):
         self._table.setColumnWidth(3, 180)
         self._table.setColumnWidth(4, 90)
         self._table.itemDoubleClicked.connect(self._on_item_activated)
+        from app.utils.tooltip_policy import suppress_popup_tooltip
+
+        suppress_popup_tooltip(self._table)
         root.addWidget(self._table, stretch=1)
 
         self._buttons = QDialogButtonBox(
@@ -203,7 +206,7 @@ class _MediaLocationPickerDialog(QDialog):
         label.setFixedSize(68, 68)
         label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         label.setObjectName("RelatedThumb")
-        label.setToolTip(str(path))
+        label.setToolTip("")
         if is_dir:
             label.setText("DIR")
             label.setProperty("hasThumbnail", False)
@@ -281,7 +284,7 @@ class _MediaLocationPickerDialog(QDialog):
         for row, (is_dir, _related, mtime, path) in enumerate(entries):
             self._table.setCellWidget(row, 0, self._thumbnail_label(path, is_dir=is_dir))
             name_item = QTableWidgetItem(path.name)
-            name_item.setToolTip(str(path))
+            name_item.setToolTip("")
             name_item.setData(
                 Qt.ItemDataRole.UserRole,
                 {"path": str(path), "is_dir": is_dir},
@@ -490,9 +493,9 @@ class _ResultPairPickerDialog(QDialog):
         if owner:
             item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
             item.setForeground(Qt.GlobalColor.gray)
-            item.setToolTip(f"已关联到 {owner}，不能在这里重复登记")
+            item.setToolTip("")
         else:
-            item.setToolTip("双击或选择后确定，关联到当前编号")
+            item.setToolTip("")
         self._list.addItem(item)
 
     def _current_candidate(self) -> dict | None:
@@ -601,6 +604,9 @@ class _RelatedFilesPickerDialog(QDialog):
         self._table.setColumnWidth(3, 80)
         self._table.setColumnWidth(4, 170)
         self._table.setColumnWidth(5, 90)
+        from app.utils.tooltip_policy import suppress_popup_tooltip
+
+        suppress_popup_tooltip(self._table)
         root.addWidget(self._table, stretch=1)
 
         self._syncing_checks = False
@@ -725,7 +731,7 @@ class _RelatedFilesPickerDialog(QDialog):
         label.setFixedSize(68, 68)
         label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         label.setObjectName("RelatedThumb")
-        label.setToolTip(path)
+        label.setToolTip("")
         label.setText(kind or "IMG")
         label.setProperty("hasThumbnail", False)
         if path:
@@ -806,7 +812,7 @@ class _RelatedFilesPickerDialog(QDialog):
                 self._table.setRowHeight(row, 74)
 
                 name = QTableWidgetItem(str(item.get("name") or ""))
-                name.setToolTip(path)
+                name.setToolTip("")
                 self._table.setItem(row, 2, name)
 
                 kind = QTableWidgetItem(str(item.get("kind") or ""))
@@ -818,7 +824,7 @@ class _RelatedFilesPickerDialog(QDialog):
                 distance, tooltip = self._distance_text(item)
                 distance_item = QTableWidgetItem(distance)
                 if tooltip:
-                    distance_item.setToolTip(tooltip)
+                    distance_item.setToolTip("")
                 self._table.setItem(row, 5, distance_item)
                 self._apply_anchor_row_style(row, item)
         finally:
@@ -896,7 +902,7 @@ class _TiffImportDialog(QDialog):
         for path in candidates:
             item = QListWidgetItem(Path(path).name)
             item.setData(Qt.ItemDataRole.UserRole, path)
-            item.setToolTip(path)
+            item.setToolTip("")
             self._list.addItem(item)
         if not candidates:
             placeholder = QListWidgetItem("（项目目录暂无 TIF 文件）")

@@ -29,7 +29,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QApplication, QMessageBox, QWidget, QWIDGETSIZE_MAX
+from PyQt6.QtWidgets import QApplication, QMessageBox, QScrollArea, QWidget, QWIDGETSIZE_MAX
 
 # One shared QApplication instance for all tests in this module
 _APP = None
@@ -3320,7 +3320,7 @@ class TestTiffImportDialog:
         from app.widgets.grouping_panel import _TiffImportDialog
         dlg = _TiffImportDialog(group_index=1, tiff_candidates=[tif])
         assert dlg._list.count() == 1
-        assert dlg._list.item(0).toolTip() == tif
+        assert dlg._list.item(0).toolTip() == ""
 
     def test_selected_path_empty_by_default(self):
         from app.widgets.grouping_panel import _TiffImportDialog
@@ -3825,6 +3825,17 @@ class TestRightRailWebFaithful:
             == Qt.ScrollBarPolicy.ScrollBarAlwaysOn
         )
 
+    def test_right_rail_drag_floor_keeps_form_clear_of_scrollbar(self):
+        from app.views.workbench_view import WorkbenchView
+        w = WorkbenchView(_make_ctx())
+
+        required = (
+            w._widget_natural_width(w._right_rail_widget)
+            + w._right_scroll.verticalScrollBar().sizeHint().width()
+        )
+
+        assert w._right_scroll.minimumWidth() >= required
+
     def test_workbench_splitters_keep_clear_drag_targets(self):
         import app.views.workbench_view as workbench_view
         from app.views.workbench_view import WorkbenchView
@@ -3848,6 +3859,7 @@ class TestRightRailWebFaithful:
         w._save_workbench_centre_splitter()
         assert workbench_view._WORKBENCH_OUTER_SPLITTER_STATE_KEY in ctx.settings._qs._d
         assert workbench_view._WORKBENCH_CENTRE_SPLITTER_STATE_KEY in ctx.settings._qs._d
+        assert w.findChild(QScrollArea, "WorkbenchScroll") is None
 
         w._toggle_right_rail()
         assert w._right_scroll.minimumWidth() == w._right_rail_collapsed_width()
@@ -4490,8 +4502,8 @@ class TestSaveButtonPersistsMetadata:
 
         assert db.execute("SELECT count(*) FROM specimens").fetchone()[0] == 0
         assert warnings
-        assert "样地" in warnings[0][2]
-        assert "样品/物种标签" in warnings[0][2]
+        assert "地区/样地" in warnings[0][2]
+        assert "物种编号" in warnings[0][2]
         assert "保存方式" in warnings[0][2]
 
 

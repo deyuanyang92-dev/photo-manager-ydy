@@ -67,7 +67,8 @@ QPushButton#NavSegment:checked {
     font-weight: 600;
 }
 
-QToolButton#NavMenuButton {
+QToolButton#NavMenuButton,
+QToolButton#ThemeSwitcherButton {
     background-color: #ffffff;
     color: #334155;
     border: 1px solid rgba(15,23,42,0.13);
@@ -76,7 +77,8 @@ QToolButton#NavMenuButton {
     font-size: 12px;
     font-weight: 600;
 }
-QToolButton#NavMenuButton:hover {
+QToolButton#NavMenuButton:hover,
+QToolButton#ThemeSwitcherButton:hover {
     color: #0d9488;
     border-color: #0f766e;
     background-color: rgba(15,118,110,0.06);
