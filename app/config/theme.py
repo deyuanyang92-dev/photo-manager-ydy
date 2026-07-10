@@ -1935,6 +1935,141 @@ QLabel#ConflictBanner {{
     border-radius: {t["radius_sm"]};
     font-weight: 700;
 }}
+
+/* ── Collab 协作中心 v0.56 补样式 ──────────────────────────────────
+   方式一/二/三选择卡、表单分区、连接结果横幅等 23 个 objectName 自视图
+   诞生起就没有对应 QSS(裸奔成纯文字, 页面显"乱"的根因), 这里一次补齐。 */
+QFrame#CollabSetupHub {{
+    background-color: {t["panel"]};
+    border: 1px solid {t["border"]};
+    border-radius: {t["radius"]};
+}}
+/* 方式选择卡: 未选=浅底; hover=提边; 选中=白底+主色边+顶部渐变 */
+QFrame#CollabMethodTab {{
+    background-color: {t["panel_2"]};
+    border: 1px solid {t["border"]};
+    border-radius: {t["radius"]};
+}}
+QFrame#CollabMethodTab[hovered="true"] {{
+    border-color: {t["border_strong"]};
+    background-color: {t["panel"]};
+}}
+QFrame#CollabMethodTab[selected="true"] {{
+    background-color: {t["panel"]};
+    border: 1px solid {t["accent"]};
+}}
+QLabel#CollabMethodTabBadge {{
+    color: {t["accent"]};
+    background-color: {t["accent_soft"]};
+    border: 1px solid {t["accent_glow"]};
+    border-radius: {t["radius_pill"]};
+    padding: 2px 9px;
+    font-size: {t["font_xs"]};
+    font-weight: 700;
+}}
+QLabel#CollabMethodTabTitle {{
+    color: {t["text"]};
+    font-size: {t["font_md"]};
+    font-weight: 700;
+}}
+QLabel#CollabMethodTabSummary {{
+    color: {t["muted"]};
+    font-size: {t["font_xs"]};
+}}
+QLabel#CollabMethodActiveTitle {{
+    color: {t["muted"]};
+    font-size: {t["font_sm"]};
+    font-weight: 600;
+    letter-spacing: 0;
+}}
+QFrame#CollabMethodDetail, QStackedWidget#CollabMethodStack,
+QWidget#CollabMethodBody, QWidget#CollabMethodForm,
+QWidget#CollabDetailShell {{
+    background: transparent;
+    border: none;
+}}
+QLabel#CollabMethodExample {{
+    color: {t["muted"]};
+    background-color: {t["panel_inset"]};
+    border-radius: {t["radius_sm"]};
+    padding: 6px 10px;
+    font-size: {t["font_xs"]};
+}}
+QLabel#CollabMethodStatus {{
+    color: {t["text_soft"]};
+    font-size: {t["font_sm"]};
+    padding: 6px 10px;
+    background-color: {t["panel_inset"]};
+    border-radius: {t["radius_sm"]};
+}}
+/* 表单分区: 浅色圆角块, 标签小字加重 */
+QFrame#CollabFormSection {{
+    background-color: {t["panel_2"]};
+    border: 1px solid {t["border"]};
+    border-radius: {t["radius_sm"]};
+}}
+QLabel#CollabFormLabel, QLabel#CollabCopyRowLabel {{
+    color: {t["muted"]};
+    font-size: {t["font_xs"]};
+    font-weight: 600;
+}}
+QLabel#CollabFormLabelInline {{
+    color: {t["muted"]};
+    font-size: {t["font_xs"]};
+}}
+/* 主 CTA「保存并启动协作」= Primary 同款 */
+QPushButton#CollabPrimaryAction {{
+    background: {accent_grad};
+    color: {t["bg"]};
+    border: 1px solid {t["accent_bottom"]};
+    border-top: 1px solid {t["accent_top"]};
+    border-radius: {t["radius_sm"]};
+    padding: 6px 18px;
+    font-weight: 600;
+}}
+QPushButton#CollabPrimaryAction:hover {{ background-color: {t["accent_hover"]}; }}
+QPushButton#CollabPrimaryAction:disabled {{
+    background-color: {t["panel_inset"]};
+    color: {t["muted_dim"]};
+    border-color: {t["border"]};
+}}
+QLabel#CollabSecuritySummary {{
+    color: {t["muted"]};
+    font-size: {t["font_xs"]};
+    padding: 4px 8px;
+    background-color: {t["panel_inset"]};
+    border-radius: {t["radius_sm"]};
+}}
+/* 连接结果横幅: idle 灰 / waiting 主色 / success 绿 / warn 橙 */
+QFrame#CollabConnectionResult {{
+    background-color: {t["panel_2"]};
+    border: 1px solid {t["border"]};
+    border-radius: {t["radius_sm"]};
+}}
+QFrame#CollabConnectionResult[role="waiting"] {{
+    background-color: {t["accent_soft"]};
+    border-color: {t["accent_glow"]};
+}}
+QFrame#CollabConnectionResult[role="success"] {{
+    background-color: rgba(21,128,61,0.10);
+    border-color: rgba(21,128,61,0.35);
+}}
+QFrame#CollabConnectionResult[role="warn"] {{
+    background-color: rgba(180,83,9,0.10);
+    border-color: rgba(180,83,9,0.35);
+}}
+QLabel#CollabConnectionIcon {{ font-size: 18px; color: {t["muted"]}; }}
+QFrame#CollabConnectionResult[role="success"] QLabel#CollabConnectionIcon {{ color: #15803d; }}
+QFrame#CollabConnectionResult[role="warn"] QLabel#CollabConnectionIcon {{ color: #b45309; }}
+QLabel#CollabConnectionTitle {{
+    color: {t["text"]};
+    font-size: {t["font_sm"]};
+    font-weight: 600;
+}}
+QLabel#CollabConnectionDetail {{
+    color: {t["muted"]};
+    font-size: {t["font_sm"]};
+}}
 QFrame#ManualConnectFrame,
 QFrame#DebugDrawer {{
     background-color: {t["panel"]};
