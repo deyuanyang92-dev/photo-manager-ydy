@@ -1823,10 +1823,24 @@ QLabel#CollabMetricDanger {{
     color: {t["danger"]};
     border: 1px solid rgba(230,110,99,0.45);
 }}
+/* 醒目引导横幅: 呼吸脉冲只切边框色(宽度恒 1px, 无布局抖动), 完成即隐藏。 */
 QFrame#CollabGuide {{
     background-color: {t["accent_soft"]};
     border: 1px solid {t["accent_glow"]};
     border-radius: {t["radius"]};
+}}
+/* 呼吸两态: 底色 11%→24% teal, 边框 soft→实色 —— 明显但不刺眼 */
+QFrame#CollabGuide[pulse="off"] {{
+    background-color: {t["accent_soft"]};
+    border: 1px solid {t["accent_glow"]};
+}}
+QFrame#CollabGuide[pulse="on"] {{
+    background-color: {t["accent_glow"]};
+    border: 1px solid {t["accent"]};
+}}
+QLabel#CollabGuideIcon {{
+    font-size: 18px;
+    padding-top: 1px;
 }}
 QLabel#CollabGuideTitle {{
     color: {t["text"]};
@@ -1836,6 +1850,12 @@ QLabel#CollabGuideTitle {{
 QLabel#CollabGuideDetail {{
     color: {t["text_soft"]};
     font-size: {t["font_sm"]};
+}}
+/* 行内操作反馈: 无背景带, 平时隐藏, 有内容才现身 */
+QLabel#CollabInlineFeedback {{
+    color: {t["accent"]};
+    font-size: {t["font_xs"]};
+    font-weight: 600;
 }}
 QFrame#CollabStepPanel {{
     background-color: {t["panel"]};
@@ -1988,11 +2008,11 @@ QWidget#CollabDetailShell {{
     background: transparent;
     border: none;
 }}
+/* 示例说明: 压平成安静文字(去掉灰底带), 不与醒目引导争视觉焦点 */
 QLabel#CollabMethodExample {{
-    color: {t["muted"]};
-    background-color: {t["panel_inset"]};
-    border-radius: {t["radius_sm"]};
-    padding: 6px 10px;
+    color: {t["muted_dim"]};
+    background: transparent;
+    padding: 2px 2px;
     font-size: {t["font_xs"]};
 }}
 QLabel#CollabMethodStatus {{

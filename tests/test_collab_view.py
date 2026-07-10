@@ -328,3 +328,50 @@ class TestTeamCodeUpdate:
         view._save_team_setup_inline()
 
         assert not svc.stop.called, "码没变不应重启服务"
+
+
+class TestGuidePulse:
+    """v0.56 醒目引导: 未完成时呼吸脉冲, 切走页面必停(项目 QTimer 泄漏红线)。"""
+
+    def test_pulse_runs_while_incomplete(self, qtbot, mock_ctx):
+        from app.views.collab_view import CollabView
+
+        view = CollabView(mock_ctx)  # 无服务 = 未完成
+        qtbot.addWidget(view)
+        view.on_activate()
+        assert not view._guide_frame.isHidden()
+        assert view._guide_pulse_timer.isActive(), "未完成时引导应脉冲"
+
+    def test_pulse_stops_on_deactivate(self, qtbot, mock_ctx):
+        from app.views.collab_view import CollabView
+
+        view = CollabView(mock_ctx)
+        qtbot.addWidget(view)
+        view.on_activate()
+        assert view._guide_pulse_timer.isActive()
+        view.on_deactivate()
+        assert not view._guide_pulse_timer.isActive(), "切走页面必须停脉冲定时器"
+        assert not view._retry_timer.isActive(), "切走页面也应停重试定时器"
+
+    def test_toggle_flips_pulse_property(self, qtbot, mock_ctx):
+        from app.views.collab_view import CollabView
+
+        view = CollabView(mock_ctx)
+        qtbot.addWidget(view)
+        view._apply_guide_pulse_property("off")
+        view._toggle_guide_pulse()
+        assert view._guide_frame.property("pulse") == "on"
+        view._toggle_guide_pulse()
+        assert view._guide_frame.property("pulse") == "off"
+
+    def test_inline_feedback_hidden_when_empty(self, qtbot, mock_ctx):
+        from app.views.collab_view import CollabView
+
+        view = CollabView(mock_ctx)
+        qtbot.addWidget(view)
+        assert view._team_setup_status.isHidden(), "无反馈时不显示常驻灰带"
+        view._flash_team_status("团队永久码已复制。")
+        assert not view._team_setup_status.isHidden()
+        assert view._team_setup_status.text() == "团队永久码已复制。"
+        view._flash_team_status("")
+        assert view._team_setup_status.isHidden()

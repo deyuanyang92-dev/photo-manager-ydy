@@ -463,18 +463,36 @@ class CollabView(BaseView):
         hub_layout.setContentsMargins(14, 10, 14, 10)
         hub_layout.setSpacing(8)
 
+        # 唯一醒目引导横幅(v0.56 深度协调): 未完成时呼吸式脉冲吸引注意,
+        # 协作启动后自动隐藏并停脉冲。页面里其它「填码点保存」类文字全部压成
+        # 普通说明, 不再各自占一条彩色带 —— 单一注意力焦点。
         guide_frame = QFrame()
         guide_frame.setObjectName("CollabGuide")
+        guide_frame.setProperty("pulse", "off")
         self._guide_frame = guide_frame
-        guide_layout = QVBoxLayout(guide_frame)
-        guide_layout.setContentsMargins(12, 8, 12, 8)
-        guide_layout.setSpacing(2)
+        guide_layout = QHBoxLayout(guide_frame)
+        guide_layout.setContentsMargins(14, 10, 14, 10)
+        guide_layout.setSpacing(12)
+        self._guide_icon = QLabel("👉")
+        self._guide_icon.setObjectName("CollabGuideIcon")
+        self._guide_icon.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
+        guide_layout.addWidget(self._guide_icon, 0, Qt.AlignmentFlag.AlignTop)
+        guide_text_col = QVBoxLayout()
+        guide_text_col.setSpacing(3)
         self._next_step_label.setObjectName("CollabGuideTitle")
-        guide_layout.addWidget(self._next_step_label)
+        guide_text_col.addWidget(self._next_step_label)
         self._next_step_detail.setObjectName("CollabGuideDetail")
         self._next_step_detail.setWordWrap(True)
-        guide_layout.addWidget(self._next_step_detail)
+        guide_text_col.addWidget(self._next_step_detail)
+        guide_layout.addLayout(guide_text_col, 1)
         hub_layout.addWidget(guide_frame)
+
+        # 呼吸脉冲定时器: 每 ~900ms 翻转 pulse 属性 → QSS 两态过渡出「呼吸」。
+        # 外观级定时器, 挂 self, on_deactivate 停(遵项目 QTimer 泄漏红线)。
+        self._guide_pulse_timer = QTimer(self)
+        self._guide_pulse_timer.setInterval(900)
+        self._guide_pulse_timer.timeout.connect(self._toggle_guide_pulse)
+        self._guide_pulse_on = False
 
         method_row = QHBoxLayout()
         method_row.setContentsMargins(0, 0, 0, 0)
@@ -910,9 +928,13 @@ class CollabView(BaseView):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
 
-        self._team_setup_status = QLabel("填写永久码和名字后点保存。")
-        self._team_setup_status.setObjectName("CollabScopeState")
+        # v0.56 深度协调: 此前这里常驻一条「填写永久码和名字后点保存。」灰带,
+        # 与顶部醒目引导 + 面板 detail 三重重复。改为默认空、仅在有真实操作反馈
+        # (已生成/已复制/错误)时才显示的行内提示 —— 平时不占视觉。
+        self._team_setup_status = QLabel("")
+        self._team_setup_status.setObjectName("CollabInlineFeedback")
         self._team_setup_status.setWordWrap(True)
+        self._team_setup_status.hide()
 
         step_entry, entry_body, entry_actions = _collab_step_panel(
             "团队永久码",
@@ -1036,6 +1058,14 @@ class CollabView(BaseView):
         layout.addWidget(aux_panel)
         return panel
 
+    def _flash_team_status(self, text: str) -> None:
+        """行内操作反馈: 有内容才显示, 空则隐藏(不占常驻视觉)。"""
+        if not hasattr(self, "_team_setup_status"):
+            return
+        msg = str(text or "").strip()
+        self._team_setup_status.setText(msg)
+        self._team_setup_status.setVisible(bool(msg))
+
     def _update_team_post_save_visibility(self) -> None:
         if not hasattr(self, "_team_post_save_frame"):
             return
@@ -1048,8 +1078,8 @@ class CollabView(BaseView):
                 running = False
         has_saved = bool(self._team_code_edit.text().strip()) and running
         self._team_post_save_frame.setVisible(has_saved)
-        if hasattr(self, "_team_setup_status"):
-            self._team_setup_status.setVisible(not has_saved)
+        # §7 旧: self._team_setup_status.setVisible(not has_saved) —— 会强行显示
+        # 空反馈标签占位。反馈显隐现由 _flash_team_status 按内容管理, 这里不再碰。
         if hasattr(self, "_team_example_label"):
             self._team_example_label.setVisible(not has_saved)
         if hasattr(self, "_share_btn"):
@@ -1107,18 +1137,18 @@ class CollabView(BaseView):
         try:
             from app.widgets.collab_pairing import generate_group_code
             self._team_code_edit.setText(generate_group_code())
-            self._team_setup_status.setText("已生成永久码，保存后开始协作。")
+            self._flash_team_status("已生成永久码，保存后开始协作。")
         except Exception as exc:  # noqa: BLE001
-            self._team_setup_status.setText(f"生成失败：{exc}")
+            self._flash_team_status(f"生成失败：{exc}")
 
     def _copy_team_code_inline(self) -> None:
         code = self._team_code_edit.text().strip()
         if not code:
             self._team_code_edit.setFocus(Qt.FocusReason.OtherFocusReason)
-            self._team_setup_status.setText("请先输入或生成团队永久码。")
+            self._flash_team_status("请先输入或生成团队永久码。")
             return
         QApplication.clipboard().setText(code)
-        self._team_setup_status.setText("团队永久码已复制。")
+        self._flash_team_status("团队永久码已复制。")
 
     def _save_team_setup_inline(self) -> None:
         pending_pair_info = None
@@ -1129,7 +1159,7 @@ class CollabView(BaseView):
                 pending_pair_info = decode_pairing(pairing_text)
             except ValueError:
                 self._team_pairing_input.setFocus(Qt.FocusReason.OtherFocusReason)
-                self._team_setup_status.setText("备用连接码格式不正确。")
+                self._flash_team_status("备用连接码格式不正确。")
                 return
             self._team_code_edit.setText(pending_pair_info.group_code)
 
@@ -1139,7 +1169,7 @@ class CollabView(BaseView):
             group_code = self._team_code_edit.text().strip()
         if not group_code:
             self._team_code_edit.setFocus(Qt.FocusReason.OtherFocusReason)
-            self._team_setup_status.setText("请先输入或生成团队永久码。")
+            self._flash_team_status("请先输入或生成团队永久码。")
             return
 
         settings = getattr(self.ctx, "settings", None)
@@ -1158,7 +1188,7 @@ class CollabView(BaseView):
 
         svc = self.ctx.ensure_collab_service()
         if svc is None:
-            self._team_setup_status.setText("永久码已保存；协作服务未启动。")
+            self._flash_team_status("永久码已保存；协作服务未启动。")
             self._refresh_devices()
             return
 
@@ -1189,7 +1219,7 @@ class CollabView(BaseView):
                 svc.stop()
                 running = False
             except Exception as exc:  # noqa: BLE001
-                self._team_setup_status.setText(f"重启协作服务失败：{exc}")
+                self._flash_team_status(f"重启协作服务失败：{exc}")
                 return
         if not running and hasattr(svc, "start"):
             try:
@@ -1199,7 +1229,7 @@ class CollabView(BaseView):
                     project_dir=str(getattr(self.ctx, "current_project_dir", "") or project_name),
                 )
             except Exception as exc:  # noqa: BLE001
-                self._team_setup_status.setText(f"启动协作失败：{exc}")
+                self._flash_team_status(f"启动协作失败：{exc}")
                 return
         elif hasattr(svc, "ensure_running"):
             try:
@@ -1257,19 +1287,19 @@ class CollabView(BaseView):
         self._refresh_team_share_fields()
         text = self._team_addr_display.text().strip()
         if not text:
-            self._team_setup_status.setText("先保存永久码并启动协作，才能复制本机地址。")
+            self._flash_team_status("先保存永久码并启动协作，才能复制本机地址。")
             return
         QApplication.clipboard().setText(text)
-        self._team_setup_status.setText("本机局域网地址已复制。")
+        self._flash_team_status("本机局域网地址已复制。")
 
     def _copy_team_pairing_inline(self) -> None:
         self._refresh_team_share_fields()
         text = self._team_pairing_display.text().strip()
         if not text:
-            self._team_setup_status.setText("先保存永久码并启动协作，才能复制连接码。")
+            self._flash_team_status("先保存永久码并启动协作，才能复制连接码。")
             return
         QApplication.clipboard().setText(text)
-        self._team_setup_status.setText("局域网连接码已复制。")
+        self._flash_team_status("局域网连接码已复制。")
 
     def _make_scope_panel(
         self,
@@ -1303,6 +1333,45 @@ class CollabView(BaseView):
             )
         if not self._retry_timer.isActive():
             self._retry_timer.start()
+        # 无服务时 _refresh_devices/_refresh_tasks 提前 return, 引导刷新走不到,
+        # 这里补一次: 保证「未启动」态也能显示并开始脉冲。
+        self._refresh_next_step(
+            self._service.peers() if self._service is not None else []
+        )
+
+    def on_deactivate(self) -> None:
+        # 停外观级定时器: 页面不可见时不该继续 blink/重绘(项目 QTimer 泄漏红线)。
+        if hasattr(self, "_guide_pulse_timer"):
+            self._guide_pulse_timer.stop()
+        if hasattr(self, "_retry_timer"):
+            self._retry_timer.stop()
+
+    # ── 引导脉冲 (呼吸式醒目提示) ──────────────────────────────────────────
+
+    def _set_guide_pulse(self, active: bool) -> None:
+        """active=未完成 → 启动呼吸脉冲; active=已完成 → 停脉冲并复位。"""
+        timer = getattr(self, "_guide_pulse_timer", None)
+        if timer is None:
+            return
+        if active:
+            if not timer.isActive():
+                timer.start()
+        else:
+            timer.stop()
+            self._guide_pulse_on = False
+            self._apply_guide_pulse_property("off")
+
+    def _toggle_guide_pulse(self) -> None:
+        self._guide_pulse_on = not self._guide_pulse_on
+        self._apply_guide_pulse_property("on" if self._guide_pulse_on else "off")
+
+    def _apply_guide_pulse_property(self, value: str) -> None:
+        frame = getattr(self, "_guide_frame", None)
+        if frame is None:
+            return
+        frame.setProperty("pulse", value)
+        frame.style().unpolish(frame)
+        frame.style().polish(frame)
 
     # ── Signal wiring ─────────────────────────────────────────────────────
 
@@ -1665,10 +1734,11 @@ class CollabView(BaseView):
         status = build_collab_status(self._service, peers)
         self._next_step_label.setText(status.next_step_label)
         self._next_step_detail.setText(status.next_step_detail)
+        incomplete = status.state in {"no_service", "not_started", "missing_group"}
         if hasattr(self, "_guide_frame"):
-            self._guide_frame.setVisible(
-                status.state in {"no_service", "not_started", "missing_group"}
-            )
+            self._guide_frame.setVisible(incomplete)
+        # 未完成 → 呼吸脉冲吸引注意; 协作已就绪 → 停闪(引导横幅同时隐藏)。
+        self._set_guide_pulse(incomplete)
         self._setup_btn.setEnabled(status.setup_enabled)
         if status.state in {"no_service", "not_started", "missing_group"}:
             self._setup_btn.setText("设置永久码")
@@ -1747,12 +1817,12 @@ class CollabView(BaseView):
                 addr = ""
         if not addr:
             self._show_team_setup_panel()
-            self._team_setup_status.setText("先保存团队永久码并启动协作，才能复制本机地址。")
+            self._flash_team_status("先保存团队永久码并启动协作，才能复制本机地址。")
             return
         QApplication.clipboard().setText(addr)
         self._refresh_team_share_fields()
         if hasattr(self, "_team_setup_status"):
-            self._team_setup_status.setText("本机局域网地址已复制。")
+            self._flash_team_status("本机局域网地址已复制。")
 
     def _on_pick_team_project(self) -> None:
         self._show_project_sync_panel()
