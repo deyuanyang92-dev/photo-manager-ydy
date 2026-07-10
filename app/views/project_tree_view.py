@@ -1787,7 +1787,10 @@ class ProjectTreeView(BaseView):
     def _enter_workspace_from_card(self, directory: str) -> None:
         try:
             if pts.is_workspace(directory):
-                self.enter_workspace_requested.emit(directory)
+                # §7 旧(v0.55 回归): 只 emit 信号, 生产端无人连接 → 点「进入」无任何反应。
+                # self.enter_workspace_requested.emit(directory)
+                # 新: 走与树「进入工作区」相同的统一入口(设 ctx、建目录、记最近、跳工作台)。
+                self._enter_workspace_path(directory)
             else:
                 self._select_tree_path(directory)
         except OSError:
@@ -4327,9 +4330,14 @@ class ProjectTreeView(BaseView):
             from PyQt6.QtWidgets import QMessageBox
             if resp != QMessageBox.StandardButton.Yes:
                 return
-        # Single unified entry path: ensures dirs, sets dir + root (bounding the
-        # settings-inheritance walk to this survey's tree), and records the node
-        # into the recent list so it also shows up in 项目总览.
+        # §7 旧: 统一入口逻辑原本内联在此(enter_workspace + 错误弹窗 + 导航),
+        # v0.56 抽成 _enter_workspace_path 供卡片「进入」复用(修卡片空操作回归)。
+        self._enter_workspace_path(path)
+
+    def _enter_workspace_path(self, path: str) -> None:
+        """Single unified entry path: ensures dirs, sets dir + root (bounding the
+        settings-inheritance walk to this survey's tree), and records the node
+        into the recent list so it also shows up in 项目总览."""
         from app.services.project_service import (
             default_user_projects_json_path,
             enter_workspace,

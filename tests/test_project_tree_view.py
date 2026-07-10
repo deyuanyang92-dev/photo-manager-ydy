@@ -432,6 +432,35 @@ def test_enter_workspace_database_locked_warns_without_crashing(
     assert warnings[0][0] == "项目数据库正忙"
 
 
+def test_card_enter_runs_unified_entry_not_just_signal(
+    qtbot, tmp_path, ctx, monkeypatch
+):
+    """v0.55 回归: 卡片「进入」只 emit 无人连接的信号 → 空操作。
+    必须走 enter_workspace 统一入口(设 ctx/建目录/记最近), 信号照发(兼容)。"""
+    recent_json = _patch_recent_json(monkeypatch, tmp_path)
+    leaf = tmp_path / "断面A"
+    leaf.mkdir()
+    _make_workspace(leaf)
+    _seed_projects_json(recent_json, [{"id": "1", "name": "断面A", "directory": str(leaf)}])
+
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    view.on_activate()
+
+    entered = []
+    monkeypatch.setattr(
+        "app.services.project_service.enter_workspace",
+        lambda _ctx, path, **_kw: entered.append(str(path)),
+    )
+    emitted = []
+    view.enter_workspace_requested.connect(lambda p: emitted.append(p))
+
+    view._enter_workspace_from_card(str(leaf))
+
+    assert entered == [str(leaf)], "卡片进入必须真正调用 enter_workspace"
+    assert emitted == [str(leaf)]
+
+
 def test_pick_root_after_flat_list_reverts_to_scan(qtbot, tmp_path, ctx, monkeypatch):
     # Flat list populated, then user picks a real root -> tree reverts to scan mode.
     app_dir = tmp_path / "isolated-app"
