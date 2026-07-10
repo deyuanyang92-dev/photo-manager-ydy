@@ -427,3 +427,138 @@ def test_finalize_supplementary_archive_requires_worker_zip(tmp_path):
         )
 
     assert tiff.exists()
+
+
+# ── 成果 ↔ 编号 的解绑 / 改绑 ────────────────────────────────────────────────
+#
+# 使用场景(用户 2026-07-10):
+#   拍摄时把标本 A 的 TIF 误关联到了编号 B(合成时选错编号、或外部 TIF 自动
+#   归档猜错了归属)。事后发现关联错了,需要:
+#     · 解绑        —— 先把这张 TIF 从错误编号上摘下来(文件绝不动、绝不删),
+#                       等确认真正的编号后再挂上去;
+#     · 改绑        —— 已经知道正确编号, 一步从 B 改挂到 A。
+#   两者都只改数据库里的「归属」事实, 不碰磁盘上的 TIF/ZIP 字节。
+
+
+def test_unbind_result_pair_detaches_from_every_uid(tmp_path):
+    from app.services.capture_workflow_service import unbind_result_pair
+
+    db = _db()
+    wrong_uid = "FJ-XM-A01-DLC001-T95E-20260601"
+    tiff = tmp_path / "misbound.tif"
+    zip_path = tmp_path / "misbound.zip"
+    tiff.write_bytes(b"tiff")
+    zip_path.write_bytes(b"zip")
+    save_grouping(
+        db, wrong_uid,
+        [Group(group_index=0, composed_tiff_path=str(tiff),
+               archive_zip=str(zip_path), status="organized")],
+        clean_phantoms=False,
+    )
+
+    removed = unbind_result_pair(db, str(tiff), str(zip_path))
+
+    assert removed == [wrong_uid]
+    assert load_grouping(db, wrong_uid).groups == [], "错误编号上不应再挂这张成果"
+    assert tiff.is_file() and zip_path.is_file(), "解绑只改归属, 绝不删文件(红线)"
+
+
+def test_unbind_result_pair_is_idempotent(tmp_path):
+    from app.services.capture_workflow_service import unbind_result_pair
+
+    db = _db()
+    tiff = tmp_path / "orphan.tif"
+    tiff.write_bytes(b"tiff")
+    assert unbind_result_pair(db, str(tiff), "") == []
+    assert unbind_result_pair(db, str(tiff), "") == []
+
+
+def test_unbind_keeps_other_groups_of_same_uid(tmp_path):
+    from app.services.capture_workflow_service import unbind_result_pair
+
+    db = _db()
+    uid = "FJ-XM-A01-DLC001-T95E-20260601"
+    keep = tmp_path / "keep.tif"
+    drop = tmp_path / "drop.tif"
+    keep.write_bytes(b"a")
+    drop.write_bytes(b"b")
+    save_grouping(
+        db, uid,
+        [
+            Group(group_index=0, composed_tiff_path=str(keep), status="organized"),
+            Group(group_index=1, composed_tiff_path=str(drop), status="organized"),
+        ],
+        clean_phantoms=False,
+    )
+
+    removed = unbind_result_pair(db, str(drop), "")
+
+    assert removed == [uid]
+    remaining = load_grouping(db, uid).groups
+    assert len(remaining) == 1
+    assert remaining[0].composed_tiff_path == str(keep.resolve())
+
+
+def test_rebind_moves_association_between_uids(tmp_path):
+    """改绑 = 从错误编号摘下 + 挂到正确编号, 一步完成(复用 link 的原子语义)。"""
+    from app.services.capture_workflow_service import rebind_result_pair_to_uid
+
+    db = _db()
+    wrong_uid = "FJ-XM-A01-DLC001-T95E-20260601"
+    right_uid = "FJ-XM-A02-DLC002-T95E-20260601"
+    tiff = tmp_path / "r.tif"
+    tiff.write_bytes(b"tiff")
+    save_grouping(
+        db, wrong_uid,
+        [Group(group_index=0, composed_tiff_path=str(tiff), status="organized")],
+        clean_phantoms=False,
+    )
+
+    linked = rebind_result_pair_to_uid(db, right_uid, str(tiff), "")
+
+    assert linked.uid == right_uid
+    assert linked.removed_from == [wrong_uid]
+    assert load_grouping(db, wrong_uid).groups == []
+    assert len(load_grouping(db, right_uid).groups) == 1
+    assert tiff.is_file()
+
+
+def test_list_unbound_result_tiffs_finds_detached_files(tmp_path):
+    """解绑后 TIF 仍在 results/ 里 —— 必须能被重新找到, 否则用户再也点不到它。
+
+    使用场景:解绑是「先摘下来, 回头再确认归属」。若界面只显示 grouping 里的
+    成果, 解绑等于让文件人间蒸发。这个查询让「全部」模式能列出「未关联成果」。
+    """
+    from app.services.capture_workflow_service import (
+        list_unbound_result_tiffs,
+        unbind_result_pair,
+    )
+
+    db = _db()
+    uid = "FJ-XM-A01-DLC001-T95E-20260601"
+    results = tmp_path / "results"
+    results.mkdir()
+    bound = results / "bound.tif"
+    loose = results / "loose.tif"
+    bound.write_bytes(b"a")
+    loose.write_bytes(b"b")
+    save_grouping(
+        db, uid,
+        [Group(group_index=0, composed_tiff_path=str(bound), status="organized")],
+        clean_phantoms=False,
+    )
+
+    # loose 从未被关联过 → 应被列出; bound 已关联 → 不列
+    found = list_unbound_result_tiffs(db, str(results))
+    assert [Path(p).name for p in found] == ["loose.tif"]
+
+    # 解绑 bound 之后, 它也应出现在未关联列表里
+    unbind_result_pair(db, str(bound), "")
+    found2 = list_unbound_result_tiffs(db, str(results))
+    assert sorted(Path(p).name for p in found2) == ["bound.tif", "loose.tif"]
+
+
+def test_list_unbound_result_tiffs_tolerates_missing_dir(tmp_path):
+    from app.services.capture_workflow_service import list_unbound_result_tiffs
+
+    assert list_unbound_result_tiffs(_db(), str(tmp_path / "nope")) == []

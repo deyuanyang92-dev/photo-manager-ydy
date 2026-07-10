@@ -312,3 +312,104 @@ class TestGroupingDeleteClearWiring:
         assert len(reloaded.groups) == 1
         assert reloaded.groups[0].group_index == 1
         db.close()
+
+
+class TestMultiUidResultsScope:
+    """侧栏 Ctrl/Shift 多选编号 → 成果区只显示这些编号的成果(用户 2026-07-10)."""
+
+    def test_multi_select_loads_only_selected_uids(self, monkeypatch):
+        from app.views import workbench_view as wv
+
+        captured: list = []
+
+        class _Stub:
+            def __init__(self):
+                self.title = None
+
+            def load_many(self, groups, *, title=None):
+                captured.append(([g["uid"] for g in groups], title))
+
+            def clear(self):
+                captured.append(("clear", None))
+
+        view = wv.WorkbenchView.__new__(wv.WorkbenchView)
+        view._results = _Stub()
+        view._status_message = lambda *_a, **_k: None
+        monkeypatch.setattr(
+            view, "_groups_for_uids",
+            lambda uids: [{"uid": u, "tiffs": [{"path": f"/{u}.tif"}], "zips": []} for u in uids],
+            raising=False,
+        )
+        view._on_specimen_selection_scope_changed(["U-1", "U-3"])
+
+        assert captured, "多选应触发成果区加载"
+        uids, title = captured[-1]
+        assert uids == ["U-1", "U-3"]
+        assert title and "2" in title, f"标题应标明所选编号数, 实际: {title!r}"
+
+    def test_plain_single_click_does_not_reload_results(self, monkeypatch):
+        """单击已由 specimen_selected 加载成果; scope 信号不得重复查库(卡顿源)。"""
+        from app.views import workbench_view as wv
+
+        view = wv.WorkbenchView.__new__(wv.WorkbenchView)
+        view._multi_scope_active = False
+        calls: list = []
+        monkeypatch.setattr(
+            view, "_on_show_current_results", lambda: calls.append("current"), raising=False
+        )
+        view._on_specimen_selection_scope_changed(["U-1"])
+        assert calls == [], "未进过多选时, 单选不应触发额外的成果重载"
+
+    def test_leaving_multi_select_restores_current_uid_view(self, monkeypatch):
+        from app.views import workbench_view as wv
+
+        view = wv.WorkbenchView.__new__(wv.WorkbenchView)
+        view._results = type("S", (), {"load_many": lambda *a, **k: None})()
+        view._status_message = lambda *_a, **_k: None
+        monkeypatch.setattr(view, "_groups_for_uids", lambda uids: [], raising=False)
+        calls: list = []
+        monkeypatch.setattr(
+            view, "_on_show_current_results", lambda: calls.append("current"), raising=False
+        )
+
+        view._on_specimen_selection_scope_changed(["U-1", "U-2"])   # 进入多选
+        view._on_specimen_selection_scope_changed(["U-1"])          # 退回单选
+        assert calls == ["current"], "退出多选必须恢复「当前编号」视图"
+
+
+class TestUnboundResultsVisible:
+    """解绑后 TIF 仍在 results/ 里 —— 「全部」模式必须把它列出来(未关联成果),
+    否则解绑 = 让文件从界面上消失, 用户无法改绑(用户 2026-07-10)。"""
+
+    def test_show_all_appends_unbound_group(self, monkeypatch, tmp_path):
+        from app.views import workbench_view as wv
+
+        loaded: list = []
+
+        import types
+
+        view = wv.WorkbenchView.__new__(wv.WorkbenchView)
+        view.ctx = types.SimpleNamespace(
+            get_db=lambda: object(), current_project_dir=str(tmp_path)
+        )
+        view._results = type(
+            "S", (), {"load_many": lambda _s, groups, **k: loaded.append(groups)}
+        )()
+        view._status_message = lambda *_a, **_k: None
+        monkeypatch.setattr(
+            view, "_groups_for_uids",
+            lambda uids: [{"uid": "U-1", "tiffs": [{"path": "/a.tif"}], "zips": []}],
+            raising=False,
+        )
+        monkeypatch.setattr(view, "_project_uids", lambda: ["U-1"], raising=False)
+        monkeypatch.setattr(
+            view, "_unbound_result_group",
+            lambda: {"uid": "未关联成果", "tiffs": [{"path": "/loose.tif"}], "zips": []},
+            raising=False,
+        )
+
+        view._on_show_all_results()
+
+        assert loaded, "全部模式应加载分组"
+        uids = [g["uid"] for g in loaded[-1]]
+        assert uids[-1] == "未关联成果", f"未关联成果应排在最后一组, 实际 {uids}"

@@ -122,6 +122,118 @@ class WorkbenchResultWorkflowMixin:
             else:
                 QMessageBox.warning(self, "注册 ZIP", f"保存失败：{exc}")
 
+    # ── 成果 ↔ 编号 关联纠错 ─────────────────────────────────────────────────
+    #
+    # 使用场景(用户 2026-07-10 提出):
+    #   合成时选错了编号,或「自动归档」按文件名猜错了归属 —— 一张 TIF 挂到了
+    #   错误的编号下。发现后有两种心态:
+    #     (a) 已经知道它真正属于哪个编号  → 「改绑到其他编号…」一步改挂;
+    #     (b) 还要回去核对标本才能确定    → 「解绑此成果」先摘下来。
+    #   两条路径都只改数据库里的归属事实,**绝不移动或删除磁盘上的 TIF 母版**
+    #   (全局红线)。解绑后 TIF 仍在 results/ 里,可在「全部」模式的
+    #   「未关联成果」分组里找到并重新绑定。
+
+    def _ask_target_uid(self, title: str, current_hint: str = "") -> str:
+        """弹出编号选择框,返回选中的 uid;取消返回 ""。"""
+        from PyQt6.QtWidgets import QInputDialog
+
+        db = self.ctx.get_db()
+        if not db:
+            return ""
+        try:
+            rows = db.execute("SELECT uid FROM specimens ORDER BY uid").fetchall()
+            uids = [str(r[0]) for r in rows if r and r[0]]
+        except Exception:
+            uids = []
+        if not uids:
+            QMessageBox.warning(self, title, "当前项目还没有编号可供关联。")
+            return ""
+        start = uids.index(current_hint) if current_hint in uids else 0
+        uid, ok = QInputDialog.getItem(
+            self, title, "选择这张成果真正所属的编号：", uids, start, False
+        )
+        return uid.strip() if ok and uid else ""
+
+    def _on_unbind_result(self, tiff_path: str, zip_path: str) -> None:
+        """解绑:把成果从当前挂着的编号上摘下来(文件不动)。"""
+        from app.utils import ui
+
+        db = self.ctx.get_db()
+        if not db:
+            self._status_message("请先打开项目")
+            return
+        name = Path(tiff_path).name if tiff_path else Path(zip_path).name
+        reply = ui.question(
+            self,
+            "解绑此成果",
+            f"将「{name}」从当前编号上解绑？\n\n"
+            "· 只解除「这张成果属于哪个编号」的关联\n"
+            "· 磁盘上的 TIF / ZIP 文件不会被移动或删除\n"
+            "· 解绑后可在成果「全部」里重新绑定",
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            from app.services.capture_workflow_service import unbind_result_pair
+
+            removed = unbind_result_pair(db, tiff_path, zip_path)
+        except Exception as exc:
+            QMessageBox.warning(self, "解绑此成果", f"解绑失败：{exc}")
+            return
+        self._after_binding_changed()
+        if removed:
+            self._status_message(f"已解绑：{name}（原属 {'、'.join(removed)}）")
+        else:
+            self._status_message(f"「{name}」本来就没有关联任何编号")
+
+    def _on_rebind_result(self, tiff_path: str, zip_path: str) -> None:
+        """改绑:一步把成果从错误编号改挂到用户指定的编号。"""
+        db = self.ctx.get_db()
+        if not db:
+            self._status_message("请先打开项目")
+            return
+        target = self._ask_target_uid("改绑到其他编号", self._current_uid or "")
+        if not target:
+            return
+        try:
+            from app.services.capture_workflow_service import rebind_result_pair_to_uid
+
+            linked = rebind_result_pair_to_uid(db, target, tiff_path, zip_path)
+        except Exception as exc:
+            QMessageBox.warning(self, "改绑到其他编号", f"改绑失败：{exc}")
+            return
+        self._after_binding_changed(uid=linked.uid, grouping=linked.grouping)
+        old = "、".join(linked.removed_from) or "未关联"
+        self._status_message(f"已改绑：{old} → {linked.uid}")
+
+    def _after_binding_changed(self, uid: str = "", grouping=None) -> None:
+        """归属变了 → 重刷成果区(按当前显示模式)与待处理区。
+
+        改绑有明确目标编号 ⇒ 直接刷那个编号;解绑没有目标 ⇒ 沿用当前模式重载
+        (「全部」模式要重扫全项目,否则被解绑的那张还挂在旧编号下面不消失)。
+        """
+        try:
+            if uid:
+                self._refresh_results_column(uid, grouping)
+            else:
+                results = getattr(self, "_results", None)
+                many = getattr(results, "_display_mode", "") == "many"
+                reload_fn = getattr(
+                    self,
+                    "_on_show_all_results" if many else "_on_show_current_results",
+                    None,
+                )
+                if callable(reload_fn):
+                    reload_fn()
+        except Exception:
+            pass
+        refresh_monitor = getattr(self, "_refresh_monitor", None)
+        if callable(refresh_monitor):
+            try:
+                refresh_monitor()
+            except Exception:
+                pass
+
     def _on_link_result_to_right_uid(self, tiff_path: str, zip_path: str) -> None:
         """Move/register an existing result pair under the voucher shown at right."""
         db = self.ctx.get_db()

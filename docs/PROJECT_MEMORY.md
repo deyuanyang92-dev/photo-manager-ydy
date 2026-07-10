@@ -313,3 +313,64 @@ pytest tests/test_tiff_exif_read.py -q
 
 相关实现：`app/views/project_tree_view.py`（数据汇总 UI、转 JPG 按钮）、`app/views/tiff_jpeg_tool_view.py`（`load_tiff_sources` / `on_activate` 消费 pending）、`app/services/tiff_jpeg_export_service.py`（真正写 JPG 文件）。
 
+
+## 成果 TIF ↔ 编号 的关联纠错（2026-07-10 用户提出）
+
+### 使用场景（这就是为什么需要这套逻辑）
+
+拍摄/合成时选错了编号，或「自动归档」按文件名猜错了归属 —— 一张成果 TIF 挂到了
+**错误的编号**下。发现之后，用户有两种心态，软件必须都支持：
+
+| 心态 | 入口（成果卡右键） | 行为 |
+|------|-------------------|------|
+| 已经知道它真正属于哪个编号 | **改绑到其他编号…** | 弹编号列表 → 一步从错误编号改挂到正确编号 |
+| 还要回去核对标本才能确定 | **解绑此成果** | 从当前编号摘下来，先不挂任何编号 |
+| 目标编号正好显示在右栏 | 关联到右侧编号（旧入口，保留） | 挂到右栏当前编号 |
+
+### 硬要求
+
+- **两条纠错路径都只改数据库里的「归属」事实，绝不移动或删除磁盘上的 TIF 母版**
+  （全局红线）。ZIP 同样不动。
+- 解绑必须**幂等**：本来就没挂 → 返回空列表，不报错。
+- 解绑/改绑对**只有 TIF、没有 ZIP** 的成果（合成完但还没「整理」）同样要能用。
+  因此它们走 `_resolve_result_pair_lenient`，而不是要求 TIF+ZIP 都在盘上的
+  `resolve_result_pair`（那是「登记一个已归档成果」的前置条件）。
+- **解绑之后 TIF 不能从界面上消失**。成果区只渲染 grouping 里的记录，所以
+  「全部」模式必须额外渲染一个 **`未关联成果`** 分组，数据来自
+  `list_unbound_result_tiffs(db, results_dir)`（扫 results/ 里没被任何编号引用的
+  TIF）。否则解绑 = 文件人间蒸发，用户再也无法改绑。该分组同时能捞出外部软件
+  直接丢进 `results/` 的 TIF。
+- 一个成果同一时刻只能属于一个编号：`link_result_pair_to_clean_uid` /
+  `rebind_result_pair_to_uid` 都是「先从所有编号摘掉，再挂到目标」。
+
+### 实现锚点
+
+- `app/services/capture_workflow_service.py`：`unbind_result_pair` /
+  `rebind_result_pair_to_uid` / `list_unbound_result_tiffs` /
+  `_detach_result_pair` / `_attach_result_pair` / `_resolve_result_pair_lenient`
+- `app/views/workbench_result_workflow.py`：`_on_unbind_result` / `_on_rebind_result`
+  / `_ask_target_uid` / `_after_binding_changed`
+- `app/widgets/results_column_cards.py`：TIFF 卡右键菜单 `解绑此成果` / `改绑到其他编号…`
+- `app/views/workbench_view.py`：`_unbound_result_group` / `UNBOUND_GROUP_LABEL`
+
+### 回归锚点
+
+```bash
+pytest tests/test_result_rebind_unbind.py -q
+pytest tests/test_capture_workflow_service.py -q -k "unbind or rebind or unbound"
+pytest tests/test_workbench_wiring.py -q -k UnboundResultsVisible
+```
+
+## 还原原片的落点（2026-07-10 用户裁定）
+
+「还原原片」**不得每次弹目录选择框**。合成错了要撤回时，原片就该回到它出发的地方：
+
+- 默认落点 = 当前工作区的**待处理区** `incoming-jpg/`（`_restore_target_dir()`，
+  目录名走 `_resolve_capture_subdirs()`，兼容遗留的「新拍JPG」）。
+- 同名 JPG **一律跳过，不覆盖**（还原是「加回原片」，绝不动已有文件），因此也
+  取消了「目标文件夹非空 → 是否覆盖」的二次弹窗。
+- 还原完成后立刻 `_refresh_monitor()`，原片马上出现在「待处理照片」里，可以直接重新合成。
+- 只有**当前没有打开项目**（无处可还原）时，才退回让用户选目录。
+
+实现：`app/views/workbench_supplementary_workflow.py::_restore_target_dir` /
+`_on_restore_archive`；回归锚点：`pytest tests/test_restore_archive_target.py -q`

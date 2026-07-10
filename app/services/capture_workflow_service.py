@@ -535,21 +535,43 @@ def resolve_result_pair(tiff_path: str, zip_path: str) -> tuple[str, str]:
     return tiff, zipf
 
 
-def link_result_pair_to_clean_uid(
-    db: sqlite3.Connection,
-    target_uid: str,
-    tiff_path: str,
-    zip_path: str,
-) -> LinkedResultPair:
-    """Register an existing TIFF+ZIP pair under *target_uid*."""
-    target = _clean_uid(target_uid)
-    if not target:
-        raise ValueError("目标编号不能为空")
-    tiff, zipf = resolve_result_pair(tiff_path, zip_path)
+def _resolve_result_pair_lenient(tiff_path: str, zip_path: str) -> tuple[str, str]:
+    """纠错路径(解绑/改绑)用的宽松解析:ZIP 可以不存在,TIF 必须能定位。
 
+    合成完但还没「整理」的成果只有 TIF、没有 ZIP;把这种成果绑错了同样要能改。
+    """
+    tiff = str(Path(tiff_path).resolve()) if tiff_path else ""
+    zipf = str(Path(zip_path).resolve()) if zip_path else ""
+    if not zipf and tiff:
+        sibling = Path(tiff).with_suffix(".zip")
+        if sibling.is_file():
+            zipf = str(sibling.resolve())
+    if not tiff and zipf:
+        sibling = Path(zipf).with_suffix(".tif")
+        if sibling.is_file():
+            tiff = str(sibling.resolve())
+    if not tiff and not zipf:
+        raise FileNotFoundError("未指定要解绑/改绑的成果文件。")
+    return tiff, zipf
+
+
+def _detach_result_pair(
+    db: sqlite3.Connection,
+    tiff: str,
+    zipf: str,
+    *,
+    also: str = "",
+) -> list[str]:
+    """把这对 TIFF/ZIP 从**所有**编号的 grouping 里摘掉,返回被摘掉的编号。
+
+    只改数据库里的「归属」事实,**不碰磁盘上的字节**(TIFF 是无损母版,
+    红线:任何流程都不得自动删除它)。``also`` 是一个即便当前没挂该成果、
+    也要一并扫一遍的编号(改绑时的目标编号,防止重复挂两份)。
+    """
     rows = db.execute("SELECT DISTINCT uid FROM grouping").fetchall()
     affected_uids = {str(row[0]) for row in rows}
-    affected_uids.add(target)
+    if also:
+        affected_uids.add(also)
     removed_from: list[str] = []
     for uid in sorted(affected_uids):
         grouping = load_grouping(db, uid)
@@ -564,6 +586,148 @@ def link_result_pair_to_clean_uid(
         if len(grouping.groups) != before:
             removed_from.append(uid)
             save_grouping(db, uid, grouping.groups, clean_phantoms=False)
+    return removed_from
+
+
+def unbind_result_pair(
+    db: sqlite3.Connection,
+    tiff_path: str,
+    zip_path: str,
+) -> list[str]:
+    """解绑:把一对成果 TIFF/ZIP 从它当前挂着的编号上摘下来,不挂到任何编号。
+
+    使用场景(用户 2026-07-10 提出):拍摄/自动归档把 TIF 关联到了**错误的编号**。
+    用户先要能「摘下来」,再从容确认它到底属于哪个编号 —— 这一步不应强迫他
+    立刻指定新编号,也绝不能因此删除或移动 TIF 母版。
+
+    返回被摘掉的编号列表(幂等:本来就没挂 → 返回 ``[]``)。
+
+    刻意**不**走 ``resolve_result_pair``:那要求 TIF 与 ZIP 都在盘上(关联新成果
+    的前置条件)。解绑是纠错动作,ZIP 可能还没归档、或已被用户挪走 —— 只要能
+    定位 TIF 就该允许摘下来,否则用户被卡死在错误关联里。
+    """
+    tiff, zipf = _resolve_result_pair_lenient(tiff_path, zip_path)
+    return _detach_result_pair(db, tiff, zipf)
+
+
+def _attach_result_pair(
+    db: sqlite3.Connection,
+    target: str,
+    tiff: str,
+    zipf: str,
+) -> SpecimenGrouping:
+    """把一对成果挂到 *target* 编号名下(追加一个 group),返回更新后的 grouping。
+
+    有 ZIP ⇒ ``organized``(已归档);只有 TIF ⇒ ``composed``(合成完、待整理)。
+    """
+    target_grouping = load_grouping(db, target)
+    next_idx = max((g.group_index for g in target_grouping.groups), default=-1) + 1
+    target_grouping.groups.append(
+        Group(
+            group_index=next_idx,
+            angle_label=f"成果{len(target_grouping.groups) + 1}",
+            jpg_paths=[],
+            composed_tiff_path=tiff,
+            status="organized" if zipf else "composed",
+            source="linked-existing-result",
+            updated_at=_utc_now_iso(),
+            archive_zip=zipf,
+            output_name=Path(tiff or zipf).stem,
+        )
+    )
+    save_grouping(db, target, target_grouping.groups, clean_phantoms=False)
+    return target_grouping
+
+
+def rebind_result_pair_to_uid(
+    db: sqlite3.Connection,
+    target_uid: str,
+    tiff_path: str,
+    zip_path: str,
+) -> LinkedResultPair:
+    """改绑:一步把成果从错误编号改挂到 *target_uid*。
+
+    使用场景(用户 2026-07-10):已经确认这张 TIF 真正属于哪个编号,不需要
+    「先解绑、再切到那个编号、再关联」三步。语义 = 从所有编号摘掉 + 挂到目标。
+
+    与 ``link_result_pair_to_clean_uid`` 的差别:后者是「把一个**已归档**的
+    TIF+ZIP 对登记到编号名下」,强制 ZIP 存在;改绑是纠错,合成完未整理
+    (只有 TIF)的成果同样要能改。文件字节永不变动。
+    """
+    target = _clean_uid(target_uid)
+    if not target:
+        raise ValueError("目标编号不能为空")
+    tiff, zipf = _resolve_result_pair_lenient(tiff_path, zip_path)
+    removed_from = _detach_result_pair(db, tiff, zipf, also=target)
+    target_grouping = _attach_result_pair(db, target, tiff, zipf)
+    return LinkedResultPair(
+        uid=target,
+        grouping=target_grouping,
+        removed_from=removed_from,
+        tiff_path=tiff,
+        zip_path=zipf,
+    )
+
+
+def list_unbound_result_tiffs(
+    db: sqlite3.Connection,
+    results_dir: str,
+) -> list[str]:
+    """列出 ``results_dir`` 里**没有被任何编号关联**的成果 TIF(绝对路径,已排序)。
+
+    使用场景:解绑之后 TIF 仍留在磁盘上,但成果区只渲染 grouping 里的记录 ——
+    不列出来的话,那张文件就从界面上消失了,用户再也无法改绑。「全部」模式用
+    这个查询多渲染一个「未关联成果」分组,让解绑真正可逆。
+    同样能捞出外部软件丢进 results/、从未登记过的 TIF。
+    """
+    root = Path(results_dir)
+    if not root.is_dir():
+        return []
+    bound: set[str] = set()
+    try:
+        rows = db.execute("SELECT DISTINCT uid FROM grouping").fetchall()
+    except sqlite3.Error:
+        return []
+    for row in rows:
+        for g in load_grouping(db, str(row[0])).groups:
+            for attr in ("composed_tiff_path", "archive_zip"):
+                val = getattr(g, attr, None)
+                if val:
+                    try:
+                        bound.add(str(Path(val).resolve()))
+                    except OSError:
+                        bound.add(str(val))
+
+    out: list[str] = []
+    for path in sorted(root.rglob("*")):
+        if path.suffix.lower() not in (".tif", ".tiff") or not path.is_file():
+            continue
+        try:
+            resolved = str(path.resolve())
+        except OSError:
+            resolved = str(path)
+        if resolved not in bound:
+            out.append(resolved)
+    return out
+
+
+def link_result_pair_to_clean_uid(
+    db: sqlite3.Connection,
+    target_uid: str,
+    tiff_path: str,
+    zip_path: str,
+) -> LinkedResultPair:
+    """Register an existing TIFF+ZIP pair under *target_uid*.
+
+    先把这对成果从**任何**已挂的编号上摘掉,再挂到目标编号 —— 所以它天然
+    也是「改绑」:一个成果同一时刻只能属于一个编号。见 :func:`rebind_result_pair_to_uid`。
+    """
+    target = _clean_uid(target_uid)
+    if not target:
+        raise ValueError("目标编号不能为空")
+    tiff, zipf = resolve_result_pair(tiff_path, zip_path)
+
+    removed_from = _detach_result_pair(db, tiff, zipf, also=target)
 
     target_grouping = load_grouping(db, target)
     next_idx = max((g.group_index for g in target_grouping.groups), default=-1) + 1

@@ -287,6 +287,9 @@ class WorkbenchView(WorkbenchSpecimenIdentityMixin, WorkbenchMediaWorkflowMixin,
         self._sidebar.setMinimumWidth(self._sidebar_min_width())
         self._sidebar.setMaximumWidth(QWIDGETSIZE_MAX)
         self._sidebar.specimen_selected.connect(self._on_specimen_selected)
+        self._sidebar.selection_scope_changed.connect(
+            self._on_specimen_selection_scope_changed
+        )
         self._sidebar.show_all_requested.connect(self._on_show_all_results)
         self._sidebar.activate_requested.connect(self._on_sidebar_activate)
         self._sidebar.deactivate_requested.connect(self._on_sidebar_deactivate)
@@ -417,6 +420,8 @@ class WorkbenchView(WorkbenchSpecimenIdentityMixin, WorkbenchMediaWorkflowMixin,
         self._results.show_all_requested.connect(self._on_show_all_results)
         self._results.current_requested.connect(self._on_show_current_results)
         self._results.link_result_requested.connect(self._on_link_result_to_right_uid)
+        self._results.unbind_result_requested.connect(self._on_unbind_result)
+        self._results.rebind_result_requested.connect(self._on_rebind_result)
         self._results.tiff_naming_check_requested.connect(
             self._on_tiff_naming_check_path
         )
@@ -596,6 +601,8 @@ class WorkbenchView(WorkbenchSpecimenIdentityMixin, WorkbenchMediaWorkflowMixin,
 
         # Track current UID for grouping edits
         self._current_uid: Optional[str] = None
+        # 侧栏是否处于「多选编号」范围(决定退出多选时是否恢复当前编号视图)
+        self._multi_scope_active: bool = False
         self._pending_grouping = None  # SpecimenGrouping awaiting save
         self.ctx.worms_fill_specimen = self.worms_fill_specimen
         self._refresh_workflow_dashboard()
@@ -850,13 +857,14 @@ class WorkbenchView(WorkbenchSpecimenIdentityMixin, WorkbenchMediaWorkflowMixin,
         self._load_specimen(uid)
         self._refresh_batch_header()
 
-    def _on_show_all_results(self) -> None:
-        """Show organized results for every specimen in the current project."""
+    UNBOUND_GROUP_LABEL = "未关联成果"
+
+    def _project_uids(self) -> list[str]:
+        """当前项目的全部编号(按 uid 排序)。"""
         db = self.ctx.get_db()
         project_dir = self.ctx.current_project_dir
         if not db or not project_dir:
-            self._results.clear()
-            return
+            return []
         try:
             project_dirs = equivalent_paths(project_dir)
             owner_filter = ",".join("?" * len(project_dirs)) or "?"
@@ -869,13 +877,63 @@ class WorkbenchView(WorkbenchSpecimenIdentityMixin, WorkbenchMediaWorkflowMixin,
                 """,
                 project_dirs or [project_dir],
             ).fetchall()
-            uids = [
-                str(row["uid"] if hasattr(row, "keys") else row[0])
-                for row in rows
-            ]
+            return [str(row["uid"] if hasattr(row, "keys") else row[0]) for row in rows]
         except Exception:
-            uids = []
+            return []
 
+    def _unbound_result_group(self) -> Optional[dict]:
+        """results/ 里没挂任何编号的 TIF,单列一组「未关联成果」。
+
+        没有这一组的话,「解绑」等于让 TIF 从界面上消失、再也无法改绑;
+        外部软件直接丢进 results/ 的 TIF 同理也在这里现身。
+        """
+        db = self.ctx.get_db()
+        project_dir = self.ctx.current_project_dir
+        if not db or not project_dir:
+            return None
+        try:
+            from app.services.capture_workflow_service import list_unbound_result_tiffs
+
+            _incoming, results_sub = self._resolve_capture_subdirs()
+            paths = list_unbound_result_tiffs(
+                db, os.path.join(str(project_dir), results_sub)
+            )
+        except Exception:
+            return None
+        if not paths:
+            return None
+        return {
+            "uid": self.UNBOUND_GROUP_LABEL,
+            "tiffs": [{"path": p, "name": os.path.basename(p)} for p in paths],
+            "zips": [],
+        }
+
+    def _on_show_all_results(self) -> None:
+        """Show organized results for every specimen in the current project."""
+        db = self.ctx.get_db()
+        project_dir = self.ctx.current_project_dir
+        if not db or not project_dir:
+            self._results.clear()
+            return
+
+        groups = self._groups_for_uids(self._project_uids())
+        # 未关联成果排在最后一组:解绑后的 TIF 从这里可以被重新绑定。
+        unbound = self._unbound_result_group()
+        if unbound:
+            groups = groups + [unbound]
+        self._results.load_many(groups)
+        self._status_message(
+            f"已展示全部成果：{len(groups)} 个编号，{self._count_results(groups)} 项。"
+        )
+
+    def _groups_for_uids(self, uids: list[str]) -> list[dict]:
+        """按编号取「已整理成果」分组(TIFF/ZIP);无成果的编号不出现。
+
+        「全部成果」与「所选编号成果」共用此取数,避免两处口径漂移。
+        """
+        db = self.ctx.get_db()
+        if not db or not uids:
+            return []
         groups: list[dict] = []
         try:
             from app.services.grouping_service import load_grouping
@@ -893,17 +951,37 @@ class WorkbenchView(WorkbenchSpecimenIdentityMixin, WorkbenchMediaWorkflowMixin,
                 if tiffs or zips:
                     groups.append({"uid": uid, "tiffs": tiffs, "zips": zips})
         except Exception:
-            groups = []
+            return []
+        return groups
 
-        self._results.load_many(groups)
-        result_count = sum(
+    @staticmethod
+    def _count_results(groups: list[dict]) -> int:
+        return sum(
             len({item.get("seq") or item.get("path") or item.get("name")
                  for item in g.get("tiffs", []) + g.get("zips", [])})
             for g in groups
         )
-        self._status_message(
-            f"已展示全部成果：{len(groups)} 个编号，{result_count} 项。"
-        )
+
+    def _on_specimen_selection_scope_changed(self, uids: list) -> None:
+        """侧栏多选编号 → 成果区只显示这些编号的成果;退出多选才回到旧行为。
+
+        单击也会发本信号(1 个编号),但那条路径已由 ``specimen_selected`` →
+        ``_load_specimen`` 加载成果 —— 这里必须放行,否则每次单击重复查库+重建
+        成果区(正是要治的卡顿)。仅在「从多选退回单选/清空」时恢复当前编号视图。
+        """
+        uid_list = [str(u) for u in (uids or []) if u]
+        if len(uid_list) >= 2:
+            self._multi_scope_active = True
+            groups = self._groups_for_uids(uid_list)
+            self._results.load_many(groups, title=f"所选 {len(uid_list)} 个编号成果")
+            self._status_message(
+                f"已展示所选 {len(uid_list)} 个编号："
+                f"{len(groups)} 个有成果，{self._count_results(groups)} 项。"
+            )
+            return
+        if getattr(self, "_multi_scope_active", False):
+            self._multi_scope_active = False
+            self._on_show_current_results()
 
     def _on_show_current_results(self) -> None:
         """Return the results panel to the currently selected specimen."""
