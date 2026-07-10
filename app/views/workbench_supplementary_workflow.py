@@ -323,34 +323,59 @@ class WorkbenchSupplementaryWorkflowMixin:
 
     # ── 还原归档 JPG ──────────────────────────────────────────────────────────
 
+    def _restore_target_dir(self) -> str:
+        """还原 JPG 的默认落点 = 当前工作区的待处理区(``incoming-jpg/``)。
+
+        用户裁定(2026-07-10):合成错了要撤回时,原片就该回到它出发的地方 ——
+        待处理区,直接重新出现在「待处理照片」里可以再合成。不再每次问路。
+        无当前项目时返回 ""(调用方退回目录选择框)。
+        """
+        project_dir = getattr(self.ctx, "current_project_dir", None)
+        if not project_dir:
+            return ""
+        try:
+            incoming, _results = self._resolve_capture_subdirs()
+        except Exception:
+            incoming = "incoming-jpg"
+        target = os.path.join(str(project_dir), incoming)
+        try:
+            os.makedirs(target, exist_ok=True)
+        except OSError:
+            return ""
+        return target
+
     def _on_restore_archive(self, zip_path: str) -> None:
-        """Recover the original JPGs from a result ZIP into a user-chosen folder.
+        """Recover the original JPGs from a result ZIP back into the pending area.
 
         Read-only against the archive + additive (writes new JPGs, deletes
         nothing). Heavy extraction/legacy decode work runs off-thread in RestoreWorker.
         """
         from app.utils import ui
-        from PyQt6.QtWidgets import QMessageBox
         from app.workers.restore_worker import RestoreWorker
 
         if not zip_path or not Path(zip_path).is_file():
             ui.warn(self, "还原原片", "归档文件不存在。")
             return
 
-        out = ui.get_existing_directory(self, "选择还原 JPG 的输出文件夹")
+        # §7 旧: 每次都弹目录选择框 + 目录非空再问一次是否覆盖 ——
+        # out = ui.get_existing_directory(self, "选择还原 JPG 的输出文件夹")
+        # if not out:
+        #     return
+        # overwrite = False
+        # try:
+        #     if any(True for _ in os.scandir(out)):
+        #         reply = ui.question(self, "目标文件夹非空", "...是否覆盖?")
+        #         overwrite = (reply == QMessageBox.StandardButton.Yes)
+        # except Exception:
+        #     pass
+        out = self._restore_target_dir()
         if not out:
-            return
-
+            # 无当前项目 → 无处可还原, 才退回让用户指定目录。
+            out = ui.get_existing_directory(self, "选择还原 JPG 的输出文件夹")
+            if not out:
+                return
+        # 同名 JPG 一律跳过, 不覆盖(还原是「加回原片」, 绝不动已有文件)。
         overwrite = False
-        try:
-            if any(True for _ in os.scandir(out)):  # 目录非空
-                reply = ui.question(
-                    self, "目标文件夹非空",
-                    "目标文件夹已有文件。同名 JPG 是否覆盖？\n（选「否」则跳过已存在的文件）",
-                )
-                overwrite = (reply == QMessageBox.StandardButton.Yes)
-        except Exception:
-            pass
 
         count = 0
         try:
@@ -396,6 +421,13 @@ class WorkbenchSupplementaryWorkflowMixin:
         if result.failures:
             msg += f"\n{len(result.failures)} 个失败：" + "；".join(result.failures[:3])
         ui.info(self, "还原完成", msg)
+        # 还原回待处理区后立刻重扫,否则用户看不到原片「回来了」。
+        refresh = getattr(self, "_refresh_monitor", None)
+        if callable(refresh):
+            try:
+                refresh()
+            except Exception:
+                pass
 
     def _on_restore_failed(self, message: str) -> None:
         from app.utils import ui
