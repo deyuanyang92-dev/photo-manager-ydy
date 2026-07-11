@@ -104,6 +104,14 @@ class SpecimenSidebar(QWidget):
     sync_project_overwrite_requested = pyqtSignal()
     print_labels_requested = pyqtSignal(str)
     delete_specimen_requested = pyqtSignal(str)
+    # 场景(Fable 5, 2026-07-12, 用户: "多选、批量处理是现代软件基本功能"):
+    #   侧栏本来就是 ExtendedSelection(能多选), 但右键菜单第一行 setCurrentItem()
+    #   会**把多选清空成一个** —— 选了 10 个编号右键, 打印/删除/标阶段只对 1 个生效。
+    #   现在: 右键落在已选中的条目上 -> 保住整批; 落在未选中的条目上 -> 只作用于它
+    #   (标准桌面语义)。批量走这三个新信号, 单个仍走旧信号, 老调用方不受影响。
+    print_labels_many_requested = pyqtSignal(list)     # [uid, ...]
+    delete_specimens_many_requested = pyqtSignal(list)  # [uid, ...]
+    phase_mark_many_requested = pyqtSignal(list, str)   # ([uid, ...], status_code)
     print_rna_queue_requested = pyqtSignal()
     phase_mark_requested = pyqtSignal(str, str)  # (uid, status_code) — phase dot click
 
@@ -1324,40 +1332,94 @@ class SpecimenSidebar(QWidget):
         else:
             self.activate_no_selection.emit()
 
+    def _menu_target_uids(self, item) -> list:
+        """右键菜单作用于哪些编号 —— 标准桌面语义。
+
+        · 右键点在**已选中**的条目上 → 整批选中的编号(不清空多选)
+        · 右键点在**未选中**的条目上 → 只作用于它(并把选择切到它)
+        (Fable 5, 2026-07-12)
+        """
+        if item is None:
+            return []
+        selected = [i for i in self._list.selectedItems()]
+        if item in selected and len(selected) > 1:
+            out = []
+            for i in range(self._list.count()):   # 按列表顺序, 不按点击顺序
+                it = self._list.item(i)
+                if it in selected:
+                    uid = it.data(Qt.ItemDataRole.UserRole)
+                    if uid:
+                        out.append(str(uid))
+            return out
+        # §7 旧: 无条件 self._list.setCurrentItem(item) —— 多选被清空
+        self._list.setCurrentItem(item)
+        uid = item.data(Qt.ItemDataRole.UserRole)
+        return [str(uid)] if uid else []
+
     def _on_context_menu(self, pos) -> None:
-        """Right-click specimen actions: copy UID / print labels / activate."""
+        """Right-click specimen actions: copy UID / print labels / activate.
+
+        多选时(≥2 个编号)菜单变成批量版: 复制 / 打印标签 / 标阶段 / 删除都带 (N),
+        一次作用于全部选中编号。单选行为与旧版完全一致。
+        """
         item = self._list.itemAt(pos)
         if item is None:
             return
-        self._list.setCurrentItem(item)
-        uid = item.data(Qt.ItemDataRole.UserRole)
-        if not uid:
+        uids = self._menu_target_uids(item)
+        if not uids:
             return
+        uid = uids[0]
+        n = len(uids)
+        multi = n > 1
+        sfx = f"（{n} 个）" if multi else ""
 
         menu = QMenu(self)
-        copy_act = menu.addAction("复制编号")
-        print_act = menu.addAction("打印默认标签")
+        copy_act = menu.addAction(f"复制编号{sfx}")
+        print_act = menu.addAction(f"打印默认标签{sfx}")
         menu.addSeparator()
-        edit_act = menu.addAction("在右侧编辑…")
+        if multi:
+            # 批量标阶段 —— 一批拍完了, 一次全标「已拍完」, 不用一个个点圆点
+            phase_menu = menu.addMenu(f"标记阶段{sfx}")
+            phase_acts = {
+                phase_menu.addAction(label): code
+                for label, code in (
+                    ("拍摄中", "shooting"), ("已拍完", "shot_done"),
+                    ("整理中", "organizing"), ("完成", "done"),
+                )
+            }
+            edit_act = activate_act = deactivate_act = None
+        else:
+            phase_acts = {}
+            edit_act = menu.addAction("在右侧编辑…")
+            menu.addSeparator()
+            activate_act = menu.addAction("激活")
+            deactivate_act = menu.addAction("去激活")
         menu.addSeparator()
-        activate_act = menu.addAction("激活")
-        deactivate_act = menu.addAction("去激活")
-        menu.addSeparator()
-        delete_act = menu.addAction("删除编号…")
+        delete_act = menu.addAction(f"删除编号{sfx}…")
 
         chosen = menu.exec(self._list.viewport().mapToGlobal(pos))
+        if chosen is None:
+            return
         if chosen == copy_act:
-            QApplication.clipboard().setText(uid)
+            QApplication.clipboard().setText("\n".join(uids))
         elif chosen == print_act:
-            self.print_labels_requested.emit(uid)
+            if multi:
+                self.print_labels_many_requested.emit(uids)
+            else:
+                self.print_labels_requested.emit(uid)
+        elif chosen in phase_acts:
+            self.phase_mark_many_requested.emit(uids, phase_acts[chosen])
         elif chosen == edit_act:
             self.edit_current_specimen()
         elif chosen == activate_act:
-            self.activate_requested.emit(uid)
+            self.activate_requested.emit(uid)   # 激活只对单个有意义(同时只能激活一个)
         elif chosen == deactivate_act:
             self.deactivate_requested.emit(uid)
         elif chosen == delete_act:
-            self.delete_specimen_requested.emit(uid)
+            if multi:
+                self.delete_specimens_many_requested.emit(uids)
+            else:
+                self.delete_specimen_requested.emit(uid)
 
     def copy_current_uid(self) -> bool:
         """Copy selected UID to clipboard. Returns False when nothing selected."""

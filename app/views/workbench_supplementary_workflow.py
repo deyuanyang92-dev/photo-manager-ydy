@@ -447,6 +447,212 @@ class WorkbenchSupplementaryWorkflowMixin:
         self._restore_worker.failed.connect(self._on_restore_failed)
         self._restore_worker.start()
 
+    def _on_restore_archives_batch(self, zip_paths: list[str]) -> None:
+        """Restore selected ZIPs with parallel file work and serial DB commits."""
+        from app.workers.batch_restore_worker import BatchRestoreTask, BatchRestoreWorker
+
+        running = getattr(self, "_batch_restore_worker", None)
+        if running is not None and running.isRunning():
+            ui.info(self, "批量还原原片", "已有批量还原任务正在进行。")
+            return
+
+        paths: list[str] = []
+        seen: set[str] = set()
+        for raw in list(zip_paths or []):
+            path = str(raw or "")
+            if not path.lower().endswith(".zip") or not Path(path).is_file():
+                continue
+            key = os.path.normcase(str(Path(path).resolve()))
+            if key not in seen:
+                paths.append(path)
+                seen.add(key)
+        if not paths:
+            ui.info(self, "批量还原原片", "请先勾选一个或多个有效 ZIP。")
+            return
+
+        output_dir = self._restore_target_dir()
+        tasks: list[BatchRestoreTask] = []
+        owned_count = 0
+        claimed_original_paths: set[str] = set()
+        for path in paths:
+            uid, _grouping, group = self._owning_group_for_zip(path)
+            if group is not None:
+                owned_count += 1
+            jpg_paths = tuple(
+                str(item) for item in list(getattr(group, "jpg_paths", []) or [])
+                if str(item or "").strip()
+            )
+            if group is not None and jpg_paths:
+                target_keys = {
+                    os.path.normcase(str(Path(item).resolve())) for item in jpg_paths
+                }
+                parallel_safe = not bool(target_keys & claimed_original_paths)
+                claimed_original_paths.update(target_keys)
+                tasks.append(
+                    BatchRestoreTask(
+                        zip_path=path,
+                        mode="original",
+                        original_paths=jpg_paths,
+                        owner_uid=str(uid or ""),
+                        group_index=int(getattr(group, "group_index", 0)),
+                        parallel_safe=parallel_safe,
+                    )
+                )
+                continue
+            if not output_dir:
+                ui.warn(self, "批量还原原片", "当前没有可用的待处理目录。")
+                return
+            tasks.append(
+                BatchRestoreTask(
+                    zip_path=path,
+                    mode="copy",
+                    output_dir=output_dir,
+                    owner_uid=str(uid or "") if group is not None else "",
+                    group_index=int(getattr(group, "group_index", 0)) if group is not None else -1,
+                    parallel_safe=False,
+                )
+            )
+
+        orphan_count = len(tasks) - owned_count
+        message = (
+            f"将还原所选 {len(tasks)} 个 ZIP。\n\n"
+            f"• {owned_count} 个已关联 ZIP：成功后删除项目内 ZIP，保留 TIFF\n"
+            f"• {orphan_count} 个孤儿/外部 ZIP：只恢复 JPG，原 ZIP 保留\n"
+            "• 文件解包并行执行，数据库状态顺序更新\n"
+            "• 失败项不会删除 ZIP\n\n确认继续？"
+        )
+        reply = QMessageBox.question(
+            self,
+            "批量还原原片",
+            message,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            configured = int(getattr(self.ctx.settings, "jxl_concurrency", 3))
+        except (TypeError, ValueError):
+            configured = 3
+        concurrency = max(1, min(4, configured, len(tasks)))
+        self._results.set_batch_restore_running(True, len(tasks))
+        worker = BatchRestoreWorker(tasks, concurrency=concurrency, parent=self)
+        self._batch_restore_worker = worker
+        worker.started_batch.connect(self._on_batch_restore_started)
+        worker.progress.connect(self._on_batch_restore_progress)
+        worker.finished_batch.connect(self._on_batch_restore_finished)
+        worker.failed.connect(self._on_batch_restore_failed)
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
+
+    def _on_batch_restore_started(self, total: int, concurrency: int) -> None:
+        self._status_message(
+            f"正在批量还原 {total} 个 ZIP（文件并行 {concurrency} 路，数据库顺序提交）"
+        )
+
+    def _on_batch_restore_progress(self, current: int, total: int, zip_path: str) -> None:
+        self._status_message(
+            f"批量还原 {current}/{total}：{Path(zip_path).name}"
+        )
+
+    def _finalize_batch_restored_group(self, task) -> tuple[bool, bool, str]:
+        from app.services.grouping_service import _utc_now_iso, load_grouping, save_grouping
+
+        db = self.ctx.get_db()
+        if not db:
+            return False, False, "数据库不可用"
+        try:
+            grouping = load_grouping(db, task.owner_uid)
+            target = next(
+                (
+                    group for group in grouping.groups
+                    if int(group.group_index) == int(task.group_index)
+                    and os.path.normcase(str(Path(group.archive_zip or "").resolve()))
+                    == os.path.normcase(str(Path(task.zip_path).resolve()))
+                ),
+                None,
+            )
+            if target is None:
+                return False, False, "找不到对应分组或 ZIP 登记已变化"
+            target.archive_zip = None
+            target.status = "composed"
+            target.updated_at = _utc_now_iso()
+            save_grouping(db, task.owner_uid, grouping.groups, clean_phantoms=False)
+        except Exception as exc:  # noqa: BLE001
+            return False, False, f"状态更新失败：{exc}"
+
+        try:
+            removed = bool(self._retire_zip(task.zip_path))
+        except OSError as exc:
+            return True, False, f"状态已更新，但 ZIP 删除失败：{exc}"
+        return True, removed, "" if removed else "外部 ZIP 已保留"
+
+    def _on_batch_restore_finished(self, summary) -> None:
+        completed = 0
+        deleted = 0
+        restored_jpg = 0
+        skipped_jpg = 0
+        failures: list[str] = []
+        processed_paths: list[str] = []
+
+        for outcome in list(getattr(summary, "outcomes", []) or []):
+            task = outcome.task
+            processed_paths.append(task.zip_path)
+            result = getattr(outcome, "result", None)
+            if outcome.error:
+                failures.append(f"{Path(task.zip_path).name}：{outcome.error}")
+                continue
+            if result is None or not getattr(result, "ok", False):
+                reason = getattr(result, "reason", "") or "；".join(
+                    list(getattr(result, "failures", []) or [])[:2]
+                )
+                failures.append(f"{Path(task.zip_path).name}：{reason or '还原失败'}")
+                continue
+
+            count = int(getattr(result, "count", 0) or 0)
+            skipped = len(list(getattr(result, "skipped", []) or []))
+            restored_jpg += count
+            skipped_jpg += skipped
+            if task.owner_uid:
+                if count <= 0:
+                    failures.append(f"{Path(task.zip_path).name}：未写出 JPG，ZIP 已保留")
+                    continue
+                ok, removed, detail = self._finalize_batch_restored_group(task)
+                if not ok:
+                    failures.append(f"{Path(task.zip_path).name}：{detail}")
+                    continue
+                if detail and not removed:
+                    failures.append(f"{Path(task.zip_path).name}：{detail}")
+                deleted += int(removed)
+            completed += 1
+
+        self._batch_restore_worker = None
+        self._results.set_batch_restore_running(False)
+        self._results.clear_result_selection(processed_paths)
+        self._after_binding_changed()
+
+        lines = [
+            f"完成 {completed}/{len(getattr(summary, 'outcomes', []) or [])} 个 ZIP",
+            f"恢复 {restored_jpg} 张 JPG，删除 {deleted} 个项目内 ZIP",
+        ]
+        if skipped_jpg:
+            lines.append(f"跳过 {skipped_jpg} 张已存在 JPG")
+        if failures:
+            lines.append(f"{len(failures)} 项需要检查：")
+            lines.extend(f"• {item}" for item in failures[:6])
+        message = "\n".join(lines)
+        self._status_message(message.replace("\n", "；"))
+        if failures:
+            ui.warn(self, "批量还原完成（有失败项）", message)
+        else:
+            ui.info(self, "批量还原完成", message)
+
+    def _on_batch_restore_failed(self, reason: str) -> None:
+        self._batch_restore_worker = None
+        self._results.set_batch_restore_running(False)
+        ui.critical(self, "批量还原失败", reason or "批量还原线程异常退出。")
+
     def _on_restore_started(self, count: int) -> None:
         try:
             bar = self.window().statusBar()

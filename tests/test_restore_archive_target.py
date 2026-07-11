@@ -22,7 +22,7 @@ from app.views.workbench_supplementary_workflow import (
 class _Harness(WorkbenchSupplementaryWorkflowMixin):
     """只装配还原路径所需的最小上下文(不构造整个 QWidget 工作台)。"""
 
-    def __init__(self, project_dir: str) -> None:
+    def __init__(self, project_dir: str = "") -> None:
         self.ctx = types.SimpleNamespace(
             current_project_dir=project_dir, settings=None
         )
@@ -386,3 +386,228 @@ def test_undo_organise_keeps_zip_when_state_save_fails(project, monkeypatch):
     assert persisted.archive_zip and persisted.status == "organized"
     assert grouping.groups[0].archive_zip and grouping.groups[0].status == "organized"
     assert warnings and "ZIP 已保留" in warnings[-1]
+
+
+def test_batch_restore_finalizes_groups_serially_and_deletes_project_zips(
+    project, monkeypatch
+):
+    import sqlite3
+    from app.db import db_manager
+    from app.services.archive_service import RestoreResult
+    from app.services.grouping_service import Group, load_grouping, save_grouping
+    from app.workers.batch_restore_worker import (
+        BatchRestoreOutcome,
+        BatchRestoreSummary,
+        BatchRestoreTask,
+    )
+
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    db_manager.ensure_schema(db)
+    tasks = []
+    for index in range(2):
+        uid = f"UID-{index}"
+        zip_path = project / "results" / f"batch-{index}.zip"
+        zip_path.parent.mkdir(parents=True, exist_ok=True)
+        zip_path.write_bytes(b"zip-placeholder")
+        save_grouping(
+            db,
+            uid,
+            [
+                Group(
+                    group_index=0,
+                    composed_tiff_path=str(project / "results" / f"{uid}.tif"),
+                    archive_zip=str(zip_path),
+                    jpg_paths=[str(project / "incoming-jpg" / f"{index}.jpg")],
+                    status="organized",
+                )
+            ],
+            clean_phantoms=False,
+        )
+        tasks.append(
+            BatchRestoreTask(
+                zip_path=str(zip_path),
+                mode="original",
+                owner_uid=uid,
+                group_index=0,
+            )
+        )
+
+    h = _UndoHarness(str(project), db)
+    h._results = types.SimpleNamespace(
+        set_batch_restore_running=lambda *a, **k: None,
+        clear_result_selection=lambda *a, **k: None,
+    )
+    h._after_binding_changed = lambda *a, **k: None
+    from app.utils import ui as _ui
+    monkeypatch.setattr(_ui, "info", lambda *a, **k: None)
+    monkeypatch.setattr(_ui, "warn", lambda *a, **k: None)
+    summary = BatchRestoreSummary(
+        outcomes=[
+            BatchRestoreOutcome(
+                task=task,
+                result=RestoreResult(
+                    output_dir=str(project / "incoming-jpg"),
+                    restored=[str(project / "incoming-jpg" / f"{index}.jpg")],
+                    count=1,
+                    ok=True,
+                ),
+            )
+            for index, task in enumerate(tasks)
+        ],
+        concurrency=2,
+    )
+
+    h._on_batch_restore_finished(summary)
+
+    for task in tasks:
+        group = load_grouping(db, task.owner_uid).groups[0]
+        assert group.status == "composed"
+        assert not group.archive_zip
+        assert not os.path.exists(task.zip_path)
+    assert not (project / "_retired-zip").exists()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 批量还原原片 —— 端到端 (用户 2026-07-12: "我在 results 中选多个 zip, 然后还原
+# 原片, 可以批量操作")。worker 层已有并行/失败隔离测试; 这里补的是**结果**:
+# 批量跑完后 JPG 真回来了吗 / ZIP 真删了吗 / 组状态真退回了吗 / 失败项的 ZIP 有没有
+# 被误删。(Fable 5, 2026-07-12)
+# ─────────────────────────────────────────────────────────────────────────────
+from PyQt6.QtCore import QObject as _QObject
+
+
+class _BatchHarness(_QObject, _Harness):
+    # BatchRestoreWorker(parent=self) 要求宿主是 QObject —— 真工作台是 QWidget。
+    def __init__(self, project_dir: str, db) -> None:
+        _QObject.__init__(self)
+        _Harness.__init__(self, project_dir)
+        self.ctx.get_db = lambda: db
+        self.ctx.settings = types.SimpleNamespace(jxl_concurrency=3)
+        self._grouping = types.SimpleNamespace(load_grouping=lambda *a, **k: None)
+        self._results = types.SimpleNamespace(
+            set_batch_restore_running=lambda *a, **k: None,
+            clear_result_selection=lambda *a, **k: None,
+        )
+        self.infos: list = []
+
+    def _after_binding_changed(self, *a, **k) -> None:
+        pass
+
+    from app.views.workbench_result_workflow import WorkbenchResultWorkflowMixin as _RW
+    _retire_zip = _RW._retire_zip
+
+    def _refresh_results_column(self, *a, **k) -> None:
+        pass
+
+    def _refresh_monitor(self, *a, **k) -> None:
+        pass
+
+
+def _owned_zip(project, db, idx: int, *, corrupt: bool = False) -> tuple[str, str, str]:
+    """造一个「已整理」组: results/rN.zip + tN.tif + incoming-jpg/PN.jpg 的原路径。"""
+    import hashlib
+    import json
+    from app.services.grouping_service import Group, save_grouping
+
+    uid = f"FJ-XM-A0{idx}-DLC00{idx}-T95E-20260601"
+    jpg = project / "incoming-jpg" / f"P{idx}.jpg"
+    jpg.parent.mkdir(parents=True, exist_ok=True)
+    data = b"\xff\xd8\xff" + bytes([idx]) * 40
+    zp = project / "results" / f"r{idx}.zip"
+    zp.parent.mkdir(parents=True, exist_ok=True)
+    if corrupt:
+        zp.write_bytes(b"not a zip at all")          # 解包必失败 → ZIP 必须留着
+    else:
+        with zipfile.ZipFile(zp, "w") as zf:
+            zf.writestr(f"P{idx}.jpg", data)
+            zf.writestr("manifest.json", json.dumps({"files": [{
+                "archiveName": f"P{idx}.jpg",
+                "originalSize": len(data),
+                "originalSha256": hashlib.sha256(data).hexdigest(),
+            }]}))
+    tif = project / "results" / f"t{idx}.tif"
+    tif.write_bytes(b"tif")
+    save_grouping(
+        db, uid,
+        [Group(group_index=0, composed_tiff_path=str(tif), archive_zip=str(zp),
+               jpg_paths=[str(jpg)], status="organized")],
+        clean_phantoms=False,
+    )
+    return uid, str(zp), str(jpg)
+
+
+def test_batch_restore_three_zips_end_to_end(project, monkeypatch, qtbot):
+    """勾选 3 个 ZIP → 一次确认 → JPG 全回原位, 3 个 ZIP 全删, TIF 母版全在。"""
+    import sqlite3
+    from PyQt6.QtWidgets import QMessageBox
+    from app.db import db_manager
+    from app.services.grouping_service import load_grouping
+
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    db_manager.ensure_schema(db)
+
+    made = [_owned_zip(project, db, i) for i in range(3)]
+    for _uid, _zp, jpg in made:
+        assert not os.path.isfile(jpg)   # 整理后原片已被 ZIP 消费
+
+    h = _BatchHarness(str(project), db)
+    monkeypatch.setattr(QMessageBox, "question",
+                        staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes))
+    monkeypatch.setattr(QMessageBox, "warning", staticmethod(lambda *a, **k: None))
+    # 收尾弹窗要 QWidget 父窗口, 测试壳是 QObject -> 屏蔽(不影响被测的文件/DB 行为)
+    from app.views import workbench_supplementary_workflow as wsw
+    monkeypatch.setattr(wsw.ui, "info", lambda *a, **k: None)
+    monkeypatch.setattr(wsw.ui, "warn", lambda *a, **k: None)
+
+    # QThread 在测试里同步跑: start() 直接执行 run()
+    from app.workers import batch_restore_worker as brw
+    monkeypatch.setattr(brw.BatchRestoreWorker, "start", brw.BatchRestoreWorker.run,
+                        raising=False)
+
+    h._on_restore_archives_batch([zp for _u, zp, _j in made])
+
+    for uid, zp, jpg in made:
+        assert os.path.isfile(jpg), f"{jpg} 应还原回待处理区"
+        assert not os.path.isfile(zp), f"{zp} 应在还原成功后删除"
+        g = load_grouping(db, uid).groups[0]
+        assert not g.archive_zip, "ZIP 登记必须清除"
+        assert g.status == "composed", "组退回「已合成、待整理」"
+        assert os.path.isfile(g.composed_tiff_path), "TIF 母版不动(红线)"
+    db.close()
+
+
+def test_batch_restore_failed_item_keeps_its_zip(project, monkeypatch, qtbot):
+    """一个坏 ZIP + 一个好 ZIP: 好的还原并删除, 坏的**必须保留 ZIP 和归档登记**。"""
+    import sqlite3
+    from PyQt6.QtWidgets import QMessageBox
+    from app.db import db_manager
+    from app.services.grouping_service import load_grouping
+
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    db_manager.ensure_schema(db)
+
+    good = _owned_zip(project, db, 0)
+    bad = _owned_zip(project, db, 1, corrupt=True)
+
+    h = _BatchHarness(str(project), db)
+    monkeypatch.setattr(QMessageBox, "question",
+                        staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes))
+    monkeypatch.setattr(QMessageBox, "warning", staticmethod(lambda *a, **k: None))
+    from app.views import workbench_supplementary_workflow as wsw
+    monkeypatch.setattr(wsw.ui, "info", lambda *a, **k: None)
+    monkeypatch.setattr(wsw.ui, "warn", lambda *a, **k: None)
+    from app.workers import batch_restore_worker as brw
+    monkeypatch.setattr(brw.BatchRestoreWorker, "start", brw.BatchRestoreWorker.run,
+                        raising=False)
+
+    h._on_restore_archives_batch([good[1], bad[1]])
+
+    assert os.path.isfile(good[2]) and not os.path.isfile(good[1]), "好的: JPG 回来, ZIP 删除"
+    assert os.path.isfile(bad[1]), "坏的: ZIP 必须保留(原片没回来, 归档不能丢)"
+    g_bad = load_grouping(db, bad[0]).groups[0]
+    assert g_bad.archive_zip, "坏的: 归档登记必须保留"
+    assert g_bad.status == "organized", "坏的: 组状态不得退回"
+    db.close()

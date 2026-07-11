@@ -354,6 +354,10 @@ class WorkbenchView(WorkbenchSpecimenIdentityMixin, WorkbenchMediaWorkflowMixin,
         self._sidebar.delete_specimen_requested.connect(self._confirm_delete_specimen)
         self._sidebar.print_rna_queue_requested.connect(self._on_print_rna_queue)
         self._sidebar.phase_mark_requested.connect(self._on_phase_mark)
+        # 批量(Fable 5, 2026-07-12): 侧栏多选右键 -> 一次处理整批编号
+        self._sidebar.print_labels_many_requested.connect(self._on_print_labels_many)
+        self._sidebar.delete_specimens_many_requested.connect(self._confirm_delete_specimens_many)
+        self._sidebar.phase_mark_many_requested.connect(self._on_phase_mark_many)
         outer.addWidget(self._sidebar)
 
         # Wire collab service signals → sidebar strip refresh + collab card refresh
@@ -460,6 +464,7 @@ class WorkbenchView(WorkbenchSpecimenIdentityMixin, WorkbenchMediaWorkflowMixin,
         # at-a-glance compose/compress state.
         self._results = ResultsColumn()
         self._results.restore_requested.connect(self._on_restore_archive)
+        self._results.restore_many_requested.connect(self._on_restore_archives_batch)
         self._results.specimen_requested.connect(self._on_specimen_selected)
         self._results.show_all_requested.connect(self._on_show_all_results)
         self._results.current_requested.connect(self._on_show_current_results)
@@ -468,6 +473,9 @@ class WorkbenchView(WorkbenchSpecimenIdentityMixin, WorkbenchMediaWorkflowMixin,
         self._results.rebind_result_requested.connect(self._on_rebind_result)
         self._results.tiff_naming_check_requested.connect(
             self._on_tiff_naming_check_path
+        )
+        self._results.tiff_naming_check_many_requested.connect(
+            lambda paths: self._run_tiff_naming_check(paths=list(paths or []))
         )
         self._results.tiff_delete_requested.connect(self._on_delete_result_tiff_path)
         centre.addWidget(self._results)
@@ -857,6 +865,10 @@ class WorkbenchView(WorkbenchSpecimenIdentityMixin, WorkbenchMediaWorkflowMixin,
         sync_worker = getattr(self, "_collab_file_sync_worker", None)
         if sync_worker is not None and sync_worker.isRunning():
             sync_worker.wait(3000)
+        batch_restore = getattr(self, "_batch_restore_worker", None)
+        if batch_restore is not None and batch_restore.isRunning():
+            batch_restore.cancel()
+            batch_restore.wait(30000)
 
     # ── Filesystem watcher helpers ──────────────────────────────────────────
 
@@ -1065,6 +1077,53 @@ class WorkbenchView(WorkbenchSpecimenIdentityMixin, WorkbenchMediaWorkflowMixin,
         )
         if ret == QMessageBox.StandardButton.Yes:
             self._on_delete_specimen(uid)
+
+    # ── 批量(侧栏多选) —— Fable 5, 2026-07-12 ────────────────────────────────
+    # 场景(用户): "多选、批量处理是现代软件基本功能"。侧栏本来能 Ctrl 多选,
+    #   但右键会把多选清空成一个 -> 20 个编号打标签要右键 20 次。
+    # 做法: 批量走新信号, 一次确认 -> 循环调用**原来的单个实现**, 逐个成败汇总,
+    #   不复制业务逻辑(单个路径怎么改, 批量自动跟随)。
+    def _confirm_delete_specimens_many(self, uids: list) -> None:
+        items = [str(u).strip() for u in (uids or []) if str(u).strip()]
+        if not items:
+            return
+        if len(items) == 1:
+            self._confirm_delete_specimen(items[0])
+            return
+        preview = "\n".join(items[:8]) + ("\n…" if len(items) > 8 else "")
+        ret = QMessageBox.question(
+            self,
+            "删除标本编号",
+            f"确定删除这 {len(items)} 个标本编号吗？\n\n{preview}\n\n"
+            "只删除工作台中的编号记录和关联状态，不删除磁盘上的照片或成果文件。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if ret != QMessageBox.StandardButton.Yes:
+            return
+        for uid in items:
+            self._on_delete_specimen(uid)
+        self._status_message(f"已删除 {len(items)} 个编号")
+
+    def _on_print_labels_many(self, uids: list) -> None:
+        items = [str(u).strip() for u in (uids or []) if str(u).strip()]
+        if not items:
+            return
+        for uid in items:
+            self._on_print_labels(uid)
+        self._status_message(f"已提交 {len(items)} 个编号的标签打印")
+
+    def _on_phase_mark_many(self, uids: list, status: str) -> None:
+        items = [str(u).strip() for u in (uids or []) if str(u).strip()]
+        if not items or not status:
+            return
+        ok = sum(1 for uid in items if self._set_phase(uid, status))
+        self._sidebar.refresh_phases()
+        self._refresh_batch_header()
+        if ok == len(items):
+            self._status_message(f"已标记 {ok} 个编号")
+        else:
+            self._status_message(f"已标记 {ok}/{len(items)} 个编号，其余失败")
 
     def _on_delete_specimen(self, uid: str) -> None:
         """Delete a specimen and local DB references owned by the workbench."""

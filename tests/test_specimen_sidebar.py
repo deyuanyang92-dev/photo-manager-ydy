@@ -827,3 +827,62 @@ def test_attention_button_label_reflects_submode(ctx, db):
     assert "缺分类" in sb._filter_attention_btn.text()
     sb._set_filter_mode("all")
     assert "资料待补" in sb._filter_attention_btn.text()
+
+
+class TestSidebarBatchActions:
+    """场景(用户 2026-07-12): 「勾选多个 ZIP 应该能批量还原; 软件其他地方也应该支持
+    多选批量 —— 这是现代软件基本功能」。
+
+    编号侧栏本来就是 ExtendedSelection(能多选), 但右键菜单第一行是
+    `self._list.setCurrentItem(item)` —— **把多选清空成一个**, 于是选了 10 个编号
+    右键, 打印标签 / 删除 / 标阶段 全都只对 1 个生效。这里把批量接上。
+    """
+
+    @staticmethod
+    def _sb_with(qtbot, uids):
+        from unittest.mock import MagicMock
+        from app.widgets.specimen_sidebar import SpecimenSidebar
+        from PyQt6.QtCore import Qt as _Qt
+        from PyQt6.QtWidgets import QListWidgetItem
+        ctx = MagicMock()
+        ctx.get_db.return_value = None
+        sb = SpecimenSidebar(ctx)
+        qtbot.addWidget(sb)
+        sb._list.clear()
+        for u in uids:
+            it = QListWidgetItem(u)
+            it.setData(_Qt.ItemDataRole.UserRole, u)
+            sb._list.addItem(it)
+        return sb
+
+    def test_right_click_keeps_multi_selection(self, qtbot):
+        sb = self._sb_with(qtbot, ["A-1", "A-2", "A-3"])
+        for i in range(3):
+            sb._list.item(i).setSelected(True)
+        # 右键落在已选中的条目上 —— 多选不得被清空
+        uids = sb._menu_target_uids(sb._list.item(1))
+        assert uids == ["A-1", "A-2", "A-3"]
+        assert len(sb._list.selectedItems()) == 3
+
+    def test_right_click_outside_selection_targets_that_item(self, qtbot):
+        sb = self._sb_with(qtbot, ["A-1", "A-2", "A-3"])
+        sb._list.item(0).setSelected(True)
+        # 右键落在**未选中**的条目上 -> 只作用于它(标准桌面语义)
+        uids = sb._menu_target_uids(sb._list.item(2))
+        assert uids == ["A-3"]
+
+    def test_batch_signals_carry_all_uids(self, qtbot):
+        sb = self._sb_with(qtbot, ["A-1", "A-2"])
+        for i in range(2):
+            sb._list.item(i).setSelected(True)
+        got = {}
+        sb.print_labels_many_requested.connect(lambda u: got.update(print=u))
+        sb.delete_specimens_many_requested.connect(lambda u: got.update(delete=u))
+        sb.phase_mark_many_requested.connect(lambda u, s: got.update(phase=(u, s)))
+
+        sb.print_labels_many_requested.emit(["A-1", "A-2"])
+        sb.delete_specimens_many_requested.emit(["A-1", "A-2"])
+        sb.phase_mark_many_requested.emit(["A-1", "A-2"], "shot_done")
+        assert got["print"] == ["A-1", "A-2"]
+        assert got["delete"] == ["A-1", "A-2"]
+        assert got["phase"] == (["A-1", "A-2"], "shot_done")
