@@ -526,6 +526,29 @@ class WorkbenchComposeWorkflowMixin:
         """启动批量合成队列。organise=True 时每组合成完后立即整理该组。"""
         if not uid:
             return
+        # 场景: 批量合成/合成+整理跑到一半, 用户又点了一次批量按钮。
+        # 理由(Fable 5, 2026-07-11 拍照工作区审查 A3): 旧代码无守卫, 第二次点击
+        #   直接 self._batch = {...} 覆盖在飞批次 → 已启动的合成回调
+        #   (_batch_group_done)读到新队列, 旧队列组变孤儿、同组可能起两个归档
+        #   worker(double-archive)。organise 侧本有守卫(workbench_organise_
+        #   workflow.py:73)但只查自己; 这里补成双向互斥: 任一批量在跑, 都拒绝
+        #   再启动并给可见提示(不是静默覆盖)。
+        # §7 旧: (无守卫, 直接往下走到 self._batch = {...})
+        running_label = None
+        if getattr(self, "_batch", None) is not None:
+            running_label = str(self._batch.get("label") or "批量合成")
+        elif getattr(self, "_organise_batch", None) is not None:
+            running_label = str(self._organise_batch.get("label") or "批量整理")
+        if running_label:
+            self._batch_status(f"{running_label}正在运行，请稍候。")
+            self._workflow_notice(
+                "批量任务已在运行",
+                f"{running_label}尚未完成，请等待当前任务结束后再启动新的批量操作。",
+                state="info",
+                force_show=True,
+                task_key=f"batch-compose-running:{uid}",
+            )
+            return
         grouping = self._get_grouping_for_uid(uid)
         selected = set()
         try:

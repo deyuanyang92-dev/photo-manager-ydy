@@ -7767,3 +7767,42 @@ class TestHeliconCancelRelease:
 
         assert worker not in w._helicon_workers, "取消后 worker 必须从活动集合移除(不泄漏)"
         assert ("fail", "用户取消") in results
+
+
+class TestBatchMutualExclusion:
+    """批量合成/批量整理互斥(A3, 2026-07-11 审查发现)。
+
+    根因: _start_compose_batch 无守卫, 批量跑一半再点一次 → self._batch 被
+    直接覆盖 → 在飞回调读到新队列, 旧队列组变孤儿、同组 double-archive。
+    修复: 双向 running-guard, 任一批量在跑都拒绝再启动并给可见提示。
+    """
+
+    def _wb(self, tmp_path):
+        from app.views.workbench_view import WorkbenchView
+        return WorkbenchView(_make_ctx(project_dir=str(tmp_path)))
+
+    def test_second_compose_batch_does_not_clobber_running_one(self, tmp_path):
+        w = self._wb(tmp_path)
+        running = {"uid": "U1", "queue": [1, 2], "organise": True,
+                   "total": 2, "done": 0, "label": "批量合成+整理",
+                   "task_key": "batch-compose:U1:organise"}
+        w._batch = dict(running)
+        w._start_compose_batch("U2", organise=False)
+        assert w._batch == running, "在飞批次不得被第二次点击覆盖"
+
+    def test_compose_batch_blocked_while_organise_batch_running(self, tmp_path):
+        w = self._wb(tmp_path)
+        w._batch = None
+        w._organise_batch = {"uid": "U1", "queue": [1], "total": 1,
+                             "done": 0, "label": "批量整理"}
+        w._start_compose_batch("U2", organise=True)
+        assert w._batch is None, "整理批在跑时不得启动合成批"
+
+    def test_organise_batch_blocked_while_compose_batch_running(self, tmp_path):
+        w = self._wb(tmp_path)
+        w._organise_batch = None
+        w._batch = {"uid": "U1", "queue": [1], "organise": True,
+                    "total": 1, "done": 0, "label": "批量合成+整理",
+                    "task_key": "k"}
+        w._organise_all_batch("U2")
+        assert w._organise_batch is None, "合成批在跑时不得再起整理批"

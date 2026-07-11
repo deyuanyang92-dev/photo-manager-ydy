@@ -70,11 +70,21 @@ class WorkbenchOrganiseWorkflowMixin:
                 task_key=f"organise-batch-empty:{uid}:{label}",
             )
             return
-        if getattr(self, "_organise_batch", None) is not None:
-            self._batch_status("整理队列正在运行，请稍候。")
+        # 场景: 批量合成+整理(_batch)跑一半, 用户点「批量整理」。
+        # 理由(Fable 5, 2026-07-11 A3): 旧守卫只查自己的 _organise_batch, 不知道
+        #   compose 批也在驱动整理 → 同一组可能被两条批量链各起一个归档 worker。
+        #   补成双向: compose 批在跑也拒绝。
+        # §7 旧: if getattr(self, "_organise_batch", None) is not None: (只查单侧)
+        _compose_batch = getattr(self, "_batch", None)
+        if getattr(self, "_organise_batch", None) is not None or _compose_batch is not None:
+            running = (
+                str(_compose_batch.get("label") or "批量合成")
+                if _compose_batch is not None else "整理队列"
+            )
+            self._batch_status(f"{running}正在运行，请稍候。")
             self._workflow_notice(
                 f"{label}已在运行",
-                "整理队列正在运行，请等待当前任务完成。",
+                f"{running}正在运行，请等待当前任务完成。",
                 state="info",
                 force_show=True,
                 task_key=f"organise-batch-running:{uid}:{label}",
