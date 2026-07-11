@@ -32,7 +32,7 @@ from collections import OrderedDict, deque
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Optional
 
-from PyQt6.QtCore import Qt, QEvent, QMimeData, QTimer, QUrl, pyqtSignal
+from PyQt6.QtCore import Qt, QEvent, QMimeData, QSize, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QDrag, QKeySequence, QPixmap, QShortcut
 from PyQt6.QtWidgets import (
     QApplication,
@@ -138,6 +138,68 @@ def _clamp_file_thumb_size(size: int) -> int:
 
 def _file_card_height_for_thumb(size: int) -> int:
     return max(78, int(size) + 18)
+
+
+class _ElideLabel(QLabel):
+    """一行提示文字, 窄了自动省略号, 且**永不**把所在栏撑宽。
+
+    场景: 批次条(UID | 状态 | 下一步提示 | JPG/TIFF 计数)在 1366 窄屏上要和
+      左右两栏抢宽度。普通 QLabel 的 minimumSizeHint = 整句文字宽度 ->
+      直接把中间栏的最小宽度顶起来 -> 三栏挤爆(这次 UI 重构踩过的坑)。
+    理由(Fable 5, 2026-07-12): 最小宽度写死一个很小的值, 空间不够就 elide,
+      提示是"锦上添花"信息, 宁可被省略也不能挤压主界面。
+    """
+
+    def __init__(self, text: str = "", parent=None) -> None:
+        super().__init__(text, parent)
+        self._full = text
+        self._short = text
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+
+    def setText(self, text: str) -> None:  # type: ignore[override]
+        self.set_texts(text or "", text or "")
+
+    def set_texts(self, full: str, short: str = "") -> None:
+        """三档降级: 宽 -> 全句; 窄 -> 短句; 再窄 -> 留白。
+
+        理由(Fable 5, 2026-07-12): 单纯 elide 在窄栏上会缩成「下…」这种半截字,
+        比不显示还难看。宁可整句让位, 也不留残字。
+        """
+        self._full = full or ""
+        self._short = short or self._full
+        self._apply_elide()
+        self.updateGeometry()
+
+    def full_text(self) -> str:
+        return self._full
+
+    def sizeHint(self) -> QSize:  # type: ignore[override]
+        # 必须按**全文**算, 不能按当前(可能已省略的)文字算 —— 否则:
+        # elide -> sizeHint 变小 -> 布局给的宽度更小 -> 再 elide ... 一路缩成"下"。
+        base = super().sizeHint()
+        pad = 12
+        return QSize(self.fontMetrics().horizontalAdvance(self._full) + pad, base.height())
+
+    def minimumSizeHint(self) -> QSize:  # type: ignore[override]
+        # 0 宽: 挤到极限时这句提示整个让位, 一个像素都不跟 UID / 计数胶囊抢。
+        base = super().minimumSizeHint()
+        return QSize(0, base.height())
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        self._apply_elide()
+
+    def _apply_elide(self) -> None:
+        avail = max(0, self.width())
+        if avail <= 0:  # 还没布局 -> 先按全句(sizeHint 才拿得到正确宽度)
+            QLabel.setText(self, self._full)
+            return
+        fm = self.fontMetrics()
+        for candidate in (self._full, self._short):
+            if candidate and fm.horizontalAdvance(candidate) <= avail:
+                QLabel.setText(self, candidate)
+                return
+        QLabel.setText(self, "")  # 连短句都放不下 -> 留白, 不留「下…」这种半截字
 
 
 class _FileCard(QFrame):
@@ -584,6 +646,19 @@ class MonitorPanel(QWidget):
             b_lay.addWidget(btn)
             btn.setVisible(False)  # only the current phase is shown (sidebar has the full set)
             self._phase_pills[code] = btn
+
+        # 场景: 新手打开工作区, 面前 6 个按钮 + 一堆照片, 不知道先点哪个。
+        #   app/widgets/workbench_dashboard.py::_WorkflowDashboard 本来做过这件事
+        #   (顶部一整条"下一步"仪表盘), 但它同时重复了项目名/编号/JPG-TIFF 计数/
+        #   合成整理按钮 —— 全都已经在别处有了, 白吃一整行高度, 所以那条胖面板
+        #   一直没被接上(死代码, 保留不删, 见 §7)。
+        # 理由(Fable 5, 2026-07-12 用户拍板"你决定, 但保证美观"): 只把那面板里
+        #   **唯一不重复**的东西 —— 那句"下一步该干嘛" —— 救出来, 塞进批次条现有
+        #   空白处(stretch 前), 零新增高度; 没待处理照片时隐藏, 不唠叨。
+        self._next_hint = _ElideLabel("")
+        self._next_hint.setObjectName("NextStepHint")
+        self._next_hint.hide()
+        b_lay.addWidget(self._next_hint)  # 不给 stretch: 取自然宽, 富余宽度归下面的 stretch
 
         b_lay.addStretch()
         self._stat_today = QLabel("JPG 0")
@@ -1036,6 +1111,34 @@ class MonitorPanel(QWidget):
         if not active_uid:
             self.set_phase(None)
 
+    def _update_next_hint(self) -> None:
+        """批次条里的「下一步 › …」一句话引导。
+
+        规则(取自 workbench_dashboard._WorkflowDashboard.update_state 的
+        title/detail 分支, 压成一行):
+          待处理为空        -> 隐藏(没事干就别唠叨)
+          只有 JPG          -> 选 JPG -> 合成
+          有 TIFF(外部成片)  -> 选 TIFF + 对应 JPG -> 整理
+        """
+        scan = getattr(self, "_scan_result", None)
+        jpg_c = len(getattr(scan, "jpg_files", []) or []) if scan else 0
+        tiff_c = len(getattr(scan, "tiff_files", []) or []) if scan else 0
+
+        if not jpg_c and not tiff_c:
+            self._next_hint.hide()
+            self._next_hint.setText("")
+            return
+
+        if tiff_c and jpg_c:
+            text, short = "下一步 › 选中 TIFF 和它的原片 JPG，点「整理」", "下一步 › 整理"
+        elif tiff_c:
+            text, short = "下一步 › 选中 TIFF，再选对应 JPG，点「整理」", "下一步 › 整理"
+        else:
+            text, short = "下一步 › 选中要用的 JPG，点「合成」", "下一步 › 合成"
+        self._next_hint.set_texts(text, short)
+        self._next_hint.setToolTip(text)
+        self._next_hint.show()
+
     def set_phase(self, status: Optional[str]) -> None:
         """Reflect the confirmed task status on the phase pills (exclusive)."""
         self._current_phase = status if status in self._phase_pills else None
@@ -1063,6 +1166,7 @@ class MonitorPanel(QWidget):
             return
         self._last_scan_sig = sig
         self._rebuild_grid()
+        self._update_next_hint()  # 计数变了 -> 「下一步」跟着变(Fable 5, 2026-07-12)
 
     def set_import_busy(self, busy: bool) -> None:
         """Reflect a background add-photo import in the toolbar."""
@@ -1207,6 +1311,7 @@ class MonitorPanel(QWidget):
         self._selection_bar.hide()
         self._unattr_warning.hide()
         self._empty_label.show()
+        self._update_next_hint()  # 清空项目 -> 隐藏引导(Fable 5, 2026-07-12)
 
     # ── Internal ──────────────────────────────────────────────────────────────
 

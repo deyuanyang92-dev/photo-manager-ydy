@@ -1773,6 +1773,15 @@ QLabel#ActivateState {{
     background-color: {t["panel_inset"]};
     border: 1px solid {t["border"]};
 }}
+/* 批次条里的「下一步 › …」引导句 —— 静音灰、无底色, 只在有待处理照片时出现,
+   不能比 UID / 状态胶囊更抢眼 (Fable 5, 2026-07-12) */
+QLabel#NextStepHint {{
+    color: {t["muted_dim"]};
+    font-size: {t["font_xs"]};
+    padding: 0 6px;
+    background: transparent;
+    border: none;
+}}
 QLabel#ActivateStateOn {{
     color: {t["accent_hover"]};
     font-size: {t["font_xs"]};

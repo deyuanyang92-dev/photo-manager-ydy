@@ -1150,3 +1150,33 @@ class TestSelectedNotActiveHint:
         uid = "浙江-三门湾-B2-001-R-20260711"
         panel.set_batch(uid, uid)
         assert panel._activate_state.isHidden() is True
+
+
+class TestNextStepHint:
+    """场景: 新手打开工作区, 一堆按钮不知道先点哪个。批次条空白处给一句
+    「下一步 › ...」, 按当前待处理内容变化。没照片时不显示(不唠叨)。
+    """
+
+    @staticmethod
+    def _mk(jpgs=0, tiffs=0):
+        return _scan(
+            [_jpg_entry(name=f"j{i}.jpg", path=f"/tmp/j{i}.jpg") for i in range(jpgs)],
+            [_tiff_entry(name=f"t{i}.tif", path=f"/tmp/t{i}.tif") for i in range(tiffs)],
+        )
+
+    def test_hidden_when_no_photos(self, panel):
+        panel.load_scan(self._mk(0, 0))
+        assert panel._next_hint.isHidden() is True
+
+    def test_jpg_only_points_at_compose(self, panel):
+        panel.load_scan(self._mk(jpgs=3))
+        assert panel._next_hint.isHidden() is False
+        assert "合成" in panel._next_hint.full_text()
+
+    def test_tiff_present_points_at_organise(self, panel):
+        panel.load_scan(self._mk(jpgs=2, tiffs=1))
+        assert "整理" in panel._next_hint.full_text()
+
+    def test_hint_never_forces_bar_wide(self, panel):
+        panel.load_scan(self._mk(jpgs=3))
+        assert panel._next_hint.minimumSizeHint().width() <= 40
