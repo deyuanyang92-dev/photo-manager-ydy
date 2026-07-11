@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sqlite3  # C4: 区分「老库没这张表」和「数据库真出错」(Fable 5, 2026-07-12)
 from pathlib import Path
 from typing import Optional
 
@@ -550,13 +551,22 @@ class WorkbenchSpecimenIdentityMixin:
             from app.services.specimen_rename_service import migrate_uid_references
             with db:
                 migrate_uid_references(db, old_uid, new_uid)
+                # §7 旧: try: db.execute("UPDATE photo_assignments ...")
+                #        except Exception: pass
+                #   -> 这行的本意是容忍**老库没有 photo_assignments 表**。但它把
+                #      「数据库被锁 / 磁盘满」这类真错也一起吞了: 照片仍挂在旧编号上,
+                #      而下一行已经把旧编号行 DELETE 掉 —— 照片直接成孤儿, 无声无息。
+                # 新(Fable 5, 2026-07-12): 只放过"没这张表", 其余照旧抛 ->
+                #      `with db:` 回滚整笔迁移 -> 外层弹「编号迁移失败」。
+                #      老库兼容性不变, 真错不再静默。
                 try:
                     db.execute(
                         "UPDATE photo_assignments SET specimen_uid=? WHERE specimen_uid=?",
                         (new_uid, old_uid),
                     )
-                except Exception:
-                    pass
+                except sqlite3.OperationalError as exc:
+                    if "no such table" not in str(exc).lower():
+                        raise
                 db.execute("DELETE FROM specimens WHERE uid=?", (old_uid,))
                 db.execute(
                     "UPDATE specimens SET raw_json=? WHERE uid=?",

@@ -556,10 +556,13 @@ class WorkbenchOrganiseWorkflowMixin:
             return False
         if new_path != tiff_path:
             group.composed_tiff_path = new_path
-            try:
-                save_grouping(db, uid, grouping.groups, clean_phantoms=False)
-            except Exception:
-                pass
+            # §7 旧: try: save_grouping(...) except Exception: pass
+            #   -> 磁盘上 TIFF 已经改名了, 库里还记着旧路径, 而且一声不吭 ——
+            #      成果区/后续整理会指向一个不存在的文件名。
+            # 新(Fable 5, 2026-07-12): 走 _save_grouping_or_warn(失败会喊)。
+            #   控制流不变 —— 仍返回 True 让整理继续(整理本身还会再写一次库,
+            #   有机会把状态补回来), 只是用户现在**知道**这一步没写进去。
+            self._save_grouping_or_warn(db, uid, grouping.groups, what="TIFF 改名")
         return True
 
     def _organize_tif_only_group(

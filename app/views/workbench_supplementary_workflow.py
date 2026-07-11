@@ -483,7 +483,20 @@ class WorkbenchSupplementaryWorkflowMixin:
             target.status = "composed"
             target.updated_at = _utc_now_iso()
             save_grouping(db, uid, grouping.groups, clean_phantoms=False)
-        except Exception:
+        # §7 旧: except Exception: return ""
+        #   -> 原片已经从 ZIP 抽回磁盘了, 撤登记却没写进库, 返回 "" 又被调用方
+        #      (_on_restore_finished)直接忽略 —— 界面照样弹「已还原 N 张 JPG」,
+        #      可库里那组还标着「已归档」。用户以为回来了, 下次打开又是归档态。
+        # 新(Fable 5, 2026-07-12): 失败必须喊出来, 并说清楚"文件回来了但状态没存上"。
+        except Exception as exc:  # noqa: BLE001
+            from app.utils import ui as _ui
+            _ui.warn(
+                self,
+                "还原原片",
+                "原片已还原到磁盘，但「撤销归档登记」没能写入数据库。\n"
+                "重开工作区可能仍显示为已归档，请重试或检查数据库是否被占用。\n\n"
+                f"详情：{exc}",
+            )
             return ""
         retire = getattr(self, "_retire_zip", None)
         retired = retire(zip_path) if callable(retire) else ""

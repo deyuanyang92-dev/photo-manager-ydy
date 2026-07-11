@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -38,6 +39,9 @@ from app.services.organize_workflow_service import (
 from app.utils import ui
 from app.widgets.compose_workbench_dialog import _ComposeWorkbenchDialog as _DefaultComposeWorkbenchDialog
 from app.workers.helicon_worker import HeliconWorker
+
+
+logger = logging.getLogger(__name__)
 
 
 class WorkbenchResultWorkflowMixin:
@@ -319,13 +323,20 @@ class WorkbenchResultWorkflowMixin:
 
         # ② JPG 解关联：移除整组 → 这些 JPG 回到自由池（未分组）。
         grouping.groups = [g for g in grouping.groups if g.group_index != group_index]
+        # §7 旧: try: save_grouping(...); load_grouping; _refresh_monitor;
+        #        _refresh_results_column  except Exception: pass
+        #   -> TIFF 已经从磁盘删掉了, 写库失败却一声不吭: 重开工作区这组还在,
+        #      指着一个不存在的 TIFF。而且 UI 刷新的异常也混在同一个 except 里,
+        #      分不清到底是"没存上"还是"只是没刷新"。
+        # 新: 写库单独走网关(失败会喊), UI 刷新另算。
+        if not self._save_grouping_or_warn(db, uid, grouping.groups, what="撤销合成"):
+            return
         try:
-            save_grouping(db, uid, grouping.groups, clean_phantoms=False)
             self._grouping.load_grouping(uid, grouping)
             self._refresh_monitor()
             self._refresh_results_column(uid, grouping)
         except Exception:
-            pass
+            logger.exception("撤销合成后刷新界面失败: uid=%s", uid)
 
     def _on_undo_organise(self, uid: str, grouping, target) -> None:
         """Undo organise: restore JPGs from ZIP, keep TIFF, clear archive state."""
@@ -444,7 +455,36 @@ class WorkbenchResultWorkflowMixin:
         self._pending_grouping = None  # will re-read from grouping panel
         self._save_timer.start()
 
-    def _flush_grouping_save(self) -> None:
+    def _save_grouping_or_warn(self, db, uid: str, groups, *, what: str) -> bool:
+        """写分组到 project.db —— 失败必须**看得见**, 返回 False, 绝不装成功。
+
+        场景(Fable 5, 2026-07-12, 用户点名 C4): 撤销合成 / 整理前 TIFF 改名 / 补充
+          归档退回 ZIP —— 这些流程都是**先动磁盘, 后写库**。写库那步原来包在
+          `except Exception: pass` 里: 数据库被别的窗口锁住、磁盘满、WAL 写不进去时,
+          磁盘已经变了、库里没变, 界面照样报成功。下次打开工作区: 组还在但 TIFF 没了、
+          文件名对不上、照片挂在已删除的旧编号下 —— 而用户根本不知道哪一步出的错。
+        理由: 复用 _flush_grouping_save 已有的报错三件套(日志 + 状态栏 + 错误通知),
+          不新增重试、不改任何调用方的控制流, 只是把哑巴改成会喊。
+        """
+        from app.services.grouping_service import save_grouping
+        try:
+            save_grouping(db, uid, groups, clean_phantoms=False)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("%s 写库失败: uid=%s", what, uid)
+            self._status_message(f"{what}保存失败：{exc}", 8000)
+            self._workflow_notice(
+                f"{what}保存失败",
+                "磁盘上的文件已经变了，但这一步没能写进项目数据库。\n"
+                "请不要关闭软件，稍后重试；若提示数据库忙，请关掉重复打开的窗口。\n"
+                + str(exc),
+                state="error",
+                force_show=True,
+                task_key=f"grouping-save:{uid or 'unknown'}",
+            )
+            return False
+
+    def _flush_grouping_save(self) -> bool:
         """Persist current in-memory grouping to the DB."""
         # The GroupingPanel holds the authoritative in-memory state via its
         # _grouping attribute; reach in safely.
@@ -453,9 +493,21 @@ class WorkbenchResultWorkflowMixin:
         db = self.ctx.get_db()
         try:
             from app.services.capture_workflow_service import flush_visible_grouping
-            flush_visible_grouping(db, uid, grouping)
-        except Exception:
-            pass
+            saved = flush_visible_grouping(db, uid, grouping)
+            if db is not None and uid and grouping is not None and not saved:
+                raise RuntimeError("当前分组与打开的编号不一致")
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("分组保存失败: uid=%s", uid)
+            self._status_message(f"分组保存失败：{exc}", 8000)
+            self._workflow_notice(
+                "分组保存失败",
+                "当前分组尚未写入项目数据库，请不要关闭软件并重试。\n" + str(exc),
+                state="error",
+                force_show=True,
+                task_key=f"grouping-save:{uid or 'unknown'}",
+            )
+            return False
 
     # ── Metadata save ─────────────────────────────────────────────────────────
 
@@ -571,8 +623,19 @@ class WorkbenchResultWorkflowMixin:
                 logging.getLogger(__name__).warning(
                     "采集记录坐标回写失败(忽略继续)", exc_info=True
                 )
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("右栏元数据保存失败: uid=%s", uid)
+            self._status_message(f"元数据保存失败：{exc}", 8000)
+            self._workflow_notice(
+                "元数据保存失败",
+                "当前编辑尚未写入项目数据库，请不要关闭软件并重试。\n" + str(exc),
+                state="error",
+                force_show=True,
+                task_key=f"metadata-save:{uid}",
+            )
+            if not commit:
+                raise
+            return
 
         if reload:
             self._load_specimen(uid)

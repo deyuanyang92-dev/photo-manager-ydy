@@ -123,7 +123,60 @@ def _fake_zip_result(jpg_paths: list[str], zip_path: str, *, saved_percent: int 
             "method": "test-plain-jpg-zip",
             "files": manifest_files,
         },
+        source_paths=tuple(jpg_paths),
     )
+
+
+def test_grouping_save_failure_is_visible_and_returns_false(
+    qtbot, tmp_path, monkeypatch
+):
+    from app.services import capture_workflow_service
+    from app.views.workbench_view import WorkbenchView
+
+    db = _make_db(str(tmp_path / "project.db"))
+    w = WorkbenchView(_make_ctx(str(tmp_path), db))
+    qtbot.addWidget(w)
+    statuses = []
+    notices = []
+    monkeypatch.setattr(w, "_status_message", lambda text, *args: statuses.append(text))
+    monkeypatch.setattr(w, "_workflow_notice", lambda *args, **kwargs: notices.append((args, kwargs)))
+    monkeypatch.setattr(
+        capture_workflow_service,
+        "flush_visible_grouping",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("disk full")),
+    )
+
+    assert w._flush_grouping_save() is False
+    assert any("分组保存失败" in text for text in statuses)
+    assert notices and notices[-1][1]["state"] == "error"
+    db.close()
+
+
+def test_metadata_save_failure_is_visible_and_propagates_inside_outer_save(
+    qtbot, tmp_path, monkeypatch
+):
+    from app.views.workbench_view import WorkbenchView
+
+    db = _make_db(str(tmp_path / "project.db"))
+    ctx = _make_ctx(str(tmp_path), db)
+    w = WorkbenchView(ctx)
+    qtbot.addWidget(w)
+    statuses = []
+    notices = []
+    monkeypatch.setattr(w, "_status_message", lambda text, *args: statuses.append(text))
+    monkeypatch.setattr(w, "_workflow_notice", lambda *args, **kwargs: notices.append((args, kwargs)))
+
+    class _BrokenDb:
+        def execute(self, *args, **kwargs):
+            raise RuntimeError("database locked")
+
+    ctx.get_db.return_value = _BrokenDb()
+    with pytest.raises(RuntimeError, match="database locked"):
+        w._on_save_metadata("UID-1", reload=False, commit=False)
+
+    assert any("元数据保存失败" in text for text in statuses)
+    assert notices and notices[-1][1]["state"] == "error"
+    db.close()
 
 
 def test_workflow_notice_panel_hides_current_task_until_new_task(qtbot):
@@ -6946,6 +6999,55 @@ class TestBatchComposeOrganise:
         assert saved.archive_zip == str(tmp_path / "results" / tif.with_suffix(".zip").name)
         db.close()
 
+    def test_organise_aborts_if_group_changes_while_archive_worker_runs(
+        self, qtbot, tmp_path, monkeypatch
+    ):
+        """Late group edits must not be registered or deleted as archived."""
+        from app.services import archive_service
+        from app.services.grouping_service import Group, load_grouping, save_grouping
+
+        w, ctx, uid, db = self._build(tmp_path)
+        tif = tmp_path / "race-result.tif"
+        tif.write_bytes(b"II*\x00")
+        late_jpg = tmp_path / "incoming-jpg" / "late.jpg"
+        late_jpg.write_bytes(b"\xff\xd8late")
+        save_grouping(
+            db,
+            uid,
+            [
+                Group(
+                    group_index=0,
+                    jpg_paths=list(self._jpgs),
+                    composed_tiff_path=str(tif),
+                    status="composed",
+                )
+            ],
+        )
+        w._grouping.load_grouping(uid, load_grouping(db, uid))
+
+        def _fake_archive(jpg_paths, tiff_path, project_dir, delete_jpg, **kwargs):
+            assert delete_jpg is False
+            w._grouping.grouping_state().groups[0].jpg_paths.append(str(late_jpg))
+            zip_path = str(Path(kwargs["output_dir"]) / Path(tiff_path).with_suffix(".zip").name)
+            return _fake_zip_result(jpg_paths, zip_path)
+
+        monkeypatch.setattr(archive_service, "archive_group", _fake_archive)
+
+        assert w._on_organise_requested(uid, 0, silent_batch=True) is True
+        qtbot.waitUntil(
+            lambda: not getattr(w, "_archive_workers", set()),
+            timeout=5000,
+        )
+
+        saved = load_grouping(db, uid).groups[0]
+        assert saved.status == "composed"
+        assert saved.archive_zip in {None, ""}
+        assert all(Path(path).is_file() for path in self._jpgs)
+        assert late_jpg.is_file()
+        assert w._grouping.isEnabled()
+        assert "发生变化" in w._last_organise_failure_reason
+        db.close()
+
     def test_organise_moves_external_imported_tiff_into_project_results(
         self, qtbot, tmp_path, monkeypatch
     ):
@@ -7698,6 +7800,18 @@ class TestComposeOrganiseProgressBar:
         assert isinstance(d._progress, QProgressBar)
         assert not d._progress.isTextVisible()
 
+    def test_typography_matches_compact_workbench_scale(self):
+        d = self._dlg()
+        qss = d.styleSheet()
+        assert "font-size:14px" not in qss
+        assert "font-weight:700" not in qss
+        assert (
+            "QLabel#ComposeOrganiseTitle {"
+            in qss
+            and "font-size:13px; font-weight:600" in qss
+        )
+        assert "font-size:11px; font-weight:600" in qss
+
 
 class TestHeliconCancelRelease:
     """取消 Helicon 合成必须释放 worker, 不泄漏线程(2026-07-11 审查发现)。
@@ -7806,3 +7920,124 @@ class TestBatchMutualExclusion:
                     "task_key": "k"}
         w._organise_all_batch("U2")
         assert w._organise_batch is None, "合成批在跑时不得再起整理批"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# C4: 写库失败不许被静默吞掉 (Fable 5, 2026-07-12, 用户: "c4啊,这个不是很重要吗")
+#
+# 场景: 这四条路径都会先动磁盘/内存(删 TIFF、改文件名、迁编号、抽回原片), 再把结果
+#   写进 project.db。写库那一步原来包在 `except Exception: pass` / `return ""` 里 ——
+#   数据库忙、被别的窗口锁住、磁盘满时, 磁盘已经变了、数据库没变, 界面却照样报成功。
+#   下次打开工作区: 组还在但 TIFF 没了 / 文件名对不上 / 照片挂在已删除的旧编号下。
+# 要求: 写库失败必须**看得见**(状态栏 + 错误通知/弹窗), 绝不装成功。
+# ─────────────────────────────────────────────────────────────────────────────
+class TestWriteFailuresAreVisible:
+
+    @staticmethod
+    def _wb(qtbot, tmp_path):
+        from app.views.workbench_view import WorkbenchView
+        db = _make_db(str(tmp_path / "project.db"))
+        w = WorkbenchView(_make_ctx(str(tmp_path), db))
+        qtbot.addWidget(w)
+        return w, db
+
+    def test_save_grouping_or_warn_surfaces_failure(self, qtbot, tmp_path, monkeypatch):
+        """共用写库网关: 失败 -> False + 状态栏 + error 通知; 不抛不吞。"""
+        w, db = self._wb(qtbot, tmp_path)
+        statuses, notices = [], []
+        monkeypatch.setattr(w, "_status_message", lambda t, *a: statuses.append(t))
+        monkeypatch.setattr(w, "_workflow_notice", lambda *a, **k: notices.append((a, k)))
+        from app.services import grouping_service
+        monkeypatch.setattr(
+            grouping_service, "save_grouping",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("database is locked")),
+        )
+
+        ok = w._save_grouping_or_warn(db, "UID-1", [], what="撤销合成")
+        assert ok is False
+        assert any("撤销合成" in s and "保存失败" in s for s in statuses)
+        assert notices and notices[-1][1]["state"] == "error"
+        db.close()
+
+    def test_save_grouping_or_warn_returns_true_on_success(self, qtbot, tmp_path, monkeypatch):
+        w, db = self._wb(qtbot, tmp_path)
+        called = {}
+        from app.services import grouping_service
+        monkeypatch.setattr(
+            grouping_service, "save_grouping",
+            lambda db_, uid, groups, **k: called.update(uid=uid, groups=groups),
+        )
+        assert w._save_grouping_or_warn(db, "UID-1", [], what="整理") is True
+        assert called["uid"] == "UID-1"
+        db.close()
+
+    def test_uid_migration_reraises_real_db_error(self, qtbot, tmp_path, monkeypatch):
+        """UID 迁移里 photo_assignments 的 UPDATE 原来被 `except: pass` 吞掉 ——
+        照片仍挂旧编号, 而旧编号行已被 DELETE -> 照片成孤儿。真错必须冒泡到
+        「编号迁移失败」弹窗(整笔事务回滚), 只有"老库没这张表"才允许放过。
+        """
+        w, db, real = self._wb_with_flaky_db(qtbot, tmp_path, monkeypatch,
+                                             "database is locked")
+        real.execute("INSERT INTO specimens(uid) VALUES ('OLD-1')")
+        real.commit()
+
+        warned = []
+        import app.views.workbench_specimen_identity as ident
+        monkeypatch.setattr(ident.QMessageBox, "warning", lambda *a, **k: warned.append(a))
+
+        w._finalize_uid_rename("OLD-1", "NEW-1")
+
+        assert warned, "写库真错必须弹「编号迁移失败」, 不许静默"
+        # 事务回滚 -> 旧行还在, 没有半迁移的残局
+        assert real.execute("SELECT 1 FROM specimens WHERE uid='OLD-1'").fetchone()
+        real.close()
+
+    def test_uid_migration_still_tolerates_missing_legacy_table(self, qtbot, tmp_path, monkeypatch):
+        """老库没有 photo_assignments 表 —— 合法情况, 迁移照常完成, 不报错。"""
+        w, db, real = self._wb_with_flaky_db(qtbot, tmp_path, monkeypatch,
+                                             "no such table: photo_assignments")
+        real.execute("INSERT INTO specimens(uid) VALUES ('OLD-2')")
+        real.commit()
+
+        warned = []
+        import app.views.workbench_specimen_identity as ident
+        monkeypatch.setattr(ident.QMessageBox, "warning", lambda *a, **k: warned.append(a))
+
+        w._finalize_uid_rename("OLD-2", "NEW-2")
+        assert not warned, "老库缺表是合法情况, 不该报错"
+        real.close()
+
+    @staticmethod
+    def _wb_with_flaky_db(qtbot, tmp_path, monkeypatch, boom_msg):
+        """工作台 + 一个「photo_assignments 一写就炸」的代理连接。
+
+        sqlite3.Connection.execute 是只读属性, monkeypatch 不了 -> 用代理对象。
+        """
+        import sqlite3 as _sq
+        from app.views.workbench_view import WorkbenchView
+
+        real = _make_db(str(tmp_path / "project.db"))
+
+        class _FlakyConn:
+            def __init__(self, conn):
+                self._c = conn
+
+            def execute(self, sql, *a, **k):
+                if "photo_assignments" in sql:
+                    raise _sq.OperationalError(boom_msg)
+                return self._c.execute(sql, *a, **k)
+
+            def __enter__(self):
+                return self._c.__enter__()
+
+            def __exit__(self, *exc):
+                return self._c.__exit__(*exc)
+
+            def __getattr__(self, name):
+                return getattr(self._c, name)
+
+        flaky = _FlakyConn(real)
+        w = WorkbenchView(_make_ctx(str(tmp_path), flaky))
+        qtbot.addWidget(w)
+        monkeypatch.setattr(w._naming, "persisted_uid", lambda: None)
+        return w, flaky, real
