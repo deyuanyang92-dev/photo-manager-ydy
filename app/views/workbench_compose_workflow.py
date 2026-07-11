@@ -465,11 +465,34 @@ class WorkbenchComposeWorkflowMixin:
 
         if progress is not None:
             def _cancel_running_helicon_worker():
+                # 场景: 用户在 Helicon 合成进度框点「取消」。
+                # 理由(Fable 5, 2026-07-11): worker.cancel() 会 kill 子进程并
+                #   quit(), 但 HeliconWorker.run() 在 _cancel_requested 为真时
+                #   直接 return **不 emit finished/failed** → 挂在这两个信号上的
+                #   _release_helicon_worker(deleteLater + 从 set/map 移除) 永不
+                #   触发 → 每取消一次泄漏一个 QThread 对象 + set/map 残留, 攒到
+                #   退出才被 stop_background_work 兜底。此处取消后主动释放。
                 worker.cancel()
                 progress.setLabelText("正在取消 Helicon 合成…")
                 if not callback_sent["value"]:
                     callback_sent["value"] = True
                     on_failed("用户取消")
+                # cancel() 已 kill 子进程, run() 随即从 return 退出; 先 wait 让
+                # 线程真正结束再 deleteLater, 避免 destroyed-while-running 崩溃。
+                # wait 超时(线程卡死)则不 deleteLater, 留给 stop_background_work
+                # 退出时兜底; 但仍从活动集合摘除并关进度框, 不残留。
+                if worker.wait(3000):
+                    _release_helicon_worker()
+                else:
+                    self._helicon_workers.discard(worker)
+                    for key, mapped in list(
+                        getattr(self, "_helicon_worker_by_task_key", {}).items()
+                    ):
+                        if mapped is worker:
+                            self._helicon_worker_by_task_key.pop(key, None)
+                    if progress is not None:
+                        progress.close()
+                        self._helicon_progress_dialogs.discard(progress)
 
         worker.finished.connect(_handle_helicon_worker_finished)
         worker.failed.connect(_handle_helicon_worker_failed)

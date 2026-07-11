@@ -7697,3 +7697,73 @@ class TestComposeOrganiseProgressBar:
         d = self._dlg()
         assert isinstance(d._progress, QProgressBar)
         assert not d._progress.isTextVisible()
+
+
+class TestHeliconCancelRelease:
+    """取消 Helicon 合成必须释放 worker, 不泄漏线程(2026-07-11 审查发现)。
+
+    根因: HeliconWorker 取消时 run() 直接 return 不 emit 信号,
+    _release_helicon_worker(挂在 finished/failed)永不触发 → 每取消一次
+    泄漏一个 QThread + set/map 残留。修复: 取消后 wait 让线程结束再主动释放。
+    """
+
+    def test_cancel_removes_worker_from_active_set(self, monkeypatch, tmp_path):
+        import app.views.workbench_compose_workflow as cw
+        from app.views.workbench_view import WorkbenchView
+
+        w = WorkbenchView(_make_ctx(project_dir=str(tmp_path)))
+
+        # 假 worker: 不起真子进程, cancel/wait/deleteLater 都 no-op 但可断言。
+        class _FakeWorker:
+            def __init__(self, cmd=None, output_path=None, parent=None):
+                self.finished = _FakeSig()
+                self.failed = _FakeSig()
+                self.canceled = _FakeSig()
+                self._started = False
+
+            def start(self):
+                self._started = True
+
+            def cancel(self):
+                pass
+
+            def wait(self, _ms=0):
+                return True   # 线程已结束
+
+            def deleteLater(self):
+                pass
+
+        class _FakeSig:
+            def __init__(self):
+                self._slots = []
+
+            def connect(self, fn):
+                self._slots.append(fn)
+
+            def emit(self, *a):
+                for fn in list(self._slots):
+                    fn(*a)
+
+        import app.services.helicon_service as hs
+        monkeypatch.setattr(cw, "HeliconWorker", _FakeWorker)
+        monkeypatch.setattr(hs, "build_helicon_cmd", lambda **k: ["echo", "ok"])
+        monkeypatch.setattr(w, "_helicon_output_opts",
+                            lambda: {"tiff_compression": None, "quality": None,
+                                     "output_format": "tif"}, raising=False)
+
+        results = []
+        w._run_helicon_stack(
+            ["/a.jpg", "/b.jpg"], str(tmp_path / "out.tif"),
+            {"method": "B", "radius": "8", "smoothing": "4"},
+            on_finished=lambda p: results.append(("ok", p)),
+            on_failed=lambda m: results.append(("fail", m)),
+            show_progress_dialog=True,
+        )
+        assert len(w._helicon_workers) == 1
+        worker = next(iter(w._helicon_workers))
+
+        # 模拟用户点取消 → progress.canceled 触发 _cancel_running_helicon_worker
+        w._helicon_progress.canceled.emit()
+
+        assert worker not in w._helicon_workers, "取消后 worker 必须从活动集合移除(不泄漏)"
+        assert ("fail", "用户取消") in results
