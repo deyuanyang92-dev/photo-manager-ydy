@@ -7,6 +7,7 @@ from typing import Any
 from PyQt6.QtCore import QModelIndex
 from PyQt6.QtWidgets import QDialog, QFileDialog, QMessageBox
 
+from app.utils import ui
 from app.views.taxonomy_dialogs import _RecordDialog
 
 
@@ -90,7 +91,7 @@ class TaxonomyRecordsWorkflowMixin:
             self._export_xlsx(all_recs)
 
     def _export_csv(self, records: list[dict[str, Any]]) -> None:
-        path, _ = QFileDialog.getSaveFileName(
+        path = ui.get_save_file_name(
             self, "导出 CSV", "taxonomy_export.csv", "CSV 文件 (*.csv)"
         )
         if not path:
@@ -108,7 +109,7 @@ class TaxonomyRecordsWorkflowMixin:
         QMessageBox.information(self, "导出完成", f"已导出 {len(records)} 条到\n{path}")
 
     def _export_xlsx(self, records: list[dict[str, Any]]) -> None:
-        path, _ = QFileDialog.getSaveFileName(
+        path = ui.get_save_file_name(
             self, "导出 Excel", "taxonomy_export.xlsx", "Excel 文件 (*.xlsx)"
         )
         if not path:
@@ -162,7 +163,9 @@ class TaxonomyRecordsWorkflowMixin:
         """
         if self._svc is None:
             return
-        path, _ = QFileDialog.getOpenFileName(
+        # §7 旧: QFileDialog 直调 —— 绕过 ui.py 的 DontUseNativeDialog+居中,
+        #        WSLg/多屏可能弹到屏幕外看不见。
+        path = ui.get_open_file_name(
             self,
             "选择 Excel / CSV 文件",
             "",
@@ -176,9 +179,12 @@ class TaxonomyRecordsWorkflowMixin:
             else:
                 self._import_xlsx(path)
         except Exception as exc:
-            QMessageBox.critical(
-                self, "导入失败",
-                f"{type(exc).__name__}: {exc}\n\n{traceback.format_exc()}"
+            # §7 旧: 把整段 traceback 糊到弹窗给用户 —— 生物学新手看天书。
+            # 改走 ui.exception: 简短人话 + 可折叠详情 + 复制按钮; traceback 进日志。
+            ui.exception(
+                self, "导入失败", exc,
+                text="表格无法导入。请检查文件是否损坏、表头是否包含必填列"
+                     "(class / order / family / species)。",
             )
 
     def _import_xlsx(self, path: str) -> None:
