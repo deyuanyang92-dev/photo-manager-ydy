@@ -17,8 +17,32 @@ is only {code: label}); see docs/specs and CLAUDE.md.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from typing import Any, Optional
+
+
+def _norm_key_date(value: Any) -> str:
+    """采集日期归一化为 8 位 YYYYMMDD(与 naming.specimen_date_seg 同规则):
+    剥去所有非数字后取前 8 位。'2026-05-18 00:00:00' / '2026/05/18' → '20260518'。"""
+    return re.sub(r"\D", "", str(value or ""))[:8]
+
+
+def _norm_key_loc(value: Any) -> str:
+    """位置键(省/市、地区/样地、站位)归一化 = 去空格 + 大写, 与工作台
+    naming_panel.set_location_keys 的 .upper() 对齐, 保证四键匹配一致。"""
+    return str(value or "").strip().upper()
+
+
+def _normalize_record_keys(data: dict) -> dict:
+    """把一条记录的四个匹配键就地归一化(写入前调用), 让存储成规范形。"""
+    out = dict(data)
+    if "collection_date" in out:
+        out["collection_date"] = _norm_key_date(out.get("collection_date"))
+    for k in ("province", "site", "station"):
+        if k in out:
+            out[k] = _norm_key_loc(out.get(k))
+    return out
 
 # Real columns on collection_records (id / raw_json handled separately).
 _COLUMNS: tuple[str, ...] = (
@@ -176,10 +200,16 @@ def lookup_record(
     This is the auto-fill entry point: the workbench calls it once the four
     location keys of a specimen are all known.
     """
+    # 查询侧同样归一化(防御:手输脏格式也能命中已规范存储的记录)。
     row = db.execute(
         """SELECT * FROM collection_records
             WHERE province=? AND site=? AND station=? AND collection_date=?""",
-        (province, site, station, collection_date),
+        (
+            _norm_key_loc(province),
+            _norm_key_loc(site),
+            _norm_key_loc(station),
+            _norm_key_date(collection_date),
+        ),
     ).fetchone()
     return _row_to_dict(row) if row is not None else None
 
@@ -328,6 +358,9 @@ def upsert_record(db: sqlite3.Connection, data: dict) -> int:
     zero-field-loss. If *data* carries a truthy ``id``, that row is updated by
     id instead (lets the editor change key fields without orphaning the row).
     """
+    # 四键归一化(2026-07-11): Excel 日期读成 datetime、位置未转大写会导致
+    # 工作台四键精确匹配不中、自动填充静默失效。存储前统一成规范形。
+    data = _normalize_record_keys(data)
     values = [_coerce_record_column_value(c, data.get(c)) for c in _COLUMNS]
     raw_json = json.dumps(data, ensure_ascii=False)
 

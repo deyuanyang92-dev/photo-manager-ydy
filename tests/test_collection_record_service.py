@@ -485,3 +485,38 @@ class TestSyncCoordsFromCapture:
             lat="",
         ) == "skipped"
         assert crs.list_records(db) == []
+
+
+class TestFourKeyNormalization:
+    """采集记录四键归一化(2026-07-11 用户报障根因): Excel 导入把日期读成
+    '2026-05-18 00:00:00'、位置不转大写, 而工作台查记录时日期是 8 位、位置
+    已 .upper() → 精确四键匹配恒不中 → 自动填充静默失效。写入和读取两侧都
+    归一化(日期剥非数字取 8 位、位置转大写)后, 无论输入格式都能命中。"""
+
+    def test_excel_datetime_date_is_normalized_on_write(self, db):
+        crs.upsert_record(db, _sample(collection_date="2026-05-18 00:00:00"))
+        # 工作台用规范 8 位日期查 → 必须命中
+        rec = crs.lookup_record(db, "ZJ", "SMW", "B2", "20260518")
+        assert rec is not None
+        assert rec["collector"] == "杨德援"
+
+    def test_lowercase_location_is_normalized_on_write(self, db):
+        crs.upsert_record(db, _sample(site="smw", station="b2", province="zj"))
+        # 工作台位置键已 .upper() → 大写查必须命中
+        rec = crs.lookup_record(db, "ZJ", "SMW", "B2", "20260518")
+        assert rec is not None
+
+    def test_lookup_normalizes_query_side_too(self, db):
+        """反向:记录规范存储, 查询侧给了脏格式也应归一化后命中(防御)。"""
+        crs.upsert_record(db, _sample())
+        rec = crs.lookup_record(db, "zj", "smw", "b2", "2026/05/18")
+        assert rec is not None
+
+    def test_upsert_is_idempotent_across_date_formats(self, db):
+        """同一逻辑记录用不同日期格式导入两次 → 归一化后是同一条, 不重复。"""
+        crs.upsert_record(db, _sample(collection_date="20260518"))
+        crs.upsert_record(db, _sample(collection_date="2026-05-18 00:00:00", collector="改名"))
+        rows = crs.list_records(db)
+        same = [r for r in rows if r["station"] == "B2" and r["collection_date"] == "20260518"]
+        assert len(same) == 1, "两种日期格式应归一化为同一条记录"
+        assert same[0]["collector"] == "改名"
