@@ -46,7 +46,7 @@ from PyQt6.QtWidgets import (
 
 from app.config import icons
 from app.services.collab_offline_queue import StatusRetryQueue
-from app.services.collab_status import build_collab_status
+from app.services.collab_status import build_collab_status, peer_display_name
 from app.views.base_view import BaseView
 from app.widgets.collab_aux_dialogs import (
     CollabManualConnectDialog,
@@ -596,16 +596,16 @@ class CollabView(BaseView):
         dev_title = QLabel("在线设备")
         dev_title.setObjectName("Section")
         device_layout.addWidget(dev_title)
-        self._device_list = QTableWidget(0, 6)
+        self._device_list = QTableWidget(0, 7)
         self._device_list.setObjectName("CollabDeviceTable")
         self._device_list.setHorizontalHeaderLabels(
-            ["主机名", "项目", "团队永久码", "照片", "地址", "延迟"]
+            ["操作者", "主机名", "项目", "团队永久码", "照片", "地址", "延迟"]
         )
         self._device_list.horizontalHeader().setStretchLastSection(False)
         self._device_list.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.ResizeMode.Stretch
         )
-        for col in (1, 2, 3, 4, 5):
+        for col in (1, 2, 3, 4, 5, 6):
             self._device_list.horizontalHeader().setSectionResizeMode(
                 col, QHeaderView.ResizeMode.ResizeToContents
             )
@@ -1414,22 +1414,29 @@ class CollabView(BaseView):
             self._device_list.clearSpans()
         self._device_list.setRowCount(len(peers))
         for row, peer in enumerate(peers):
-            self._device_list.setItem(row, 0, _ro_item(peer.hostname or peer.ip))
-            self._device_list.setItem(row, 1, _ro_item(_project_display(peer.project_name)))
-            self._device_list.setItem(row, 2, _ro_item(peer.group_code or "—"))
+            operator_label = peer_display_name(peer)
+            pending_review = self._service.is_peer_pending_review(peer)
+            if pending_review:
+                operator_label = f"{operator_label}（待确认）"
+            self._device_list.setItem(row, 0, _ro_item(operator_label))
+            self._device_list.setItem(row, 1, _ro_item(peer.hostname or peer.ip))
+            self._device_list.setItem(row, 2, _ro_item(_project_display(peer.project_name)))
+            self._device_list.setItem(row, 3, _ro_item(peer.group_code or "—"))
             media_label = self._peer_media_sync_label(peer)
+            if pending_review:
+                media_label = "待确认"
             media_item = _ro_item(media_label)
             if media_label == "仅任务":
                 media_item.setToolTip("同组但项目同步码不同；任务可见，照片不会同步。")
             elif media_label == "可同步":
                 media_item.setToolTip("同组且项目同步码相同，可以同步照片/TIF/ZIP。")
-            self._device_list.setItem(row, 3, media_item)
+            self._device_list.setItem(row, 4, media_item)
             addr_text = f"{peer.ip}:{peer.port}"
             if peer.manual:
                 addr_text += " ✎"
-            self._device_list.setItem(row, 4, _ro_item(addr_text))
+            self._device_list.setItem(row, 5, _ro_item(addr_text))
             lat = f"{peer.latency_ms:.0f} ms" if peer.latency_ms is not None else "—"
-            self._device_list.setItem(row, 5, _ro_item(lat))
+            self._device_list.setItem(row, 6, _ro_item(lat))
 
         if not peers:
             self._device_list.setRowCount(1)

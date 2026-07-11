@@ -329,6 +329,7 @@ def test_multi_select_two_workspaces_shows_survey_and_merged_grid(
 
         # 中间 UidGroupedGrid 收到合并 groups（数据汇总模式）
         assert not view._grid_panel.isHidden()
+        qtbot.waitUntil(lambda: view._uid_grid.section_count() == 2, timeout=8000)
         assert view._uid_grid.section_count() == 2
     finally:
         view.stop_background_work()
@@ -416,6 +417,7 @@ def test_select_root_folder_shows_subtree_overview(
         assert view._right_stack.currentIndex() == 1
         assert view._overview_panel._card_workspaces._value.text() == "2"
         assert not view._grid_body.isHidden()
+        qtbot.waitUntil(lambda: view._uid_grid.section_count() >= 1, timeout=8000)
         assert view._uid_grid.section_count() >= 1
     finally:
         view.stop_background_work()

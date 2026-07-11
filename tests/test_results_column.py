@@ -1165,20 +1165,26 @@ class TestThumbnailsAreDeferred:
         assert len(col._thumb_queue) == len(tiff_cards)
 
 
-def test_results_default_view_is_large_thumbnail(qtbot, monkeypatch):
+def test_results_default_view_is_large_thumbnail(qtbot, monkeypatch, tmp_path):
     """成果照片墙默认「大缩略图」(2026-07-11 用户要求照片做大), 且持久化。"""
     from PyQt6.QtCore import QSettings
-    from app.widgets.results_column import ResultsColumn
+    from app.widgets import results_column as results_column_module
 
-    QSettings().remove("ui/results_view_mode")   # 干净默认
+    settings = QSettings(
+        str(tmp_path / "results-view.ini"), QSettings.Format.IniFormat
+    )
+    monkeypatch.setattr(results_column_module, "QSettings", lambda: settings)
+    ResultsColumn = results_column_module.ResultsColumn
+
+    settings.remove("ui/results_view_mode")   # 干净默认
     col = ResultsColumn()
     qtbot.addWidget(col)
     assert col._result_view_mode == "large_thumbnail"
 
     # 切到 list → 持久化 → 新实例应记住
     col._set_result_view_mode("list")
-    assert QSettings().value("ui/results_view_mode") == "list"
+    assert settings.value("ui/results_view_mode") == "list"
     col2 = ResultsColumn()
     qtbot.addWidget(col2)
     assert col2._result_view_mode == "list"
-    QSettings().remove("ui/results_view_mode")
+    settings.remove("ui/results_view_mode")

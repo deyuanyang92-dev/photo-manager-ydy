@@ -1071,6 +1071,8 @@ class TestCollabViewSmoke:
         view = CollabView(ctx)
         view.on_activate()
 
+        assert view._device_list.columnCount() == 7
+        assert view._device_list.horizontalHeaderItem(0).text() == "操作者"
         assert view._device_list.item(0, 0).text() == "小李"
         assert view._device_list.item(0, 1).text() == "shoot-pc"
         assert view._device_list.item(0, 2).text() == "Project-B"

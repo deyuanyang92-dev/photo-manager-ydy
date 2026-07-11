@@ -218,7 +218,7 @@ class TestFileDialogSorting:
         assert tree.header().sortIndicatorOrder() == Qt.SortOrder.AscendingOrder
 
     def test_priority_proxy_uses_matching_tif_as_time_anchor(self, qapp, tmp_path):
-        from app.utils.ui import _PriorityFileSortProxy
+        from app.utils.ui import _NO_NATIVE, _PriorityFileSortProxy
 
         related_tif = tmp_path / "GXFCG-BLW-BZC003-3-R-20260618.tif"
         near_jpg = tmp_path / "P6191292.JPG"
@@ -235,6 +235,7 @@ class TestFileDialogSorting:
             os.utime(path, (ts, ts))
 
         dlg = QFileDialog(None, "选择照片", str(tmp_path))
+        dlg.setOption(_NO_NATIVE, True)
         proxy = _PriorityFileSortProxy(
             [],
             ["GXFCG-BLW-BZC003-R-20260618"],
@@ -253,7 +254,7 @@ class TestFileDialogSorting:
         assert proxy._rank_tuple(far_idx) == (2, 86_400)
 
     def test_priority_proxy_filters_to_matching_tif_and_nearby_jpgs(self, qapp, tmp_path):
-        from app.utils.ui import _PriorityFileSortProxy
+        from app.utils.ui import _NO_NATIVE, _PriorityFileSortProxy
 
         related_tif = tmp_path / "GXFCG-BLW-BZC003-3-R-20260618.tif"
         near_jpg = tmp_path / "P6191292.JPG"
@@ -271,6 +272,7 @@ class TestFileDialogSorting:
             os.utime(path, (ts, ts))
 
         dlg = QFileDialog(None, "选择照片", str(tmp_path))
+        dlg.setOption(_NO_NATIVE, True)
         proxy = _PriorityFileSortProxy(
             [],
             ["GXFCG-BLW-BZC003-R-20260618"],
