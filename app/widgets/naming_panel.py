@@ -28,6 +28,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMenu,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -174,14 +175,19 @@ class NamingPanel(QWidget):
         hdr.setObjectName("CardTitle")
         hdr_row.addWidget(hdr)
         hdr_row.addStretch()
-        save_btn = QPushButton("保存")
-        save_btn.setObjectName("Outline")
-        save_btn.setFixedHeight(28)
-        icons.set_button_icon(save_btn, "mdi6.content-save-outline",
-                              color=icons.TONE_MUTED, size=14)
-        save_btn.setToolTip("把当前输入存到本地，刷新不丢")
-        save_btn.clicked.connect(self.save_requested.emit)
-        hdr_row.addWidget(save_btn)
+        # 场景: 命名卡上原本有**两个**「保存」—— 卡片标题栏一个、编号预览行一个,
+        #   点下去发的是同一个 save_requested 信号, 用户看不出区别只能干瞪眼。
+        # 理由(Fable 5, 2026-07-12 用户确认): 保留预览行那一个(和「添加」「更新」
+        #   同组, 语义连贯); 标题栏这个纯重复, 去掉后标题行也不再和按钮抢宽度。
+        # §7 旧:
+        # save_btn = QPushButton("保存")
+        # save_btn.setObjectName("Outline")
+        # save_btn.setFixedHeight(28)
+        # icons.set_button_icon(save_btn, "mdi6.content-save-outline",
+        #                       color=icons.TONE_MUTED, size=14)
+        # save_btn.setToolTip("把当前输入存到本地，刷新不丢")
+        # save_btn.clicked.connect(self.save_requested.emit)
+        # hdr_row.addWidget(save_btn)
         self._record_btn = QPushButton("采集记录")
         self._record_btn.setObjectName("Ghost")
         self._record_btn.setFixedHeight(28)
@@ -450,6 +456,18 @@ class NamingPanel(QWidget):
         )
         self._display_fields_btn.clicked.connect(self._open_display_fields_menu)
         preview_hdr.addWidget(self._display_fields_btn)
+        # 场景: 「删除」原本和「保存/添加/更新」并排, 四个按钮间距 6px —— 手滑
+        #   一格就把编号删了。删除是**破坏性**动作, 不该和日常安全按钮同排同色。
+        # 理由(Fable 5, 2026-07-12 用户确认): 收进 ⋯ 菜单(危险动作要多走一步),
+        #   仍走原来的 delete_requested -> workbench._confirm_delete_specimen 确认框。
+        #   只在编辑已存在编号时出现(新建态没东西可删 -> 隐藏, 不做静默禁用)。
+        self._more_btn = QToolButton()
+        self._more_btn.setObjectName("CompactIconButton")
+        self._more_btn.setToolTip("更多操作")
+        self._more_btn.setIcon(icons.icon("mdi6.dots-horizontal", color=icons.TONE_MUTED))
+        self._more_btn.clicked.connect(self._open_more_menu)
+        self._more_btn.hide()
+        preview_hdr.addWidget(self._more_btn)
         preview_lay.addLayout(preview_hdr)
 
         # 操作行:4 个文字按钮独占一行(右对齐),不再和标题抢宽度。
@@ -481,15 +499,16 @@ class NamingPanel(QWidget):
                               color=icons.TONE_MUTED, size=13)
         self._update_btn.clicked.connect(self.update_requested.emit)
         preview_actions.addWidget(self._update_btn)
-        self._delete_btn = QPushButton("删除")
-        self._delete_btn.setObjectName("Outline")
-        self._delete_btn.setFixedHeight(26)
-        self._delete_btn.setToolTip("删除当前选中的标本编号（不删除磁盘成果文件）")
-        icons.set_button_icon(self._delete_btn, "mdi6.trash-can-outline",
-                              color=icons.TONE_DANGER, size=13)
-        self._delete_btn.clicked.connect(self._emit_delete_requested)
-        self._delete_btn.hide()
-        preview_actions.addWidget(self._delete_btn)
+        # §7 旧: 「删除」与保存/添加/更新并排(手滑风险), 现移入上方 ⋯ 菜单。
+        # self._delete_btn = QPushButton("删除")
+        # self._delete_btn.setObjectName("Outline")
+        # self._delete_btn.setFixedHeight(26)
+        # self._delete_btn.setToolTip("删除当前选中的标本编号（不删除磁盘成果文件）")
+        # icons.set_button_icon(self._delete_btn, "mdi6.trash-can-outline",
+        #                       color=icons.TONE_DANGER, size=13)
+        # self._delete_btn.clicked.connect(self._emit_delete_requested)
+        # self._delete_btn.hide()
+        # preview_actions.addWidget(self._delete_btn)
         preview_lay.addLayout(preview_actions)
         self._uid_preview = QLabel("—")
         self._uid_preview.setObjectName("PreviewEmpty")
@@ -1373,7 +1392,24 @@ class NamingPanel(QWidget):
         )
         self._preview_save_btn.setVisible(True)
         self._update_btn.setVisible(editing)
-        self._delete_btn.setVisible(editing)
+        # §7 旧: self._delete_btn.setVisible(editing)
+        self._more_btn.setVisible(editing)  # ⋯ 菜单(内含删除)只在编辑已有编号时出现
+
+    def _build_more_menu(self) -> QMenu:
+        """⋯ 菜单 —— 目前只放破坏性动作「删除此编号」。
+
+        单独抽成方法, 测试可直接拿到菜单触发, 不用弹窗。
+        """
+        menu = QMenu(self)
+        act = menu.addAction(icons.icon("mdi6.trash-can-outline", color=icons.TONE_DANGER),
+                             "删除此编号…")
+        act.setToolTip("从列表删除当前编号（不删除磁盘上的成果文件）")
+        act.triggered.connect(self._emit_delete_requested)
+        return menu
+
+    def _open_more_menu(self) -> None:
+        menu = self._build_more_menu()
+        menu.exec(self._more_btn.mapToGlobal(self._more_btn.rect().bottomLeft()))
 
     def _emit_delete_requested(self) -> None:
         if self._persisted_uid:

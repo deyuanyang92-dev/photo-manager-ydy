@@ -503,3 +503,42 @@ class TestUidDisplaySummary:
         panel._copy_uid()
         assert QApplication.clipboard().text() == panel.current_uid()
         assert "张三" not in QApplication.clipboard().text()
+
+
+class TestNamingActionsDedup:
+    """场景: 命名卡上有**两个**「保存」按钮(卡片标题栏一个、编号预览行一个),
+    点下去发的是同一个 save_requested 信号 —— 用户不知道有什么区别, 干瞪眼。
+    而「删除」和「保存/添加/更新」并排, 手滑一格就删编号。
+
+    改: 只留预览行那一个「保存」(和添加/更新同组); 「删除」移进预览行标题的
+    ⋯ 菜单(仍走原来的确认框)。
+    """
+
+    _SPEC = {
+        "uid": "GXFCG-BLW-SC001-D79-20260618",
+        "province": "GXFCG", "site": "BLW", "id": "SC001",
+        "storage": "D79", "collectionDate": "20260618", "photoDate": "20260618",
+    }
+
+    def test_only_one_save_button(self, panel):
+        saves = [b for b in panel.findChildren(QPushButton) if b.text() == "保存"]
+        assert len(saves) == 1, "命名卡不得有两个「保存」按钮"
+        assert saves[0] is panel._preview_save_btn
+
+    def test_delete_button_gone_from_action_row(self, panel):
+        panel.load_specimen(dict(self._SPEC))
+        dels = [b for b in panel.findChildren(QPushButton) if b.text() == "删除"]
+        assert not dels, "「删除」不得和保存/添加/更新并排(手滑风险)"
+
+    def test_more_menu_shows_only_when_editing(self, panel):
+        assert panel._more_btn.isHidden() is True   # 新建态: 没东西可删
+        panel.load_specimen(dict(self._SPEC))
+        assert panel._more_btn.isHidden() is False
+
+    def test_more_menu_delete_emits_delete_requested(self, panel, qtbot):
+        panel.load_specimen(dict(self._SPEC))
+        menu = panel._build_more_menu()
+        act = next(a for a in menu.actions() if "删除" in a.text())
+        with qtbot.waitSignal(panel.delete_requested, timeout=1000) as sig:
+            act.trigger()
+        assert sig.args == [self._SPEC["uid"]]
