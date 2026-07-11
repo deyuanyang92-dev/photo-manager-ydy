@@ -83,6 +83,16 @@ def _max_seq_for_uid_on_disk(uid: str, *dirs: str) -> int:
     """Scan *dirs* for TIFF files belonging to *uid*; return max sequence found.
 
     Oracle: server.js:3501-3528 maxSeqForUid.
+
+    场景(用户 2026-07-11 报障并确认修): 老式**无站位**编号
+    ``GXFCG-BLW-BZC003-R-20260618``(5 段), 其成果文件名插入序号后只有 6 段。
+    理由(Fable 5): §7 旧实现用 ``split('-')`` 且要求 ``len(parts) >= 7`` ——
+    这些 6 段老成片**全部被跳过** → ``disk_max`` 恒为 0 → 下一个序号算成 1 →
+    新成片直接**覆盖用户已拍好的第 1 张**, 静默丢数据。这正是 PROJECT_MEMORY
+    明令禁止的 "split('-') 猜段"(必须走 ``parse_tiff_result_detail`` 权威解析器);
+    ``_parse_uid_from_tiff_name`` 已修, 唯独这里漏了。
+    现改为复用同一个权威解析器 ``_parse_result_tiff_name``: 标准 7 段与 legacy
+    6 段一视同仁, 标准段行为逐字节不变(超集)。
     """
     mx = 0
     for d in dirs:
@@ -91,20 +101,51 @@ def _max_seq_for_uid_on_disk(uid: str, *dirs: str) -> int:
         for name in os.listdir(d):
             if not re.search(r"\.tiff?$", name, re.IGNORECASE):
                 continue
-            stem = Path(name).stem
-            parts = stem.split("-")
-            if len(parts) < 7:
+            # §7 旧: split('-') + len(parts) < 7 跳过 + parts[4] 猜序号 +
+            #        "-".join(parts[:4] + parts[5:]) 拼 uid —— legacy 6 段全漏。
+            # stem = Path(name).stem
+            # parts = stem.split("-")
+            # if len(parts) < 7:
+            #     continue
+            # try:
+            #     seq = int(parts[4])
+            # except ValueError:
+            #     continue
+            # candidate_uid = "-".join(parts[:4] + parts[5:])
+            # if candidate_uid == uid:
+            #     if seq > mx:
+            #         mx = seq
+            parsed = _parse_result_tiff_name(name)
+            if not parsed:
                 continue
-            try:
-                seq = int(parts[4])
-            except ValueError:
-                continue
-            # Reconstruct uid from this filename
-            candidate_uid = "-".join(parts[:4] + parts[5:])
-            if candidate_uid == uid:
-                if seq > mx:
-                    mx = seq
+            candidate_uid, seq = parsed
+            if candidate_uid == uid and seq > mx:
+                mx = seq
     return mx
+
+
+def list_unnumbered_result_tiffs(*dirs: str) -> list[str]:
+    """列出 *dirs* 里「命名不规范、算不进序号」的成片 TIF 文件名。
+
+    场景(用户 2026-07-11 要求): 用户想在整理时被提醒哪些成片命名不规范。
+    理由(Fable 5): 序号扫描(``_max_seq_for_uid_on_disk``)只认权威解析器能解出
+    ``(uid, seq)`` 的文件名。解不出的文件(外部软件随手命名、手动改过名的)
+    **不会被计入序号**, 是撞号覆盖的风险源 —— 但用户看不见它们的存在。
+    这个函数把它们挑出来, 让工作台能主动提醒"这些成片没有规范序号,
+    不参与序号计算, 建议改名或用『检查 TIF 命名』修复"。
+
+    只读、不改任何文件。返回文件名(非全路径), 按名排序。
+    """
+    out: list[str] = []
+    for d in dirs:
+        if not d or not os.path.isdir(d):
+            continue
+        for name in sorted(os.listdir(d)):
+            if not re.search(r"\.tiff?$", name, re.IGNORECASE):
+                continue
+            if _parse_result_tiff_name(name) is None:
+                out.append(name)
+    return out
 
 
 def next_result_sequence(db: sqlite3.Connection, uid: str) -> int:

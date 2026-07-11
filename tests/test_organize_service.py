@@ -303,3 +303,91 @@ class TestParseResultTiffName:
             "GXFCG-BLW-BZC003-R-20260618"
         )
         assert _parse_uid_from_tiff_name("random.tif") is None
+
+
+class TestMaxSeqLegacyUid:
+    """老式无站位编号的成果序号必须被磁盘扫描认出, 否则序号从 0 重算 → 覆盖已有成片。
+
+    场景(用户 2026-07-11 确认修): 老编号 GXFCG-BLW-BZC003-R-20260618(5 段, 无站位),
+    已拍过 -1-/-2-/-3- 三张成片(文件名 6 段)。再合成整理时:
+    §7 旧 _max_seq_for_uid_on_disk 用 split('-') 要求 >=7 段 → 6 段全被跳过 →
+    disk_max=0 → 新成片命名 -1- → **直接覆盖已有第 1 张**, 用户数据静默丢失。
+    """
+
+    def _write(self, d, name):
+        (d / name).write_bytes(b"tif")
+
+    def test_legacy_no_station_uid_sees_existing_results(self, tmp_path):
+        from app.services.organize_service import _max_seq_for_uid_on_disk
+
+        uid = "GXFCG-BLW-BZC003-R-20260618"          # 5 段, 无站位
+        for seq in (1, 2, 3):
+            self._write(tmp_path, f"GXFCG-BLW-BZC003-R-{seq}-20260618.tif")
+
+        assert _max_seq_for_uid_on_disk(uid, str(tmp_path)) == 3, (
+            "老式无站位编号的已有成片必须被扫到, 否则新成片会覆盖第 1 张"
+        )
+
+    def test_standard_7_segment_uid_still_works(self, tmp_path):
+        """回归: 标准 7 段(有站位)编号的扫描行为不变。"""
+        from app.services.organize_service import _max_seq_for_uid_on_disk
+
+        uid = "FJ-XM-B2-DLC001-T95E-20260601"
+        for seq in (1, 2):
+            self._write(tmp_path, f"FJ-XM-B2-DLC001-{seq}-T95E-20260601.tif")
+
+        assert _max_seq_for_uid_on_disk(uid, str(tmp_path)) == 2
+
+    def test_other_uids_results_are_not_counted(self, tmp_path):
+        """别的编号的成片不得算进本编号的序号。"""
+        from app.services.organize_service import _max_seq_for_uid_on_disk
+
+        uid = "GXFCG-BLW-BZC003-R-20260618"
+        self._write(tmp_path, "GXFCG-BLW-BZC003-R-1-20260618.tif")     # 本编号
+        self._write(tmp_path, "GXFCG-BLW-OTHER1-R-9-20260618.tif")     # 别的编号
+        assert _max_seq_for_uid_on_disk(uid, str(tmp_path)) == 1
+
+    def test_multi_digit_sequence(self, tmp_path):
+        from app.services.organize_service import _max_seq_for_uid_on_disk
+
+        uid = "GXFCG-BLW-BZC003-R-20260618"
+        self._write(tmp_path, "GXFCG-BLW-BZC003-R-10-20260618.tif")
+        assert _max_seq_for_uid_on_disk(uid, str(tmp_path)) == 10
+
+
+class TestListUnnumberedResultTiffs:
+    """列出「命名不规范、算不进序号」的成片(用户 2026-07-11 要求主动提醒)。
+
+    这些文件不参与序号计算, 是撞号覆盖的风险源, 但用户看不见它们。
+    """
+
+    def test_lists_only_unparsable_names(self, tmp_path):
+        from app.services.organize_service import list_unnumbered_result_tiffs
+
+        # 规范成片(标准 7 段 + legacy 6 段) → 不算不规范
+        (tmp_path / "FJ-XM-B2-DLC001-1-T95E-20260601.tif").write_bytes(b"a")
+        (tmp_path / "GXFCG-BLW-BZC003-R-2-20260618.tif").write_bytes(b"b")
+        # 不规范:外部软件随手命名 / 手改过名 / 裸 uid 无序号
+        (tmp_path / "IMG_1234.tif").write_bytes(b"c")
+        (tmp_path / "扫描件-最终版.tiff").write_bytes(b"d")
+        (tmp_path / "FJ-XM-B2-DLC001-T95E-20260601.tif").write_bytes(b"e")  # 无序号
+        # 非 TIFF 不算
+        (tmp_path / "note.txt").write_text("x")
+
+        bad = list_unnumbered_result_tiffs(str(tmp_path))
+        assert sorted(bad) == sorted([
+            "FJ-XM-B2-DLC001-T95E-20260601.tif",
+            "IMG_1234.tif",
+            "扫描件-最终版.tiff",
+        ])
+
+    def test_all_standard_names_returns_empty(self, tmp_path):
+        from app.services.organize_service import list_unnumbered_result_tiffs
+
+        (tmp_path / "FJ-XM-B2-DLC001-1-T95E-20260601.tif").write_bytes(b"a")
+        assert list_unnumbered_result_tiffs(str(tmp_path)) == []
+
+    def test_missing_dir_is_tolerated(self, tmp_path):
+        from app.services.organize_service import list_unnumbered_result_tiffs
+
+        assert list_unnumbered_result_tiffs(str(tmp_path / "nope")) == []

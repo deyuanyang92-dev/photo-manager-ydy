@@ -643,6 +643,47 @@ class WorkbenchOrganiseWorkflowMixin:
             on_complete(True)
         return True
 
+    def _warn_unnumbered_result_tiffs(self) -> None:
+        """整理后提醒:results 里有「命名不规范、算不进序号」的成片。
+
+        场景(用户 2026-07-11 要求): 用户想知道哪些成片命名不规范。
+        理由(Fable 5): 序号扫描只认权威解析器能解出 (uid, seq) 的文件名;
+          解不出的成片(外部软件随手命名 / 手改过名)**不参与序号计算**,
+          是撞号覆盖的风险源, 但用户看不见它们存在。整理成功后主动提醒一次。
+        不打断操作: 只走 workflow_notice + 状态栏; 每个项目每次会话只提醒一次
+          (避免每整理一次弹一遍)。
+        """
+        project_dir = getattr(self.ctx, "current_project_dir", None)
+        if not project_dir:
+            return
+        seen = getattr(self, "_unnumbered_tiff_warned_projects", None)
+        if seen is None:
+            seen = set()
+            self._unnumbered_tiff_warned_projects = seen
+        if str(project_dir) in seen:
+            return
+        try:
+            from app.services.organize_service import list_unnumbered_result_tiffs
+
+            _inc, res = self._resolve_capture_subdirs()
+            bad = list_unnumbered_result_tiffs(os.path.join(str(project_dir), res))
+        except Exception:
+            return
+        if not bad:
+            return
+        seen.add(str(project_dir))
+        sample = "、".join(bad[:3]) + ("…" if len(bad) > 3 else "")
+        self._batch_status(f"发现 {len(bad)} 个命名不规范的成片(不计入序号)")
+        self._workflow_notice(
+            "成片命名不规范",
+            f"results/ 里有 {len(bad)} 个成片文件名无法解析出「编号+序号」:\n{sample}\n\n"
+            "它们不参与序号计算，可能导致新成片撞号。建议用监控区「更多 → 检查 TIF "
+            "命名」核对并改名。",
+            state="info",
+            force_show=True,
+            task_key=f"unnumbered-tiffs:{project_dir}",
+        )
+
     def _on_organise_requested(
         self,
         uid: str,
@@ -1041,6 +1082,9 @@ class WorkbenchOrganiseWorkflowMixin:
                     on_complete(True)
                 if not silent_batch:
                     ui.info(dlg_parent, "整理完成", msg)
+                    # 整理成功后提醒一次:有没有命名不规范、算不进序号的成片
+                    # (撞号风险源)。批量静默模式不打扰。
+                    self._warn_unnumbered_result_tiffs()
                 else:
                     self._batch_status(
                         f"整理完成：{Path(group.archive_zip).name}（{result.file_count} 张 JPG）"
