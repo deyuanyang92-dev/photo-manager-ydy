@@ -658,6 +658,14 @@ def test_results_large_thumbnail_view_keeps_list_view_as_default(qtbot):
         [{"path": "/fake/a.zip", "name": "a.zip", "size": 99, "seq": 1}],
     )
 
+    # 2026-07-11: 成果照片墙默认改为「大缩略图」网格(用户要求照片做大)。
+    # 显式切到 list 再切回大图, 验证两种模式都工作。
+    col._set_result_view_mode("list")
+    col.load_uid(
+        "UID",
+        [{"path": "/fake/a.tif", "name": "a.tif", "seq": 1}],
+        [{"path": "/fake/a.zip", "name": "a.zip", "size": 99, "seq": 1}],
+    )
     default_tiff = next(c for c in col._cards if isinstance(c, _TiffCard))
     assert col._result_view_mode == "list"
     assert default_tiff.property("resultViewMode") == "list"
@@ -1155,3 +1163,22 @@ class TestThumbnailsAreDeferred:
         tiff_cards = [c for c in col._cards if hasattr(c, "_lightbox_fn")]
         assert all(c._defer_thumbnail for c in tiff_cards)
         assert len(col._thumb_queue) == len(tiff_cards)
+
+
+def test_results_default_view_is_large_thumbnail(qtbot, monkeypatch):
+    """成果照片墙默认「大缩略图」(2026-07-11 用户要求照片做大), 且持久化。"""
+    from PyQt6.QtCore import QSettings
+    from app.widgets.results_column import ResultsColumn
+
+    QSettings().remove("ui/results_view_mode")   # 干净默认
+    col = ResultsColumn()
+    qtbot.addWidget(col)
+    assert col._result_view_mode == "large_thumbnail"
+
+    # 切到 list → 持久化 → 新实例应记住
+    col._set_result_view_mode("list")
+    assert QSettings().value("ui/results_view_mode") == "list"
+    col2 = ResultsColumn()
+    qtbot.addWidget(col2)
+    assert col2._result_view_mode == "list"
+    QSettings().remove("ui/results_view_mode")

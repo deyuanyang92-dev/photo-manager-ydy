@@ -11,7 +11,7 @@ from collections import deque
 from pathlib import Path
 from typing import Optional
 
-from PyQt6.QtCore import QEvent, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QEvent, QSettings, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QKeySequence, QPixmap, QShortcut
 from PyQt6.QtWidgets import (
     QFrame,
@@ -67,7 +67,11 @@ class ResultsColumn(QWidget):
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self._thumb_size = _DEFAULT_THUMB
-        self._result_view_mode = "list"
+        # 成果照片墙默认「大缩略图」网格(用户 2026-07-11: 照片墙做大),
+        # 并记住用户的选择(QSettings 持久化, 跨重启保持)。旧默认是 list。
+        self._view_mode_qs_key = "ui/results_view_mode"
+        saved = str(QSettings().value(self._view_mode_qs_key, "large_thumbnail") or "")
+        self._result_view_mode = saved if saved in {"list", "large_thumbnail"} else "large_thumbnail"
         self._thumb_cache: dict = {}
         self._thumb_queue: deque[_ResultCardBase] = deque()
         self._thumb_timer = QTimer(self)
@@ -722,6 +726,11 @@ class ResultsColumn(QWidget):
         if mode not in {"list", "large_thumbnail"} or mode == self._result_view_mode:
             return
         self._result_view_mode = mode
+        # 记住用户选择, 跨重启保持。
+        try:
+            QSettings().setValue(self._view_mode_qs_key, mode)
+        except Exception:
+            pass
         self._update_options_button_tooltip()
         self._refresh_current_results()
 
