@@ -827,6 +827,24 @@ class GroupingPanel(QWidget):
             tuple(sorted(self._selected_group_indexes)),
         )
 
+    # ── 公开接口 (Fable 5, 2026-07-12) ────────────────────────────────────────
+    # 场景: workbench 直接掏 self._grouping._grouping / ._rebuild() / ._uid_label。
+    # 理由: 逐字别名, 语义不变。
+    #   ⚠ grouping_state() **必须返回活对象, 不能返回拷贝** —— 调用方
+    #   (workbench_organise_workflow._sync_grouping_outputs_from_naming) 会就地改
+    #   g.output_name 再 rebuild; 返回拷贝会让改动写不回去 = 静默丢功能。
+    def grouping_state(self):
+        return self._grouping
+
+    def rebuild(self) -> None:
+        """公开别名 —— 旧: view 直接调 self._grouping._rebuild()。"""
+        self._rebuild()
+
+    def set_target_labels(self, uid_text: str, target_text: str) -> None:
+        """写分组卡顶部两个标签 —— 旧: view 直接 _uid_label/_target_label.setText()。"""
+        self._uid_label.setText(uid_text)
+        self._target_label.setText(target_text)
+
     def _rebuild(self) -> None:
         self._clear_content()
         if not self._grouping or not self._uid:

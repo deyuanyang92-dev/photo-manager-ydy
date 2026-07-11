@@ -1683,6 +1683,11 @@ class MonitorPanel(QWidget):
             card.set_selected(True)
         self._refresh_selection_bar()
 
+    def clear_selection(self) -> None:
+        """公开别名 —— 旧: view 直接调 self._monitor._on_select_none()。
+        (Fable 5, 2026-07-12: 逐字转调, 行为不变)"""
+        self._on_select_none()
+
     def _on_select_none(self) -> None:
         for card in self._cards:
             card.set_selected(False)

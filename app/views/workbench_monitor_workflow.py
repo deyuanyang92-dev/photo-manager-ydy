@@ -439,7 +439,7 @@ class WorkbenchMonitorWorkflowMixin:
                 manual_assign(project_dir, uid, jpg_paths)
             except Exception:
                 pass
-        self._monitor._on_select_none()
+        self._monitor.clear_selection()
 
     def _on_add_to_group(self, group_index: int, jpg_paths: list[str]) -> None:
         """Add selected monitor JPGs to the specified grouping group."""
@@ -684,7 +684,7 @@ class WorkbenchMonitorWorkflowMixin:
             return
 
         try:
-            self._monitor._on_select_none()
+            self._monitor.clear_selection()
         except Exception:
             pass
         self._refresh_monitor()
@@ -999,7 +999,7 @@ class WorkbenchMonitorWorkflowMixin:
         TIFFs are audited; if there are none, the caller falls back to a folder
         picker for legacy bulk checks.
         """
-        grouping = getattr(self._grouping, "_grouping", None)
+        grouping = self._grouping.grouping_state()  # §7 旧: getattr(self._grouping, "_grouping", None) —— 活对象, 调用方要就地改 output_name
         if grouping is None:
             return [], False
         try:
@@ -1154,7 +1154,7 @@ class WorkbenchMonitorWorkflowMixin:
         if not target_key:
             return None
 
-        grouping = getattr(self._grouping, "_grouping", None)
+        grouping = self._grouping.grouping_state()  # §7 旧: getattr(self._grouping, "_grouping", None) —— 活对象, 调用方要就地改 output_name
         uid = getattr(self._grouping, "_uid", None)
         for group in list(getattr(grouping, "groups", []) or []):
             try:

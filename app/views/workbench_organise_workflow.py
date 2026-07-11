@@ -350,7 +350,7 @@ class WorkbenchOrganiseWorkflowMixin:
             return False
         self._current_uid = text
         self._naming.acknowledge_existing_uid(text)
-        panel_grouping = getattr(self._grouping, "_grouping", None)
+        panel_grouping = self._grouping.grouping_state()  # §7 旧: getattr(self._grouping, "_grouping", None) —— 活对象, 调用方要就地改 output_name
         if panel_grouping is not None:
             self._grouping.load_grouping(
                 text,
@@ -412,7 +412,7 @@ class WorkbenchOrganiseWorkflowMixin:
                         self._load_specimen(target_uid)
                     else:
                         self._current_uid = None
-                panel_grouping = getattr(self._grouping, "_grouping", None)
+                panel_grouping = self._grouping.grouping_state()  # §7 旧: getattr(self._grouping, "_grouping", None) —— 活对象, 调用方要就地改 output_name
                 if panel_grouping is not None:
                     from app.services.grouping_service import SpecimenGrouping
                     self._grouping.load_grouping(
@@ -445,10 +445,10 @@ class WorkbenchOrganiseWorkflowMixin:
 
     def _sync_grouping_outputs_from_naming(self) -> bool:
         """Push standard result stems into auto-legacy group output fields."""
-        grouping = getattr(self._grouping, "_grouping", None)
+        grouping = self._grouping.grouping_state()  # §7 旧: getattr(self._grouping, "_grouping", None) —— 活对象, 调用方要就地改 output_name
         if grouping is None or not grouping.groups:
             return False
-        if not self._naming._storage.text().strip():
+        if not self._naming.storage_code():
             return False
         if not self._naming.has_result_identity():
             return False
@@ -463,7 +463,7 @@ class WorkbenchOrganiseWorkflowMixin:
             if not self._naming.group_output_looks_auto_legacy(current):
                 continue
             seq = (
-                self._naming._seq.value()
+                self._naming.sequence()
                 if len(grouping.groups) == 1
                 else g.group_index + 1
             )
@@ -473,7 +473,7 @@ class WorkbenchOrganiseWorkflowMixin:
             g.output_name = new_stem
             changed = True
         if changed:
-            self._grouping._rebuild()
+            self._grouping.rebuild()
             self._grouping.grouping_changed.emit()
         return changed
 
@@ -502,7 +502,7 @@ class WorkbenchOrganiseWorkflowMixin:
         self._apply_tiff_filename_recognition(tiff_path)
 
         panel_uid = self._naming.current_uid()
-        panel_storage = self._naming._storage.text().strip()
+        panel_storage = self._naming.storage_code()
         if not tiff_stem_needs_rename_for_organize(
             stem,
             components,
@@ -514,15 +514,15 @@ class WorkbenchOrganiseWorkflowMixin:
         rec = recognize_tiff_filename(stem, components)
         if rec:
             col, photo = coalesce_specimen_dates(
-                self._naming._collection_date.text().strip(),
-                self._naming._photo_date.text().strip(),
+                self._naming.collection_date(),
+                self._naming.photo_date(),
             )
             date_seg = specimen_date_seg(col or None, photo or None)
             values = {
-                "province": self._naming._province.text().strip(),
-                "site": self._naming._site.text().strip(),
-                "station": self._naming._station.text().strip(),
-                "species_id": self._naming._species_id.text().strip(),
+                "province": self._naming.province(),
+                "site": self._naming.site(),
+                "station": self._naming.station(),
+                "species_id": self._naming.species_id(),
                 "storage": panel_storage,
                 "date_seg": date_seg,
                 "collection_date": col,
@@ -741,7 +741,10 @@ class WorkbenchOrganiseWorkflowMixin:
             from app.services.organize_service import _check_organize_gate, OrganizeGateError
 
             self._save_timer.stop()
-            self._flush_grouping_save()
+            if not self._flush_grouping_save():
+                return _organise_not_started(
+                    "当前分组保存失败；为避免按旧数据整理，操作已中止"
+                )
 
             grouping = self._get_grouping_for_uid(uid)
             group_state = inspect_organize_group(grouping, group_index)
@@ -905,10 +908,25 @@ class WorkbenchOrganiseWorkflowMixin:
             progress = None
 
             # Two-phase archive: ZIP first, DB finalize, then delete JPGs.
+            # Keep one immutable source snapshot for all three phases. The
+            # live Group object can otherwise change while the worker runs.
             request_delete_jpg = archive_plan.delete_jpg
+            archive_jpg_snapshot = tuple(group.jpg_paths)
+            archive_tiff_snapshot = str(group.composed_tiff_path or "")
+
+            def _path_signature(paths) -> tuple[str, ...]:
+                return tuple(
+                    sorted(
+                        os.path.normcase(os.path.realpath(os.path.abspath(str(path))))
+                        for path in paths
+                    )
+                )
+
+            archive_jpg_signature = _path_signature(archive_jpg_snapshot)
+            archive_tiff_signature = _path_signature([archive_tiff_snapshot])
             worker = SuppCompressionWorker(
-                jpg_paths=group.jpg_paths,
-                tiff_path=group.composed_tiff_path,
+                jpg_paths=list(archive_jpg_snapshot),
+                tiff_path=archive_tiff_snapshot,
                 project_dir=project_dir or archive_output_dir,
                 delete_jpg=False,
                 method=getattr(self.ctx.settings, "jxl_effort_method", "standard"),
@@ -924,15 +942,18 @@ class WorkbenchOrganiseWorkflowMixin:
             self._archive_worker_by_task_key[notice_task_key] = worker
             self._workflow_notice(
                 f"{notice_label}：正在整理",
-                f"正在把 {len(group.jpg_paths)} 张 JPG 写入 ZIP：{Path(group.composed_tiff_path).name}",
+                f"正在把 {len(archive_jpg_snapshot)} 张 JPG 写入 ZIP：{Path(archive_tiff_snapshot).name}",
                 state="busy",
                 force_show=not bool(workflow_task_key),
                 task_key=notice_task_key,
             )
             if silent_batch:
                 self._status_message(
-                    f"正在整理：{Path(group.composed_tiff_path).name}，打包 {len(group.jpg_paths)} 张 JPG…"
+                    f"正在整理：{Path(archive_tiff_snapshot).name}，打包 {len(archive_jpg_snapshot)} 张 JPG…"
                 )
+
+            grouping_was_enabled = self._grouping.isEnabled()
+            self._grouping.setEnabled(False)
 
             def _release_worker() -> None:
                 if progress is not None:
@@ -942,6 +963,8 @@ class WorkbenchOrganiseWorkflowMixin:
                     if mapped is worker:
                         self._archive_worker_by_task_key.pop(key, None)
                 worker.deleteLater()
+                if not self._archive_workers and grouping_was_enabled:
+                    self._grouping.setEnabled(True)
 
             def _archive_progress(current: int, total: int, filename: str) -> None:
                 verifying = str(filename or "") == "__verify_zip__"
@@ -1000,6 +1023,16 @@ class WorkbenchOrganiseWorkflowMixin:
                 if not result.ok:
                     _archive_failed("归档过程出现错误。")
                     return
+                if (
+                    _path_signature(group.jpg_paths) != archive_jpg_signature
+                    or _path_signature([group.composed_tiff_path or ""])
+                    != archive_tiff_signature
+                ):
+                    _archive_failed(
+                        "整理期间分组内容发生变化，已停止登记并保留全部 JPG。"
+                        "请核对分组后重新整理。"
+                    )
+                    return
                 _release_worker()
                 from app.services.capture_workflow_service import finalize_archived_group
 
@@ -1036,12 +1069,12 @@ class WorkbenchOrganiseWorkflowMixin:
                         on_complete(False)
                     return
 
-                if request_delete_jpg and group.jpg_paths:
+                if request_delete_jpg and archive_jpg_snapshot:
                     from app.services.archive_service import commit_jpg_deletion_after_archive
 
                     result = commit_jpg_deletion_after_archive(
                         result,
-                        list(group.jpg_paths),
+                        list(archive_jpg_snapshot),
                     )
                 if organized.metadata.error:
                     self._status_message(f"TIFF 元数据写入失败：{organized.metadata.error}")
@@ -1111,7 +1144,11 @@ class WorkbenchOrganiseWorkflowMixin:
                 progress.show()
                 ui.center_on(progress, dlg_parent)
                 progress.raise_()
-            worker.start()
+            try:
+                worker.start()
+            except Exception:
+                _release_worker()
+                raise
             return True
 
         except FileNotFoundError as exc:

@@ -529,9 +529,12 @@ class WorkbenchView(WorkbenchSpecimenIdentityMixin, WorkbenchMediaWorkflowMixin,
         # 卡1 non-key fields (日期/拍照备注) autosave like web input-persist.
         # KEY segments (地区/样地/站位/物种/保存方式) still go through the 保存
         # button / storage-correction path — autosaving them would change the UID.
-        self._naming._collection_date.textEdited.connect(lambda *_: self._schedule_rail_save())
-        self._naming._photo_date.textEdited.connect(lambda *_: self._schedule_rail_save())
-        self._naming._photo_notes.textChanged.connect(lambda: self._schedule_rail_save())
+        # §7 旧: 直接 connect 命名卡内部控件的信号(掏私有成员)
+        # self._naming._collection_date.textEdited.connect(lambda *_: self._schedule_rail_save())
+        # self._naming._photo_date.textEdited.connect(lambda *_: self._schedule_rail_save())
+        # self._naming._photo_notes.textChanged.connect(lambda: self._schedule_rail_save())
+        # 新: 面板自己把这三个内部信号汇成 fields_edited, 触发点一一对应, 不增不减。
+        self._naming.fields_edited.connect(self._schedule_rail_save)
 
         # 卡2 分类标签（独立卡，对齐 web renderTaxonNotesCard）
         self._taxon_card = TaxonCardPanel(self.ctx)
@@ -1206,12 +1209,12 @@ class WorkbenchView(WorkbenchSpecimenIdentityMixin, WorkbenchMediaWorkflowMixin,
         # draft. 新增编号通常是同一工作区/同一站位连续拍摄：地点、站位、
         # 日期、保存方式、人员和坐标应沿用；物种编号/备注/分类仍按新标本清空。
         prev_naming_context = {
-            "province": self._naming._province.text().strip(),
-            "site": self._naming._site.text().strip(),
-            "station": self._naming._station.text().strip(),
-            "storage": self._naming._storage.text().strip(),
-            "collectionDate": self._naming._collection_date.text().strip(),
-            "photoDate": self._naming._photo_date.text().strip(),
+            "province": self._naming.province(),
+            "site": self._naming.site(),
+            "station": self._naming.station(),
+            "storage": self._naming.storage_code(),
+            "collectionDate": self._naming.collection_date(),
+            "photoDate": self._naming.photo_date(),
         }
         try:
             # Personnel are project defaults for every new specimen, not sticky

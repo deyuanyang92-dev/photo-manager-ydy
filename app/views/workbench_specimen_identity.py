@@ -98,7 +98,7 @@ class WorkbenchSpecimenIdentityMixin:
         if not db:
             return False
 
-        grouping = getattr(self._grouping, "_grouping", None)
+        grouping = self._grouping.grouping_state()  # §7 旧: getattr(self._grouping, "_grouping", None) —— 活对象, 调用方要就地改 output_name
         if grouping is None:
             return False
 
@@ -150,7 +150,7 @@ class WorkbenchSpecimenIdentityMixin:
                 "编号信息未填写完整",
                 "请先补全必填字段：" + "、".join(missing_required),
             )
-            self._naming._check_compliance(uid)
+            self._naming.run_compliance_check(uid)
             return
         persisted_uid = self._naming.persisted_uid()
         old_uid = (
@@ -170,7 +170,7 @@ class WorkbenchSpecimenIdentityMixin:
 
         # 采集日期软必填：它是编号核心字段、会写入 UID 日期段。空着强提醒，但允许继续
         # （兼容采集日期确实未知的标本——编号自动少一段）。默认「返回填写」。
-        if not self._naming._collection_date.text().strip():
+        if not self._naming.collection_date():
             reply = QMessageBox.question(
                 dlg_parent, "采集日期未填",
                 "采集日期是编号核心字段，会写入唯一编号。\n\n"
@@ -250,7 +250,7 @@ class WorkbenchSpecimenIdentityMixin:
                         dlg_parent, "编号已被占用",
                         f"编号 {uid} 已被占用：{msg}\n请改用其他编号后再保存。",
                     )
-                    self._naming._apply_sequence_suggestion()
+                    self._naming.apply_sequence_suggestion()
                     return
 
         n = self._naming
@@ -355,15 +355,15 @@ class WorkbenchSpecimenIdentityMixin:
         from app.utils.naming import coalesce_specimen_dates, specimen_date_seg
 
         collection_date, photo_date = coalesce_specimen_dates(
-            self._naming._collection_date.text().strip(),
-            self._naming._photo_date.text().strip(),
+            self._naming.collection_date(),
+            self._naming.photo_date(),
         )
         values = {
-            "province": self._naming._province.text().strip(),
-            "site": self._naming._site.text().strip(),
-            "station": self._naming._station.text().strip(),
-            "species_id": self._naming._species_id.text().strip(),
-            "storage": self._naming._storage.text().strip(),
+            "province": self._naming.province(),
+            "site": self._naming.site(),
+            "station": self._naming.station(),
+            "species_id": self._naming.species_id(),
+            "storage": self._naming.storage_code(),
             "date_seg": specimen_date_seg(collection_date, photo_date),
             "collection_date": collection_date,
             "photo_date": photo_date,
@@ -640,8 +640,9 @@ class WorkbenchSpecimenIdentityMixin:
             ADHOC_GROUPING_UID,
             SpecimenGrouping(uid=ADHOC_GROUPING_UID, groups=[]),
         )
-        self._grouping._uid_label.setText(label)
-        self._grouping._target_label.setText("临时")
+        # §7 旧: self._grouping._uid_label.setText(label)
+        #        self._grouping._target_label.setText("临时")
+        self._grouping.set_target_labels(label, "临时")
 
     def _on_open_grouping(self) -> None:
         """Open (or re-focus) the grouping/compose popup — web 分组工具 toggle.
@@ -659,8 +660,8 @@ class WorkbenchSpecimenIdentityMixin:
             if getattr(self._grouping, "_uid", None) != ADHOC_GROUPING_UID:
                 self._load_temporary_grouping_task("未归属（可后续归入编号）")
             else:
-                self._grouping._uid_label.setText("未归属（可后续归入编号）")
-                self._grouping._target_label.setText("临时")
+                # §7 旧: _uid_label / _target_label 直接 setText
+                self._grouping.set_target_labels("未归属（可后续归入编号）", "临时")
             self._status_message("当前没有激活编号：新组将暂存为未归属分组。", 5000)
             uid = ADHOC_GROUPING_UID
         if getattr(self._grouping, "_uid", None) != uid:
@@ -888,7 +889,7 @@ class WorkbenchSpecimenIdentityMixin:
         except Exception:
             pass
         try:
-            values["photo_notes"] = self._naming._photo_notes.toPlainText().strip()
+            values["photo_notes"] = self._naming.photo_notes()
             self._naming.set_display_metadata(values)
         except Exception:
             pass
@@ -927,14 +928,17 @@ class WorkbenchSpecimenIdentityMixin:
             k: ("" if (k in auto or not v.strip()) else v)
             for k, v in self._metadata.current_values().items()
         }
-        current["photo_date"] = self._naming._photo_date.text()
+        # §7 旧: current["photo_date"] = self._naming._photo_date.text()
+        # 注意: 旧行**没有** .strip(), 所以走 photo_date_raw() 而非 photo_date()。
+        current["photo_date"] = self._naming.photo_date_raw()
         vals = crs.autofill_values(rec, current)
         if not vals:
             if dynamic_changed and self._current_uid:
                 self._schedule_rail_save()
             return
-        if "photo_date" in vals and not self._naming._photo_date.text().strip():
-            self._naming._photo_date.setText(str(vals["photo_date"]))
+        if "photo_date" in vals and not self._naming.photo_date():
+            # §7 旧: self._naming._photo_date.setText(str(vals["photo_date"]))
+            self._naming.set_photo_date(str(vals["photo_date"]))
         # override_auto=True：覆盖项目默认（自动）坐标，但 apply_autofill 内部仍
         # 跳过手动字段。
         self._metadata.apply_autofill(vals, override_auto=True)

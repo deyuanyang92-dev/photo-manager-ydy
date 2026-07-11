@@ -114,6 +114,12 @@ class NamingPanel(QWidget):
     storage_applied = pyqtSignal(str, str)  # (old_code, new_code) — 保存方式选定/变更
     open_project_settings = pyqtSignal()  # "其他… 打开项目设置" picked in 保存方式
     keys_committed = pyqtSignal()         # 地区/样地/站位/采集日期 finished editing or picked
+    # 场景: workbench_view 原本直接 connect 命名卡内部的 QLineEdit.textEdited /
+    #   QTextEdit.textChanged 来触发右栏草稿自动保存(掏私有控件)。
+    # 理由(Fable 5, 2026-07-12): 面板自己把这三个内部信号汇成一个对外信号,
+    #   触发点与旧代码**逐一对应**(采集日期 textEdited / 拍摄日期 textEdited /
+    #   备注 textChanged), 不新增也不减少触发时机。
+    fields_edited = pyqtSignal()
                                           # → workbench looks up a collection record and auto-fills
 
     def __init__(self, ctx: "AppContext", parent: Optional[QWidget] = None) -> None:
@@ -573,6 +579,11 @@ class NamingPanel(QWidget):
         for _, key, getter in _SECTION_DEFS:
             getter(self).setVisible(self._load_section_vis(key))
 
+        # 面板级 fields_edited —— 汇聚工作台原本直连的三个内部信号(见信号声明处注释)
+        self._collection_date.textEdited.connect(lambda *_: self.fields_edited.emit())
+        self._photo_date.textEdited.connect(lambda *_: self.fields_edited.emit())
+        self._photo_notes.textChanged.connect(lambda: self.fields_edited.emit())
+
         # Wire all edits to live-preview
         for widget in (
             self._province, self._site, self._station, self._species_id,
@@ -905,6 +916,58 @@ class NamingPanel(QWidget):
     def _toggle_display_notes(self) -> None:
         self._display_notes_expanded = not self._display_notes_expanded
         self._refresh_display_summary()
+
+    # ── 只读字段接口 ──────────────────────────────────────────────────────────
+    # 场景: app/views/workbench_*.py 里有 26 处直接写 self._naming._province.text()
+    #   .strip() 这种 —— 掏别人的私有控件。命名卡内部换个字段名, 工作台静默崩,
+    #   卡片也没法脱离工作台单测。
+    # 理由(Fable 5, 2026-07-12 用户批准, 前提"主处理逻辑不能变"): 每个接口 = 原来
+    #   那一行的**逐字复制**(同样 .text().strip()), 不改判断、不改顺序、不改时机。
+    #   金标测试 tests/test_workbench_panel_accessors.py 把送进 UID 推导/整理流程的
+    #   dict 硬编码钉死, 重构前后必须逐字节一致。
+    def province(self) -> str:
+        return self._province.text().strip()
+
+    def site(self) -> str:
+        return self._site.text().strip()
+
+    def station(self) -> str:
+        return self._station.text().strip()
+
+    def species_id(self) -> str:
+        return self._species_id.text().strip()
+
+    def storage_code(self) -> str:
+        return self._storage.text().strip()
+
+    def collection_date(self) -> str:
+        return self._collection_date.text().strip()
+
+    def photo_date(self) -> str:
+        return self._photo_date.text().strip()
+
+    def photo_date_raw(self) -> str:
+        """未 strip 的原文 —— workbench_specimen_identity:930 旧行就是 .text(),
+        不是 .text().strip()。接口化必须保留这点差异, 否则语义被我偷改。"""
+        return self._photo_date.text()
+
+    def photo_notes(self) -> str:
+        return self._photo_notes.toPlainText().strip()
+
+    def sequence(self) -> int:
+        return self._seq.value()
+
+    def set_photo_date(self, text: str) -> None:
+        """写回拍摄日期(采集记录自动填充用) —— 等价旧的 _photo_date.setText()。"""
+        self._photo_date.setText(str(text))
+
+    def run_compliance_check(self, uid: str) -> None:
+        """公开别名 —— 旧: view 直接调 self._naming._check_compliance(uid)。"""
+        self._check_compliance(uid)
+
+    def apply_sequence_suggestion(self) -> None:
+        """公开别名 —— 旧: view 直接调 self._naming._apply_sequence_suggestion()。"""
+        self._apply_sequence_suggestion()
 
     def current_uid(self) -> str:
         return self._uid_preview.text() if self._uid_preview.text() != "—" else ""
