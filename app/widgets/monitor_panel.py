@@ -1001,10 +1001,33 @@ class MonitorPanel(QWidget):
         # The active phase is shown by the single visible phase pill right after
         # the UID (see set_phase). Only the "未激活" hint shows when nothing is
         # active — the old "激活：<uid> · 自 HH:MM" banner duplicated the UID.
+        # 场景: 用户在左侧「单击」某编号 -> 右侧命名/分类表单立刻填满 -> 他以为
+        #   "我已经在用这个号了", 接着拍照, 结果照片没归到该号(拍照自动归属只认
+        #   **已激活**编号, 要双击才激活)。旧文案不管选没选都只写「未激活」, 和
+        #   旁边明晃晃的 UID 互相打架, 看不出"我明明选了啊"。
+        # 理由(Fable 5, 2026-07-11 用户确认): 把三态分开显示, 选中态直接告诉用户
+        #   下一步动作(双击激活), 不用他去猜。
+        # §7 旧:
+        #   if active_uid:
+        #       self._activate_state.hide()
+        #   else:
+        #       self._activate_state.setText("未激活")
+        #       ... show()
         if active_uid:
             self._activate_state.hide()
         else:
-            self._activate_state.setText("未激活")
+            if uid:
+                # 选中但未激活 —— 有号、但拍照不会自动归到它
+                self._activate_state.setText("已选中 · 未激活")
+                self._activate_state.setToolTip(
+                    "只是选中查看，拍照不会自动归到这个编号。\n"
+                    "双击左侧编号（或点「激活此编号」）后才会自动归属。"
+                )
+            else:
+                self._activate_state.setText("未激活")
+                self._activate_state.setToolTip(
+                    "还没有当前编号。在左侧双击一个编号即可激活。"
+                )
             self._activate_state.setObjectName("ActivateState")
             self._activate_state.style().unpolish(self._activate_state)
             self._activate_state.style().polish(self._activate_state)

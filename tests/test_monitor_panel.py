@@ -1126,3 +1126,27 @@ class TestToolbarWraps:
         from PyQt6.QtWidgets import QCheckBox
         cbs = [c for c in panel.findChildren(QCheckBox) if c.text() == "先确认"]
         assert cbs, "预览 复选框必须仍在(换行不得丢控件)"
+
+
+class TestSelectedNotActiveHint:
+    """场景: 用户在左侧「单击」编号 -> 右侧表单填满 -> 以为已经在用这个号。
+    实际只有「双击激活」后拍照才会自动归到该号。批次条只写「未激活」,
+    看不出"我明明选了啊"。这里把三种状态区分开。
+    """
+
+    def test_nothing_selected(self, panel):
+        panel.set_batch(None, None)
+        assert panel._activate_state.isHidden() is False
+        assert panel._activate_state.text() == "未激活"
+
+    def test_selected_but_not_active(self, panel):
+        panel.set_batch("浙江-三门湾-B2-001-R-20260711", None)
+        assert panel._activate_state.isHidden() is False
+        txt = panel._activate_state.text()
+        assert "已选中" in txt and "未激活" in txt
+        assert "双击" in panel._activate_state.toolTip()
+
+    def test_active_hides_hint(self, panel):
+        uid = "浙江-三门湾-B2-001-R-20260711"
+        panel.set_batch(uid, uid)
+        assert panel._activate_state.isHidden() is True
