@@ -375,3 +375,25 @@ class TestGuidePulse:
         assert view._team_setup_status.text() == "团队永久码已复制。"
         view._flash_team_status("")
         assert view._team_setup_status.isHidden()
+
+    def test_pulse_auto_stops_after_max_toggles(self, qtbot, mock_ctx):
+        """v0.57: 呼吸最多 _GUIDE_PULSE_MAX_TOGGLES 次后自动停在高亮态,
+        不再「未完成就永远闪」(用户报'一直闪屏')。"""
+        from app.views.collab_view import CollabView
+
+        view = CollabView(mock_ctx)
+        qtbot.addWidget(view)
+        view.on_activate()
+        assert view._guide_pulse_timer.isActive()
+
+        for _ in range(view._GUIDE_PULSE_MAX_TOGGLES + 1):
+            view._toggle_guide_pulse()
+
+        assert not view._guide_pulse_timer.isActive(), "限次后必须自动停"
+        assert view._guide_frame.property("pulse") == "on", "停在高亮态保持醒目"
+
+        # 再次进页重新计数, 重新呼吸一轮
+        view.on_deactivate()
+        view.on_activate()
+        assert view._guide_pulse_timer.isActive()
+        assert view._guide_pulse_count == 0

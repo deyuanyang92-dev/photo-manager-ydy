@@ -1347,14 +1347,20 @@ class CollabView(BaseView):
             self._retry_timer.stop()
 
     # ── 引导脉冲 (呼吸式醒目提示) ──────────────────────────────────────────
+    # v0.57 收敛: 「未完成就永远闪」被用户报为"一直闪屏"(2026-07-12)。
+    # 现在每次进页只呼吸 _GUIDE_PULSE_MAX_TOGGLES 次(≈7 秒)自动停,
+    # 停在高亮态保持醒目; 配置完成仍立即隐藏整条横幅。
+
+    _GUIDE_PULSE_MAX_TOGGLES = 8
 
     def _set_guide_pulse(self, active: bool) -> None:
-        """active=未完成 → 启动呼吸脉冲; active=已完成 → 停脉冲并复位。"""
+        """active=未完成 → 启动限次呼吸脉冲; active=已完成 → 停脉冲并复位。"""
         timer = getattr(self, "_guide_pulse_timer", None)
         if timer is None:
             return
         if active:
             if not timer.isActive():
+                self._guide_pulse_count = 0
                 timer.start()
         else:
             timer.stop()
@@ -1362,6 +1368,14 @@ class CollabView(BaseView):
             self._apply_guide_pulse_property("off")
 
     def _toggle_guide_pulse(self) -> None:
+        count = getattr(self, "_guide_pulse_count", 0) + 1
+        self._guide_pulse_count = count
+        if count > self._GUIDE_PULSE_MAX_TOGGLES:
+            # 提醒到位即闭嘴: 停在高亮态, 不再翻转(不再"一直闪")。
+            self._guide_pulse_timer.stop()
+            self._guide_pulse_on = True
+            self._apply_guide_pulse_property("on")
+            return
         self._guide_pulse_on = not self._guide_pulse_on
         self._apply_guide_pulse_property("on" if self._guide_pulse_on else "off")
 
