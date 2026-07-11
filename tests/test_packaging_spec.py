@@ -49,6 +49,14 @@ def test_windows_build_runs_packaged_smoke_before_zip():
     assert text.index("Invoke-PackagedSmoke -ExePath $exePath") < text.index("Compress-Archive")
 
 
+def test_windows_build_signing_tail_is_ascii_for_powershell5():
+    """Windows PowerShell 5 can misdecode UTF-8 text after the ZIP step."""
+    text = BUILD_SCRIPT.read_text(encoding="utf-8")
+    signing_tail = text[text.index("# Sign the update package") :]
+
+    assert signing_tail.isascii()
+
+
 def test_ci_uploads_versioned_windows_zip_artifact():
     text = CI_WORKFLOW.read_text(encoding="utf-8")
 

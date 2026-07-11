@@ -199,9 +199,9 @@ for ($i = 1; $i -le 5; $i++) {
     }
 }
 
-# 更新包签名（Ed25519）。仅当能找到私钥时才签名：
-#   env SPECIMEN_UPDATE_PRIVATE_KEY 指定的 PEM，或默认 secrets\update_private_key.pem。
-# 生成的 <zip>.sig 需与 zip 一起上传到 GitHub Release，客户端才会通过签名校验。
+# Sign the update package with Ed25519 when a private key is available.
+# The key comes from SPECIMEN_UPDATE_PRIVATE_KEY or secrets\update_private_key.pem.
+# Upload the generated <zip>.sig beside the ZIP when signature checks are enabled.
 $sigPath = "$zipPath.sig"
 $privKey = $env:SPECIMEN_UPDATE_PRIVATE_KEY
 if ([string]::IsNullOrWhiteSpace($privKey)) {
@@ -213,8 +213,8 @@ if (-not [string]::IsNullOrWhiteSpace($privKey) -and (Test-Path $privKey)) {
     if ($LASTEXITCODE -ne 0) { throw "Failed to sign release zip" }
     Write-Host "Signed: $sigPath"
 } else {
-    Write-Host "WARNING: 未找到更新签名私钥，跳过签名（此发布包不会通过签名校验）。"
-    Write-Host "         运行 scripts/gen_update_keys.py 生成密钥并配置公钥后再发布。"
+    Write-Host "WARNING: Update signing key not found; skipping Ed25519 signature."
+    Write-Host "         Run scripts/gen_update_keys.py before enabling signed updates."
 }
 
 Write-Host ""
