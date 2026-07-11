@@ -164,11 +164,17 @@ class _ElideLabel(QLabel):
 
         理由(Fable 5, 2026-07-12): 单纯 elide 在窄栏上会缩成「下…」这种半截字,
         比不显示还难看。宁可整句让位, 也不留残字。
+        v0.57 修「疯狂闪屏」: 降级选择改到 paintEvent 自绘, 不再经由 setText。
+        原实现 resizeEvent→setText(长短句切换)→sizeHint 失效→布局重协商→宽度变
+        →又 resizeEvent —— 临界宽度下两个句子无限来回 = 打开工作区整条批次栏
+        高频振荡(2026-07-12 用户报"疯狂闪屏")。自绘让文本切换零布局副作用。
         """
         self._full = full or ""
         self._short = short or self._full
-        self._apply_elide()
+        # §7 旧: self._apply_elide()  # setText 驱动 → 布局振荡根源
+        QLabel.setText(self, "")  # 基类不持有可见文本, 绘制全权在 paintEvent
         self.updateGeometry()
+        self.update()
 
     def full_text(self) -> str:
         return self._full
@@ -187,19 +193,35 @@ class _ElideLabel(QLabel):
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
-        self._apply_elide()
+        # §7 旧: self._apply_elide()  # 会 setText → 触发布局协商 → 振荡
+        self.update()  # 只请求重绘; 布局宽度是多少就画多少, 零反馈回路
 
-    def _apply_elide(self) -> None:
+    def picked_text(self) -> str:
+        """当前宽度下应显示的档位(测试也用它断言三档降级)。"""
         avail = max(0, self.width())
-        if avail <= 0:  # 还没布局 -> 先按全句(sizeHint 才拿得到正确宽度)
-            QLabel.setText(self, self._full)
-            return
+        if avail <= 0:
+            return self._full
         fm = self.fontMetrics()
         for candidate in (self._full, self._short):
             if candidate and fm.horizontalAdvance(candidate) <= avail:
-                QLabel.setText(self, candidate)
-                return
-        QLabel.setText(self, "")  # 连短句都放不下 -> 留白, 不留「下…」这种半截字
+                return candidate
+        return ""  # 连短句都放不下 -> 留白, 不留「下…」这种半截字
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        text = self.picked_text()
+        if not text:
+            return
+        from PyQt6.QtGui import QPainter
+
+        painter = QPainter(self)
+        painter.setFont(self.font())
+        # QSS 的 color 会写进 palette(WindowText); 自绘沿用, 主题切换仍生效。
+        painter.setPen(self.palette().color(self.foregroundRole()))
+        painter.drawText(
+            self.contentsRect(),
+            int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+            text,
+        )
 
 
 class _FileCard(QFrame):

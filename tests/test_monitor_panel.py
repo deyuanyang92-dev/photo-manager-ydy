@@ -1180,3 +1180,37 @@ class TestNextStepHint:
     def test_hint_never_forces_bar_wide(self, panel):
         panel.load_scan(self._mk(jpgs=3))
         assert panel._next_hint.minimumSizeHint().width() <= 40
+
+
+class TestElideLabelNoOscillation:
+    """v0.57 修「疯狂闪屏」: 文本降级走 paintEvent 自绘, resize 不得再 setText
+    (setText→sizeHint 失效→布局重协商→宽度变→再 resize = 无限振荡)。"""
+
+    def test_resize_never_mutates_label_text(self, qtbot):
+        from app.widgets.monitor_panel import _ElideLabel
+
+        lbl = _ElideLabel("")
+        qtbot.addWidget(lbl)
+        lbl.set_texts("下一步 › 全选后点「合成+整理」", "下一步 › 合成+整理")
+
+        base_text = lbl.text()
+        for w in (400, 80, 30, 5, 400):  # 扫过全句/短句/留白临界
+            lbl.resize(w, 20)
+        assert lbl.text() == base_text, "resize 不得改基类 text(振荡根源)"
+
+    def test_picked_text_three_tier_downgrade(self, qtbot):
+        from app.widgets.monitor_panel import _ElideLabel
+
+        lbl = _ElideLabel("")
+        qtbot.addWidget(lbl)
+        lbl.set_texts("很长很长的一整句提示文字啊啊啊", "短句")
+        fm = lbl.fontMetrics()
+
+        lbl.resize(fm.horizontalAdvance("很长很长的一整句提示文字啊啊啊") + 10, 20)
+        assert lbl.picked_text() == "很长很长的一整句提示文字啊啊啊"
+
+        lbl.resize(fm.horizontalAdvance("短句") + 6, 20)
+        assert lbl.picked_text() == "短句"
+
+        lbl.resize(3, 20)
+        assert lbl.picked_text() == "", "连短句都放不下应留白, 不留半截字"
