@@ -634,11 +634,18 @@ class MonitorPanel(QWidget):
         self._compose_btn.clicked.connect(self.compose_implicit_requested.emit)
         controls.addWidget(self._compose_btn)
 
-        self._compose_preview_cb = QCheckBox("预览")
+        # 场景: 用户看到「合成」旁边写着「预览」, 以为点了能看图。
+        # 理由(Fable 5, 2026-07-11 用户确认改名): 它其实是**合成流程开关** ——
+        #   勾选=合成前先确认 JPG、合成后进 TIFF 预览工作台; 取消=直接合成。
+        #   叫「预览」严重误导(用户以为是看图按钮)。改叫「先确认」: 放在「合成」
+        #   旁边读作"合成, 先确认一下", 一目了然。
+        # §7 旧: QCheckBox("预览")
+        self._compose_preview_cb = QCheckBox("先确认")
         self._compose_preview_cb.setObjectName("InlineCheck")
         self._compose_preview_cb.setChecked(True)
         self._compose_preview_cb.setToolTip(
-            "勾选：合成前确认 JPG，合成后进入 TIFF 预览工作台；取消：直接合成"
+            "勾选：合成前先确认要用哪些 JPG，合成后进入 TIFF 预览工作台\n"
+            "取消：直接合成，不打断"
         )
         self._compose_preview_cb.toggled.connect(self.compose_preview_toggled.emit)
         controls.addWidget(self._compose_preview_cb)

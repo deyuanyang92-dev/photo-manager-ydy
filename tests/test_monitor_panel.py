@@ -1084,7 +1084,7 @@ class TestComposePreviewToggle:
     def test_preview_checkbox_exists_and_defaults_on(self, panel):
         from PyQt6.QtWidgets import QCheckBox
 
-        preview = next(c for c in panel.findChildren(QCheckBox) if c.text() == "预览")
+        preview = next(c for c in panel.findChildren(QCheckBox) if c.text() == "先确认")
 
         assert preview.isChecked()
         assert panel.compose_preview_enabled() is True
@@ -1124,5 +1124,5 @@ class TestToolbarWraps:
 
     def test_preview_checkbox_still_present(self, panel):
         from PyQt6.QtWidgets import QCheckBox
-        cbs = [c for c in panel.findChildren(QCheckBox) if c.text() == "预览"]
+        cbs = [c for c in panel.findChildren(QCheckBox) if c.text() == "先确认"]
         assert cbs, "预览 复选框必须仍在(换行不得丢控件)"
