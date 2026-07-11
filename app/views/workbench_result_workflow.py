@@ -356,7 +356,8 @@ class WorkbenchResultWorkflowMixin:
             self,
             "撤销整理",
             "将从 ZIP 还原原始 JPG 到原位置，并把该组退回“已合成、待整理”。\n\n"
-            "TIFF 不会删除；项目内 ZIP 会移到 _retired-zip 作为备份。确认？",
+            "TIFF 不会删除；恢复和状态更新成功后，项目内 ZIP 将直接删除，"
+            "不再保留备份。恢复失败时 ZIP 不会删除。确认？",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
@@ -369,19 +370,47 @@ class WorkbenchResultWorkflowMixin:
         result = restore_archive_to_original_paths(
             zip_path,
             jpg_paths,
-            overwrite=False,
+            overwrite=True,
         )
         if not getattr(result, "ok", False):
             reason = getattr(result, "reason", "") or "；".join(result.failures[:3])
             QMessageBox.warning(self, "撤销整理失败", reason or "部分 JPG 未能恢复。")
             return
 
-        retired_zip = self._retire_zip(zip_path)
+        previous_archive_zip = target.archive_zip
+        previous_status = target.status
+        previous_updated_at = target.updated_at
         target.archive_zip = None
         target.status = "composed"
         target.updated_at = _utc_now_iso()
         try:
             save_grouping(db, uid, grouping.groups, clean_phantoms=False)
+        except Exception as exc:
+            target.archive_zip = previous_archive_zip
+            target.status = previous_status
+            target.updated_at = previous_updated_at
+            QMessageBox.warning(
+                self,
+                "撤销整理",
+                "JPG 已恢复，但状态更新失败；ZIP 已保留，请重试。\n\n"
+                f"详情：{exc}",
+            )
+            return
+
+        removed_zip = ""
+        zip_delete_failed = False
+        try:
+            removed_zip = self._retire_zip(zip_path)
+        except OSError as exc:
+            zip_delete_failed = True
+            QMessageBox.warning(
+                self,
+                "撤销整理",
+                "JPG 已恢复且状态已更新，但项目内 ZIP 删除失败，请手动检查。\n\n"
+                f"详情：{exc}",
+            )
+
+        try:
             self._grouping.load_grouping(uid, grouping)
             self._refresh_monitor()
             self._refresh_results_column(uid, grouping)
@@ -390,13 +419,15 @@ class WorkbenchResultWorkflowMixin:
             detail = f"已恢复 {restored_count} 张 JPG"
             if skipped_count:
                 detail += f"，{skipped_count} 张原位置已有文件已跳过"
-            if retired_zip:
-                detail += f"；ZIP 已移到 {Path(retired_zip).parent.name}/"
+            if removed_zip:
+                detail += "；项目内 ZIP 已删除"
+            elif zip_delete_failed:
+                detail += "；项目内 ZIP 删除失败"
             else:
-                detail += "；ZIP 已取消登记，磁盘文件保留原处"
+                detail += "；ZIP 已取消登记，外部文件保留原处"
             self._status_message(f"撤销整理完成：{detail}")
         except Exception as exc:
-            QMessageBox.warning(self, "撤销整理", f"状态更新失败：{exc}")
+            QMessageBox.warning(self, "撤销整理", f"界面刷新失败：{exc}")
 
     def _retire_tiff(self, tiff_path: str) -> None:
         """Move a TIFF to the project's _retired-tiff/ directory."""
@@ -423,32 +454,20 @@ class WorkbenchResultWorkflowMixin:
             pass
 
     def _retire_zip(self, zip_path: str) -> str:
-        """Move a project-managed ZIP to _retired-zip; leave external ZIPs alone."""
-        try:
-            src = Path(zip_path)
-            if not src.is_file():
-                return ""
-            project_dir = getattr(self.ctx, "current_project_dir", None)
-            if not project_dir:
-                return ""
-            project_root = Path(project_dir).resolve()
-            try:
-                src.resolve().relative_to(project_root)
-            except ValueError:
-                return ""
-            retired_dir = project_root / "_retired-zip"
-            retired_dir.mkdir(exist_ok=True)
-            dest = retired_dir / src.name
-            if dest.exists():
-                stem, suffix = src.stem, src.suffix
-                i = 1
-                while dest.exists():
-                    dest = retired_dir / f"{stem}_{i}{suffix}"
-                    i += 1
-            shutil.move(str(src), str(dest))
-            return str(dest)
-        except Exception:
+        """Delete a project-managed ZIP after a successful restore and DB save."""
+        src = Path(zip_path)
+        if not src.is_file():
             return ""
+        project_dir = getattr(self.ctx, "current_project_dir", None)
+        if not project_dir:
+            return ""
+        project_root = Path(project_dir).resolve()
+        try:
+            src.resolve().relative_to(project_root)
+        except ValueError:
+            return ""
+        src.unlink()
+        return str(src)
 
     def _on_grouping_changed(self) -> None:
         """Debounce-save grouping to DB after edits."""

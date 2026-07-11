@@ -382,7 +382,7 @@ class WorkbenchSupplementaryWorkflowMixin:
         待处理又在归档里, 看起来像什么都没发生)。所以:
 
         · ZIP 属于某编号的组 → 走「撤销整理」(_on_undo_organise):
-          JPG 还原回原位 + ZIP 移入 _retired-zip 备份(不裸删) +
+          JPG 还原回原位 + 成功后直接删除项目内 ZIP +
           组退回 composed → 成果区那行 ZIP 消失, TIF 保留(红线:母版不动)。
         · 孤儿 ZIP(不属于任何组, 如外部拷入) → 旧行为:只抽副本到待处理区,
           ZIP 原地不动(additive, 重活在 RestoreWorker 线程)。
@@ -401,7 +401,7 @@ class WorkbenchSupplementaryWorkflowMixin:
                 undo(uid, grouping, group)
                 return
         # 组存在但没记录原 JPG 路径(如改绑挂上来的成果):抽副本到待处理区,
-        # 成功后同样清 ZIP 登记 + 退役 ZIP + 组回 composed(在 _on_restore_finished
+        # 成功后同样清 ZIP 登记 + 删除项目内 ZIP + 组回 composed(在 _on_restore_finished
         # 消费; 失败绝不动登记 —— 原片没回来时归档记录不能丢)。
         self._pending_restore_finalize = (
             (uid, int(getattr(group, "group_index", 0)), zip_path)
@@ -457,7 +457,7 @@ class WorkbenchSupplementaryWorkflowMixin:
             pass
 
     def _finalize_pending_restore(self) -> str:
-        """抽副本成功后的撤登记:清 archive_zip + 组回 composed + ZIP 退役。"""
+        """抽副本成功后撤登记，并删除已经完成还原的项目内 ZIP。"""
         pending = getattr(self, "_pending_restore_finalize", None)
         self._pending_restore_finalize = None
         if not pending:
@@ -499,7 +499,18 @@ class WorkbenchSupplementaryWorkflowMixin:
             )
             return ""
         retire = getattr(self, "_retire_zip", None)
-        retired = retire(zip_path) if callable(retire) else ""
+        removed = ""
+        if callable(retire):
+            try:
+                removed = retire(zip_path)
+            except OSError as exc:
+                from app.utils import ui as _ui
+                _ui.warn(
+                    self,
+                    "还原原片",
+                    "原片已恢复且状态已更新，但项目内 ZIP 删除失败，请手动检查。\n\n"
+                    f"详情：{exc}",
+                )
         # 按当前显示模式重载成果区(传 grouping=None 会刷成空列表)
         after = getattr(self, "_after_binding_changed", None)
         if callable(after):
@@ -507,7 +518,7 @@ class WorkbenchSupplementaryWorkflowMixin:
                 after(uid=uid, grouping=grouping)
             except Exception:
                 pass
-        return retired or zip_path
+        return removed
 
     def _on_restore_finished(self, result) -> None:
         from app.utils import ui

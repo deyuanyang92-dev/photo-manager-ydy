@@ -119,8 +119,8 @@ def test_restore_falls_back_to_picker_when_no_project(tmp_path, monkeypatch):
 # 使用场景:用户合成/整理错了, 点 ZIP 卡上的「还原原片」是想**撤回这次整理**。
 # 原片回到待处理区之后, ZIP 若还挂在成果区 = 状态矛盾(同一批 JPG 既在待处理
 # 又在归档里, 看起来像什么都没发生)。所以:
-#   · ZIP 属于某编号的组 → 走「撤销整理」: JPG 还原 + ZIP 移入 _retired-zip
-#     备份(不裸删) + 组退回 composed → 成果区那行 ZIP 消失, TIF 保留
+#   · ZIP 属于某编号的组 → 走「撤销整理」: JPG 还原 + 项目内 ZIP 直接删除 +
+#     组退回 composed → 成果区那行 ZIP 消失, TIF 保留
 #   · 孤儿 ZIP(不属于任何组) → 保留旧行为: 只抽副本到待处理区
 
 
@@ -144,7 +144,7 @@ class _UndoHarness(_Harness):
 
 
 def test_restore_of_organized_group_undoes_organise(project, monkeypatch):
-    """组内 ZIP 的「还原原片」= 撤销整理: JPG 回原位 + ZIP 退役 + 组回 composed。"""
+    """组内 ZIP 的「还原原片」= 撤销整理: JPG 回原位 + ZIP 删除 + 组回 composed。"""
     import sqlite3
     from app.db import db_manager
     from app.services.grouping_service import Group, load_grouping, save_grouping
@@ -173,9 +173,14 @@ def test_restore_of_organized_group_undoes_organise(project, monkeypatch):
 
     h = _UndoHarness(str(project), db)
     from PyQt6.QtWidgets import QMessageBox
+    questions: list[str] = []
     monkeypatch.setattr(
         QMessageBox, "question",
-        staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes),
+        staticmethod(
+            lambda *a, **k: (
+                questions.append(str(a[2])), QMessageBox.StandardButton.Yes
+            )[1]
+        ),
     )
     monkeypatch.setattr(QMessageBox, "warning", staticmethod(lambda *a, **k: None))
 
@@ -187,9 +192,11 @@ def test_restore_of_organized_group_undoes_organise(project, monkeypatch):
     assert not g.archive_zip, "ZIP 登记必须清除 → 成果区那行 ZIP 消失"
     assert g.status == "composed", "组退回「已合成、待整理」"
     assert jpg_orig.is_file(), "JPG 应还原回原位置(待处理区)"
-    assert not zip_path.exists(), "项目内 ZIP 应移入 _retired-zip 备份"
-    assert (project / "_retired-zip" / "r.zip").is_file()
+    assert not zip_path.exists(), "恢复成功后项目内 ZIP 应直接删除"
+    assert not (project / "_retired-zip").exists(), "不应再创建 ZIP 备份目录"
     assert tiff.is_file(), "TIF 母版不动(红线)"
+    assert questions and "直接删除" in questions[0]
+    assert "_retired-zip" not in questions[0]
 
 
 def test_restore_of_orphan_zip_keeps_copy_semantics(project, monkeypatch):
@@ -223,9 +230,9 @@ def test_restore_of_orphan_zip_keeps_copy_semantics(project, monkeypatch):
     assert os.path.isfile(zip_path), "孤儿 ZIP 不动"
 
 
-def test_restore_group_without_jpg_paths_still_retires_zip(project, monkeypatch):
+def test_restore_group_without_jpg_paths_still_removes_zip(project, monkeypatch):
     """组存在但没记录原 JPG 路径(如改绑挂上的成果): 抽副本到待处理区成功后,
-    同样必须清 ZIP 登记 + 退役 ZIP + 组回 composed —— 语义一致, 不留矛盾状态。"""
+    同样必须清 ZIP 登记 + 删除项目内 ZIP + 组回 composed —— 语义一致, 不留矛盾状态。"""
     import sqlite3
     from app.db import db_manager
     from app.services.grouping_service import Group, load_grouping, save_grouping
@@ -271,7 +278,8 @@ def test_restore_group_without_jpg_paths_still_retires_zip(project, monkeypatch)
 
     g = load_grouping(db, uid).groups[0]
     assert not g.archive_zip and g.status == "composed"
-    assert not zip_path.exists() and (project / "_retired-zip" / "nopaths.zip").is_file()
+    assert not zip_path.exists()
+    assert not (project / "_retired-zip").exists()
 
 
 def test_restore_failure_leaves_zip_registered(project, monkeypatch):
@@ -316,3 +324,65 @@ def test_restore_failure_leaves_zip_registered(project, monkeypatch):
     g = load_grouping(db, uid).groups[0]
     assert g.archive_zip and g.status == "organized", "失败不得撤登记"
     assert zip_path.exists()
+
+
+def test_undo_organise_keeps_zip_when_state_save_fails(project, monkeypatch):
+    """JPG 虽已恢复，但数据库没写成时必须保留 ZIP，避免失去可重试归档。"""
+    import sqlite3
+    from PyQt6.QtWidgets import QMessageBox
+    from app.db import db_manager
+    from app.services import grouping_service
+    from app.services.grouping_service import Group, load_grouping, save_grouping
+
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    db_manager.ensure_schema(db)
+
+    uid = "FJ-XM-A01-DLC001-T95E-20260601"
+    jpg_orig = project / "incoming-jpg" / "P001.jpg"
+    zip_path = project / "results" / "save-fail.zip"
+    zip_path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("P001.jpg", b"\xff\xd8\xffSAFE")
+    save_grouping(
+        db,
+        uid,
+        [
+            Group(
+                group_index=0,
+                composed_tiff_path="",
+                archive_zip=str(zip_path),
+                jpg_paths=[str(jpg_orig)],
+                status="organized",
+            )
+        ],
+        clean_phantoms=False,
+    )
+
+    h = _UndoHarness(str(project), db)
+    grouping = load_grouping(db, uid)
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes),
+    )
+    monkeypatch.setattr(
+        QMessageBox,
+        "warning",
+        staticmethod(lambda *a, **k: warnings.append(str(a[2]))),
+    )
+    monkeypatch.setattr(
+        grouping_service,
+        "save_grouping",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("db busy")),
+    )
+
+    h._on_undo_organise(uid, grouping, grouping.groups[0])
+
+    persisted = load_grouping(db, uid).groups[0]
+    assert jpg_orig.is_file(), "恢复结果不应回滚删除"
+    assert zip_path.is_file(), "状态未写成时 ZIP 必须保留"
+    assert persisted.archive_zip and persisted.status == "organized"
+    assert grouping.groups[0].archive_zip and grouping.groups[0].status == "organized"
+    assert warnings and "ZIP 已保留" in warnings[-1]
