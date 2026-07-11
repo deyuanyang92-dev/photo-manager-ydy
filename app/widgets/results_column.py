@@ -11,13 +11,14 @@ from collections import deque
 from pathlib import Path
 from typing import Optional
 
-from PyQt6.QtCore import QEvent, QSettings, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QEvent, QPoint, QSettings, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QKeySequence, QPixmap, QShortcut
 from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
     QMenu,
+    QApplication,
     QPushButton,
     QScrollArea,
     QVBoxLayout,
@@ -54,6 +55,7 @@ class ResultsColumn(QWidget):
     """② 成果内容 column: collapsible, zoomable, paired TIFF↔ZIP rows."""
 
     restore_requested = pyqtSignal(str)  # ZIP 绝对路径 → 还原原片 JPG
+    restore_many_requested = pyqtSignal(list)  # 勾选的 ZIP → 批量还原
     specimen_requested = pyqtSignal(str)  # all-results group header → select UID
     show_all_requested = pyqtSignal()
     current_requested = pyqtSignal()
@@ -62,6 +64,7 @@ class ResultsColumn(QWidget):
     unbind_result_requested = pyqtSignal(str, str)   # tiff_path, zip_path
     rebind_result_requested = pyqtSignal(str, str)   # tiff_path, zip_path
     tiff_naming_check_requested = pyqtSignal(str)  # tiff_path
+    tiff_naming_check_many_requested = pyqtSignal(list)  # selected TIFF paths
     tiff_delete_requested = pyqtSignal(str)  # tiff_path
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
@@ -91,6 +94,8 @@ class ResultsColumn(QWidget):
         self._current_zips: list[dict] = []
         self._current_groups: list[dict] = []
         self._selected_result_paths: set[str] = set()
+        self._batch_restore_running = False
+        self._batch_restore_count = 0
         self._display_mode = "single"
         self._filename_mode = "full"
         self._rendered_paired_columns = True
@@ -154,6 +159,21 @@ class ResultsColumn(QWidget):
         self._all_mode_btn.setToolTip("按编号分组显示当前项目全部 TIFF 和 ZIP")
         self._all_mode_btn.clicked.connect(lambda: self.show_all_requested.emit())
         hdr.addWidget(self._all_mode_btn)
+
+        self._restore_selected_btn = QPushButton("还原所选")
+        self._restore_selected_btn.setObjectName("Outline")
+        self._restore_selected_btn.setFixedHeight(28)
+        self._restore_selected_btn.setVisible(False)
+        self._restore_selected_btn.setToolTip("并行还原已勾选的 ZIP 原片")
+        self._restore_selected_btn.clicked.connect(self._emit_restore_selected)
+        hdr.addWidget(self._restore_selected_btn)
+
+        self._selected_actions_btn = QPushButton("所选操作")
+        self._selected_actions_btn.setObjectName("Ghost")
+        self._selected_actions_btn.setFixedHeight(28)
+        self._selected_actions_btn.setVisible(False)
+        self._selected_actions_btn.clicked.connect(self._show_selected_actions_menu)
+        hdr.addWidget(self._selected_actions_btn)
         hdr.addStretch()
 
         self._paired_selection_btn = QPushButton("联选")
@@ -390,6 +410,7 @@ class ResultsColumn(QWidget):
         self._current_zips = []
         self._current_groups = []
         self._selected_result_paths.clear()
+        self._update_restore_selected_button()
         self._display_mode = "single"
         self._update_mode_button_state()
         self._title.setText("成果")
@@ -413,6 +434,114 @@ class ResultsColumn(QWidget):
 
     def selected_result_paths(self) -> list[str]:
         return sorted(self._selected_result_paths)
+
+    def selected_zip_paths(self) -> list[str]:
+        selected: list[str] = []
+        seen: set[str] = set()
+        for info in self._current_zips:
+            path = str(info.get("path") or "")
+            key = self._result_key(path)
+            if key and key in self._selected_result_paths and key not in seen:
+                selected.append(path)
+                seen.add(key)
+        return selected
+
+    def selected_tiff_paths(self) -> list[str]:
+        selected: list[str] = []
+        seen: set[str] = set()
+        for info in self._current_tiffs:
+            path = str(info.get("path") or "")
+            key = self._result_key(path)
+            if key and key in self._selected_result_paths and key not in seen:
+                selected.append(path)
+                seen.add(key)
+        return selected
+
+    def visible_selected_paths(self) -> list[str]:
+        selected_keys = set(self._selected_result_paths)
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for info in self._current_tiffs + self._current_zips:
+            path = str(info.get("path") or "")
+            key = self._result_key(path)
+            if key and key in selected_keys and key not in seen:
+                ordered.append(path)
+                seen.add(key)
+        return ordered
+
+    def clear_result_selection(self, paths: list[str] | None = None) -> None:
+        if paths is None:
+            self._selected_result_paths.clear()
+        else:
+            self._selected_result_paths.difference_update(
+                self._result_key(path) for path in paths if path
+            )
+        for card in self._cards:
+            key = self._result_key(card._info.get("path", ""))
+            if hasattr(card, "set_selected"):
+                card.set_selected(key in self._selected_result_paths)
+        self._update_visible_pair_indicator_state()
+        self._update_restore_selected_button()
+
+    def set_batch_restore_running(self, running: bool, count: int = 0) -> None:
+        self._batch_restore_running = bool(running)
+        self._batch_restore_count = max(0, int(count))
+        self._update_restore_selected_button()
+
+    def _emit_restore_selected(self) -> None:
+        paths = self.selected_zip_paths()
+        if paths and not self._batch_restore_running:
+            self.restore_many_requested.emit(paths)
+
+    def _show_selected_actions_menu(self) -> None:
+        paths = self.visible_selected_paths()
+        if not paths:
+            return
+        tiffs = self.selected_tiff_paths()
+        zips = self.selected_zip_paths()
+        menu = QMenu(self)
+        if zips:
+            restore_action = menu.addAction(f"还原所选 ZIP（{len(zips)}）")
+            restore_action.triggered.connect(lambda: self.restore_many_requested.emit(zips))
+        if tiffs:
+            naming_action = menu.addAction(f"检查所选 TIF 命名（{len(tiffs)}）")
+            naming_action.triggered.connect(
+                lambda: self.tiff_naming_check_many_requested.emit(tiffs)
+            )
+        menu.addSeparator()
+        copy_action = menu.addAction(f"复制所选路径（{len(paths)}）")
+        copy_action.triggered.connect(
+            lambda: QApplication.clipboard().setText("\n".join(paths))
+        )
+        clear_action = menu.addAction("取消选择")
+        clear_action.triggered.connect(self.clear_result_selection)
+        menu.exec(
+            self._selected_actions_btn.mapToGlobal(
+                QPoint(0, self._selected_actions_btn.height())
+            )
+        )
+
+    def _update_restore_selected_button(self) -> None:
+        if not hasattr(self, "_restore_selected_btn"):
+            return
+        count = len(self.selected_zip_paths())
+        if self._batch_restore_running:
+            self._restore_selected_btn.setText(
+                f"正在还原（{self._batch_restore_count or count}）"
+            )
+            self._restore_selected_btn.setVisible(True)
+            self._restore_selected_btn.setEnabled(False)
+        else:
+            self._restore_selected_btn.setText(f"还原所选（{count}）")
+            self._restore_selected_btn.setVisible(count > 0)
+            self._restore_selected_btn.setEnabled(count > 0)
+        if hasattr(self, "_selected_actions_btn"):
+            selected_count = len(self.visible_selected_paths())
+            self._selected_actions_btn.setText(f"所选操作（{selected_count}）")
+            self._selected_actions_btn.setVisible(selected_count > 0)
+            self._selected_actions_btn.setEnabled(
+                selected_count > 0 and not self._batch_restore_running
+            )
 
     def _result_key(self, path: str) -> str:
         if not path:
@@ -452,11 +581,13 @@ class ResultsColumn(QWidget):
             if c_key in keys and hasattr(c, "set_selected"):
                 c.set_selected(c_key in self._selected_result_paths)
         self._update_visible_pair_indicator_state()
+        self._update_restore_selected_button()
 
     def _prune_selected_result_paths(self) -> None:
         valid = self._visible_result_keys()
         self._selected_result_paths &= valid
         self._update_visible_pair_indicator_state()
+        self._update_restore_selected_button()
 
     def _visible_result_keys(self) -> set[str]:
         return {
@@ -591,17 +722,30 @@ class ResultsColumn(QWidget):
         else:
             self.load_uid("", self._current_tiffs, self._current_zips)
 
-    def _should_show_paired_columns(self) -> bool:
-        if not self._paired_columns_enabled:
-            return False
+    def _layout_probe_width(self) -> int:
         width = 0
         if hasattr(self, "_body"):
             width = self._body.viewport().width()
         if width <= 0:
             width = self.width()
+        return width
+
+    def _should_show_paired_columns(self) -> bool:
+        if not self._paired_columns_enabled:
+            return False
+        width = self._layout_probe_width()
         if width <= 0 or not self.isVisible():
             return True
-        return width >= _MIN_PAIRED_COLUMNS_WIDTH
+        # §7 旧: return width >= _MIN_PAIRED_COLUMNS_WIDTH  —— 单一阈值。
+        # v0.57 滞回修「疯狂闪屏」: 全量重建会让滚动条出没, viewport 宽度在
+        # 阈值附近 ±十几 px 来回跨线 → 单/双列判定翻转 → 又重建 → 又动滚动条
+        # = 自激振荡, 且每轮重建重新逐张解码缩略图(2026-07-12 用户报
+        # 「一直闪屏, 加载一个个就动一次」)。加 ±24px 死区: 已是双列要掉出
+        # 死区下缘才退回单列, 反之要越过上缘才升双列, 滚动条摆动落在死区内。
+        margin = 24
+        if self._rendered_paired_columns:
+            return width >= _MIN_PAIRED_COLUMNS_WIDTH - margin
+        return width >= _MIN_PAIRED_COLUMNS_WIDTH + margin
 
     def _schedule_layout_refresh(self) -> None:
         if hasattr(self, "_layout_refresh_timer"):
@@ -936,4 +1080,3 @@ class ResultsColumn(QWidget):
                     subprocess.Popen(["explorer.exe", "/select,", win_path])
         except Exception:
             pass
-

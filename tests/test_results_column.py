@@ -887,6 +887,72 @@ def test_results_column_selection_highlights_only_clicked_file_by_default(qtbot)
     assert len(col.selected_result_paths()) == 2
 
 
+def test_selected_zip_button_emits_only_selected_archives(qtbot):
+    from app.widgets.results_column import ResultsColumn, _ArchiveCard, _TiffCard
+
+    col = ResultsColumn()
+    qtbot.addWidget(col)
+    tiff = "/fake/a.tif"
+    zip_a = "/fake/a.zip"
+    zip_b = "/fake/b.zip"
+    col.load_uid(
+        "UID",
+        [{"path": tiff, "name": "a.tif", "seq": 1}],
+        [
+            {"path": zip_a, "name": "a.zip", "size": 10, "seq": 1},
+            {"path": zip_b, "name": "b.zip", "size": 11, "seq": 2},
+        ],
+    )
+    tiff_card = next(c for c in col._cards if isinstance(c, _TiffCard))
+    zip_cards = [c for c in col._cards if isinstance(c, _ArchiveCard)]
+
+    col._toggle_result_selection(tiff, tiff_card)
+    col._toggle_result_selection(zip_a, zip_cards[0])
+    col._toggle_result_selection(zip_b, zip_cards[1])
+
+    assert col.selected_zip_paths() == [zip_a, zip_b]
+    assert not col._restore_selected_btn.isHidden()
+    assert "2" in col._restore_selected_btn.text()
+    with qtbot.waitSignal(col.restore_many_requested, timeout=1000) as emitted:
+        col._restore_selected_btn.click()
+    assert emitted.args == [[zip_a, zip_b]]
+
+
+def test_selected_actions_separate_tiffs_and_zips(qtbot, monkeypatch):
+    from PyQt6.QtWidgets import QMenu
+    from app.widgets.results_column import ResultsColumn, _ArchiveCard, _TiffCard
+
+    col = ResultsColumn()
+    qtbot.addWidget(col)
+    tiff = "/fake/a.tif"
+    zipf = "/fake/a.zip"
+    col.load_uid(
+        "UID",
+        [{"path": tiff, "name": "a.tif", "seq": 1}],
+        [{"path": zipf, "name": "a.zip", "size": 10, "seq": 1}],
+    )
+    tiff_card = next(c for c in col._cards if isinstance(c, _TiffCard))
+    zip_card = next(c for c in col._cards if isinstance(c, _ArchiveCard))
+    col._toggle_result_selection(tiff, tiff_card)
+    col._toggle_result_selection(zipf, zip_card)
+
+    assert col.selected_tiff_paths() == [tiff]
+    assert col.selected_zip_paths() == [zipf]
+    assert col.visible_selected_paths() == [tiff, zipf]
+    assert not col._selected_actions_btn.isHidden()
+    captured = {}
+
+    def fake_exec(menu, *_args, **_kwargs):
+        captured["labels"] = [action.text() for action in menu.actions()]
+        return None
+
+    monkeypatch.setattr(QMenu, "exec", fake_exec)
+    col._show_selected_actions_menu()
+    assert "还原所选 ZIP（1）" in captured["labels"]
+    assert "检查所选 TIF 命名（1）" in captured["labels"]
+    assert "复制所选路径（2）" in captured["labels"]
+
+
 def test_clicking_result_card_selects_only_that_file(qtbot):
     from PyQt6.QtCore import Qt
     from app.widgets.results_column import (
@@ -1188,3 +1254,41 @@ def test_results_default_view_is_large_thumbnail(qtbot, monkeypatch, tmp_path):
     qtbot.addWidget(col2)
     assert col2._result_view_mode == "list"
     settings.remove("ui/results_view_mode")
+
+
+class TestPairedColumnsHysteresis:
+    """v0.57 修「疯狂闪屏」: 单/双列阈值加 ±24px 死区——重建引起的滚动条
+    出没(viewport 宽 ±十几px)不得再触发判定翻转→全量重建→自激振荡。"""
+
+    def _col(self, qtbot, monkeypatch, width, rendered_paired):
+        from app.widgets import results_column as rc
+
+        col = rc.ResultsColumn()
+        qtbot.addWidget(col)
+        col.show()
+        monkeypatch.setattr(col, "_layout_probe_width", lambda: width)
+        col._paired_columns_enabled = True
+        col._rendered_paired_columns = rendered_paired
+        return col
+
+    def test_scrollbar_jitter_inside_deadzone_never_flips(self, qtbot, monkeypatch):
+        from app.widgets.results_column_cards import _MIN_PAIRED_COLUMNS_WIDTH as MIN
+
+        # 已是双列, 宽度掉到 MIN-10(死区内, 相当于滚动条出现) → 保持双列
+        col = self._col(qtbot, monkeypatch, MIN - 10, rendered_paired=True)
+        assert col._should_show_paired_columns() is True
+
+        # 已是单列, 宽度升到 MIN+10(死区内, 滚动条消失) → 保持单列
+        col2 = self._col(qtbot, monkeypatch, MIN + 10, rendered_paired=False)
+        assert col2._should_show_paired_columns() is False
+
+    def test_beyond_deadzone_still_switches(self, qtbot, monkeypatch):
+        from app.widgets.results_column_cards import _MIN_PAIRED_COLUMNS_WIDTH as MIN
+
+        # 真正变窄(越过死区下缘) → 双列退单列
+        col = self._col(qtbot, monkeypatch, MIN - 60, rendered_paired=True)
+        assert col._should_show_paired_columns() is False
+
+        # 真正变宽(越过死区上缘) → 单列升双列
+        col2 = self._col(qtbot, monkeypatch, MIN + 60, rendered_paired=False)
+        assert col2._should_show_paired_columns() is True
