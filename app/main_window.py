@@ -1163,14 +1163,31 @@ class MainWindow(QMainWindow):
         migrated = qs.value(_K_SCREENSHOT_DEFAULT_MIGRATED, "", type=str)
         if str(migrated).lower() != "true":
             qs.setValue(_K_SCREENSHOT_DEFAULT_MIGRATED, "true")
+        # 场景(审计 2026-07-12): PROJECT_MEMORY:17 是用户裁定 ——「截图工具必须有可见的
+        #   顶栏直接入口, 不能只藏在工具箱嵌套菜单里」。但 v0.51 加了这段迁移, 把
+        #   ui/screenshot_tool_enabled 主动写成 "false" -> 顶栏按钮和工具箱菜单**两个
+        #   都隐藏**, 用户只能去设置页找开关, 与裁定直接冲突, 且无任何用户依据。
+        # 理由(Fable 5, 2026-07-12 用户确认"默认显示"): 删掉这段强制关闭的迁移,
+        #   默认值恢复 true; 用户手动关掉的选择仍然保留(QSettings 里已有显式值)。
+        # §7 旧:
+        # opt_in_migrated = qs.value(_K_SCREENSHOT_OPT_IN_MIGRATED, "", type=str)
+        # if str(opt_in_migrated).lower() != "true":
+        #     qs.setValue(_K_SCREENSHOT_OPT_IN_MIGRATED, "true")
+        #     qs.setValue(_K_SCREENSHOT_TOOL_ENABLED, "false")
         opt_in_migrated = qs.value(_K_SCREENSHOT_OPT_IN_MIGRATED, "", type=str)
         if str(opt_in_migrated).lower() != "true":
             qs.setValue(_K_SCREENSHOT_OPT_IN_MIGRATED, "true")
-            qs.setValue(_K_SCREENSHOT_TOOL_ENABLED, "false")
+            # 之前被那段迁移强行关掉的用户 -> 恢复默认显示(用户裁定)
+            if str(qs.value(_K_SCREENSHOT_TOOL_ENABLED, "")).lower() == "false":
+                qs.remove(_K_SCREENSHOT_TOOL_ENABLED)
 
     def screenshot_tool_enabled(self) -> bool:
-        """Whether the screenshot menu and hotkey are enabled. Default: off."""
-        raw = self.ctx.settings._qs.value(_K_SCREENSHOT_TOOL_ENABLED, "false")
+        """Whether the screenshot menu and hotkey are enabled. Default: **on**.
+
+        用户裁定(PROJECT_MEMORY:17): 顶栏必须有可见的直接入口。
+        §7 旧默认值: "false" (Fable 5, 2026-07-12 改为 "true")
+        """
+        raw = self.ctx.settings._qs.value(_K_SCREENSHOT_TOOL_ENABLED, "true")
         return str(raw).lower() == "true"
 
     def set_screenshot_tool_enabled(self, enabled: bool) -> None:

@@ -273,6 +273,8 @@ def resolve_compose_output_name(
     group: Group,
     results_dir: str,
     incoming_dir: str,
+    *,
+    allow_auto_seq: bool = True,
 ) -> tuple[str, int]:
     """Resolve one group's output TIFF name and result sequence.
 
@@ -286,6 +288,15 @@ def resolve_compose_output_name(
         output_name = getattr(group, "output_name", None)
         if output_name:
             return Path(output_name).stem + ".tif", seq
+        # 场景: 未归属(ad-hoc)分组、用户也没填输出名。用户有两条裁定:
+        #   甲(PROJECT_MEMORY:76): 不得静默命名成 1.tif/2.tif, 要用户给名字或选编号
+        #   乙(2026-06-21):       [合成+整理] 一条龙**零弹框**, 输出名=组序.tif
+        # 用户 2026-07-12 拍板: 两条共存 —— **人点的单组合成要问**;
+        #   **自动化/批量(一条龙)保持零弹框**, 照用 组序.tif。
+        # 所以命名策略由调用方声明: allow_auto_seq=False -> 返回空名(视图去问用户);
+        #   默认 True -> 保持旧行为(批量/无人值守路径不受影响)。(Fable 5, 2026-07-12)
+        if not allow_auto_seq:
+            return "", seq
         return f"{seq}.tif", seq
 
     from app.services.organize_service import organize_preview

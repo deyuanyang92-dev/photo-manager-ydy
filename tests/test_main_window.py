@@ -185,10 +185,13 @@ def test_function_menu_groups_all_registered_views():
         "项目汇总",
     ]
     tools_menu = win._nav_group_menus["tools"]
+    # 截图工具默认可见(用户裁定 PROJECT_MEMORY:17) -> 工具箱里也应出现
+    # §7 旧期望: ["标签打印", "TIFF 转 JPG", "采集地图"] (Fable 5, 2026-07-12)
     assert [a.text() for a in tools_menu.actions() if a.isVisible()] == [
         "标签打印",
         "TIFF 转 JPG",
         "采集地图",
+        "截图",
     ]
     system_menu = win._nav_group_menus["system"]
     assert "软件更新" in [a.text() for a in system_menu.actions()]
@@ -283,16 +286,22 @@ def test_context_bar_with_project(tmp_path):
 
 # ── Screenshot lives in the grouped tools menu, Settings only configures it ─
 
-def test_screenshot_tool_is_disabled_by_default():
+def test_screenshot_tool_is_enabled_by_default():
+    """§7 改写(Fable 5, 2026-07-12, 用户确认「默认显示」):
+
+    旧名 test_screenshot_tool_is_disabled_by_default —— 它把 v0.51 那段「强制关闭」
+    迁移钉成了契约, 与用户裁定 PROJECT_MEMORY:17「截图工具必须有可见的顶栏直接入口」
+    直接冲突(顶栏和工具箱两个入口都被藏起来, 只能去设置页找)。
+    """
     win = _fresh_window()
     for cls in ALL_VIEWS:
         win.register_view(cls)
 
     assert isinstance(win._shot_btn, QToolButton)
-    assert win._shot_btn.isHidden()
-    assert not win.screenshot_tool_enabled()
-    assert not win._shot_menu.menuAction().isVisible()
-    assert not win._screenshot_shortcut.isEnabled()
+    assert not win._shot_btn.isHidden()          # §7 旧: assert win._shot_btn.isHidden()
+    assert win.screenshot_tool_enabled()
+    assert win._shot_menu.menuAction().isVisible()
+    assert win._screenshot_shortcut.isEnabled()
     assert win._settings_btn.toolTip() == "配置"
 
 
@@ -326,7 +335,7 @@ def test_legacy_hidden_screenshot_setting_stays_hidden_after_migration():
     assert not win._shot_menu.menuAction().isVisible()
 
 
-def test_legacy_enabled_screenshot_setting_migrates_to_disabled():
+def test_legacy_enabled_screenshot_setting_stays_enabled():
     set_language("zh")
     ctx = AppContext()
     ctx.settings._qs.remove("ui/topbar_pinned_views")
@@ -336,15 +345,14 @@ def test_legacy_enabled_screenshot_setting_migrates_to_disabled():
 
     win = MainWindow(ctx)
 
-    assert not win.screenshot_tool_enabled()
-    assert ctx.settings._qs.value("ui/screenshot_tool_enabled") == "false"
-    assert ctx.settings._qs.value("ui/screenshot_tool_default_migrated") == "true"
+    # §7 旧: 迁移会把它强行改成 false 并隐藏按钮 —— 与用户裁定冲突, 已删除该迁移。
+    assert win.screenshot_tool_enabled()
     assert ctx.settings._qs.value("ui/screenshot_tool_opt_in_migrated") == "true"
-    assert win._shot_btn.isHidden()
-    assert not win._screenshot_shortcut.isEnabled()
+    assert not win._shot_btn.isHidden()
+    assert win._screenshot_shortcut.isEnabled()   # §7 旧: assert not ...
 
 
-def test_missing_screenshot_setting_migrates_to_disabled():
+def test_missing_screenshot_setting_defaults_to_enabled():
     set_language("zh")
     ctx = AppContext()
     ctx.settings._qs.remove("ui/topbar_pinned_views")
@@ -354,12 +362,10 @@ def test_missing_screenshot_setting_migrates_to_disabled():
 
     win = MainWindow(ctx)
 
-    assert not win.screenshot_tool_enabled()
-    assert ctx.settings._qs.value("ui/screenshot_tool_enabled") == "false"
-    assert ctx.settings._qs.value("ui/screenshot_tool_default_migrated") == "true"
-    assert ctx.settings._qs.value("ui/screenshot_tool_opt_in_migrated") == "true"
-    assert win._shot_btn.isHidden()
-    assert not win._screenshot_shortcut.isEnabled()
+    # 全新用户 -> 顶栏直接看得到截图入口(用户裁定 PROJECT_MEMORY:17)
+    assert win.screenshot_tool_enabled()
+    assert not win._shot_btn.isHidden()
+    assert win._screenshot_shortcut.isEnabled()   # §7 旧: assert not ...(默认关时)
 
 
 def test_screenshot_tool_can_be_enabled_in_tools_menu():
@@ -399,12 +405,15 @@ def test_screenshot_menu_can_disable_tool_from_menu():
 
 
 def test_screenshot_is_menu_only_not_nav_segment():
+    """截图不是导航页(不占导航段), 但**顶栏有独立按钮 + 工具箱有菜单**。
+    §7 旧: assert not win._shot_menu.menuAction().isVisible() (Fable 5, 2026-07-12)
+    """
     win = _fresh_window()
     for cls in ALL_VIEWS:
         win.register_view(cls)
 
     assert "截图" not in [btn.text() for btn in win._nav_buttons]
-    assert not win._shot_menu.menuAction().isVisible()
+    assert win._shot_menu.menuAction().isVisible()
 
 
 def test_rebind_screenshot_shortcut_updates_tooltip():
@@ -430,6 +439,7 @@ def test_retranslate_ui_updates_shell_and_grouped_menu():
         "Label Printing",
         "TIFF 转 JPG",
         "Collection Map",
+        "Screenshot",   # 截图默认可见(用户裁定, Fable 5 2026-07-12)
     ]
     assert "Alt+A" in win._shot_actions["region"].text()
 

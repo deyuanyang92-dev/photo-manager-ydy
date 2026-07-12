@@ -215,8 +215,15 @@ class WorkbenchComposeWorkflowMixin:
 
             # 输出名统一走 _resolve_compose_output_name:覆盖值 > 编号-序号 > 组序.tif。
             # _seq:真编号=preview.next_seq;临时分组(ad-hoc)=组序。
-            output_name, _seq = self._resolve_compose_output_name(
+            # §7 旧: output_name, _seq = self._resolve_compose_output_name(...)
+            #   -> ad-hoc 组静默拿到 1.tif/2.tif。现在**人点的单组合成**改走
+            #   _ensure_group_output_name: 没名字就问「归属编号 / 自由输出名」。
+            #   批量/一条龙不变(零弹框, 见 _compose_group_headless)。(Fable 5, 2026-07-12)
+            output_name, _seq = self._ensure_group_output_name(
                 db, uid, group, results_dir, incoming_dir)
+            if not output_name:
+                _notify_composed(False)
+                return
             output_path = os.path.join(incoming_dir, output_name)  # incoming, not results
             # Honor 输出格式 (tif/jpg); default tif keeps the lossless archival master.
             output_path = self._with_output_ext(output_path, self._helicon_output_opts()["format"])
@@ -510,17 +517,56 @@ class WorkbenchComposeWorkflowMixin:
     # 故由 workbench 串行驱动:合成完成(异步回调)→ 后台整理该组 → 下一组。
     # 批量时走 `_compose_group_headless`(无预览/结果确认框),满足"一键直合"。
 
-    def _resolve_compose_output_name(self, db, uid, group, results_dir, incoming_dir):
+    def _resolve_compose_output_name(self, db, uid, group, results_dir, incoming_dir,
+                                     *, allow_auto_seq: bool = True):
         """统一的「输出 TIF 名」解析(合成单组/批量共用)。返回 (name.tif, seq)。
 
         优先级:
           ① 用户在该组「输出 TIF」框手填的覆盖值(去后缀+.tif)
           ② 有真编号 → organize_preview 建议成果名(编号-序号.tif)
           ③ 无编号(临时分组 ad-hoc) → 组序.tif(组0→1.tif, 组1→2.tif)
+             —— allow_auto_seq=False 时改为返回空名, 由调用方问用户(见下)。
         seq:真编号取 preview.next_seq;ad-hoc 取 group_index+1。
         """
         from app.services.compose_workflow_service import resolve_compose_output_name
-        return resolve_compose_output_name(db, uid, group, results_dir, incoming_dir)
+        return resolve_compose_output_name(
+            db, uid, group, results_dir, incoming_dir, allow_auto_seq=allow_auto_seq)
+
+    def _ensure_group_output_name(self, db, uid, group, results_dir, incoming_dir):
+        """**人点的**单组合成用: ad-hoc 组没名字就问用户。返回 (name, seq); 取消 -> (None, 0)。
+
+        场景(用户裁定 PROJECT_MEMORY:76 + 2026-07-12 口头确认):
+          没有激活编号时点分组面板的 [合成], 旧代码静默输出 1.tif / 2.tif —— 过几天
+          没人知道那是什么标本。现在弹一次「归属到编号 / 自由输出名」(复用主工具栏
+          那条路已有的对话框, 不另造)。
+          **批量 / 合成+整理一条龙不走这里** —— 用户裁定那条路必须零弹框, 继续用
+          组序.tif(见 _compose_group_headless)。(Fable 5, 2026-07-12)
+        """
+        name, seq = self._resolve_compose_output_name(
+            db, uid, group, results_dir, incoming_dir, allow_auto_seq=False)
+        if name:
+            return name, seq
+
+        prompt = getattr(self, "_prompt_selected_compose_target", None)
+        if not callable(prompt):   # 兜底: 拿不到对话框就退回旧行为, 绝不卡住用户
+            return self._resolve_compose_output_name(
+                db, uid, group, results_dir, incoming_dir)
+        target = prompt(len(list(getattr(group, "jpg_paths", []) or [])), organise=False)
+        if target is None:
+            self._status_message("已取消：未指定成果名或目标编号。")
+            return None, 0
+
+        target_uid = str(getattr(target, "uid", "") or "").strip()
+        free_stem = str(getattr(target, "output_name", "") or "").strip()
+        if target_uid:
+            return self._resolve_compose_output_name(
+                db, target_uid, group, results_dir, incoming_dir)
+        if free_stem:
+            group.output_name = free_stem
+            return self._resolve_compose_output_name(
+                db, uid, group, results_dir, incoming_dir)
+        self._status_message("已取消：成果名不能为空。")
+        return None, 0
 
     def _start_compose_batch(self, uid: str, organise: bool) -> None:
         """启动批量合成队列。organise=True 时每组合成完后立即整理该组。"""
