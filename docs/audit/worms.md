@@ -1,5 +1,7 @@
 # WoRMS 模块审计报告
 
+> 历史快照：本文状态仅代表审计当日，不是当前缺口清单。当前口径见 [`../REQUIREMENTS_CURRENT.md`](../REQUIREMENTS_CURRENT.md)。
+
 生成日期：2026-06-03  
 参考来源：`prototype-photo-gui/app.js`（web 函数）+ `app/views/worms_view.py` + `app/services/worms_service.py`
 

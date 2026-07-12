@@ -53,15 +53,6 @@ class SuppCompressionWorker(QThread):
         self.progress.emit(current, total, filename)
         QThread.yieldCurrentThread()
 
-    def _cleanup_partial_zip(self) -> None:
-        zip_dir = Path(self._output_dir) if self._output_dir else Path(self._tiff_path).parent
-        zip_path = zip_dir / (Path(self._tiff_path).stem + ".zip")
-        try:
-            if zip_path.exists():
-                zip_path.unlink()
-        except OSError:
-            pass
-
     def run(self) -> None:
         from app.services import archive_service
 
@@ -82,7 +73,6 @@ class SuppCompressionWorker(QThread):
             )
             self.finished.emit(result)
         except archive_service.ArchiveCancelled:
-            self._cleanup_partial_zip()
             self.cancelled.emit("用户取消")
         except Exception as exc:  # noqa: BLE001 — surface any failure to the UI
             self.failed.emit(str(exc))

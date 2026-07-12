@@ -39,6 +39,8 @@ from app.utils import ui
 from app.widgets.compose_workbench_dialog import _ComposeWorkbenchDialog as _DefaultComposeWorkbenchDialog
 from app.workers.helicon_worker import HeliconWorker
 
+_RestoreWorkerCls = None
+
 
 class WorkbenchSupplementaryWorkflowMixin:
     """Supplementary archive and restore workflow for WorkbenchView."""
@@ -388,8 +390,6 @@ class WorkbenchSupplementaryWorkflowMixin:
           ZIP 原地不动(additive, 重活在 RestoreWorker 线程)。
         """
         from app.utils import ui
-        from app.workers.restore_worker import RestoreWorker
-
         if not zip_path or not Path(zip_path).is_file():
             ui.warn(self, "还原原片", "归档文件不存在。")
             return
@@ -439,7 +439,29 @@ class WorkbenchSupplementaryWorkflowMixin:
         except Exception:
             pass
 
-        self._restore_worker = RestoreWorker(
+        owned_note = (
+            "成功恢复后将删除项目内 ZIP，保留 TIFF。"
+            if self._pending_restore_finalize
+            else "这是孤儿/外部 ZIP；只恢复 JPG，原 ZIP 保留。"
+        )
+        reply = QMessageBox.question(
+            self,
+            "还原原片",
+            f"将从 {Path(zip_path).name} 恢复约 {count} 张原始 JPG。\n"
+            f"同名文件会跳过，不会覆盖。{owned_note}\n\n确认继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            self._pending_restore_finalize = None
+            return
+
+        worker_cls = _RestoreWorkerCls
+        if worker_cls is None:
+            from app.workers.restore_worker import RestoreWorker
+
+            worker_cls = RestoreWorker
+        self._restore_worker = worker_cls(
             zip_path, out, overwrite=overwrite, file_count=count, parent=self
         )
         self._restore_worker.started.connect(self._on_restore_started)
@@ -575,6 +597,9 @@ class WorkbenchSupplementaryWorkflowMixin:
             )
             if target is None:
                 return False, False, "找不到对应分组或 ZIP 登记已变化"
+            previous_archive_zip = target.archive_zip
+            previous_status = target.status
+            previous_updated_at = target.updated_at
             target.archive_zip = None
             target.status = "composed"
             target.updated_at = _utc_now_iso()
@@ -585,7 +610,23 @@ class WorkbenchSupplementaryWorkflowMixin:
         try:
             removed = bool(self._retire_zip(task.zip_path))
         except OSError as exc:
-            return True, False, f"状态已更新，但 ZIP 删除失败：{exc}"
+            target.archive_zip = previous_archive_zip
+            target.status = previous_status
+            target.updated_at = previous_updated_at
+            try:
+                save_grouping(
+                    db,
+                    task.owner_uid,
+                    grouping.groups,
+                    clean_phantoms=False,
+                )
+            except Exception as rollback_exc:  # noqa: BLE001
+                return (
+                    False,
+                    False,
+                    f"ZIP 删除失败且数据库回滚失败：{exc}；{rollback_exc}",
+                )
+            return False, False, f"ZIP 删除失败，归档登记已保留：{exc}"
         return True, removed, "" if removed else "外部 ZIP 已保留"
 
     def _on_batch_restore_finished(self, summary) -> None:
@@ -685,6 +726,9 @@ class WorkbenchSupplementaryWorkflowMixin:
             )
             if target is None:
                 return ""
+            previous_archive_zip = target.archive_zip
+            previous_status = target.status
+            previous_updated_at = target.updated_at
             target.archive_zip = None
             target.status = "composed"
             target.updated_at = _utc_now_iso()
@@ -710,12 +754,20 @@ class WorkbenchSupplementaryWorkflowMixin:
             try:
                 removed = retire(zip_path)
             except OSError as exc:
+                target.archive_zip = previous_archive_zip
+                target.status = previous_status
+                target.updated_at = previous_updated_at
+                rollback_error = ""
+                try:
+                    save_grouping(db, uid, grouping.groups, clean_phantoms=False)
+                except Exception as rollback_exc:  # noqa: BLE001
+                    rollback_error = f"\n数据库回滚也失败：{rollback_exc}"
                 from app.utils import ui as _ui
                 _ui.warn(
                     self,
                     "还原原片",
-                    "原片已恢复且状态已更新，但项目内 ZIP 删除失败，请手动检查。\n\n"
-                    f"详情：{exc}",
+                    "原片已恢复，但项目内 ZIP 删除失败；归档登记已保留，可稍后重试。\n\n"
+                    f"详情：{exc}{rollback_error}",
                 )
         # 按当前显示模式重载成果区(传 grouping=None 会刷成空列表)
         after = getattr(self, "_after_binding_changed", None)
@@ -737,6 +789,10 @@ class WorkbenchSupplementaryWorkflowMixin:
             self._pending_restore_finalize = None
             reason = getattr(result, "reason", "") or "；".join(result.failures[:3])
             ui.critical(self, "还原失败", reason or "还原失败，未输出文件。")
+            return
+        if int(getattr(result, "count", 0) or 0) <= 0:
+            self._pending_restore_finalize = None
+            ui.warn(self, "还原原片", "没有恢复出新的 JPG；ZIP 和归档登记均已保留。")
             return
         self._finalize_pending_restore()
 

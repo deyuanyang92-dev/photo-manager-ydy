@@ -1,56 +1,54 @@
-# 标本照片工作台 v0.51
+# 标本照片工作台 v0.59
 
-把 `photo-platform-ydy/` 的 Web 原型复现为 Windows / macOS / Linux 桌面 GUI（PyQt6）。
-功能 100% 照搬 Web 原型，界面美观+顺手，真实数据只读导入零丢失。
+面向标本拍摄、景深合成、原片归档、分类鉴定、采集记录和项目协作的 PyQt6 桌面软件，支持 Windows，源码也可在 macOS / Linux 环境运行。
 
-## Windows 直接使用
+当前需求与行为以 [`docs/REQUIREMENTS_CURRENT.md`](docs/REQUIREMENTS_CURRENT.md) 和 [`docs/PROJECT_MEMORY.md`](docs/PROJECT_MEMORY.md) 为准；`docs/audit/` 是历史审计快照，不代表当前缺口。
 
-仓库内已提供 Windows 便携版：
+## 主要能力
 
-- 下载：GitHub Releases 中的 `SpecimenPhotoWorkbench-v0.51-win64.zip`
-- 解压到普通目录，例如 `D:\Apps\SpecimenPhotoWorkbench\`
-- 双击 `SpecimenPhotoWorkbench.exe`
-- 进入后在“项目总览”中新建或打开项目目录
+- 工作台：JPG 多选、分组、批量合成、合成后整理、结果预览和状态恢复。
+- 归档：普通 JPG ZIP 为默认格式；校验通过后才允许清理散落 JPG；TIFF 永不自动删除。
+- 批量还原：成果区可多选 ZIP；安全任务并行解包，数据库状态顺序提交。
+- 项目数据：项目树、汇总、跨工作区筛选、采集记录、地图和结果导出。
+- 分类：本地分类库、WoRMS 匹配、批量更新、筛选和导出。
+- 标签与协作：标签设计/打印、团队永久码和项目共享码等独立协作流程。
+- 显示设置：可调整全局字体缩放并持久保存，弹窗与主界面使用同一字号体系。
 
-不要直接在 zip 压缩包里运行 exe，必须先解压。更完整的安装和使用说明见
-`docs/windows-install.md`。便携包为了能直接放进 GitHub 仓库，没有内置完整
-`data\worms_taxonomy.json` 离线库；需要完整离线 WoRMS 查询时，把源码仓库
-`data\worms_taxonomy.json` 和 `data\worms_cache.json` 复制到解压目录的
-`_internal\data\`。
+## Windows 使用
 
-- 方案：`/root/.claude/plans/docs-cross-platform-desktop-gui-plan-md-hidden-frog.md`
-- 决策记录：`docs/adr/`
-- 每模块详细设计：`docs/specs/`（Opus 出，Sonnet 据此 TDD 实现）
+1. 从 GitHub Releases 下载 `SpecimenPhotoWorkbench-v0.59-win64.zip`。
+2. 完整解压到普通目录，不要直接在压缩包内运行。
+3. 双击 `SpecimenPhotoWorkbench.exe`，在“项目总览”中新建或打开项目。
+
+完整说明见 [`docs/windows-install.md`](docs/windows-install.md)。发布包由 GitHub Actions 在版本标签推送后自动构建。
 
 ## 开发
 
 ```bash
 pip install -r requirements.txt
-python main.py            # 启动空骨架
-pytest tests/ -v         # 跑测试
+python main.py
+QT_QPA_PLATFORM=offscreen python -m pytest tests/ -q
 ```
 
-Windows 桌面双击启动：双击仓库里的 `launch_windows.cmd`。它会通过 `wsl.exe`
-进入当前 WSL 项目目录启动 GUI；如果失败，会保留错误窗口和 `/tmp/specimen-photo-workbench-launch.log`。
-
-## Windows 打包 / 安装
-
-在 Windows PowerShell 中构建发行包：
+Windows PowerShell 构建便携包：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\build_windows.ps1
 ```
 
-输出目录为 `dist\SpecimenPhotoWorkbench\`，可分发压缩包为
-`dist\SpecimenPhotoWorkbench-v0.51-win64.zip`。安装与使用说明见
-`docs/windows-install.md`。
+## 数据安全红线
 
-## 红线（绝不破）
+- TIFF 母版不由合成、整理、归档或还原流程自动删除。
+- JPG 只在 ZIP 存在、完整性校验和逐文件大小/SHA-256 校验通过后删除。
+- 同名 ZIP 和结果文件使用临时文件校验后原子替换；失败或取消不破坏旧文件。
+- ZIP 还原拒绝绝对路径和目录穿越；覆盖时先校验临时文件，再替换目标。
+- 已关联 ZIP 还原成功后直接删除项目内 ZIP，不创建 `_retired-zip` 备份；删除失败时保留数据库登记。
+- 导入和查询型功能不修改用户原始数据文件。
 
-- **TIFF 绝不自动删**（无损母片）。仅允许用户在确认对话框后**手动**删除；后台/归档/整理流程一律不得删 TIFF。
-- **JPG 删除前必须校验归档**：ZIP 已生成、完整性通过，且 ZIP 内每张 JPG 的名称/大小/SHA-256 与原图一致；删除开关开启时才会删除散落 JPG。
-- 导入现有数据**只读**，原文件一字节不改（sha256 校验）。
+## 文档入口
 
-## 状态
-
-主力模块已落地：工作区 / 项目总览 / 项目文件夹树 / 标签打印（含 A4/A5 拼版 + 矢量设计器）/ WoRMS / 内置分类库 / 坐标工具 / 采集记录 / 采集地图 / 协作（内嵌 FastAPI + mDNS）/ 设置。详见 `CLAUDE.md` 与 `docs/specs/`。
+- [当前需求基线](docs/REQUIREMENTS_CURRENT.md)
+- [项目长期记忆与不可回归项](docs/PROJECT_MEMORY.md)
+- [文档索引](docs/README.md)
+- [Windows 安装](docs/windows-install.md)
+- [架构与模块边界](docs/architecture/module-map.md)

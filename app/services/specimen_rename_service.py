@@ -404,6 +404,22 @@ def migrate_uid_references(db: sqlite3.Connection, old_uid: str, new_uid: str) -
     db.execute("UPDATE tasks SET uid=? WHERE uid=?", (new_uid, old_uid))
 
 
+def migrate_optional_photo_assignments(
+    db: sqlite3.Connection,
+    old_uid: str,
+    new_uid: str,
+) -> None:
+    """Move optional legacy photo assignments without masking real DB errors."""
+    try:
+        db.execute(
+            "UPDATE photo_assignments SET specimen_uid=? WHERE specimen_uid=?",
+            (new_uid, old_uid),
+        )
+    except sqlite3.OperationalError as exc:
+        if "no such table" not in str(exc).lower():
+            raise
+
+
 def rename_specimen_code(db: sqlite3.Connection, uid: str, new_code: str) -> str:
     """Change the specimen id segment (sp.id) and return the new UID.
 

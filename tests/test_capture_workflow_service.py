@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import json
 import sqlite3
 import sys
@@ -262,6 +263,32 @@ def test_move_result_file_refuses_to_replace_directory(tmp_path):
         move_result_file(str(src), out, replace_existing=True)
 
     assert src.exists()
+
+
+def test_move_result_file_preserves_existing_when_cross_volume_copy_fails(
+    tmp_path, monkeypatch
+):
+    src = tmp_path / "incoming" / "result.tif"
+    dst = tmp_path / "results" / "result.tif"
+    src.parent.mkdir()
+    dst.parent.mkdir()
+    src.write_bytes(b"new")
+    dst.write_bytes(b"existing")
+
+    def _cross_volume(*_args, **_kwargs):
+        raise OSError(errno.EXDEV, "cross-volume")
+
+    def _copy_failed(*_args, **_kwargs):
+        raise OSError("copy failed")
+
+    monkeypatch.setattr("app.services.capture_workflow_service.os.replace", _cross_volume)
+    monkeypatch.setattr("app.services.capture_workflow_service.shutil.copy2", _copy_failed)
+
+    with pytest.raises(OSError, match="copy failed"):
+        move_result_file(str(src), dst.parent, replace_existing=True)
+
+    assert src.read_bytes() == b"new"
+    assert dst.read_bytes() == b"existing"
 
 
 def test_register_tif_only_group_moves_to_results_and_persists(tmp_path):

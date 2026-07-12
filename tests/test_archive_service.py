@@ -17,6 +17,8 @@ import os
 import shutil
 import sqlite3
 import tempfile
+import threading
+import time
 import zipfile
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -429,6 +431,59 @@ class TestArchiveGroup:
         assert not os.path.exists(jpg_a)
         assert not os.path.exists(jpg_b)
 
+    def test_cancel_preserves_preexisting_archive(self):
+        jpg = _make_jpg(self.tmpdir, "cancel-safe.jpg")
+        tiff = _make_tiff(self.tmpdir, "result_cancel_safe.tif")
+        final_zip = Path(self.tmpdir) / "result_cancel_safe.zip"
+        final_zip.write_bytes(b"existing-valid-archive")
+
+        def _cancelled_direct(*args, output_dir=None, **kwargs):
+            Path(output_dir, "result_cancel_safe.zip").write_bytes(b"partial")
+            raise ArchiveCancelled("cancelled")
+
+        with patch(
+            "app.services.archive_service._archive_group_direct",
+            side_effect=_cancelled_direct,
+        ):
+            with pytest.raises(ArchiveCancelled):
+                archive_group([jpg], tiff, self.tmpdir, delete_jpg=False)
+
+        assert final_zip.read_bytes() == b"existing-valid-archive"
+
+    def test_jxl_compression_honors_parallelism(self):
+        jpgs = [_make_jpg(self.tmpdir, f"parallel-{index}.jpg") for index in range(4)]
+        tiff = _make_tiff(self.tmpdir, "parallel-result.tif")
+        state = {"active": 0, "maximum": 0}
+        lock = threading.Lock()
+
+        def _compress(src, dst, effort=9):
+            with lock:
+                state["active"] += 1
+                state["maximum"] = max(state["maximum"], state["active"])
+            time.sleep(0.03)
+            shutil.copy2(src, dst)
+            with lock:
+                state["active"] -= 1
+
+        with patch("app.services.archive_service.has_cjxl", return_value=True), patch(
+            "app.services.archive_service.has_djxl", return_value=True
+        ), patch(
+            "app.services.archive_service.compress_to_jxl", side_effect=_compress
+        ), patch(
+            "app.services.archive_service._verify_jxl_zip_complete",
+            return_value=CheckResult(ok=True),
+        ):
+            archive_group(
+                jpgs,
+                tiff,
+                self.tmpdir,
+                delete_jpg=False,
+                method="maximum",
+                concurrency=3,
+            )
+
+        assert state["maximum"] >= 2
+
     def test_restore_archive_to_original_paths_recovers_deleted_jpgs(self):
         """Undo-organise can restore exact JPGs to their original paths."""
         jpg_a = _make_jpg(self.tmpdir, "img_restore_a.jpg")
@@ -587,6 +642,54 @@ class TestRestoreArchive:
         assert r.ok is False
         assert any("a.jpg" in x for x in r.failures)
         assert not os.path.isfile(os.path.join(out, "a.jpg")), "大小不符的半成品必须删除"
+
+    def test_invalid_restore_does_not_destroy_existing_jpg(self):
+        zip_path = os.path.join(self.tmpdir, "invalid-overwrite.zip")
+        manifest = {"version": 2, "files": [{
+            "originalName": "a.jpg",
+            "archiveName": "a.jpg",
+            "originalSize": 999,
+            "originalSha256": "invalid",
+        }]}
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("manifest.json", json.dumps(manifest))
+            zf.writestr("a.jpg", b"bad replacement")
+        out = Path(self.tmpdir) / "safe-overwrite"
+        out.mkdir()
+        existing = out / "a.jpg"
+        existing.write_bytes(b"keep me")
+
+        result = restore_archive(zip_path, str(out), overwrite=True)
+
+        assert not result.ok
+        assert existing.read_bytes() == b"keep me"
+
+    def test_zip_traversal_is_rejected(self):
+        zip_path = os.path.join(self.tmpdir, "traversal.zip")
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("../escaped.jpg", b"escape")
+        out = Path(self.tmpdir) / "restore-root"
+
+        with pytest.raises(ValueError, match="不安全路径"):
+            restore_archive(zip_path, str(out))
+
+        assert not (Path(self.tmpdir) / "escaped.jpg").exists()
+
+    def test_manifest_original_name_cannot_escape_output(self):
+        zip_path = os.path.join(self.tmpdir, "manifest-traversal.zip")
+        manifest = {"version": 2, "files": [{
+            "originalName": "../escaped.jpg",
+            "archiveName": "safe.jpg",
+        }]}
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("manifest.json", json.dumps(manifest))
+            zf.writestr("safe.jpg", b"safe")
+        out = Path(self.tmpdir) / "manifest-restore-root"
+
+        result = restore_archive(zip_path, str(out))
+
+        assert not result.ok
+        assert not (Path(self.tmpdir) / "escaped.jpg").exists()
 
     def test_skip_vs_overwrite_existing(self):
         """overwrite=False skips existing files; overwrite=True replaces them."""

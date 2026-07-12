@@ -1,6 +1,6 @@
 # 自动更新的 Ed25519 签名 — 启用步骤
 
-当前状态(v0.58):**签名验证代码完整但休眠**。`app/services/update_service.py`
+当前状态(v0.59):**签名验证代码完整但休眠**。`app/services/update_service.py`
 里 `UPDATE_PUBLIC_KEY_B64 = ""`(空)→ `signature_required()` 为 False → 更新只校验
 大小 + GitHub 提供的 SHA-256。这挡不住「发布账号被盗、恶意包连同摘要一起被替换」
 的威胁。启用签名后,客户端只安装能用你的私钥验证的 zip。

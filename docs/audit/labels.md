@@ -1,5 +1,7 @@
 # Labels Module — Web→Qt Coverage Audit
 
+> 历史快照：本文状态仅代表审计当日，不是当前缺口清单。当前口径见 [`../REQUIREMENTS_CURRENT.md`](../REQUIREMENTS_CURRENT.md)。
+
 **Audited**: 2026-06-03  
 **Web oracle**: `prototype-photo-gui/app.js` (79 label-related functions)  
 **Qt targets**: `app/utils/label_core.py`, `app/services/label_service.py`, `app/views/labels_view.py`, `app/widgets/label_editor.py`

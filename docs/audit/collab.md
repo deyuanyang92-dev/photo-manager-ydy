@@ -1,5 +1,7 @@
 # 协作模块审计 — collab
 
+> 历史快照：本文状态仅代表审计当日，不是当前缺口清单。当前口径见 [`../REQUIREMENTS_CURRENT.md`](../REQUIREMENTS_CURRENT.md)。
+
 审计日期：2026-06-03  
 审计范围：web `app.js` 协作函数（25 个）vs Qt `collab_service.py` + `collab_view.py` + `specimen_sidebar.py`
 

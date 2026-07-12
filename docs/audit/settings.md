@@ -1,5 +1,7 @@
 # Settings Module Audit — Web → Qt
 
+> 历史快照：本文状态仅代表审计当日，不是当前缺口清单。当前口径见 [`../REQUIREMENTS_CURRENT.md`](../REQUIREMENTS_CURRENT.md)。
+
 Generated: 2026-06-03  
 Source: `prototype-photo-gui/app.js` (12 config functions) vs `app/views/settings_view.py`
 

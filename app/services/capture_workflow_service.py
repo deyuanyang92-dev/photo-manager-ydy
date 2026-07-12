@@ -6,9 +6,11 @@ module owns the SQLite/event-log mutations that must stay consistent.
 """
 from __future__ import annotations
 
+import errno
 import sqlite3
 import os
 import shutil
+import tempfile
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -397,10 +399,29 @@ def move_result_file(
             pass
         if dst.is_dir():
             raise IsADirectoryError(f"目标路径是目录，不能覆盖: {dst}")
-        dst.unlink()
     elif dst.exists():
         dst = _unique_destination(results_path, dst_name, source=src_path)
     if dst == src_path:
+        return str(dst)
+    if replace_existing:
+        try:
+            os.replace(src_path, dst)
+        except OSError as exc:
+            if exc.errno != errno.EXDEV:
+                raise
+            fd, staged_name = tempfile.mkstemp(
+                prefix=".result-staging-",
+                suffix=dst.suffix,
+                dir=results_path,
+            )
+            os.close(fd)
+            staged_path = Path(staged_name)
+            try:
+                shutil.copy2(src_path, staged_path)
+                os.replace(staged_path, dst)
+                src_path.unlink()
+            finally:
+                staged_path.unlink(missing_ok=True)
         return str(dst)
     shutil.move(str(src_path), str(dst))
     return str(dst)

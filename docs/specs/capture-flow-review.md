@@ -149,11 +149,12 @@
 - `app/views/workbench_view.py`：`_on_add_jpg_files` / `_on_free_compose` / `_on_compose_requested`
   / `_on_organise_requested`（含 `_in_incoming` 辅助 + 同名 ZIP 检查 + archive_zip 路径）。
 
-## 场景9：整理 + 归档（红线区）✅ 核对通过，无需改
+## 场景9：整理 + 归档（当前口径）
 
-- cjxl `--distance 0 -e`（无损 bit-exact）+ delete_jpg 默认 True（用户可关闭保留散落 JPG）+ 4 道闸（cjxl 可用 / ZIP>32B /
-  清单完整 / djxl 真能解回）+ TIFF 从不作删除对象 —— 严谨忠实 oracle archive.js。我加的"自动
-  整理"复用同一套闸，安全。
+- 默认模式把原始 JPG 字节直接写入普通 ZIP，逐文件校验大小和 SHA-256 后才允许清理散落 JPG。
+- 可选高压缩模式使用 `cjxl --lossless_jpeg=1 -e 9`，并以 `djxl` 做可恢复性校验；压缩阶段按设置并发，ZIP 写入和最终提交顺序执行。
+- 同名 ZIP 先在同目录暂存、校验，再原子替换；取消或失败不得破坏旧 ZIP。
+- TIFF 从不作为自动删除对象。
 
 ## 场景10：撤销合成 ✔（已改：删TIFF + JPG解关联）
 

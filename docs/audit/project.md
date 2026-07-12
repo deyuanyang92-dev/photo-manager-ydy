@@ -1,5 +1,7 @@
 # Project / Overview / Summary — Qt Coverage Audit
 
+> 历史快照：本文状态仅代表审计当日，不是当前缺口清单。当前口径见 [`../REQUIREMENTS_CURRENT.md`](../REQUIREMENTS_CURRENT.md)。
+
 **Scope**: Functions in `app.js` whose names contain `project|Project|overview|Overview|summary|Summary|workspace|Workspace`.  
 **Date**: 2026-06-03  
 **Method**: `grep -nE "function .*(project|Project|overview|Overview|summary|Summary|workspace|Workspace)" app.js` → 66 hits; classified below.

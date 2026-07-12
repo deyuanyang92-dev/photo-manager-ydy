@@ -1,5 +1,7 @@
 # 坐标模块审计 (coords audit)
 
+> 历史快照：本文状态仅代表审计当日，不是当前缺口清单。当前口径见 [`../REQUIREMENTS_CURRENT.md`](../REQUIREMENTS_CURRENT.md)。
+
 审计时间：2026-06-03  
 参照：`prototype-photo-gui/app.js` + `prototype-photo-gui/coord-utils.js`  
 实现：`app/utils/coord_utils.py` + `app/views/coords_view.py`

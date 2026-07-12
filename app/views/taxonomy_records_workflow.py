@@ -89,7 +89,7 @@ class TaxonomyRecordsWorkflowMixin:
             return all_recs
         if self._select_all_filtered:
             return list(getattr(self, "_filtered_records_cache", []) or [])
-        selected_ids = set(self._model.checked_ids() or self._selected_ids)
+        selected_ids = set(self._model.checked_ids()) | set(self._selected_ids)
         return [
             record for record in all_recs
             if str(record.get("recordId") or "") in selected_ids

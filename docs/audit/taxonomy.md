@@ -1,5 +1,7 @@
 # Taxonomy Module Audit — Web vs. Qt
 
+> 历史快照：本文状态仅代表审计当日，不是当前缺口清单。当前口径见 [`../REQUIREMENTS_CURRENT.md`](../REQUIREMENTS_CURRENT.md)。
+
 **Audited:** 2026-06-03
 **Scope:** `app.js` taxonomy functions (50 functions) vs.
   `app/services/taxonomy_service.py`, `app/widgets/taxonomy_input.py`,

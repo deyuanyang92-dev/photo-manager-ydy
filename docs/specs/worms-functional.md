@@ -189,9 +189,7 @@ function wormsFillToSpecimen(record, sp) {
 **web Oracle:** `app.js:11447–11457` `wormsFillToSpecimen()`, `12532–12541`（按钮逻辑）  
 **PyQt6:** `WormsView._on_fill_to_specimen(rec)` (`worms_view.py:1052–1073`)
 
-**注意：** PyQt6 实现通过 `ctx.worms_fill_specimen(r)` hook 委托给工作台视图。
-`AppContext` 尚未实现此 hook（活跃标本路由待 workbench 打通后补）。
-当前：hook 不存在时显示状态文字"（需先在工作区选择标本）"。
+**注意：** PyQt6 实现通过 `ctx.worms_fill_specimen(r)` hook 委托给工作台视图；工作台启动时已注册该 hook。没有激活标本时仍提示先在工作区选择目标。
 
 ---
 
@@ -221,7 +219,7 @@ function wormsFillToSpecimen(record, sp) {
 | 列表查询 | `GET /api/worms/jobs` | `WormsService.list_jobs()` |
 | 单条查询 | `GET /api/worms/jobs/:id` | `WormsService.get_job(id)` |
 | 更新状态 | `POST /api/worms/jobs/:id/:action` (pause/cancel/resume) | `WormsService.update_job_status(id, status)` |
-| 刷新 UI  | 轮询 1500ms（运行中）| 手动点击「刷新」按钮 |
+| 刷新 UI  | 轮询 1500ms（运行中）| 运行中任务自动轮询 1500ms，也支持手动刷新 |
 
 **web Oracle:** `app.js:11602–11619` `fetchWormsJobs()`, `11701–11716` `startTaxonomyWormsJob()`, `11735–11739` `updateWormsJob()`  
 **server.js:** 批量任务端点（约 line 1590–1680）  
@@ -295,19 +293,19 @@ worms_chain, worms_verified_at
 | 结果列表（accepted/unaccepted 标记）| ✓ | |
 | 分类链（flatten + 高亮当前节点）| ✓ | |
 | 概览 Tab（字段+生境）| ✓ | |
-| 子分类 Tab | ✓ | 仅第1页，无"加载更多" |
+| 子分类 Tab | ✓ | 支持“加载更多”分页 |
 | 同义词 Tab | ✓ | |
-| 填充到当前标本 | ✓（hook） | ctx.worms_fill_specimen 待 workbench 打通 |
+| 填充到当前标本 | ✓（hook） | 工作台已注册 ctx.worms_fill_specimen |
 | 批量验证任务创建/列表/状态 | ✓ | |
-| 批量任务 cursor 续跑 | ✓（Service层） | UI 无进度轮询（需手动刷新） |
+| 批量任务 cursor 续跑 | ✓ | UI 运行中自动轮询 |
 | 缓存命中（无网络调用）| ✓ | |
 | 缓存 TTL 过期→重拉 | ✓ | |
 | 缓存 10MB 驱逐 | ✓ | |
 | 限速 600ms | ✓ | threading.Lock |
 | 中文字段不覆盖 | ✓ | 红线已测试 |
 | merge_worms_into_record | ✓ | worms_* 前缀字段 |
-| 子分类"加载更多"| ✗ | web 有，PyQt6 未实现（children offset>1 pagination） |
-| UI 自动轮询 running jobs | ✗ | web 1500ms 轮询，PyQt6 仅手动刷新 |
+| 子分类"加载更多"| ✓ | children offset 分页 |
+| UI 自动轮询 running jobs | ✓ | 1500ms 单次计时循环，任务结束后停止 |
 
 ---
 

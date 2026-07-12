@@ -424,7 +424,7 @@ class TaxonomyTableWorkflowMixin:
         if mapping_candidates:
             ra = menu.addAction(f"审核 WoRMS 候选（{len(mapping_candidates)} 个）")
             ra.triggered.connect(lambda: self._on_review_worms_row(rec))
-        checked_ids = self._model.checked_ids() or self._selected_ids
+        checked_ids = set(self._model.checked_ids()) | set(self._selected_ids)
         if len(checked_ids) > 1 and rec.get("recordId") in checked_ids:
             menu.addSeparator()
             ba = menu.addAction(f"WoRMS 更新已选 {len(checked_ids)} 条")

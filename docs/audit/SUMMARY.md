@@ -1,5 +1,7 @@
 # 功能覆盖审计汇总（Phase 1/2/3 全覆盖 · 2026-06-04）
 
+> 历史快照：本文状态仅代表审计当日，不是当前缺口清单。当前口径见 [`../REQUIREMENTS_CURRENT.md`](../REQUIREMENTS_CURRENT.md)。
+
 > 方法:逐模块 grep web `app.js`(508 函数)+`server.js`(98 端点),对每个函数标 Qt 状态 ✓/◐/✗(详见同目录各 `<module>.md`),并补缺。
 > **已亲自验证**:全套 `pytest tests/` = **1422 passed, 2 skipped**(146s,本人跑);`python main.py` 正常起,8 页注册。
 > **诚实声明**:Phase 1/2/3 所有已标识缺口均已实现，测试全绿。

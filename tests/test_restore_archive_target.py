@@ -50,7 +50,18 @@ def project(tmp_path):
     return tmp_path
 
 
+def _approve_restore_confirmation(monkeypatch) -> None:
+    from PyQt6.QtWidgets import QMessageBox
+
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes),
+    )
+
+
 def test_restore_defaults_to_incoming_without_asking(project, monkeypatch):
+    _approve_restore_confirmation(monkeypatch)
     zip_path = _make_zip(project)
     h = _Harness(str(project))
 
@@ -86,6 +97,7 @@ def test_restore_defaults_to_incoming_without_asking(project, monkeypatch):
 
 
 def test_restore_falls_back_to_picker_when_no_project(tmp_path, monkeypatch):
+    _approve_restore_confirmation(monkeypatch)
     """无当前项目(无处可还原)时才退回目录选择框。"""
     zip_path = _make_zip(tmp_path)
     h = _Harness("")
@@ -200,6 +212,7 @@ def test_restore_of_organized_group_undoes_organise(project, monkeypatch):
 
 
 def test_restore_of_orphan_zip_keeps_copy_semantics(project, monkeypatch):
+    _approve_restore_confirmation(monkeypatch)
     """孤儿 ZIP(不属于任何组): 保持抽副本到待处理区的旧行为, ZIP 原地不动。"""
     import sqlite3
     from app.db import db_manager
@@ -231,6 +244,7 @@ def test_restore_of_orphan_zip_keeps_copy_semantics(project, monkeypatch):
 
 
 def test_restore_group_without_jpg_paths_still_removes_zip(project, monkeypatch):
+    _approve_restore_confirmation(monkeypatch)
     """组存在但没记录原 JPG 路径(如改绑挂上的成果): 抽副本到待处理区成功后,
     同样必须清 ZIP 登记 + 删除项目内 ZIP + 组回 composed —— 语义一致, 不留矛盾状态。"""
     import sqlite3
@@ -283,6 +297,7 @@ def test_restore_group_without_jpg_paths_still_removes_zip(project, monkeypatch)
 
 
 def test_restore_failure_leaves_zip_registered(project, monkeypatch):
+    _approve_restore_confirmation(monkeypatch)
     """还原失败 → 绝不动 ZIP 登记(否则原片没回来、归档记录还丢了)。"""
     import sqlite3
     from app.db import db_manager
@@ -578,6 +593,39 @@ def test_batch_restore_three_zips_end_to_end(project, monkeypatch, qtbot):
     db.close()
 
 
+def test_batch_restore_delete_failure_keeps_archive_registration(project, monkeypatch):
+    import sqlite3
+    from app.db import db_manager
+    from app.services.grouping_service import load_grouping
+
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    db_manager.ensure_schema(db)
+    uid, zip_path, _jpg_path = _owned_zip(project, db, 1)
+    harness = _BatchHarness(str(project), db)
+
+    def _delete_failed(_path):
+        raise OSError("locked")
+
+    monkeypatch.setattr(harness, "_retire_zip", _delete_failed)
+    task = types.SimpleNamespace(
+        owner_uid=uid,
+        group_index=0,
+        zip_path=zip_path,
+    )
+
+    ok, removed, detail = harness._finalize_batch_restored_group(task)
+
+    group = load_grouping(db, uid).groups[0]
+    assert not ok
+    assert not removed
+    assert "归档登记已保留" in detail
+    assert group.archive_zip == zip_path
+    assert group.status == "organized"
+    assert os.path.isfile(zip_path)
+    db.close()
+
+
 def test_batch_restore_failed_item_keeps_its_zip(project, monkeypatch, qtbot):
     """一个坏 ZIP + 一个好 ZIP: 好的还原并删除, 坏的**必须保留 ZIP 和归档登记**。"""
     import sqlite3
@@ -611,3 +659,105 @@ def test_batch_restore_failed_item_keeps_its_zip(project, monkeypatch, qtbot):
     assert g_bad.archive_zip, "坏的: 归档登记必须保留"
     assert g_bad.status == "organized", "坏的: 组状态不得退回"
     db.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 还原原片的三条用户裁定(PROJECT_MEMORY:370/372/376), 审计发现全都没落地:
+#   ① 还原写出 0 张 -> 提示「未能还原」, **不撤 ZIP 登记**
+#      实际: 同名 JPG 全被 skip -> ok=True/count=0 -> 组退档 + ZIP 被删, 一张没回来
+#   ② 同名 -> 询问是否覆盖(确认后用 ZIP 内原片覆盖)
+#      实际: 硬编码 overwrite=False, 不问, 直接跳过, 还弹「还原完成」
+#   ③ 还原前必须确认(一点击不得直接写盘)
+#      实际: 孤儿 ZIP / 改绑成果那条路零确认框直接开 worker
+# (Fable 5, 2026-07-12)
+# ─────────────────────────────────────────────────────────────────────────────
+class _RestoreFinishHarness(_Harness):
+    def __init__(self, project_dir: str, db) -> None:
+        super().__init__(project_dir)
+        self.ctx.get_db = lambda: db
+        self._grouping = types.SimpleNamespace(load_grouping=lambda *a, **k: None)
+        self.retired: list = []
+
+    def _retire_zip(self, zip_path: str) -> str:      # 记录"删 ZIP"这个动作有没有发生
+        self.retired.append(zip_path)
+        return zip_path
+
+    def _refresh_results_column(self, *a, **k) -> None:
+        pass
+
+    def _refresh_monitor(self, *a, **k) -> None:
+        pass
+
+    def _after_binding_changed(self, *a, **k) -> None:
+        pass
+
+
+def _restore_result(count=0, skipped=(), failures=(), ok=True, out="/tmp/out"):
+    return types.SimpleNamespace(
+        ok=ok, count=count, skipped=list(skipped), failures=list(failures),
+        output_dir=out, reason="",
+    )
+
+
+def test_zero_restored_keeps_zip_and_registration(project, monkeypatch):
+    """写出 0 张(全被同名跳过) -> 必须提示未能还原, 不撤登记、不删 ZIP。"""
+    import sqlite3
+    from app.db import db_manager
+    from app.services.grouping_service import load_grouping
+    from app.views import workbench_supplementary_workflow as wsw
+
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    db_manager.ensure_schema(db)
+    uid, zp, _jpg = _owned_zip(project, db, 0)
+
+    h = _RestoreFinishHarness(str(project), db)
+    h._pending_restore_finalize = (uid, 0, zp)
+    warned: list = []
+    monkeypatch.setattr(wsw.ui, "info", lambda *a, **k: warned.append(("info", a)))
+    monkeypatch.setattr(wsw.ui, "critical", lambda *a, **k: warned.append(("critical", a)))
+    monkeypatch.setattr(wsw.ui, "warn", lambda *a, **k: warned.append(("warn", a)))
+
+    h._on_restore_finished(_restore_result(count=0, skipped=["a.jpg"]))
+
+    assert not h.retired, "一张原片都没回来 -> 绝不能删 ZIP"
+    g = load_grouping(db, uid).groups[0]
+    assert g.archive_zip, "0 张还原 -> 归档登记必须保留"
+    assert g.status == "organized", "0 张还原 -> 组状态不得退回"
+    kinds = [k for k, _ in warned]
+    assert "info" not in kinds, "不许弹「还原完成」"
+    assert kinds, "必须提示未能还原"
+    db.close()
+
+
+def test_restore_asks_confirmation_before_writing(project, monkeypatch):
+    """孤儿 ZIP 还原: 写盘前必须确认(默认否); 取消 -> 一个 worker 都不许起。"""
+    from PyQt6.QtWidgets import QMessageBox
+    from app.views import workbench_supplementary_workflow as wsw
+
+    zp = project / "results" / "orphan.zip"
+    zp.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(zp, "w") as zf:
+        zf.writestr("P9.jpg", b"\xff\xd8\xffX")
+
+    started: list = []
+
+    class _NoWorker:
+        def __init__(self, *a, **k):
+            started.append(a)
+            self.started = self.finished = self.failed = types.SimpleNamespace(
+                connect=lambda *_a, **_k: None
+            )
+
+        def start(self):
+            started.append("start")
+
+    h = _RestoreFinishHarness(str(project), None)
+    monkeypatch.setattr(wsw, "_RestoreWorkerCls", _NoWorker, raising=False)
+    monkeypatch.setattr(QMessageBox, "question",
+                        staticmethod(lambda *a, **k: QMessageBox.StandardButton.No))
+    monkeypatch.setattr(wsw.ui, "warn", lambda *a, **k: None)
+    monkeypatch.setattr(wsw.ui, "info", lambda *a, **k: None)
+
+    h._on_restore_archive(str(zp))
+    assert not started, "用户点「否」-> 不得写盘"

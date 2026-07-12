@@ -352,6 +352,19 @@ class TestExportCsv:
 
         assert [record["recordId"] for record in selected] == ["seed:1"]
 
+    def test_selected_export_unions_checked_and_row_selected_ids(self, view, qapp):
+        records, _ = view._svc.all_records(source_filter="seed", page_size=999)
+        view.on_activate()
+        view._model._checked = {records[0]["recordId"]}
+        view._selected_ids = {records[1]["recordId"]}
+
+        selected = view._records_for_export(selected_only=True)
+
+        assert {record["recordId"] for record in selected} == {
+            records[0]["recordId"],
+            records[1]["recordId"],
+        }
+
     def test_csv_written_with_header(self, view, tmp_path, qapp):
         out = tmp_path / "test_export.csv"
         # Load some records first

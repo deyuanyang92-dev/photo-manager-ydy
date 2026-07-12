@@ -1,5 +1,7 @@
 # Workbench Module — Web → Qt Coverage Audit
 
+> 历史快照：本文状态仅代表审计当日，不是当前缺口清单。当前口径见 [`../REQUIREMENTS_CURRENT.md`](../REQUIREMENTS_CURRENT.md)。
+
 > Generated: 2026-06-03  
 > Auditor: verified against web app.js + Qt source  
 > Oracle: prototype-photo-gui/app.js (workbench section, ~159 functions), server.js lines 2974-3870, monitor-service.js, helicon.js, archive.js
