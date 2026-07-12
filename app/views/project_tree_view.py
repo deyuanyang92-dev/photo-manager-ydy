@@ -233,7 +233,9 @@ class ProjectTreeView(BaseView):
         self._act_pick_root = self._more_menu.addAction("选择根目录…")
         self._act_pick_root.triggered.connect(self._pick_root)
         self._more_menu.addSeparator()
-        self._act_new_region = self._more_menu.addAction("新建调查区域…")
+        # §7 旧文案: "新建项目…" —— 现在这个入口一次建好「项目 + 若干采样点」,
+        # 叫「新建项目」更贴用户的说法(Fable 5, 2026-07-12)
+        self._act_new_region = self._more_menu.addAction("新建项目…")
         self._act_new_region.triggered.connect(self._new_region)
         self._act_scan = self._more_menu.addAction("扫描磁盘…")
         self._act_scan.triggered.connect(self._scan_disk)
@@ -245,7 +247,7 @@ class ProjectTreeView(BaseView):
         )
         self._act_refresh_index.triggered.connect(self._refresh_index_cache_manual)
         self._more_menu.addSeparator()
-        self._act_newsub = self._more_menu.addAction("新建断面/子节点")
+        self._act_newsub = self._more_menu.addAction("新建采样点")
         self._act_newsub.triggered.connect(self._new_subfolder)
         self._more_btn.setMenu(self._more_menu)
         bar.addWidget(self._more_btn)
@@ -422,7 +424,7 @@ class ProjectTreeView(BaseView):
         self._empty_state = QLabel(
             "还没有选择调查根目录。\n\n"
             "选择根目录：读取已有文件夹树，不改动原文件。\n"
-            "新建调查区域：创建一个区域根目录，后续断面会继承区域设置。"
+            "新建项目：一次建好项目目录和它下面的采样点，采样点自动继承项目设置。"
         )
         self._empty_state.setObjectName("EmptyState")
         self._empty_state.setWordWrap(True)
@@ -1982,7 +1984,7 @@ class ProjectTreeView(BaseView):
         nodes = self._load_known_projects_nodes()
         if not nodes:
             self._root_lbl.setText("（未选根目录）")
-            self._detail_name.setText("选择或创建调查区域")
+            self._detail_name.setText("选择或创建项目")
             self._detail_path.setText("")
             self._detail_kind.setText("未选择")
             self._info_block.hide()
@@ -1990,7 +1992,7 @@ class ProjectTreeView(BaseView):
             self._empty_state.setText(
                 "还没有选择调查根目录，也没有已记录的项目。\n\n"
                 "选择根目录：读取已有文件夹树，不改动原文件。\n"
-                "新建调查区域：创建一个区域根目录，后续断面会继承区域设置。"
+                "新建项目：一次建好项目目录和它下面的采样点，采样点自动继承项目设置。"
             )
             self._empty_state.show()
             return
@@ -2603,8 +2605,10 @@ class ProjectTreeView(BaseView):
                 color=icons.TONE_ACCENT,
             )
         elif child_count:
-            kind = "调查区域"
-            state = "区域节点，通常在下级断面拍照"
+            # 用词统一(用户 2026-07-12): 项目 = 容器; 采样点 = 进去拍照的地方。
+            # §7 旧: kind = "调查区域"; state = "区域节点，通常在下级断面拍照"
+            kind = "项目"
+            state = "项目节点，照片放在下面的采样点里"
             self._btn_adopt.hide()
             self._set_enter_action_style(
                 "SoftAction", "进入此层拍照", "mdi6.folder-open-outline",
@@ -4454,54 +4458,82 @@ class ProjectTreeView(BaseView):
         ui.info(self, "已添加", f"已登记到项目列表:\n{path}")
 
     def _new_region(self) -> None:
-        """Scaffold a 调查区域 root: create the folder, seed region-level
-        settings (地区/负责人) as the inheritance anchor, then make it the tree
-        root so 断面 created under it auto-inherit (set once, never re-type)."""
-        from app.views.project_dialog import ProjectDialog
-        dlg = ProjectDialog(mode="new", existing_projects=[], parent=self)
+        """新建项目: 一次填完「项目名 + 若干采样点」, 直接建出可进入的目录树。
+
+        场景(用户 2026-07-12 报障): "我开展一个大项目, 比如江苏盐城2026, 在这个区域
+          设置了 2 个点: 日出海湾、月亮湾 —— 软件在创建工作区时无法自动建出项目目录 +
+          内部两个子目录, 我可以切换进去。"
+        旧流程的毛病: ① 建区域会顺手在**项目根**建 incoming-jpg/ results/ ——
+          项目根自己变成拍照工作区, 照片堆在项目根上; ② 子点只 mkdir 空壳,
+          不是工作区; ③ 没有一次建好的入口, 要点 4~5 次。
+        现在: 一个对话框 -> project_scaffold_service.create_survey_project ->
+          项目根只放共享设置(采样点自动继承), 每个采样点是**建完即可进入**的工作区。
+        §7 旧实现(ProjectDialog + seed_region_settings, 会污染项目根)整段注释保留:
+        #     from app.views.project_dialog import ProjectDialog
+        #     dlg = ProjectDialog(mode="new", existing_projects=[], parent=self)
+        #     ... seed_region_settings(directory, collector=..., meta=...)
+        #     ... save_project_descriptor(...)
+        (Fable 5, 2026-07-12)
+        """
+        from app.widgets.new_survey_project_dialog import NewSurveyProjectDialog
+
+        default_parent = ""
+        if self._root:
+            default_parent = str(Path(self._root).parent)
+        dlg = NewSurveyProjectDialog(self, default_parent_dir=default_parent)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        proj = dlg.result_project()
-        if not proj:
-            return
-        directory = proj.get("directory") or proj.get("dir") or ""
-        if not directory:
-            return
+        vals = dlg.values()
+
         try:
+            from app.services.project_scaffold_service import create_survey_project
             from app.services.project_service import (
                 default_user_projects_json_path,
                 load_user_projects,
                 save_project_descriptor,
-                seed_region_settings,
             )
-            seed_region_settings(
-                directory,
-                collector=proj.get("collector", ""),
-                meta={
-                    "name": proj.get("name", ""),
-                    "location": proj.get("location", ""),
-                    "year": proj.get("year", ""),
-                    "date_range": proj.get("dateRange", ""),
-                    "project_code": proj.get("projectCode", ""),
-                },
+
+            res = create_survey_project(
+                vals["parent_dir"],
+                name=vals["name"],
+                sites=vals["sites"],
+                meta=vals["meta"],
+                collector=vals["collector"],
+                province=vals["province"],
             )
-            save_project_descriptor(
-                default_user_projects_json_path(),
-                proj,
-                existing_projects=load_user_projects(),
-            )
-        except Exception as exc:  # pragma: no cover - defensive
-            ui.warn(self, "新建调查区域", f"创建失败：{exc}")
+            # 每个采样点也登记进 user_projects.json —— 顶栏「最近项目」能直接切
+            for site_dir in res["sites"]:
+                save_project_descriptor(
+                    default_user_projects_json_path(),
+                    {
+                        "name": Path(site_dir).name,
+                        "directory": site_dir,
+                        "location": vals["meta"].get("location", ""),
+                        "year": vals["meta"].get("year", ""),
+                        "collector": vals["collector"],
+                    },
+                    existing_projects=load_user_projects(),
+                )
+        except (ValueError, FileExistsError, FileNotFoundError) as exc:
+            ui.warn(self, "新建项目", str(exc))
             return
-        self._root = str(Path(directory).resolve())
+        except Exception as exc:  # pragma: no cover - defensive
+            ui.warn(self, "新建项目", f"创建失败：{exc}")
+            return
+
+        self._root = str(Path(res["root"]).resolve())
         pts.clear_project_tree_cache(self._root)
         self.ctx.settings.project_tree_root = self._root
         self._reload_project_tree()
+
+        n = len(res["sites"])
         ui.info(
             self,
-            "新建调查区域",
-            "区域已建。地区/负责人已设在区域层，下面新建的断面会自动继承——"
-            "在断面里设省/市、地区/样地可覆盖。",
+            "新建项目",
+            f"项目「{vals['name']}」已建好，含 {n} 个采样点。\n\n"
+            "· 项目根只保存共享设置（地区/采集人），采样点自动继承\n"
+            "· 双击任一采样点即可进入拍照；照片只会落在采样点里，不会堆在项目根\n"
+            "· 之后可以右键项目 →「新建子文件夹」继续加点",
         )
 
     def _new_subfolder(self) -> None:
@@ -4528,18 +4560,17 @@ class ProjectTreeView(BaseView):
         path = self._selected_path()
         if not path:
             return
-        # 区域≠工作区: a node with subfolders that isn't yet a workspace is most
-        # likely a 调查区域 (inheritance anchor), not where you shoot. Don't
-        # forbid — just confirm, so a region doesn't accidentally become a
-        # photo workspace.
+        # 项目≠采样点: 一个还有子文件夹、又不是工作区的节点, 多半是**项目**
+        # (设置继承的锚点), 不是拍照的地方。不禁止, 但要确认 —— 免得项目根
+        # 稀里糊涂变成拍照工作区、照片堆在项目根上。(用词统一: 用户 2026-07-12)
         items = self._tree.selectedItems()
         item = items[0] if items else None
         if item is not None and item.childCount() > 0 and not pts.is_workspace(path):
             resp = ui.question(
                 self,
                 "进入工作区",
-                f"「{Path(path).name}」下面还有子文件夹，看起来是调查区域。"
-                "通常在下层断面里拍照。仍要把这一层当作工作区进入吗？",
+                f"「{Path(path).name}」下面还有子文件夹，看起来是**项目**（不是采样点）。"
+                "照片通常放在下面的采样点里。仍要把这一层当成采样点进入吗？",
             )
             from PyQt6.QtWidgets import QMessageBox
             if resp != QMessageBox.StandardButton.Yes:

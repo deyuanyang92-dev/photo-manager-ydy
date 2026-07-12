@@ -99,8 +99,27 @@ def _cache_put(cache: dict, key: tuple, value) -> None:
     cache[key] = (time.monotonic(), copy.deepcopy(value))
 
 
+def is_region(dir_path: str) -> bool:
+    """True 当这个目录是**项目容器(调查区域)**, 不是拍照工作区。
+
+    场景(用户 2026-07-12): 「江苏盐城2026」是项目, 底下「日出海湾」「月亮湾」才是
+      拍照的地方。项目根也有 _data/project.db(存共享设置供子点继承), 光看
+      project.db 会把项目根误判成工作区 -> 照片堆到项目根上。
+    标记文件 _data/region.json 由 project_scaffold_service 建项目时写入。
+    纯路径判断: 项目树扫描不开数据库(开了会持有文件锁, Windows 上文件夹就删不掉了)。
+    (Fable 5, 2026-07-12)
+    """
+    return (Path(dir_path) / "_data" / "region.json").exists()
+
+
 def is_workspace(dir_path: str) -> bool:
-    """True if *dir_path* already has its own ``_data/project.db`` (已认领的工作区)."""
+    """True if *dir_path* already has its own ``_data/project.db`` (已认领的工作区).
+
+    §7 旧: 只看 project.db 存不存在。现在多一条: 打了 region.json 标记的**项目容器**
+    不算工作区(见 is_region) —— 老项目没有该标记, 行为完全不变。
+    """
+    if is_region(dir_path):
+        return False
     return (Path(dir_path) / "_data" / "project.db").exists()
 
 
