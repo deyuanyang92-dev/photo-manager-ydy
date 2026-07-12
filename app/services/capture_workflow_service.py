@@ -38,6 +38,14 @@ class DeleteSpecimenResult:
 
 
 @dataclass(frozen=True)
+class DeleteSpecimensResult:
+    requested: list[str] = field(default_factory=list)
+    deleted: list[str] = field(default_factory=list)
+    missing: list[str] = field(default_factory=list)
+    failures: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class GroupingClaimPlan:
     kind: str
     uid: str
@@ -129,6 +137,27 @@ def delete_specimen(db: sqlite3.Connection, uid: str) -> DeleteSpecimenResult:
         uid=target,
         deleted=cur.rowcount > 0,
         unassigned_photo_rows=unassigned_photo_rows,
+    )
+
+
+def delete_specimens(db: sqlite3.Connection, uids: list[str]) -> DeleteSpecimensResult:
+    """Delete a deduplicated batch sequentially while isolating item failures."""
+    requested = list(dict.fromkeys(_clean_uid(uid) for uid in uids if _clean_uid(uid)))
+    deleted: list[str] = []
+    missing: list[str] = []
+    failures: dict[str, str] = {}
+    for uid in requested:
+        try:
+            result = delete_specimen(db, uid)
+        except Exception as exc:  # noqa: BLE001
+            failures[uid] = str(exc)
+            continue
+        (deleted if result.deleted else missing).append(uid)
+    return DeleteSpecimensResult(
+        requested=requested,
+        deleted=deleted,
+        missing=missing,
+        failures=failures,
     )
 
 

@@ -39,9 +39,29 @@ from app.views import settings_view_support as _sv
 class SettingsUiWorkflowMixin:
     """Theme, typography, screenshot, and shortcut settings behaviour."""
 
+    def _sync_font_scale_preset(self, value: float) -> None:
+        """Select the matching friendly preset, or 自定义 for other values."""
+        custom_index = self._font_scale_preset_combo.count() - 1
+        target_index = custom_index
+        for index in range(custom_index):
+            preset = self._font_scale_preset_combo.itemData(index)
+            if preset is not None and abs(float(preset) - float(value)) < 0.001:
+                target_index = index
+                break
+        self._font_scale_preset_combo.blockSignals(True)
+        self._font_scale_preset_combo.setCurrentIndex(target_index)
+        self._font_scale_preset_combo.blockSignals(False)
+
+    def _on_font_scale_preset_changed(self) -> None:
+        """Apply a friendly size preset through the existing live-save path."""
+        scale = self._font_scale_preset_combo.currentData()
+        if scale is not None:
+            self._font_scale_spin.setValue(float(scale))
+
     def _on_font_scale_changed(self, value: float) -> None:
         """Realtime: update percentage label, persist, and re-skin the app."""
         self._font_scale_pct_label.setText(f"{round(value * 100)}%")
+        self._sync_font_scale_preset(value)
         self._save_ui()
         self._apply_typography_live()
 

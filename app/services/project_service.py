@@ -625,6 +625,15 @@ def enter_workspace(
     Returns the resolved workspace path.
     """
     resolved = normalize_path(path)
+    # Snapshot an existing project DB before open_project can run schema
+    # migrations or other entry-time writes. New workspaces have no DB yet and
+    # snapshot_project safely becomes a no-op.
+    try:
+        from app.services.backup_service import snapshot_project
+
+        snapshot_project(resolved)
+    except Exception:  # noqa: BLE001
+        pass
     # Unavailability (drive unmounted / path gone) MUST surface — do not activate
     # a dead path, or the workbench reads a ghost. Other minor errors are
     # tolerated as before.

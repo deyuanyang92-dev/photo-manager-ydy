@@ -755,6 +755,79 @@ def test_grid_list_has_context_menu_policy(tmp_path):
     grid.teardown()
 
 
+def test_context_menu_keeps_multi_selection_and_returns_all_paths(tmp_path):
+    from PyQt6.QtCore import QItemSelectionModel
+    from app.widgets.uid_grouped_grid import UidGroupedGrid
+
+    paths = []
+    for name in ("a.jpg", "b.jpg"):
+        path = tmp_path / name
+        _write_image(path)
+        paths.append(str(path))
+    grid = UidGroupedGrid()
+    grid.set_paths(paths)
+    section = grid.section(0)
+    assert section is not None
+    selection = section.list_view.selectionModel()
+    for row in range(2):
+        selection.select(
+            section.model.index(row, 0),
+            QItemSelectionModel.SelectionFlag.Select,
+        )
+
+    entries = grid._context_selected_photo_entries(
+        section.list_view, section.model.index(1, 0)
+    )
+
+    assert [path for path, _item in entries] == paths
+    assert len(selection.selectedIndexes()) == 2
+    grid.teardown()
+
+
+def test_batch_export_selected_tiffs_uses_parallel_worker(tmp_path, monkeypatch):
+    from app.services.tiff_jpeg_export_service import OverwritePolicy
+    from app.widgets.uid_grouped_grid import UidGroupedGrid
+
+    paths = []
+    for name in ("a.tif", "b.tif"):
+        path = tmp_path / name
+        path.write_bytes(b"tiff")
+        paths.append(str(path))
+    captured = {}
+
+    class _Signal:
+        def connect(self, fn):
+            pass
+
+    class _FakeWorker:
+        def __init__(self, sources, settings, **kwargs):
+            captured.update(sources=sources, kwargs=kwargs)
+            self.progress = _Signal()
+            self.finished = _Signal()
+            self.failed = _Signal()
+
+        def isRunning(self):
+            return False
+
+        def start(self):
+            captured["started"] = True
+
+    monkeypatch.setattr(
+        "app.workers.tiff_jpeg_export_worker.TiffJpegExportWorker",
+        _FakeWorker,
+    )
+    grid = UidGroupedGrid()
+
+    grid._export_photos_jpg(paths)
+
+    assert captured["sources"] == paths
+    assert captured["kwargs"]["smart"] is True
+    assert captured["kwargs"]["overwrite"] == OverwritePolicy.RENAME
+    assert captured["started"] is True
+    grid._batch_export_worker = None
+    grid.teardown()
+
+
 def test_merge_groups_by_catalog_key_combines_same_unique_id():
     from app.widgets.uid_grouped_grid import merge_groups_by_catalog_key
 

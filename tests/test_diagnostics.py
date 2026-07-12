@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from types import SimpleNamespace
 
 
 def test_setup_logging_writes_to_env_log_dir(monkeypatch, tmp_path):
@@ -66,7 +67,56 @@ def test_format_diagnostic_includes_support_context(monkeypatch, tmp_path):
         assert "Title: 程序遇到错误" in payload
         assert "Message: boom" in payload
         assert f"Log: {tmp_path / 'app.log'}" in payload
+        assert f"Native crash log: {tmp_path / 'crash.log'}" in payload
         assert "project: /data/project" in payload
         assert "Traceback line" in payload
     finally:
         diagnostics.reset_for_tests()
+
+
+def test_install_runtime_diagnostics_routes_faults_and_thread_errors(
+    monkeypatch, tmp_path, caplog
+):
+    from app.utils import diagnostics
+
+    diagnostics.reset_for_tests()
+    monkeypatch.setenv("SPECIMEN_WORKBENCH_LOG_DIR", str(tmp_path))
+    enabled = {}
+    previous_calls = []
+    disabled = []
+    monkeypatch.setattr(
+        diagnostics.faulthandler,
+        "enable",
+        lambda **kwargs: enabled.update(kwargs),
+    )
+    monkeypatch.setattr(
+        diagnostics.faulthandler,
+        "disable",
+        lambda: disabled.append(True),
+    )
+    monkeypatch.setattr(
+        diagnostics.threading,
+        "excepthook",
+        lambda args: previous_calls.append(args),
+    )
+    try:
+        path = diagnostics.install_runtime_diagnostics()
+        hook = diagnostics.threading.excepthook
+        exc = RuntimeError("worker boom")
+        args = SimpleNamespace(
+            exc_type=RuntimeError,
+            exc_value=exc,
+            exc_traceback=exc.__traceback__,
+            thread=SimpleNamespace(name="worker-1"),
+        )
+        with caplog.at_level(logging.CRITICAL, logger="app.thread"):
+            hook(args)
+
+        assert path == tmp_path / "crash.log"
+        assert enabled["all_threads"] is True
+        assert enabled["file"].name == str(path)
+        assert "worker-1" in caplog.text
+        assert previous_calls == [args]
+    finally:
+        diagnostics.reset_for_tests()
+        assert disabled

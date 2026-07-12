@@ -11,6 +11,7 @@ import pytest
 from app.services.capture_workflow_service import (
     assign_jpg_to_active_specimen,
     delete_specimen,
+    delete_specimens,
     finalize_supplementary_archive,
     finalize_archived_group,
     link_result_pair_to_clean_uid,
@@ -94,6 +95,21 @@ def test_delete_specimen_removes_local_references_without_disk_rules():
     assert not db.execute("SELECT 1 FROM grouping WHERE uid=?", (uid,)).fetchone()
     row = db.execute("SELECT specimen_uid FROM photo_assignments WHERE assignment_id='a1'").fetchone()
     assert row["specimen_uid"] is None
+
+
+def test_delete_specimens_deduplicates_and_reports_missing():
+    db = _db()
+    db.execute("INSERT INTO specimens(uid) VALUES ('U1')")
+    db.execute("INSERT INTO specimens(uid) VALUES ('U2')")
+    db.commit()
+
+    result = delete_specimens(db, ["U1", "U2", "U1", "missing"])
+
+    assert result.requested == ["U1", "U2", "missing"]
+    assert result.deleted == ["U1", "U2"]
+    assert result.missing == ["missing"]
+    assert result.failures == {}
+    assert db.execute("SELECT COUNT(*) FROM specimens").fetchone()[0] == 0
 
 
 def test_grouping_claim_moves_adhoc_groups_after_existing_target_groups():

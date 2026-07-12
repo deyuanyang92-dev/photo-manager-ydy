@@ -37,7 +37,7 @@ class ProjectTreeUidIndex(QFrame):
         lay.addWidget(head)
         self._list = QListWidget()
         self._list.setObjectName("ProjectTreeUidList")
-        self._list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self._list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self._list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._list.itemClicked.connect(self._on_item_clicked)
         lay.addWidget(self._list, 1)

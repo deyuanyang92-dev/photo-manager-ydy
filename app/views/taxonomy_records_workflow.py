@@ -76,19 +76,34 @@ class TaxonomyRecordsWorkflowMixin:
 
     # ── Export ────────────────────────────────────────────────────────────────
 
-    def _on_export(self, fmt: str) -> None:
+    def _records_for_export(self, selected_only: bool = False) -> list[dict[str, Any]]:
         if self._svc is None:
-            return
+            return []
         source_filter = None
         if self._view == "worms":
             source_filter = "seed"
         all_recs, _ = self._svc.all_records(
             source_filter=source_filter, page=0, page_size=999999
         )
+        if not selected_only:
+            return all_recs
+        if self._select_all_filtered:
+            return list(getattr(self, "_filtered_records_cache", []) or [])
+        selected_ids = set(self._model.checked_ids() or self._selected_ids)
+        return [
+            record for record in all_recs
+            if str(record.get("recordId") or "") in selected_ids
+        ]
+
+    def _on_export(self, fmt: str, *, selected_only: bool = False) -> None:
+        records = self._records_for_export(selected_only=selected_only)
+        if selected_only and not records:
+            QMessageBox.information(self, "导出所选", "请先选择一条或多条分类记录。")
+            return
         if fmt == "csv":
-            self._export_csv(all_recs)
+            self._export_csv(records)
         else:
-            self._export_xlsx(all_recs)
+            self._export_xlsx(records)
 
     def _export_csv(self, records: list[dict[str, Any]]) -> None:
         path = ui.get_save_file_name(

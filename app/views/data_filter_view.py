@@ -13,8 +13,9 @@ spec: docs/specs/2026-07-08-data-filter-view-design.md
 """
 from __future__ import annotations
 
-import sqlite3
+import json
 from collections import Counter
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -103,6 +104,30 @@ _EDITABLE_FIELDS = {"province", "site", "photographer", "storage", "scientific_n
                     "station", "geo_area", "notes", "photo_notes", "collection_date",
                     "photo_date"}
 
+_RAW_JSON_ALIASES = {
+    "scientific_name": "scientificName",
+    "scientific_name_cn": "scientificNameCn",
+    "geo_area": "geoArea",
+    "photo_notes": "photoNotes",
+    "collection_date": "collectionDate",
+    "photo_date": "photoDate",
+}
+
+
+def _merge_raw_json_edit(raw_text: object, field: str, value: str, updated_at: str) -> str:
+    try:
+        raw = json.loads(str(raw_text or "{}"))
+        if not isinstance(raw, dict):
+            raw = {}
+    except (TypeError, ValueError, json.JSONDecodeError):
+        raw = {}
+    raw[field] = value
+    alias = _RAW_JSON_ALIASES.get(field)
+    if alias:
+        raw[alias] = value
+    raw["updatedAt"] = updated_at
+    return json.dumps(raw, ensure_ascii=False)
+
 
 class DataFilterView(BaseView):
     view_id = "data_filter"
@@ -152,9 +177,17 @@ class DataFilterView(BaseView):
         self._btn_export.setToolTip("导出当前查询结果（全部汇总字段）")
         self._btn_export.setEnabled(False)
         self._btn_export.clicked.connect(self._export_csv)
+        self._btn_export_selected = QPushButton("导出所选 CSV")
+        self._btn_export_selected.setObjectName("Outline")
+        self._btn_export_selected.setToolTip("只导出结果表中选中的编号")
+        self._btn_export_selected.setEnabled(False)
+        self._btn_export_selected.clicked.connect(
+            lambda: self._export_csv(selected_only=True)
+        )
         cond_head.addWidget(self._btn_add_cond)
         cond_head.addWidget(self._btn_clear_cond)
         cond_head.addStretch(1)
+        cond_head.addWidget(self._btn_export_selected)
         cond_head.addWidget(self._btn_export)
         cond_head.addWidget(self._btn_run)
         root.addLayout(cond_head)
@@ -170,6 +203,9 @@ class DataFilterView(BaseView):
         self._btn_unlock.setObjectName("Outline")
         self._btn_unlock.clicked.connect(self._on_unlock)
         status_row.addWidget(self._lock_lbl)
+        self._selection_lbl = QLabel("已选 0 条")
+        self._selection_lbl.setObjectName("MutedSmall")
+        status_row.addWidget(self._selection_lbl)
         status_row.addStretch(1)
         status_row.addWidget(self._btn_unlock)
         root.addLayout(status_row)
@@ -185,6 +221,7 @@ class DataFilterView(BaseView):
         self._table.setObjectName("DataFilterResultTable")
         self._table.setHorizontalHeaderLabels([label for _, label in _COLUMNS])
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._table.itemChanged.connect(self._on_cell_changed)
         self._table.horizontalHeader().setStretchLastSection(True)
@@ -500,14 +537,29 @@ class DataFilterView(BaseView):
             pass
         self._query_worker = None
 
-    def _export_csv(self) -> None:
-        if not self._rows:
+    def _selected_rows(self) -> list[dict[str, Any]]:
+        selection = self._table.selectionModel()
+        if selection is None:
+            return []
+        indexes = sorted(selection.selectedRows(), key=lambda index: index.row())
+        return [
+            self._rows[index.row()]
+            for index in indexes
+            if 0 <= index.row() < len(self._rows)
+        ]
+
+    def _export_csv(self, *, selected_only: bool = False) -> None:
+        rows = self._selected_rows() if selected_only else list(self._rows)
+        if not rows:
+            if selected_only:
+                ui.warn(self, "导出", "请先在结果表中选择一个或多个编号。")
+                return
             ui.warn(self, "导出", "请先查询出结果再导出。")
             return
         path = ui.get_save_file_name(
             self,
-            "导出筛选结果 CSV",
-            "数据筛选结果.csv",
+            "导出所选结果 CSV" if selected_only else "导出筛选结果 CSV",
+            "数据筛选所选结果.csv" if selected_only else "数据筛选结果.csv",
             "CSV (*.csv)",
         )
         if not path:
@@ -516,13 +568,13 @@ class DataFilterView(BaseView):
 
         ws_paths = sorted({
             str(r.get("_workspace") or "").strip()
-            for r in self._rows
+            for r in rows
             if str(r.get("_workspace") or "").strip()
         })
         columns = cwq.summary_all_columns(ws_paths)
         try:
             out = cwq.export_filtered_specimens_csv(
-                self._rows, path, columns=columns or None,
+                rows, path, columns=columns or None,
             )
         except Exception as exc:
             ui.warn(self, "导出失败", str(exc))
@@ -611,11 +663,19 @@ class DataFilterView(BaseView):
         workspace = spec_row.get("_workspace")
         if not uid or not workspace:
             return
-        self._persist_edit(str(uid), key, item.text(), str(workspace))
+        old_value = spec_row.get(key)
+        if not self._persist_edit(str(uid), key, item.text(), str(workspace)):
+            self._suspend_cell_signal = True
+            try:
+                item.setText("" if old_value is None else str(old_value))
+            finally:
+                self._suspend_cell_signal = False
+            return
+        spec_row[key] = item.text()
         # 派生/统计随改值刷新
         if key == "storage":
-            spec_row[key] = item.text()
             self._fill_table(self._rows)
+        if key in {"storage", "photographer", "site"}:
             self._fill_stats(self._rows)
 
     def _on_selection_changed(self) -> None:
@@ -624,6 +684,9 @@ class DataFilterView(BaseView):
         if sm is None:
             return
         idxs = sm.selectedRows()
+        count = len(idxs)
+        self._selection_lbl.setText(f"已选 {count} 条")
+        self._btn_export_selected.setEnabled(count > 0)
         if not idxs:
             self._photo_label.clear()
             self._photo_label.setText("选中编号查看照片")
@@ -670,20 +733,37 @@ class DataFilterView(BaseView):
 
     def _persist_edit(self, uid: str, field: str, value: str, workspace: str) -> bool:
         """解锁后: 写回该 specimen 所属工作区 db + 记审计。"""
-        from pathlib import Path
         db_path = Path(workspace) / "_data" / "project.db"
         if not db_path.exists():
             return False
         try:
-            conn = sqlite3.connect(str(db_path))
+            from app.db.db_manager import open_project_db_private
+
+            conn = open_project_db_private(workspace, ensure=True)
             try:
+                row = conn.execute(
+                    "SELECT raw_json FROM specimens WHERE uid=?",
+                    (uid,),
+                ).fetchone()
+                if row is None:
+                    return False
+                updated_at = datetime.now(timezone.utc).isoformat()
+                raw_json = _merge_raw_json_edit(
+                    row["raw_json"] if hasattr(row, "keys") else row[0],
+                    field,
+                    value,
+                    updated_at,
+                )
                 # field 来自 _EDITABLE_FIELDS 白名单(实列名), 防 SQL 注入
-                conn.execute(f'UPDATE specimens SET "{field}"=? WHERE uid=?', (value, uid))
+                conn.execute(
+                    f'UPDATE specimens SET "{field}"=?, raw_json=?, '
+                    "collab_updated_at=? WHERE uid=?",
+                    (value, raw_json, updated_at, uid),
+                )
                 conn.commit()
-                self._rows  # row 缓存同步由调用方负责
             finally:
                 conn.close()
-        except sqlite3.Error as exc:
+        except Exception as exc:  # noqa: BLE001
             ui.warn(self, "保存失败", f"写入数据库失败:\n{exc}")
             return False
         self._log_edit_audit(uid, field, value, workspace)

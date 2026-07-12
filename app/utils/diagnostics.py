@@ -1,11 +1,13 @@
 """Application diagnostics and file logging helpers."""
 from __future__ import annotations
 
+import faulthandler
 import logging
 import os
 import platform
 import sys
 import tempfile
+import threading
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -14,9 +16,13 @@ from typing import Mapping
 _APP_DIR_WINDOWS = "SpecimenPhotoWorkbench"
 _APP_DIR_POSIX = "specimen-photo-workbench"
 _LOG_FILE = "app.log"
+_CRASH_LOG_FILE = "crash.log"
 _HANDLER_MARK = "_specimen_photo_workbench_handler"
 _LOG_PATH: Path | None = None
 _PREVIOUS_ROOT_LEVEL: int | None = None
+_FAULT_FILE_HANDLE = None
+_PREVIOUS_THREAD_EXCEPTHOOK = None
+_THREAD_EXCEPTHOOK = None
 
 
 def _ensure_dir(path: Path) -> Path:
@@ -51,6 +57,11 @@ def log_dir() -> Path:
 def log_path() -> Path:
     """Return the current log file path without reconfiguring logging."""
     return _LOG_PATH or (log_dir() / _LOG_FILE)
+
+
+def crash_log_path() -> Path:
+    """Return the native crash log path."""
+    return log_dir() / _CRASH_LOG_FILE
 
 
 def setup_logging(debug: bool | None = None) -> Path:
@@ -103,6 +114,43 @@ def setup_logging(debug: bool | None = None) -> Path:
     return path
 
 
+def install_runtime_diagnostics() -> Path:
+    """Capture native crashes and uncaught Python thread exceptions."""
+    global _FAULT_FILE_HANDLE, _PREVIOUS_THREAD_EXCEPTHOOK, _THREAD_EXCEPTHOOK
+
+    path = crash_log_path()
+    if _FAULT_FILE_HANDLE is None:
+        handle = path.open("a", encoding="utf-8", buffering=1)
+        handle.write(
+            f"\n[{datetime.now().astimezone().isoformat(timespec='seconds')}] "
+            f"native crash handler armed pid={os.getpid()}\n"
+        )
+        handle.flush()
+        faulthandler.enable(file=handle, all_threads=True)
+        _FAULT_FILE_HANDLE = handle
+
+    if _THREAD_EXCEPTHOOK is None:
+        previous = threading.excepthook
+
+        def _thread_hook(args) -> None:
+            logging.getLogger("app.thread").critical(
+                "Uncaught exception in thread %s",
+                getattr(getattr(args, "thread", None), "name", "<unknown>"),
+                exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+            )
+            try:
+                previous(args)
+            except Exception:  # noqa: BLE001
+                pass
+
+        _PREVIOUS_THREAD_EXCEPTHOOK = previous
+        _THREAD_EXCEPTHOOK = _thread_hook
+        threading.excepthook = _thread_hook
+
+    logging.getLogger(__name__).info("Runtime diagnostics initialized at %s", path)
+    return path
+
+
 def format_diagnostic(
     title: str,
     message: str,
@@ -115,6 +163,7 @@ def format_diagnostic(
         f"Message: {message}",
         f"Time: {datetime.now().astimezone().isoformat(timespec='seconds')}",
         f"Log: {log_path()}",
+        f"Native crash log: {crash_log_path()}",
         f"Python: {platform.python_version()} ({sys.executable})",
         f"Platform: {platform.platform()}",
         f"Working directory: {Path.cwd()}",
@@ -140,6 +189,7 @@ def flush_logs() -> None:
 def reset_for_tests() -> None:
     """Remove diagnostics handlers so tests can isolate log directories."""
     global _LOG_PATH, _PREVIOUS_ROOT_LEVEL
+    global _FAULT_FILE_HANDLE, _PREVIOUS_THREAD_EXCEPTHOOK, _THREAD_EXCEPTHOOK
     root = logging.getLogger()
     for handler in list(root.handlers):
         if getattr(handler, _HANDLER_MARK, False):
@@ -149,3 +199,17 @@ def reset_for_tests() -> None:
         root.setLevel(_PREVIOUS_ROOT_LEVEL)
     _LOG_PATH = None
     _PREVIOUS_ROOT_LEVEL = None
+    if _THREAD_EXCEPTHOOK is not None and threading.excepthook is _THREAD_EXCEPTHOOK:
+        threading.excepthook = _PREVIOUS_THREAD_EXCEPTHOOK or threading.__excepthook__
+    _PREVIOUS_THREAD_EXCEPTHOOK = None
+    _THREAD_EXCEPTHOOK = None
+    if _FAULT_FILE_HANDLE is not None:
+        try:
+            faulthandler.disable()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            _FAULT_FILE_HANDLE.close()
+        except OSError:
+            pass
+        _FAULT_FILE_HANDLE = None

@@ -118,7 +118,13 @@ class TaxonomyService:
     def _ensure_loaded(self) -> None:
         if self._loaded:
             return
-        self._seed = self._read_seed()
+        self._seed = [
+            {
+                **record,
+                "recordId": str(record.get("recordId") or f"seed:{index}"),
+            }
+            for index, record in enumerate(self._read_seed())
+        ]
         self._user = self._read_user()
         self._loaded = True
 

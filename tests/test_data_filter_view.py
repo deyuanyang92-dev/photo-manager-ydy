@@ -1,6 +1,7 @@
 """test_data_filter_view.py — 数据筛选视图(spec 2026-07-08)."""
 from __future__ import annotations
 
+import json
 import sqlite3
 
 import pytest
@@ -161,6 +162,37 @@ def test_persist_edit_writes_to_db(qtbot, qapp, tmp_path) -> None:
     assert val == "李四"
 
 
+def test_persist_edit_keeps_raw_json_and_collab_timestamp_in_sync(
+    qtbot, qapp, tmp_path
+) -> None:
+    a = tmp_path / "断面a"
+    _make_ws(a, [("u1", "R95E", "张三", "浙江", "Aa")])
+    conn = sqlite3.connect(str(a / "_data" / "project.db"))
+    conn.execute("ALTER TABLE specimens ADD COLUMN raw_json TEXT")
+    conn.execute("ALTER TABLE specimens ADD COLUMN collab_updated_at TEXT")
+    conn.execute(
+        "UPDATE specimens SET raw_json=? WHERE uid='u1'",
+        (json.dumps({"photographer": "张三", "custom": "保留"}, ensure_ascii=False),),
+    )
+    conn.commit()
+    conn.close()
+    v = DataFilterView(_Ctx())
+    qtbot.addWidget(v)
+
+    assert v._persist_edit("u1", "photographer", "李四", str(a)) is True
+
+    conn = sqlite3.connect(str(a / "_data" / "project.db"))
+    row = conn.execute(
+        "SELECT photographer, raw_json, collab_updated_at FROM specimens WHERE uid='u1'"
+    ).fetchone()
+    conn.close()
+    raw = json.loads(row[1])
+    assert row[0] == "李四"
+    assert raw["photographer"] == "李四"
+    assert raw["custom"] == "保留"
+    assert raw["updatedAt"] == row[2]
+
+
 def test_find_specimen_photo_matches_uid_prefix(qtbot, qapp, tmp_path) -> None:
     """选中编号 → results 下 uid 前缀匹配的首个 .tif。"""
     ws = tmp_path / "断面a"
@@ -208,6 +240,48 @@ def test_export_csv_button_writes_file(qtbot, qapp, tmp_path, monkeypatch) -> No
     assert out.exists()
     text = out.read_text(encoding="utf-8-sig")
     assert "u1" in text
+
+
+def test_export_selected_csv_only_writes_selected_rows(
+    qtbot, qapp, tmp_path, monkeypatch
+) -> None:
+    a = tmp_path / "断面a"
+    _make_ws(
+        a,
+        [
+            ("u1", "R95E", "张三", "浙江", "Aa"),
+            ("u2", "T95E", "李四", "福建", "Bb"),
+        ],
+    )
+    v = DataFilterView(_Ctx())
+    qtbot.addWidget(v)
+    v._set_workspaces([(str(a), "断面a")])
+    monkeypatch.setattr(v, "_collect_conditions", lambda: [])
+    v._run_query()
+    qtbot.waitUntil(lambda: v._table.rowCount() == 2, timeout=5000)
+    v._stop_filter_query_worker(wait_ms=2000)
+
+    from PyQt6.QtCore import QItemSelectionModel
+    v._table.selectionModel().select(
+        v._table.model().index(1, 0),
+        QItemSelectionModel.SelectionFlag.ClearAndSelect
+        | QItemSelectionModel.SelectionFlag.Rows,
+    )
+    assert [row["uid"] for row in v._selected_rows()] == ["u2"]
+    assert v._btn_export_selected.isEnabled()
+    assert "1" in v._selection_lbl.text()
+
+    out = tmp_path / "selected.csv"
+    monkeypatch.setattr(
+        "app.utils.ui.get_save_file_name",
+        lambda *_a, **_k: str(out),
+    )
+    monkeypatch.setattr("app.utils.ui.info", lambda *_a, **_k: None)
+    v._export_csv(selected_only=True)
+
+    text = out.read_text(encoding="utf-8-sig")
+    assert "u2" in text
+    assert "u1" not in text
 
 
 def test_query_runs_in_worker_thread(qtbot, qapp, tmp_path, monkeypatch) -> None:

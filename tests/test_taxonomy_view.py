@@ -326,6 +326,32 @@ class TestImportRows:
 # ── _export_csv ───────────────────────────────────────────────────────────────
 
 class TestExportCsv:
+    def test_selected_export_records_only_include_checked_ids(self, view, qapp):
+        first = view._svc.learn({
+            "class": "Polychaeta", "order": "Phyllodocida",
+            "family": "Polynoidae", "species": "Selected species",
+        })
+        view._svc.learn({
+            "class": "Malacostraca", "order": "Decapoda",
+            "family": "Portunidae", "species": "Other species",
+        })
+        view.on_activate()
+        view._model._checked = {first["recordId"]}
+
+        records = view._records_for_export(selected_only=True)
+
+        assert [record["recordId"] for record in records] == [first["recordId"]]
+
+    def test_seed_records_have_stable_ids_for_batch_selection(self, view, qapp):
+        records, _ = view._svc.all_records(source_filter="seed", page_size=999)
+        assert [record["recordId"] for record in records] == ["seed:0", "seed:1"]
+
+        view.on_activate()
+        view._model._checked = {"seed:1"}
+        selected = view._records_for_export(selected_only=True)
+
+        assert [record["recordId"] for record in selected] == ["seed:1"]
+
     def test_csv_written_with_header(self, view, tmp_path, qapp):
         out = tmp_path / "test_export.csv"
         # Load some records first

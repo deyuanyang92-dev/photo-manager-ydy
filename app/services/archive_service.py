@@ -231,6 +231,7 @@ def _archive_group_as_jxl_zip(
             deletion_skipped_reason=deletion_skipped_reason,
             manifest=manifest,
             ok=True,
+            source_paths=tuple(jpg_paths),
         )
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
@@ -440,6 +441,9 @@ class ZipResult:
     deletion_skipped_reason: str
     manifest: dict
     ok: bool = True
+    # Runtime-only provenance for the two-phase delete gate. Do not persist
+    # absolute source paths into the user-facing ZIP manifest.
+    source_paths: tuple[str, ...] = ()
 
 
 class ArchiveCancelled(RuntimeError):
@@ -466,6 +470,31 @@ def commit_jpg_deletion_after_archive(
 
     if result.delete_jpg or not jpg_paths:
         return result
+
+    def _source_key(path: str) -> str:
+        return os.path.normcase(os.path.realpath(os.path.abspath(path)))
+
+    archived_sources = tuple(getattr(result, "source_paths", ()) or ())
+    requested_sources = tuple(jpg_paths)
+    if not archived_sources:
+        return replace(
+            result,
+            delete_jpg=False,
+            requested_delete_jpg=True,
+            deletion_skipped_reason="归档结果缺少源文件清单，已保留 JPG",
+        )
+
+    from collections import Counter
+
+    if Counter(map(_source_key, requested_sources)) != Counter(
+        map(_source_key, archived_sources)
+    ):
+        return replace(
+            result,
+            delete_jpg=False,
+            requested_delete_jpg=True,
+            deletion_skipped_reason="待删除 JPG 与本次归档源文件不一致，已全部保留",
+        )
 
     manifest = dict(result.manifest or {})
     manifest_files = list(manifest.get("files") or [])
@@ -716,6 +745,7 @@ def archive_group(
         deletion_skipped_reason=deletion_skipped_reason,
         manifest=manifest,
         ok=True,
+        source_paths=tuple(jpg_paths),
     )
 
 

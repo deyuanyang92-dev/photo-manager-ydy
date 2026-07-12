@@ -84,7 +84,12 @@ def _synth_headers(n: int) -> list[str]:
 
 
 def _read_delimited(p: Path, *, has_header: bool = True) -> tuple[list[str], list[dict]]:
-    text = p.read_text(encoding="utf-8-sig")
+    try:
+        text = p.read_text(encoding="utf-8-sig")
+    except UnicodeDecodeError:
+        # Windows 中文版 Excel 常把 CSV 保存为系统代码页。GB18030 是
+        # GBK/GB2312 的超集，回退读取不会影响正常 UTF-8 文件。
+        text = p.read_text(encoding="gb18030")
     sample = text[:4096]
     try:
         dialect = csv.Sniffer().sniff(sample, delimiters=",\t;|")

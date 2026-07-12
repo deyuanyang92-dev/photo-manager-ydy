@@ -79,6 +79,8 @@ _mpl_dir = _runtime_dir / "matplotlib"
 _mpl_dir.mkdir(parents=True, exist_ok=True)
 _INSTANCE_LOCK_HANDLE = None
 _INSTANCE_MUTEX_HANDLE = None
+_QT_MESSAGE_HANDLER = None
+_QT_PREVIOUS_MESSAGE_HANDLER = None
 # Set unconditionally (not setdefault): a stale/unwritable inherited value would
 # bring back the very warning we are killing.
 os.environ["MPLCONFIGDIR"] = str(_mpl_dir)
@@ -387,6 +389,47 @@ def _install_exception_hook(win) -> None:
     sys.excepthook = _hook
 
 
+def _install_qt_message_handler(installer=None) -> None:
+    """Bridge Qt runtime warnings into the rotating application log."""
+    global _QT_MESSAGE_HANDLER, _QT_PREVIOUS_MESSAGE_HANDLER
+    if _QT_MESSAGE_HANDLER is not None:
+        return
+
+    from PyQt6.QtCore import QtMsgType, qInstallMessageHandler
+
+    install = installer or qInstallMessageHandler
+    previous_holder = {"handler": None}
+
+    def _handler(message_type, context, message) -> None:
+        levels = {
+            QtMsgType.QtDebugMsg: logging.DEBUG,
+            QtMsgType.QtInfoMsg: logging.INFO,
+            QtMsgType.QtWarningMsg: logging.WARNING,
+            QtMsgType.QtCriticalMsg: logging.ERROR,
+            QtMsgType.QtFatalMsg: logging.CRITICAL,
+        }
+        source = ""
+        if context is not None:
+            file_name = getattr(context, "file", None) or ""
+            line = getattr(context, "line", 0) or 0
+            function = getattr(context, "function", None) or ""
+            if file_name or function:
+                source = f" [{file_name}:{line} {function}]"
+        logging.getLogger("qt").log(
+            levels.get(message_type, logging.WARNING),
+            "%s%s",
+            message,
+            source,
+        )
+        previous = previous_holder["handler"]
+        if callable(previous):
+            previous(message_type, context, message)
+
+    previous_holder["handler"] = install(_handler)
+    _QT_PREVIOUS_MESSAGE_HANDLER = previous_holder["handler"]
+    _QT_MESSAGE_HANDLER = _handler
+
+
 def _detect_is_wsl() -> bool:
     """Safe WSL check — never raise on missing/unreadable /proc/version."""
     if not sys.platform.startswith("linux"):
@@ -534,11 +577,14 @@ def main() -> int:
         return 2
 
     log_path = diagnostics.setup_logging()
+    crash_log_path = diagnostics.install_runtime_diagnostics()
+    _install_qt_message_handler()
     logging.getLogger(__name__).info(
-        "Application starting argv=%s cwd=%s log=%s",
+        "Application starting argv=%s cwd=%s log=%s crash_log=%s",
         sys.argv,
         os.getcwd(),
         log_path,
+        crash_log_path,
     )
 
     # HiDPI: pass through the exact fractional scale (125%/150% on Windows,

@@ -11,8 +11,8 @@ from PyQt6.QtWidgets import QAbstractItemView
 from app.widgets.project_tree_uid_index import ProjectTreeUidIndex
 
 
-def test_uid_index_supports_ctrl_a_and_shift_range(qtbot):
-    """编号 rail 应兼容 Windows 列表习惯：Ctrl+A 与 Shift 范围选择."""
+def test_uid_index_keeps_single_navigation_selection(qtbot):
+    """编号索引只负责跳转，不应形成没有批量动作的假多选。"""
     from PyQt6.QtTest import QTest
 
     index = ProjectTreeUidIndex()
@@ -23,15 +23,15 @@ def test_uid_index_supports_ctrl_a_and_shift_range(qtbot):
         {"uid": "GXFCG-BLW-PGC001-D-20260618", "abbrev": "GXFCG-BLW-PGC001", "count": 5},
     ])
     lst = index._list
-    assert lst.selectionMode() == QAbstractItemView.SelectionMode.ExtendedSelection
+    assert lst.selectionMode() == QAbstractItemView.SelectionMode.SingleSelection
     lst.show()
     lst.setFocus()
     lst.setCurrentRow(0)
 
     QTest.keyClick(lst, Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
-    assert [lst.item(i).isSelected() for i in range(lst.count())] == [True, True, True]
+    assert sum(lst.item(i).isSelected() for i in range(lst.count())) == 1
 
     lst.clearSelection()
     lst.setCurrentRow(0)
     QTest.keyClick(lst, Qt.Key.Key_Down, Qt.KeyboardModifier.ShiftModifier)
-    assert [lst.item(i).isSelected() for i in range(lst.count())] == [True, True, False]
+    assert sum(lst.item(i).isSelected() for i in range(lst.count())) == 1

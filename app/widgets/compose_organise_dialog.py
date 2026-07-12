@@ -196,23 +196,23 @@ class _ComposeOrganiseProgressDialog(QWidget):
             "}"
             "QLabel#ComposeOrganiseMark {"
             f" background:{TOKENS['accent']}; color:white;"
-            " border-radius:8px; font-size:13px; font-weight:600;"
+            f" border-radius:8px; font-size:{TOKENS['font_sm']}; font-weight:600;"
             "}"
             "QLabel#ComposeOrganiseTitle {"
-            f" color:{TOKENS['text']}; font-size:14px; font-weight:600;"
+            f" color:{TOKENS['text']}; font-size:{TOKENS['font_body']}; font-weight:600;"
             "}"
             "QLabel#ComposeOrganiseSubtitle {"
-            f" color:{TOKENS['muted']}; font-size:12px;"
+            f" color:{TOKENS['muted']}; font-size:{TOKENS['font_xs']};"
             "}"
             "QLabel#ComposeOrganiseOverallBadge {"
             " background:transparent; border:0; padding:2px 0;"
-            " font-size:12px; font-weight:600;"
+            f" font-size:{TOKENS['font_xs']}; font-weight:600;"
             "}"
             "QToolButton#ComposeOrganiseToolButton {"
             f" background:{TOKENS['panel_2']};"
             f" border:1px solid {TOKENS['border']};"
             " border-radius:8px; min-width:28px; min-height:28px;"
-            f" color:{TOKENS['muted']}; font-size:13px; font-weight:600;"
+            f" color:{TOKENS['muted']}; font-size:{TOKENS['font_xs']}; font-weight:600;"
             "}"
             "QToolButton#ComposeOrganiseToolButton:hover {"
             f" background:{TOKENS['panel_inset']};"
@@ -223,7 +223,7 @@ class _ComposeOrganiseProgressDialog(QWidget):
             f" color:{TOKENS['text']};"
             f" border:1px solid {TOKENS['border']};"
             " border-radius:8px; padding:6px 12px;"
-            " font-size:12px; font-weight:700;"
+            f" font-size:{TOKENS['font_xs']}; font-weight:600;"
             "}"
             "QPushButton#ComposeOrganiseActionButton:hover {"
             f" background:{TOKENS['panel_inset']};"
@@ -234,7 +234,7 @@ class _ComposeOrganiseProgressDialog(QWidget):
             f" color:{TOKENS['danger']};"
             " border:1px solid #fed7aa;"
             " border-radius:8px; padding:6px 12px;"
-            " font-size:12px; font-weight:600;"
+            f" font-size:{TOKENS['font_xs']}; font-weight:600;"
             "}"
             "QPushButton#ComposeOrganiseCancelButton[role=\"danger\"]:hover {"
             " background:#ffedd5; border-color:#fdba74;"
@@ -244,7 +244,7 @@ class _ComposeOrganiseProgressDialog(QWidget):
             f" color:{TOKENS['text']};"
             f" border:1px solid {TOKENS['border']};"
             " border-radius:8px; padding:6px 12px;"
-            " font-size:12px; font-weight:600;"
+            f" font-size:{TOKENS['font_xs']}; font-weight:600;"
             "}"
             "QPushButton#ComposeOrganiseCancelButton[role=\"neutral\"]:hover {"
             f" background:{TOKENS['panel_inset']};"
@@ -257,7 +257,7 @@ class _ComposeOrganiseProgressDialog(QWidget):
             "QPushButton#ComposeOrganiseOkButton {"
             f" background:{TOKENS['accent']}; color:white;"
             " border:0; border-radius:8px; padding:6px 16px;"
-            " font-size:12px; font-weight:600;"
+            f" font-size:{TOKENS['font_xs']}; font-weight:600;"
             "}"
             "QPushButton#ComposeOrganiseOkButton:hover {"
             f" background:{TOKENS['accent_hover']};"
@@ -271,16 +271,16 @@ class _ComposeOrganiseProgressDialog(QWidget):
             " background:transparent; border:0;"
             "}"
             "QLabel#ComposeOrganiseStepName {"
-            f" color:{TOKENS['text']}; font-size:13px; font-weight:700;"
+            f" color:{TOKENS['text']}; font-size:{TOKENS['font_sm']}; font-weight:600;"
             "}"
             "QLabel#ComposeOrganiseStepHint {"
-            f" color:{TOKENS['muted']}; font-size:11px;"
+            f" color:{TOKENS['muted']}; font-size:{TOKENS['font_xs']};"
             "}"
             "QLabel#ComposeOrganiseDetail {"
             f" color:{TOKENS['muted']};"
             f" background:{TOKENS['panel_inset']};"
             f" border:1px solid {TOKENS['border']};"
-            " border-radius:8px; padding:8px 10px; font-size:12px;"
+            f" border-radius:8px; padding:8px 10px; font-size:{TOKENS['font_xs']};"
             "}"
         )
 
@@ -304,7 +304,7 @@ class _ComposeOrganiseProgressDialog(QWidget):
         index.setStyleSheet(
             f"background:{TOKENS['panel_inset']}; color:{TOKENS['muted']};"
             f" border:1px solid {TOKENS['border_medium']}; border-radius:12px;"
-            " font-size:12px; font-weight:700;"
+            f" font-size:{TOKENS['font_xs']}; font-weight:600;"
         )
         text_box = QVBoxLayout()
         text_box.setContentsMargins(0, 0, 0, 0)
@@ -408,7 +408,7 @@ class _ComposeOrganiseProgressDialog(QWidget):
         label.setText(state)
         label.setStyleSheet(
             f"background:{bg}; color:{fg}; border:1px solid {border};"
-            " border-radius:10px; padding:4px 8px; font-size:12px; font-weight:600;"
+            f" border-radius:10px; padding:4px 8px; font-size:{TOKENS['font_xs']}; font-weight:600;"
         )
         hint = getattr(self, "_stage_hint_by_label", {}).get(label)
         if hint is not None:
@@ -460,7 +460,7 @@ class _ComposeOrganiseProgressDialog(QWidget):
         self._overall_badge.setText(f"状态：{stage}")
         self._overall_badge.setStyleSheet(
             f"background:transparent; color:{fg}; border:0;"
-            " padding:2px 0; font-size:12px; font-weight:600;"
+            f" padding:2px 0; font-size:{TOKENS['font_xs']}; font-weight:600;"
         )
         self._sync_launcher_style(fg, stage)
 
@@ -586,7 +586,7 @@ class _ComposeOrganiseProgressDialog(QWidget):
         self._launcher.setStyleSheet(
             "QPushButton#ComposeOrganiseLauncher {"
             f" background:{color}; color:white; border:0; border-radius:15px;"
-            " padding:4px 14px; font-size:12px; font-weight:600;"
+            f" padding:4px 14px; font-size:{TOKENS['font_xs']}; font-weight:600;"
             "}"
         )
 

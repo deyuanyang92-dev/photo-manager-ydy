@@ -55,6 +55,7 @@ from PyQt6.QtCore import (
     QAbstractListModel,
     Q_ARG,
     QEvent,
+    QItemSelectionModel,
     QMetaObject,
     QModelIndex,
     QObject,
@@ -744,6 +745,10 @@ class UidGroupedGrid(QFrame):
             self._thread.wait(2000)
         except Exception:
             pass
+        export_worker = getattr(self, "_batch_export_worker", None)
+        if export_worker is not None and export_worker.isRunning():
+            export_worker.cancel()
+            export_worker.wait(30000)
 
     # -- Accessors (tests / parent view) --------------------------------------
 
@@ -1196,6 +1201,10 @@ class UidGroupedGrid(QFrame):
         if not path:
             return
         item = model.item_at(index.row()) or {}
+        selected_entries = self._context_selected_photo_entries(list_view, index)
+        selected_paths = [entry_path for entry_path, _entry in selected_entries]
+        selected_count = len(selected_paths)
+        suffix = f"（{selected_count}）" if selected_count > 1 else ""
         menu = QMenu(self)
         act_preview = menu.addAction(tr("大图预览…"))
         act_preview.triggered.connect(
@@ -1203,16 +1212,30 @@ class UidGroupedGrid(QFrame):
         )
         act_reveal = menu.addAction(tr("在文件夹中显示"))
         act_reveal.triggered.connect(lambda: self._reveal_path(path))
-        act_copy = menu.addAction(tr("复制路径"))
-        act_copy.triggered.connect(lambda: self._copy_path(path))
+        act_copy = menu.addAction(tr("复制所选路径") + suffix)
+        act_copy.triggered.connect(lambda: self._copy_paths(selected_paths))
         menu.addSeparator()
-        act_refresh = menu.addAction(tr("刷新此图"))
-        act_refresh.triggered.connect(lambda: self.refresh_thumbnail(path))
+        act_refresh = menu.addAction(
+            (tr("刷新所选缩略图") + suffix)
+            if selected_count > 1
+            else tr("刷新此图")
+        )
+        act_refresh.triggered.connect(lambda: self._refresh_paths(selected_paths))
         act_refresh_all = menu.addAction(tr("刷新全部"))
         act_refresh_all.triggered.connect(self.refresh_all_thumbnails)
         menu.addSeparator()
-        act_export = menu.addAction(tr("导出为 JPG…"))
-        act_export.triggered.connect(lambda: self._export_photo_jpg(path))
+        act_export = menu.addAction(
+            (tr("导出所选为 JPG…") + suffix)
+            if selected_count > 1
+            else tr("导出为 JPG…")
+        )
+        act_export.triggered.connect(
+            lambda: (
+                self._export_photos_jpg(selected_paths)
+                if selected_count > 1
+                else self._export_photo_jpg(path)
+            )
+        )
         quality_menu = menu.addMenu(tr("预览清晰度"))
         current = self.preview_master_size()
         labels = {
@@ -1250,6 +1273,117 @@ class UidGroupedGrid(QFrame):
 
     def _copy_path(self, path: str) -> None:
         QApplication.clipboard().setText(path)
+
+    def _copy_paths(self, paths: list[str]) -> None:
+        QApplication.clipboard().setText("\n".join(paths))
+
+    def _refresh_paths(self, paths: list[str]) -> None:
+        for path in paths:
+            self.refresh_thumbnail(path)
+
+    def _context_selected_photo_entries(
+        self, list_view: QListView, clicked_index: QModelIndex
+    ) -> list[tuple[str, dict]]:
+        selection = list_view.selectionModel()
+        if selection is None:
+            return []
+        if not selection.isSelected(clicked_index):
+            for section in self._sections:
+                section.list_view.clearSelection()
+            list_view.setCurrentIndex(clicked_index)
+            selection.select(
+                clicked_index,
+                QItemSelectionModel.SelectionFlag.ClearAndSelect,
+            )
+
+        entries: list[tuple[str, dict]] = []
+        seen: set[str] = set()
+        for section in self._sections:
+            selected = sorted(
+                section.list_view.selectionModel().selectedIndexes(),
+                key=lambda selected_index: selected_index.row(),
+            )
+            for selected_index in selected:
+                selected_path = str(
+                    section.model.data(selected_index, UidSectionModel.PATH_ROLE) or ""
+                )
+                if not selected_path or selected_path in seen:
+                    continue
+                entries.append(
+                    (selected_path, dict(section.model.item_at(selected_index.row()) or {}))
+                )
+                seen.add(selected_path)
+        if not entries:
+            selected_path = str(
+                list_view.model().data(clicked_index, UidSectionModel.PATH_ROLE) or ""
+            )
+            if selected_path:
+                clicked_item = list_view.model().item_at(clicked_index.row()) or {}
+                entries.append((selected_path, dict(clicked_item)))
+        return entries
+
+    def _export_photos_jpg(self, paths: list[str]) -> None:
+        from app.services.tiff_jpeg_export_service import (
+            OverwritePolicy,
+            TiffJpegExportSettings,
+        )
+        from app.workers.tiff_jpeg_export_worker import TiffJpegExportWorker
+
+        sources = [
+            str(path) for path in paths
+            if str(path).lower().endswith((".tif", ".tiff")) and Path(path).is_file()
+        ]
+        if not sources:
+            ui.warn(self, tr("批量导出 JPG"), tr("所选项目中没有有效的 TIFF 文件。"))
+            return
+        worker = getattr(self, "_batch_export_worker", None)
+        if worker is not None and worker.isRunning():
+            ui.info(self, tr("批量导出 JPG"), tr("已有导出任务正在进行。"))
+            return
+        self._summary.setText(tr("正在并行导出 {count} 张 JPG…").format(count=len(sources)))
+        worker = TiffJpegExportWorker(
+            sources,
+            TiffJpegExportSettings(),
+            recursive=False,
+            overwrite=OverwritePolicy.RENAME,
+            smart=True,
+            parent=self,
+        )
+        self._batch_export_worker = worker
+        worker.progress.connect(
+            lambda current, total, name: self._summary.setText(
+                tr("正在导出 {current}/{total}：{name}").format(
+                    current=current, total=total, name=name
+                )
+            )
+        )
+        worker.finished.connect(self._on_batch_export_finished)
+        worker.failed.connect(self._on_batch_export_failed)
+        worker.start()
+
+    def _on_batch_export_finished(self, result) -> None:
+        self._batch_export_worker = None
+        converted = len(list(getattr(result, "converted", []) or []))
+        skipped = len(list(getattr(result, "skipped", []) or []))
+        failed = list(getattr(result, "failed", []) or [])
+        self._summary.setText(
+            tr("批量导出完成：成功 {ok}，跳过 {skip}，失败 {fail}").format(
+                ok=converted, skip=skipped, fail=len(failed)
+            )
+        )
+        message = tr("成功 {ok}，跳过 {skip}，失败 {fail}").format(
+            ok=converted, skip=skipped, fail=len(failed)
+        )
+        if failed:
+            detail = "\n".join(f"• {Path(path).name}：{reason}" for path, reason in failed[:6])
+            ui.warn(self, tr("批量导出完成（有失败项）"), f"{message}\n{detail}")
+        else:
+            ui.info(self, tr("批量导出完成"), message)
+
+    def _on_batch_export_failed(self, reason: str) -> None:
+        self._batch_export_worker = None
+        self._summary.setText(tr("批量导出失败"))
+        ui.warn(self, tr("批量导出失败"), reason)
 
     def _export_photo_jpg(self, path: str) -> None:
         from PyQt6.QtWidgets import QMessageBox

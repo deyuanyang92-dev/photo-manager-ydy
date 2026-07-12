@@ -25,6 +25,20 @@ class TestReadTable:
         assert headers == ["地区", "断面", "站位", "经度", "纬度"]
         assert rows[0]["站位"] == "B2"
 
+    def test_read_gb18030_csv_from_chinese_excel(self, tmp_path: Path):
+        p = tmp_path / "中文Excel.csv"
+        p.write_bytes(
+            "地区,断面,站位,经度,纬度\n浙江,三门湾,B2,121.76,29.11\n".encode(
+                "gb18030"
+            )
+        )
+
+        headers, rows = cis.read_table(str(p))
+
+        assert headers == ["地区", "断面", "站位", "经度", "纬度"]
+        assert rows[0]["地区"] == "浙江"
+        assert rows[0]["断面"] == "三门湾"
+
     def test_read_txt_tab(self, tmp_path: Path):
         p = tmp_path / "s.txt"
         p.write_text("prov\tstation\tlon\tlat\nZJ\tB2\t121.0\t29.0\n", encoding="utf-8")

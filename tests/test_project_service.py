@@ -634,6 +634,31 @@ class _FakeCtx:
 
 
 class TestEnterWorkspace:
+    def test_snapshots_existing_database_before_open(self, tmp_path, monkeypatch):
+        from app.services import backup_service
+        from app.services.project_service import enter_workspace
+
+        ctx = _FakeCtx()
+        proj = tmp_path / "snapshot-before-open"
+        (proj / "_data").mkdir(parents=True)
+        (proj / "_data" / "project.db").write_bytes(b"existing-db")
+        events = []
+        monkeypatch.setattr(
+            backup_service,
+            "snapshot_project",
+            lambda path: events.append(("snapshot", path)),
+        )
+
+        # Avoid opening the deliberately minimal marker file; this assertion is
+        # specifically about ordering at the unified entry boundary.
+        monkeypatch.setattr(
+            "app.services.project_service.open_project",
+            lambda path: events.append(("open", path)),
+        )
+        enter_workspace(ctx, str(proj))
+
+        assert events == [("snapshot", str(proj)), ("open", str(proj))]
+
     def test_sets_both_dir_and_root(self, tmp_path):
         from app.services.project_service import enter_workspace
         ctx = _FakeCtx()

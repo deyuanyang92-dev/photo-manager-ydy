@@ -812,6 +812,21 @@ class TestUISettings:
         view._on_font_scale_changed(1.1)
         assert "110%" in view._font_scale_pct_label.text()
 
+    def test_font_scale_preset_applies_and_persists(self, view: SettingsView) -> None:
+        large_index = view._font_scale_preset_combo.findData(1.15)
+        assert large_index >= 0
+
+        view._font_scale_preset_combo.setCurrentIndex(large_index)
+
+        assert view._font_scale_spin.value() == pytest.approx(1.15, abs=0.01)
+        stored = float(view.ctx.settings._qs.value(_K_UI_FONT_SCALE, 0.0))
+        assert stored == pytest.approx(1.15, abs=0.01)
+
+    def test_custom_font_scale_selects_custom_preset(self, view: SettingsView) -> None:
+        view._font_scale_spin.setValue(1.07)
+
+        assert view._font_scale_preset_combo.currentData() is None
+
     def test_font_picker_surfaces_common_cjk_and_latin_faces(
         self, view: SettingsView
     ) -> None:

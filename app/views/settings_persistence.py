@@ -155,6 +155,7 @@ class SettingsPersistenceMixin:
         self._font_scale_spin.setValue(font_scale)
         self._font_scale_spin.blockSignals(False)
         self._font_scale_pct_label.setText(f"{round(font_scale * 100)}%")
+        self._sync_font_scale_preset(font_scale)
 
         saved_family = qs.value(_sv._K_UI_FONT_FAMILY, "", type=str) or ""
         fam_idx = self._font_family_combo.findData(saved_family)

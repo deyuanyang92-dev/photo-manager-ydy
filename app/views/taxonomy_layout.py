@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMenu,
     QProgressBar,
     QPushButton,
     QScrollArea,
@@ -326,6 +327,21 @@ class TaxonomyLayoutMixin:
         btn_export_csv.setObjectName("Outline")
         btn_export_csv.clicked.connect(lambda: self._on_export("csv"))
         action_row.addWidget(btn_export_csv)
+
+        self._btn_export_selected = QPushButton("导出所选")
+        self._btn_export_selected.setObjectName("Outline")
+        self._btn_export_selected.setEnabled(False)
+        selected_export_menu = QMenu(self._btn_export_selected)
+        export_selected_xlsx = selected_export_menu.addAction("导出所选为 Excel")
+        export_selected_xlsx.triggered.connect(
+            lambda: self._on_export("xlsx", selected_only=True)
+        )
+        export_selected_csv = selected_export_menu.addAction("导出所选为 CSV")
+        export_selected_csv.triggered.connect(
+            lambda: self._on_export("csv", selected_only=True)
+        )
+        self._btn_export_selected.setMenu(selected_export_menu)
+        action_row.addWidget(self._btn_export_selected)
 
         # 导入 Excel/CSV — file-picker button (taxon-import-label in DOM)
         btn_import = QPushButton("导入 Excel/CSV")

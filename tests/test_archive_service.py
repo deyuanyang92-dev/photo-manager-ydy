@@ -207,6 +207,29 @@ class TestArchiveGroup:
         assert committed.delete_jpg is True
         assert not os.path.isfile(jpg)
 
+    def test_commit_refuses_delete_set_that_differs_from_archive_sources(self):
+        """A late-added JPG must never be deleted by an earlier archive run."""
+        archived_jpg = _make_jpg(self.tmpdir, "archived.jpg")
+        late_jpg = _make_jpg(self.tmpdir, "late-added.jpg")
+        tiff = _make_tiff(self.tmpdir, "deferred-mismatch.tif")
+        staged = archive_group(
+            [archived_jpg],
+            tiff,
+            self.tmpdir,
+            delete_jpg=False,
+        )
+
+        committed = commit_jpg_deletion_after_archive(
+            staged,
+            [archived_jpg, late_jpg],
+        )
+
+        assert committed.delete_jpg is False
+        assert committed.requested_delete_jpg is True
+        assert "不一致" in committed.deletion_skipped_reason
+        assert os.path.isfile(archived_jpg)
+        assert os.path.isfile(late_jpg)
+
     def test_archive_group_does_not_auto_delete_tiff(self):
         """archive_group must not auto-delete TIFF while deleting loose JPGs."""
         jpg = _make_jpg(self.tmpdir, "img001.jpg")

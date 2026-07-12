@@ -192,6 +192,11 @@ class WorkbenchView(WorkbenchSpecimenIdentityMixin, WorkbenchMediaWorkflowMixin,
         # §7 旧: 用 _widget_natural_width(偏好宽) —— 同中栏, 那是"想要多宽"不是
         # "最少多宽", 会过度占宽把窄屏挤穿。改用硬最小值(minimumSizeHint)。
         content = getattr(self, "_right_rail_widget", None)
+        if content is not None:
+            content.ensurePolished()
+            layout = content.layout()
+            if layout is not None:
+                layout.activate()
         base = content.minimumSizeHint().width() if content is not None else 1
         scroll = getattr(self, "_right_scroll", None)
         if scroll is not None:
@@ -667,6 +672,11 @@ class WorkbenchView(WorkbenchSpecimenIdentityMixin, WorkbenchMediaWorkflowMixin,
         self._compose_organise_progress_dialog.cancel_requested.connect(
             self._cancel_workflow_task
         )
+        # Child widgets finish polishing while the remaining workbench panels
+        # are constructed. Re-read the rail hint once the full tree exists so
+        # a runtime font-scale change cannot leave the scrollbar overlapping
+        # the form by a few pixels.
+        self._right_scroll.setMinimumWidth(self._right_rail_min_width())
 
     # ── Header chrome builders ─────────────────────────────────────────────────
 
@@ -1101,9 +1111,31 @@ class WorkbenchView(WorkbenchSpecimenIdentityMixin, WorkbenchMediaWorkflowMixin,
         )
         if ret != QMessageBox.StandardButton.Yes:
             return
-        for uid in items:
-            self._on_delete_specimen(uid)
-        self._status_message(f"已删除 {len(items)} 个编号")
+        db = self.ctx.get_db()
+        if not db:
+            return
+        from app.services.capture_workflow_service import delete_specimens
+
+        result = delete_specimens(db, items)
+        if self._current_uid in result.deleted:
+            self._current_uid = None
+            for widget in (self._naming, self._metadata, self._taxon_card, self._grouping):
+                clear = getattr(widget, "clear", None)
+                if callable(clear):
+                    clear()
+        self._sidebar.refresh()
+        self._refresh_batch_header()
+        detail = f"已删除 {len(result.deleted)}/{len(result.requested)} 个编号"
+        if result.failures:
+            detail += f"，{len(result.failures)} 个失败"
+            QMessageBox.warning(
+                self,
+                "批量删除完成（有失败项）",
+                detail + "\n\n" + "\n".join(
+                    f"{uid}：{reason}" for uid, reason in list(result.failures.items())[:6]
+                ),
+            )
+        self._status_message(detail)
 
     def _on_print_labels_many(self, uids: list) -> None:
         items = [str(u).strip() for u in (uids or []) if str(u).strip()]

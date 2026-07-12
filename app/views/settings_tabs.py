@@ -952,7 +952,23 @@ class SettingsTabsMixin:
         self._font_family_combo.currentIndexChanged.connect(self._on_font_family_changed)
         font_form.addRow(tr("字体"), self._font_family_combo)
 
-        # 字体大小 — 缩放倍率 + 百分比
+        # 字体大小 — 常用档位 + 可选精细倍率
+        self._font_scale_preset_combo = QComboBox()
+        self._font_scale_preset_combo.addItem(tr("小（90%）"), 0.90)
+        self._font_scale_preset_combo.addItem(tr("标准（100%）"), 1.00)
+        self._font_scale_preset_combo.addItem(tr("大（115%）"), 1.15)
+        self._font_scale_preset_combo.addItem(tr("特大（130%）"), 1.30)
+        self._font_scale_preset_combo.addItem(tr("自定义"), None)
+        self._font_scale_preset_combo.setCurrentIndex(1)
+        self._font_scale_preset_combo.setFixedWidth(132)
+        self._font_scale_preset_combo.setToolTip(
+            tr("选择常用界面字号档位；立即预览并自动保存")
+        )
+        self._font_scale_preset_combo.currentIndexChanged.connect(
+            self._on_font_scale_preset_changed
+        )
+        font_form.addRow(tr("字号档位"), self._font_scale_preset_combo)
+
         size_row = QHBoxLayout()
         size_row.setContentsMargins(0, 0, 0, 0)
         size_row.setSpacing(10)
@@ -970,11 +986,16 @@ class SettingsTabsMixin:
         self._font_scale_pct_label.setObjectName("Muted")
         size_row.addWidget(self._font_scale_pct_label)
         size_row.addStretch()
-        font_form.addRow(tr("字体大小"), size_row)
+        font_form.addRow(tr("精细调整"), size_row)
 
         self._font_scale_spin.valueChanged.connect(self._on_font_scale_changed)
 
-        note = QLabel(tr("常用中文字体和 Times 等字体固定列在前面；未安装字体会自动回退。"))
+        note = QLabel(
+            tr(
+                "调整后会立即预览并自动保存，下次启动继续使用；"
+                "常用中文字体和 Times 等字体固定列在前面。"
+            )
+        )
         note.setObjectName("MutedSmall")
         note.setWordWrap(True)
         font_form.addRow("", note)

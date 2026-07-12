@@ -6608,7 +6608,7 @@ class TestUndoComposeDeletesTiff:
         assert saved.status == "composed"
         assert saved.archive_zip in (None, "")
         assert not Path(archived.zip_path).exists()
-        assert (project_dir / "_retired-zip" / Path(archived.zip_path).name).exists()
+        assert not (project_dir / "_retired-zip").exists()
         assert messages and "撤销整理完成" in messages[-1]
 
 
@@ -7811,6 +7811,20 @@ class TestComposeOrganiseProgressBar:
             and "font-size:13px; font-weight:600" in qss
         )
         assert "font-size:11px; font-weight:600" in qss
+
+    def test_typography_follows_global_font_scale(self):
+        from app.config.theme import apply_theme, set_typography
+
+        try:
+            set_typography(scale=1.3)
+            apply_theme("classic_light")
+            qss = self._dlg().styleSheet()
+            assert "font-size:17px; font-weight:600" in qss
+            assert "font-size:16px; font-weight:600" in qss
+            assert "font-size:14px; font-weight:600" in qss
+        finally:
+            set_typography(scale=1.0)
+            apply_theme("classic_light")
 
 
 class TestHeliconCancelRelease:

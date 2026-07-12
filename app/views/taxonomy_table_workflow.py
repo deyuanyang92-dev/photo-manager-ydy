@@ -318,6 +318,7 @@ class TaxonomyTableWorkflowMixin:
             )
 
         self._total = len(all_recs)
+        self._filtered_records_cache = list(all_recs)
 
         # Update filter active label
         has_active_filter = bool(self._filter_text) or bool(self._col_filters)
@@ -375,6 +376,9 @@ class TaxonomyTableWorkflowMixin:
             note = f"已选 {len(checked_ids)} 条"
         self._selection_note.setText(note)
         self._btn_worms_sel.setEnabled(bool(checked_ids) or self._select_all_filtered)
+        self._btn_export_selected.setEnabled(
+            bool(checked_ids) or bool(self._selected_ids) or self._select_all_filtered
+        )
 
     # ── Selection ─────────────────────────────────────────────────────────────
 
