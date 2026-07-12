@@ -1778,6 +1778,42 @@ class MonitorPanel(QWidget):
     def _on_delete_single_requested(self, path: str) -> None:
         self._delete_paths([path], clear_selection=False)
 
+    def _admin_delete_tiffs(self, paths: list) -> bool:
+        """删 TIF 的管理员闸门(密码 + 操作人 + 审计)。删成功返回 True。
+
+        用户 2026-07-12 裁定: TIF 可删, 但要管理员密码并记下操作人。
+        与成果区那条入口共用同一个服务(app/services/tiff_delete_gate.py), 不各写一套。
+        (Fable 5, 2026-07-12)
+        """
+        import os as _os
+        from app.widgets.admin_delete_dialog import ask_admin_delete
+        from app.services.tiff_delete_gate import TiffDeleteDenied, delete_tiff_with_audit
+
+        targets = [str(p) for p in (paths or []) if str(p or "").strip()]
+        if not targets:
+            return False
+        creds = ask_admin_delete(self, self.ctx, targets)
+        if creds is None:
+            return False
+        actor, password, reason = creds
+        db = self.ctx.get_db()
+        errors: list[str] = []
+        for path in targets:
+            try:
+                delete_tiff_with_audit(
+                    db, path, actor=actor, password=password,
+                    reason=reason or "待处理区右键删除",
+                )
+            except TiffDeleteDenied as exc:
+                QMessageBox.warning(self, "删除 TIF", str(exc))
+                return False
+            except (OSError, FileNotFoundError) as exc:
+                errors.append(f"{_os.path.basename(path)}: {exc}")
+        if errors:
+            QMessageBox.warning(self, "删除部分失败", "\n".join(errors[:5]))
+            return False
+        return True
+
     def _delete_paths(self, paths: list[str], *, clear_selection: bool) -> None:
         tiff_paths = [p for p in paths if p.lower().endswith((".tif", ".tiff"))]
         jpg_paths  = [p for p in paths if p and not p.lower().endswith((".tif", ".tiff"))]
@@ -1787,18 +1823,17 @@ class MonitorPanel(QWidget):
             return
 
         # TIFF 可删，但必须是用户明确删除；整理/归档流程不能顺手删 TIFF。
-        # 删除不可恢复 → 单独弹确认框；JPG 同样确认。各自确认、删各自确认通过的。
+        # 用户 2026-07-12 裁定(覆盖旧的"TIFF 永不删"): TIF 可以删, **但要管理员密码
+        #   + 记下操作人** —— 母片删了不可恢复, 事后要能查是谁删的。
+        # §7 旧: 一个普通 Yes/No 确认框就能删 TIFF, 谁都能删、查无对证:
+        #   reply = QMessageBox.question(self, "确认删除 TIFF", f"确认删除 {n} 个 TIFF 成片？...")
+        #   if reply == Yes: to_delete += tiff_paths
         to_delete: list[str] = []
         if tiff_paths:
-            reply = QMessageBox.question(
-                self, "确认删除 TIFF",
-                f"确认删除 {len(tiff_paths)} 个 TIFF 成片？\n"
-                "TIFF 是无损母片，删除后不可恢复。",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-            if reply == QMessageBox.StandardButton.Yes:
-                to_delete += tiff_paths
+            if self._admin_delete_tiffs(tiff_paths):
+                if clear_selection:
+                    self._on_select_none()
+                self.refresh_requested.emit()
         if jpg_paths:
             reply = QMessageBox.question(
                 self, "确认删除",

@@ -24,8 +24,9 @@ import subprocess
 import tempfile
 import zipfile
 import zlib
-from dataclasses import dataclass, field
-from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field, replace
+from pathlib import Path, PurePosixPath
 from typing import Callable, Optional
 
 
@@ -102,7 +103,7 @@ def _verify_jxl_zip_complete(zip_path: str, manifest_files: list[dict]) -> Check
                 bad = zf.testzip()
                 if bad:
                     return CheckResult(ok=False, reason=f"ZIP 内部文件损坏: {bad}")
-                zf.extractall(verify_dir)
+                _extract_zip_safely(zf, verify_dir)
         except (OSError, zipfile.BadZipFile) as exc:
             return CheckResult(ok=False, reason=f"ZIP 校验失败：{exc}")
 
@@ -132,6 +133,7 @@ def _archive_group_as_jxl_zip(
     *,
     delete_jpg: bool,
     effort: int = 9,
+    concurrency: int = 4,
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
     cancel_callback: Optional[Callable[[], bool]] = None,
 ) -> ZipResult:
@@ -144,17 +146,23 @@ def _archive_group_as_jxl_zip(
     used_names: set[str] = set()
     total_files = len(jpg_paths)
     try:
-        for index, jpg_path in enumerate(jpg_paths, start=1):
+        plans: list[tuple[str, str, str]] = []
+        for jpg_path in jpg_paths:
             _raise_if_cancelled(cancel_callback)
             original_name = os.path.basename(jpg_path)
             archive_name = _reserve_unique_archive_name(original_name, used_names, suffix=".jxl")
+            plans.append((jpg_path, original_name, archive_name))
+
+        def _compress_one(plan: tuple[str, str, str]) -> dict:
+            jpg_path, original_name, archive_name = plan
+            _raise_if_cancelled(cancel_callback)
             original_size = os.path.getsize(jpg_path)
             original_sha256 = _sha256_file(jpg_path)
             jxl_path = os.path.join(temp_dir, archive_name)
             compress_to_jxl(jpg_path, jxl_path, effort=effort)
             _raise_if_cancelled(cancel_callback)
             compressed_size = os.path.getsize(jxl_path)
-            manifest_files.append({
+            return {
                 "originalName": original_name,
                 "archiveName": archive_name,
                 "originalSize": original_size,
@@ -162,11 +170,16 @@ def _archive_group_as_jxl_zip(
                 "originalSha256": original_sha256,
                 "zipCompression": "jpeg-xl-lossless",
                 "jxlPath": jxl_path,
-            })
-            total_original += original_size
-            total_compressed += compressed_size
-            if progress_callback is not None:
-                progress_callback(index, total_files, original_name)
+            }
+
+        worker_count = max(1, min(8, int(concurrency), total_files))
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            for index, row in enumerate(executor.map(_compress_one, plans), start=1):
+                manifest_files.append(row)
+                total_original += int(row["originalSize"])
+                total_compressed += int(row["compressedSize"])
+                if progress_callback is not None:
+                    progress_callback(index, total_files, str(row["originalName"]))
 
         manifest = {
             "version": 3,
@@ -528,7 +541,7 @@ def commit_jpg_deletion_after_archive(
 
 # ── archive_group ─────────────────────────────────────────────────────────────
 
-def archive_group(
+def _archive_group_direct(
     jpg_paths: list[str],
     tiff_path: str,
     project_dir: str,
@@ -590,6 +603,7 @@ def archive_group(
                 tiff_basename,
                 delete_jpg=delete_jpg,
                 effort=effort,
+                concurrency=concurrency,
                 progress_callback=progress_callback,
                 cancel_callback=cancel_callback,
             )
@@ -749,12 +763,178 @@ def archive_group(
     )
 
 
+def archive_group(
+    jpg_paths: list[str],
+    tiff_path: str,
+    project_dir: str,
+    delete_jpg: bool = True,
+    method: str = "standard",
+    concurrency: int = 4,
+    progress_callback: Optional[Callable[[int, int, str], None]] = None,
+    cancel_callback: Optional[Callable[[], bool]] = None,
+    output_dir: Optional[str] = None,
+) -> ZipResult:
+    """Build and verify an archive before atomically publishing the final ZIP.
+
+    A same-name archive is never opened for writing. The new archive is built
+    in a sibling staging directory and replaces the destination only after all
+    verification gates pass, so cancellation or failure preserves an existing
+    valid ZIP.
+    """
+    tiff_basename = Path(tiff_path).stem
+    zip_dir = Path(output_dir) if output_dir else Path(tiff_path).parent
+    zip_dir.mkdir(parents=True, exist_ok=True)
+    final_zip_path = zip_dir / f"{tiff_basename}.zip"
+    staging_dir = Path(tempfile.mkdtemp(prefix=".archive-staging-", dir=zip_dir))
+
+    try:
+        staged_result = _archive_group_direct(
+            jpg_paths,
+            tiff_path,
+            project_dir,
+            delete_jpg=False,
+            method=method,
+            concurrency=concurrency,
+            progress_callback=progress_callback,
+            cancel_callback=cancel_callback,
+            output_dir=str(staging_dir),
+        )
+        _raise_if_cancelled(cancel_callback)
+
+        staged_zip_path = Path(staged_result.zip_path)
+        if not staged_zip_path.is_file():
+            raise RuntimeError("归档暂存文件不存在")
+        manifest_files = list((staged_result.manifest or {}).get("files") or [])
+        if str((staged_result.manifest or {}).get("format") or "") == "jxl-zip":
+            staged_check = _verify_jxl_zip_complete(
+                str(staged_zip_path),
+                manifest_files,
+            )
+        else:
+            staged_check = verify_jpg_zip_complete(
+                str(staged_zip_path),
+                manifest_files,
+            )
+        if not staged_check.ok:
+            raise RuntimeError(staged_check.reason or "归档暂存文件校验失败")
+        os.replace(staged_zip_path, final_zip_path)
+
+        published_result = replace(
+            staged_result,
+            zip_path=str(final_zip_path),
+            zip_size=final_zip_path.stat().st_size,
+            delete_jpg=False,
+            requested_delete_jpg=bool(delete_jpg),
+            deletion_skipped_reason="",
+        )
+        if delete_jpg:
+            return commit_jpg_deletion_after_archive(
+                published_result,
+                jpg_paths,
+            )
+        return published_result
+    finally:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+
+
 def _utc_now_iso() -> str:
     from datetime import datetime, timezone
     return datetime.now(tz=timezone.utc).isoformat()
 
 
 # ── restore_archive — one-click recover original JPGs from a ZIP ───────────────
+
+def _safe_archive_member_path(root: str | Path, member_name: str) -> Path:
+    """Resolve one ZIP member under *root* and reject traversal/absolute paths."""
+    normalized = str(member_name or "").replace("\\", "/")
+    member = PurePosixPath(normalized)
+    if (
+        not normalized
+        or normalized.startswith("/")
+        or member.is_absolute()
+        or any(part in {"", ".", ".."} for part in member.parts)
+        or (member.parts and ":" in member.parts[0])
+    ):
+        raise ValueError(f"ZIP 包含不安全路径: {member_name}")
+
+    root_path = Path(root).resolve()
+    target = root_path.joinpath(*member.parts).resolve()
+    try:
+        target.relative_to(root_path)
+    except ValueError as exc:
+        raise ValueError(f"ZIP 包含越界路径: {member_name}") from exc
+    return target
+
+
+def _extract_zip_safely(zf: zipfile.ZipFile, temp_dir: str) -> list[str]:
+    """Extract regular ZIP members under a temporary root without Zip Slip."""
+    names: list[str] = []
+    seen_targets: set[str] = set()
+    for info in zf.infolist():
+        target = _safe_archive_member_path(temp_dir, info.filename)
+        if info.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+            continue
+        target_key = os.path.normcase(str(target))
+        if target_key in seen_targets:
+            raise ValueError(f"ZIP 包含重复路径: {info.filename}")
+        seen_targets.add(target_key)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with zf.open(info, "r") as src, open(target, "wb") as dst:
+            shutil.copyfileobj(src, dst)
+        names.append(info.filename)
+    return names
+
+
+def _safe_restore_destination(output_dir: str | Path, original_name: str) -> Path:
+    return _safe_archive_member_path(output_dir, original_name)
+
+
+def _restore_entry_atomically(
+    src: str | Path,
+    dst: str | Path,
+    *,
+    is_jxl: bool,
+    original_size: Optional[int],
+    original_sha256: Optional[str],
+) -> None:
+    """Decode/copy and verify one JPG before atomically replacing its target."""
+    dst_path = Path(dst)
+    dst_path.parent.mkdir(parents=True, exist_ok=True)
+    suffix = dst_path.suffix or ".jpg"
+    fd, staged_name = tempfile.mkstemp(
+        prefix=".restore-staging-",
+        suffix=suffix,
+        dir=dst_path.parent,
+    )
+    os.close(fd)
+    staged_path = Path(staged_name)
+    try:
+        if is_jxl:
+            subprocess.run(
+                ["djxl", str(src), str(staged_path)],
+                check=True,
+                capture_output=True,
+                timeout=120,
+            )
+        else:
+            shutil.copy2(src, staged_path)
+
+        if not staged_path.is_file() or staged_path.stat().st_size <= 0:
+            raise RuntimeError("还原输出异常")
+        if original_size is not None and staged_path.stat().st_size != original_size:
+            raise RuntimeError(
+                f"大小与清单不一致（{staged_path.stat().st_size}≠{original_size}）"
+            )
+        if original_sha256 and _sha256_file(str(staged_path)) != original_sha256:
+            raise RuntimeError("SHA-256 与清单不一致")
+        os.replace(staged_path, dst_path)
+    finally:
+        try:
+            staged_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
 
 @dataclass
 class RestoreResult:
@@ -800,8 +980,7 @@ def restore_archive(
 
     try:
         with zipfile.ZipFile(zip_path, "r") as zf:
-            names = zf.namelist()
-            zf.extractall(temp_dir)
+            names = _extract_zip_safely(zf, temp_dir)
 
         # ── Build entries: (archiveName, originalName, originalSize, sha256) ───
         manifest_path = os.path.join(temp_dir, "manifest.json")
@@ -838,54 +1017,31 @@ def restore_archive(
             )
 
         for archive_name, original_name, original_size, original_sha256 in entries:
-            src = os.path.join(temp_dir, archive_name)
-            dst = os.path.join(output_dir, original_name)
+            try:
+                src = _safe_archive_member_path(temp_dir, archive_name)
+                dst = _safe_restore_destination(output_dir, original_name)
+            except ValueError as exc:
+                failures.append(str(exc))
+                continue
 
-            if not os.path.isfile(src):
+            if not src.is_file():
                 failures.append(f"{archive_name}：归档内缺失")
                 continue
-            if os.path.isfile(dst) and not overwrite:
-                skipped.append(dst)
+            if dst.is_file() and not overwrite:
+                skipped.append(str(dst))
                 continue
 
             try:
-                if archive_name.lower().endswith(".jxl"):
-                    subprocess.run(
-                        ["djxl", src, dst],
-                        check=True,
-                        capture_output=True,
-                        timeout=120,
-                    )
-                    if not os.path.isfile(dst) or os.path.getsize(dst) <= 0:
-                        failures.append(f"{original_name}：还原输出异常")
-                        if os.path.isfile(dst):
-                            os.unlink(dst)
-                        continue
-                    if original_size is not None and os.path.getsize(dst) != original_size:
-                        failures.append(
-                            f"{original_name}：大小与清单不一致"
-                            f"（{os.path.getsize(dst)}≠{original_size}）"
-                        )
-                        os.unlink(dst)
-                        continue
-                    if original_sha256 and _sha256_file(dst) != original_sha256:
-                        failures.append(f"{original_name}：SHA-256 与清单不一致")
-                        os.unlink(dst)
-                        continue
-                else:
-                    shutil.copy2(src, dst)
-                    if original_sha256 and _sha256_file(dst) != original_sha256:
-                        failures.append(f"{original_name}：SHA-256 与清单不一致")
-                        os.unlink(dst)
-                        continue
-                restored.append(dst)
+                _restore_entry_atomically(
+                    src,
+                    dst,
+                    is_jxl=archive_name.lower().endswith(".jxl"),
+                    original_size=original_size,
+                    original_sha256=original_sha256,
+                )
+                restored.append(str(dst))
             except Exception as e:
                 failures.append(f"{original_name}：{e}")
-                if os.path.isfile(dst):
-                    try:
-                        os.unlink(dst)
-                    except OSError:
-                        pass
 
         return RestoreResult(
             output_dir=output_dir,
@@ -930,8 +1086,11 @@ def restore_archive_to_original_paths(
 
     try:
         with zipfile.ZipFile(zip_path, "r") as zf:
-            names = [n for n in zf.namelist() if n != "manifest.json"]
-            zf.extractall(temp_dir)
+            names = [
+                name
+                for name in _extract_zip_safely(zf, temp_dir)
+                if name != "manifest.json"
+            ]
 
         manifest_path = os.path.join(temp_dir, "manifest.json")
         entries: list[tuple[str, Optional[int], Optional[str]]] = []
@@ -972,50 +1131,43 @@ def restore_archive_to_original_paths(
             )
 
         for (archive_name, original_size, original_sha256), dst in zip(entries, targets):
-            src = os.path.join(temp_dir, archive_name)
-            if not os.path.isfile(src):
+            try:
+                src = _safe_archive_member_path(temp_dir, archive_name)
+            except ValueError as exc:
+                failures.append(str(exc))
+                continue
+            if not src.is_file():
                 failures.append(f"{archive_name}：归档内缺失")
                 continue
             if os.path.isfile(dst) and not overwrite:
-                skipped.append(dst)
+                # 场景(用户 2026-07-12 问"还原中途死机会不会丢数据"):
+                #   还原的顺序是 写回 JPG -> 写库(撤归档登记) -> 删 ZIP。若在**写完
+                #   JPG、还没写库**时断电/崩溃, 重跑还原时这些 JPG 已经躺在原位了 ——
+                #   旧逻辑一律记成"跳过", 于是 count=0 -> 上层判定「未能还原」->
+                #   归档登记和 ZIP 永远留着、组永远退不回, 用户彻底卡住。
+                # 理由(Fable 5, 2026-07-12): 目标文件已存在且 **SHA-256 与归档清单
+                #   一致** = 这张本来就是从这个归档还原出来的, 算「已还原」(restored),
+                #   重跑就能把剩下的步骤走完(幂等可续跑)。内容**不一致**才算跳过 ——
+                #   那是用户自己的新文件, 绝不能乱覆盖。
+                # §7 旧: skipped.append(dst); continue
+                if original_sha256 and _sha256_file(dst) == original_sha256:
+                    restored.append(dst)
+                else:
+                    skipped.append(dst)
                 continue
 
             os.makedirs(str(Path(dst).parent), exist_ok=True)
             try:
-                if archive_name.lower().endswith(".jxl"):
-                    subprocess.run(
-                        ["djxl", src, dst],
-                        check=True,
-                        capture_output=True,
-                        timeout=120,
-                    )
-                else:
-                    shutil.copy2(src, dst)
-
-                if not os.path.isfile(dst) or os.path.getsize(dst) <= 0:
-                    failures.append(f"{Path(dst).name}：还原输出异常")
-                    if os.path.isfile(dst):
-                        os.unlink(dst)
-                    continue
-                if original_size is not None and os.path.getsize(dst) != original_size:
-                    failures.append(
-                        f"{Path(dst).name}：大小与清单不一致"
-                        f"（{os.path.getsize(dst)}≠{original_size}）"
-                    )
-                    os.unlink(dst)
-                    continue
-                if original_sha256 and _sha256_file(dst) != original_sha256:
-                    failures.append(f"{Path(dst).name}：SHA-256 与清单不一致")
-                    os.unlink(dst)
-                    continue
+                _restore_entry_atomically(
+                    src,
+                    dst,
+                    is_jxl=archive_name.lower().endswith(".jxl"),
+                    original_size=original_size,
+                    original_sha256=original_sha256,
+                )
                 restored.append(dst)
             except Exception as exc:  # noqa: BLE001
                 failures.append(f"{Path(dst).name}：{exc}")
-                if os.path.isfile(dst):
-                    try:
-                        os.unlink(dst)
-                    except OSError:
-                        pass
 
         complete = len(restored) + len(skipped) == len(targets)
         return RestoreResult(

@@ -819,27 +819,52 @@ class TestTiffDelete:
             card._show_context_menu(QPoint(0, 0))
         assert "删除此文件" in seen
 
-    def test_tiff_delete_confirmed_unlinks(self, qtbot, ctx, tmp_path, monkeypatch):
-        from PyQt6.QtWidgets import QMessageBox
+    # 用户 2026-07-12 裁定: TIF 可删, **但要管理员密码 + 记下操作人**(写进 audit_log)。
+    # §7 旧: 普通 Yes/No 确认框就能删(monkeypatch QMessageBox.question 即可)。
+    def test_tiff_delete_requires_admin_and_unlinks(self, qtbot, ctx, tmp_path, monkeypatch):
+        import app.widgets.admin_delete_dialog as add_mod
+        import app.services.tiff_delete_gate as gate
         tif = tmp_path / "r.tif"
         tif.write_bytes(b"II*\x00")
         panel = MonitorPanel(ctx)
         qtbot.addWidget(panel)
-        monkeypatch.setattr(QMessageBox, "question",
-                            lambda *a, **k: QMessageBox.StandardButton.Yes)
+
+        # 管理员框: 填了操作人 + 正确密码
+        monkeypatch.setattr(add_mod, "ask_admin_delete",
+                            lambda *a, **k: ("张三", "123", "重拍"))
+        recorded = []
+        monkeypatch.setattr(gate, "record_tiff_deletion",
+                            lambda db, actor, path, reason="": recorded.append((actor, path, reason)))
+
         panel._delete_paths([str(tif)], clear_selection=False)
-        assert not tif.exists()                       # 确认→真删
+
+        assert not tif.exists()                        # 管理员确认 -> 真删
+        assert recorded and recorded[0][0] == "张三"   # 操作人必须被记下
+        assert recorded[0][2] == "重拍"
 
     def test_tiff_delete_cancelled_keeps_file(self, qtbot, ctx, tmp_path, monkeypatch):
+        import app.widgets.admin_delete_dialog as add_mod
+        tif = tmp_path / "r.tif"
+        tif.write_bytes(b"II*\x00")
+        panel = MonitorPanel(ctx)
+        qtbot.addWidget(panel)
+        monkeypatch.setattr(add_mod, "ask_admin_delete", lambda *a, **k: None)  # 取消
+        panel._delete_paths([str(tif)], clear_selection=False)
+        assert tif.exists()                            # 取消 -> 保留
+
+    def test_tiff_delete_wrong_password_keeps_file(self, qtbot, ctx, tmp_path, monkeypatch):
+        import app.widgets.admin_delete_dialog as add_mod
         from PyQt6.QtWidgets import QMessageBox
         tif = tmp_path / "r.tif"
         tif.write_bytes(b"II*\x00")
         panel = MonitorPanel(ctx)
         qtbot.addWidget(panel)
-        monkeypatch.setattr(QMessageBox, "question",
-                            lambda *a, **k: QMessageBox.StandardButton.No)
+        # 弹框被绕过(比如脚本直调), 密码是错的 -> 服务层必须挡住
+        monkeypatch.setattr(add_mod, "ask_admin_delete",
+                            lambda *a, **k: ("张三", "wrong-password", ""))
+        monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: None)
         panel._delete_paths([str(tif)], clear_selection=False)
-        assert tif.exists()                           # 取消→保留
+        assert tif.exists(), "密码错 -> 绝不能删"
 
 
 class TestSelectionAccessors:

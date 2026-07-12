@@ -303,23 +303,29 @@ class WorkbenchResultWorkflowMixin:
             self._on_undo_organise(uid, grouping, target)
             return
 
-        reply = QMessageBox.question(
-            self, "删除 TIF / 撤销合成",
-            "将删除这张合成 TIFF（不可恢复），并把关联的 JPG 放回自由池"
-            "（可重新分组/合成）。确认？",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
-
-        # ① 删除 TIFF（用户主权；非自动流程，手动确认后删）。
-        try:
-            if target.composed_tiff_path and os.path.isfile(target.composed_tiff_path):
-                os.unlink(target.composed_tiff_path)
-        except OSError as exc:
-            QMessageBox.warning(self, "撤销合成", f"TIFF 删除失败：{exc}")
-            return
+        # ① 删除 TIFF —— 用户 2026-07-12 裁定: TIF 可删, **但要管理员密码 + 操作人**,
+        #   删除写进 audit_log(母片删了不可恢复, 事后要能查是谁删的)。
+        #   撤销合成本质就是"删掉这张合成母片, JPG 退回自由池"(拍虚了要重来), 所以
+        #   它同样要过闸门, 与成果区/监视器共用 _admin_delete_tiffs。
+        # §7 旧: 一个普通 Yes/No 框 + os.unlink(composed_tiff_path):
+        #   reply = QMessageBox.question(self, "删除 TIF / 撤销合成", "将删除这张合成 TIFF…")
+        #   if reply != Yes: return
+        #   try: os.unlink(target.composed_tiff_path)
+        #   except OSError as exc: QMessageBox.warning(...); return
+        tiff_path = str(getattr(target, "composed_tiff_path", "") or "")
+        if tiff_path and os.path.isfile(tiff_path):
+            if not self._admin_delete_tiffs([tiff_path], reason_hint="撤销合成"):
+                return
+        else:
+            reply = QMessageBox.question(
+                self, "撤销合成",
+                "这一组的合成 TIFF 已经不在磁盘上。\n\n"
+                "仍然把关联的 JPG 放回自由池吗？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
 
         # ② JPG 解关联：移除整组 → 这些 JPG 回到自由池（未分组）。
         grouping.groups = [g for g in grouping.groups if g.group_index != group_index]
@@ -403,11 +409,19 @@ class WorkbenchResultWorkflowMixin:
             removed_zip = self._retire_zip(zip_path)
         except OSError as exc:
             zip_delete_failed = True
+            target.archive_zip = previous_archive_zip
+            target.status = previous_status
+            target.updated_at = previous_updated_at
+            rollback_error = ""
+            try:
+                save_grouping(db, uid, grouping.groups, clean_phantoms=False)
+            except Exception as rollback_exc:  # noqa: BLE001
+                rollback_error = f"\n数据库回滚也失败：{rollback_exc}"
             QMessageBox.warning(
                 self,
                 "撤销整理",
-                "JPG 已恢复且状态已更新，但项目内 ZIP 删除失败，请手动检查。\n\n"
-                f"详情：{exc}",
+                "JPG 已恢复，但项目内 ZIP 删除失败；归档登记已保留，可稍后重试。\n\n"
+                f"详情：{exc}{rollback_error}",
             )
 
         try:
@@ -590,9 +604,6 @@ class WorkbenchResultWorkflowMixin:
         lon_str = panel._lon.text().strip()
         lat_str = panel._lat.text().strip()
 
-        set_clauses = ", ".join(f"{k} = ?" for k in fields)
-        values = list(fields.values())
-
         try:
             lon_val: Optional[float] = float(lon_str) if lon_str else None
         except ValueError:
@@ -603,26 +614,41 @@ class WorkbenchResultWorkflowMixin:
             lat_val = None
 
         try:
-            db.execute(
-                f"UPDATE specimens SET {set_clauses}, lon = ?, lat = ? WHERE uid = ?",
-                values + [lon_val, lat_val, uid],
-            )
-            row = db.execute(
-                "SELECT raw_json FROM specimens WHERE uid = ?",
-                (uid,),
-            ).fetchone()
-            try:
-                raw = json.loads(row["raw_json"] or "{}") if row else {}
-                if not isinstance(raw, dict):
-                    raw = {}
-            except Exception:
-                raw = {}
-            merged_raw = self._merge_right_rail_raw_fields(raw)
-            if merged_raw != raw:
+            specimen_columns = {
+                str(row[1]) for row in db.execute("PRAGMA table_info(specimens)")
+            }
+            writable_fields = {
+                key: value for key, value in fields.items()
+                if key in specimen_columns
+            }
+            if "lon" in specimen_columns:
+                writable_fields["lon"] = lon_val
+            if "lat" in specimen_columns:
+                writable_fields["lat"] = lat_val
+            if writable_fields:
+                set_clauses = ", ".join(f"{key} = ?" for key in writable_fields)
                 db.execute(
-                    "UPDATE specimens SET raw_json = ? WHERE uid = ?",
-                    (json.dumps(merged_raw, ensure_ascii=False), uid),
+                    f"UPDATE specimens SET {set_clauses} WHERE uid = ?",
+                    list(writable_fields.values()) + [uid],
                 )
+
+            if "raw_json" in specimen_columns:
+                row = db.execute(
+                    "SELECT raw_json FROM specimens WHERE uid = ?",
+                    (uid,),
+                ).fetchone()
+                try:
+                    raw = json.loads(row["raw_json"] or "{}") if row else {}
+                    if not isinstance(raw, dict):
+                        raw = {}
+                except Exception:
+                    raw = {}
+                merged_raw = self._merge_right_rail_raw_fields(raw)
+                if merged_raw != raw:
+                    db.execute(
+                        "UPDATE specimens SET raw_json = ? WHERE uid = ?",
+                        (json.dumps(merged_raw, ensure_ascii=False), uid),
+                    )
             if commit:
                 db.commit()
             # 拍照界面经纬度 → 回写/新建采集记录（四键对齐；有则更新坐标，无则建行）

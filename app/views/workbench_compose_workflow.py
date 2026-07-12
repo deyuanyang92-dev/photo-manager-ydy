@@ -215,15 +215,14 @@ class WorkbenchComposeWorkflowMixin:
 
             # 输出名统一走 _resolve_compose_output_name:覆盖值 > 编号-序号 > 组序.tif。
             # _seq:真编号=preview.next_seq;临时分组(ad-hoc)=组序。
-            # §7 旧: output_name, _seq = self._resolve_compose_output_name(...)
-            #   -> ad-hoc 组静默拿到 1.tif/2.tif。现在**人点的单组合成**改走
-            #   _ensure_group_output_name: 没名字就问「归属编号 / 自由输出名」。
-            #   批量/一条龙不变(零弹框, 见 _compose_group_headless)。(Fable 5, 2026-07-12)
-            output_name, _seq = self._ensure_group_output_name(
+            # 命名(用户 2026-07-12 最终拍板): **没有激活编号时允许 1.tif / 2.tif**,
+            #   不弹框打断 —— 临时分组本来就是"先拍了再说"的场景, 用户想自己命名可以
+            #   在该组的「输出 TIF」框里手填(那个覆盖值优先级最高)。
+            # §7 上一版(同日, 已按用户指示撤回): 调 _ensure_group_output_name 弹
+            #   「归属编号 / 自由输出名」对话框, 空名则不写盘。方法保留未删, 以便日后
+            #   需要强制命名时直接接回。
+            output_name, _seq = self._resolve_compose_output_name(
                 db, uid, group, results_dir, incoming_dir)
-            if not output_name:
-                _notify_composed(False)
-                return
             output_path = os.path.join(incoming_dir, output_name)  # incoming, not results
             # Honor 输出格式 (tif/jpg); default tif keeps the lossless archival master.
             output_path = self._with_output_ext(output_path, self._helicon_output_opts()["format"])

@@ -608,7 +608,7 @@ def test_workflow_dashboard_allows_jpg_compose_without_active_uid(qtbot, tmp_pat
     assert not hasattr(w, "_workflow_dashboard")
 
 
-def test_supp_compression_worker_cancel_cleans_partial_zip(qtbot, tmp_path, monkeypatch):
+def test_supp_compression_worker_cancel_preserves_existing_zip(qtbot, tmp_path, monkeypatch):
     from app.services import archive_service
     from app.workers.supp_compression_worker import SuppCompressionWorker
 
@@ -618,10 +618,10 @@ def test_supp_compression_worker_cancel_cleans_partial_zip(qtbot, tmp_path, monk
     tiff.write_bytes(b"tif")
     out_dir = tmp_path / "results"
     out_dir.mkdir()
-    partial_zip = out_dir / "result.zip"
+    existing_zip = out_dir / "result.zip"
+    existing_zip.write_bytes(b"existing archive")
 
     def _cancelled_archive(*_args, **_kwargs):
-        partial_zip.write_bytes(b"partial zip")
         raise archive_service.ArchiveCancelled("用户取消")
 
     monkeypatch.setattr(archive_service, "archive_group", _cancelled_archive)
@@ -638,7 +638,7 @@ def test_supp_compression_worker_cancel_cleans_partial_zip(qtbot, tmp_path, monk
     worker.run()
 
     assert messages == ["用户取消"]
-    assert not partial_zip.exists()
+    assert existing_zip.read_bytes() == b"existing archive"
 
 
 def _make_db(path: str) -> sqlite3.Connection:
@@ -2607,8 +2607,12 @@ class TestDeleteWithTiffWarning:
             w._delete_selected_pending_files()
         assert not os.path.exists(jpg_path), "JPG must be deleted after confirm"
 
-    def test_tiff_delete_asks_confirm_then_deletes(self, tmp_path):
-        """TIFF 可删：删前弹确认框，确认才删。"""
+    def test_tiff_delete_asks_admin_then_deletes(self, tmp_path, monkeypatch):
+        """TIFF 可删：但要**管理员密码 + 操作人**(用户 2026-07-12 裁定)。
+
+        §7 旧: 普通确认框(patch QMessageBox.question)即可删。
+        """
+        import app.widgets.admin_delete_dialog as add_mod
         from app.widgets.monitor_panel import MonitorPanel, _FileCard
         ctx = _make_ctx()
         w = MonitorPanel(ctx)
@@ -2628,13 +2632,15 @@ class TestDeleteWithTiffWarning:
         tif_card._selected = True
         w._cards = [tif_card]
 
-        from unittest.mock import patch
-        from PyQt6.QtWidgets import QMessageBox
-        with patch.object(QMessageBox, "question",
-                          return_value=QMessageBox.StandardButton.Yes) as mq:
-            w._delete_selected_pending_files()
-            mq.assert_called_once()      # 弹了确认框
-        assert not tif.exists()          # 确认 → 真删
+        asked = []
+        monkeypatch.setattr(
+            add_mod, "ask_admin_delete",
+            lambda parent, ctx_, paths, **k: (asked.append(list(paths)) or ("张三", "123", "重拍")),
+        )
+        w._delete_selected_pending_files()
+
+        assert asked == [[str(tif)]], "删 TIF 必须先过管理员框"
+        assert not tif.exists()          # 管理员确认 → 真删
 
     def _make_fake_entry(self, path: str, kind: str = "jpg"):
         """Return a minimal fake FileEntry-like object."""
@@ -6524,12 +6530,17 @@ class TestUndoComposeDeletesTiff:
         return str(tiff), [str(j1), str(j2)]
 
     def test_undo_confirmed_deletes_tiff_and_ungroups(self, tmp_path, monkeypatch):
+        """§7 改(Fable 5, 2026-07-12, 用户裁定): 撤销合成会删 TIF 母片 ->
+        现在要过管理员闸门(密码 + 操作人, 写 audit_log), 不再是普通 Yes/No。"""
         from PyQt6.QtWidgets import QMessageBox
         from app.services.grouping_service import load_grouping
+        import app.widgets.admin_delete_dialog as add_mod
         w, ctx, db = self._make_view(tmp_path)
         tiff, jpgs = self._setup_composed(tmp_path, db)
         monkeypatch.setattr(QMessageBox, "question",
                             lambda *a, **k: QMessageBox.StandardButton.Yes)
+        monkeypatch.setattr(add_mod, "ask_admin_delete",
+                            lambda *a, **k: ("张三", "123", "撤销合成"))
         w._on_undo_compose("U1", 0)
         assert not os.path.exists(tiff)                       # TIFF 删除
         g = load_grouping(db, "U1")
@@ -6540,10 +6551,12 @@ class TestUndoComposeDeletesTiff:
     def test_undo_cancelled_keeps_everything(self, tmp_path, monkeypatch):
         from PyQt6.QtWidgets import QMessageBox
         from app.services.grouping_service import load_grouping
+        import app.widgets.admin_delete_dialog as add_mod
         w, ctx, db = self._make_view(tmp_path)
         tiff, jpgs = self._setup_composed(tmp_path, db)
         monkeypatch.setattr(QMessageBox, "question",
                             lambda *a, **k: QMessageBox.StandardButton.No)
+        monkeypatch.setattr(add_mod, "ask_admin_delete", lambda *a, **k: None)  # 取消
         w._on_undo_compose("U1", 0)
         assert os.path.exists(tiff)                           # 取消→TIFF 保留
         g = load_grouping(db, "U1")
