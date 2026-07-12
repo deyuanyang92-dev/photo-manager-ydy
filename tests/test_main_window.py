@@ -23,7 +23,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 
 from PyQt6.QtCore import QEvent
-from PyQt6.QtWidgets import QApplication, QMenu, QPushButton, QSizePolicy, QToolButton
+from PyQt6.QtWidgets import (
+    QApplication, QMenu, QPushButton, QSizePolicy, QToolButton, QWidget,
+)
 
 from app.app_context import AppContext
 from app.config.i18n import set_language
@@ -229,15 +231,18 @@ def test_workspace_actions_are_integrated_into_breadcrumb(tmp_path):
     win = MainWindow(ctx)
     win.refresh_context_bar()
     folder_btn = win._project_switcher._btn_folder
-    actions = [a.text() for a in folder_btn.menu().actions()]
+    panel = folder_btn.menu().findChild(QWidget, "WorkspaceLocationPanel")
 
     assert not hasattr(win, "_project_actions_btn")
     assert folder_btn.objectName() == "WorkspaceFolderButton"
-    assert folder_btn.accessibleName() == "打开/新建工作区"
+    assert folder_btn.accessibleName() == "照片保存位置"
     # §7 旧: ["新建工作区…", "打开文件夹…"] —— 后来多了一次建好「项目+采样点」的入口
     # §7 旧: ["新建项目（含采样点）…", ...] —— 2026-07-12 起「新建项目」只建一个空项目
     #        目录(容器, 非工作区), 采样点在项目树里加, 故文案回落为「新建项目…」。
-    assert actions == ["新建项目…", "新建单个工作区…", "打开文件夹…"]
+    assert panel is not None
+    assert [b.text() for b in panel.findChildren(QPushButton)] == [
+        "＋ 项目", "＋ 下级目录"
+    ]
 
 
 def test_nav_pin_menu_toggles_topbar_segments():

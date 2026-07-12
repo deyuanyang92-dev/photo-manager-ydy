@@ -8,6 +8,8 @@ Guards the 2026-07-12 卡顿修复 in app/widgets/grouping_media_helpers.py:
 """
 from __future__ import annotations
 
+import threading
+
 import pytest
 from PyQt6.QtGui import QColor, QImage, QPixmap
 from PyQt6.QtWidgets import QLabel
@@ -141,3 +143,142 @@ def test_media_thumbnail_pixmap_still_returns_a_pixmap(tmp_path, qtbot):
     assert isinstance(pixmap, QPixmap) and not pixmap.isNull()
     assert pixmap.width() <= 64 and pixmap.height() <= 64
     assert gmh._media_thumbnail_pixmap(str(tmp_path / "missing.jpg"), 64) is None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Real-caller adoption: the grouping picker dialogs must go through the loader,
+# i.e. NO image decode may ever run on the GUI thread (2026-07-12 卡顿修复).
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _boom(*_a, **_kw):  # pragma: no cover - only fires on regression
+    raise AssertionError("image decode ran on the GUI thread")
+
+
+def _forbid_gui_thread_decode(monkeypatch) -> None:
+    """Any decode entry point reachable from the GUI thread blows up."""
+    from app.widgets import grouping_dialogs as gd
+
+    monkeypatch.setattr(gd, "_media_thumbnail_pixmap", _boom)
+    monkeypatch.setattr("app.utils.image_thumbnail.decode_image_thumbnail", _boom)
+    monkeypatch.setattr(gmh, "_media_thumbnail_pixmap", _boom)
+
+
+def _spy_worker_decodes(monkeypatch) -> list:
+    """Record the thread each worker-side decode actually ran on."""
+    from app.workers import thumbnail_worker
+
+    real = thumbnail_worker.decode_image_data
+    seen: list = []
+
+    def _spy(path, max_size):
+        seen.append(threading.current_thread())
+        return real(path, max_size)
+
+    monkeypatch.setattr(thumbnail_worker, "decode_image_data", _spy)
+    return seen
+
+
+def _row_for_name(table, name: str, col: int) -> int:
+    for row in range(table.rowCount()):
+        item = table.item(row, col)
+        if item is not None and item.text() == name:
+            return row
+    raise AssertionError(f"row {name!r} not found")
+
+
+def test_location_picker_thumbnails_arrive_via_loader_off_gui_thread(
+    tmp_path, qtbot, monkeypatch
+):
+    from app.widgets import grouping_dialogs as gd
+
+    decoded_on = _spy_worker_decodes(monkeypatch)
+    _forbid_gui_thread_decode(monkeypatch)
+    jpg = _jpg(tmp_path, "P6201980.JPG")
+
+    dlg = gd._MediaLocationPickerDialog("选择相关 JPG/TIF", str(tmp_path))
+    qtbot.addWidget(dlg)
+    assert isinstance(dlg._thumbs, gmh.MediaThumbnailLoader)
+
+    row = _row_for_name(dlg._table, jpg.name, 1)
+    label = dlg._table.cellWidget(row, 0)
+    assert label.property("hasThumbnail") is False  # placeholder until reply
+
+    qtbot.waitUntil(lambda: label.property("hasThumbnail") is True, timeout=8000)
+    assert not label.pixmap().isNull()
+    assert decoded_on and all(t is not threading.main_thread() for t in decoded_on)
+    dlg.close()
+
+
+def test_related_picker_thumbnails_arrive_via_loader_off_gui_thread(
+    tmp_path, qtbot, monkeypatch
+):
+    from app.widgets import grouping_dialogs as gd
+
+    decoded_on = _spy_worker_decodes(monkeypatch)
+    _forbid_gui_thread_decode(monkeypatch)
+    jpg = _jpg(tmp_path, "P6201980.JPG")
+    candidates = [{"path": str(jpg), "name": jpg.name, "kind": "JPG", "mtime": 1}]
+
+    dlg = gd._RelatedFilesPickerDialog("UID-1", str(tmp_path), candidates)
+    qtbot.addWidget(dlg)
+    assert isinstance(dlg._thumbs, gmh.MediaThumbnailLoader)
+
+    label = dlg._table.cellWidget(0, 1)
+    assert label.property("hasThumbnail") is False
+
+    qtbot.waitUntil(lambda: label.property("hasThumbnail") is True, timeout=8000)
+    assert not label.pixmap().isNull()
+    assert decoded_on and all(t is not threading.main_thread() for t in decoded_on)
+    dlg.close()
+
+
+def test_location_picker_repopulate_drops_stale_replies(tmp_path, qtbot, monkeypatch):
+    """Navigating to another folder must invalidate in-flight requests."""
+    from app.widgets import grouping_dialogs as gd
+
+    _forbid_gui_thread_decode(monkeypatch)
+    _jpg(tmp_path, "P6201980.JPG")
+    other = tmp_path / "sub"
+    other.mkdir()
+
+    dlg = gd._MediaLocationPickerDialog("t", str(tmp_path))
+    qtbot.addWidget(dlg)
+    gen_before = dlg._thumbs.generation
+    dlg._go_to_dir(str(other))
+    assert dlg._thumbs.generation == gen_before + 1
+    assert dlg._thumbs.pending_count() == 0
+    assert dlg._thumb_queue == []
+    dlg.close()
+
+
+@pytest.mark.parametrize("closer", ["close", "reject", "accept"])
+def test_location_picker_shuts_the_decode_thread_down(tmp_path, qtbot, closer):
+    from app.widgets import grouping_dialogs as gd
+
+    _jpg(tmp_path, "P6201980.JPG")
+    dlg = gd._MediaLocationPickerDialog("t", str(tmp_path))
+    qtbot.addWidget(dlg)
+    thread = dlg._thumbs._thread
+    assert thread.isRunning()
+
+    getattr(dlg, closer)()
+    assert not thread.isRunning()
+    assert dlg._thumbs._worker is None
+
+
+@pytest.mark.parametrize("closer", ["close", "reject", "accept"])
+def test_related_picker_shuts_the_decode_thread_down(tmp_path, qtbot, closer):
+    from app.widgets import grouping_dialogs as gd
+
+    jpg = _jpg(tmp_path, "P6201980.JPG")
+    dlg = gd._RelatedFilesPickerDialog(
+        "UID-1", str(tmp_path),
+        [{"path": str(jpg), "name": jpg.name, "kind": "JPG", "mtime": 1}],
+    )
+    qtbot.addWidget(dlg)
+    thread = dlg._thumbs._thread
+    assert thread.isRunning()
+
+    getattr(dlg, closer)()
+    assert not thread.isRunning()
+    assert dlg._thumbs._worker is None

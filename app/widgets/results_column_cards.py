@@ -152,12 +152,23 @@ class _ResultCardBase(QFrame):
         return self._display_thumb_size() + _LARGE_THUMB_CARD_EXTRA_HEIGHT
 
     def load_thumbnail_now(self) -> None:
+        """同步解码(§7 保留): 只剩「无 QApplication 的纯逻辑测试」等降级路径会走到。
+
+        正常路径改由 ResultsColumn 把解码投给 GridThumbnailWorker 线程, 回包后调
+        set_thumbnail_pixmap —— TIFF 母图冷解码最坏十几秒, 绝不能在 GUI 线程做。
+        """
         if self._thumbnail_loaded:
             return
         self._thumbnail_loaded = True
         path = self._info.get("path", "")
         if self._thumb_provider and path:
             self._base_pm = self._thumb_provider(path)
+        self._apply_icon()
+
+    def set_thumbnail_pixmap(self, pm: Optional[QPixmap]) -> None:
+        """异步解码回包(主线程)贴图。pm 为 None ⇒ 落到占位图标。"""
+        self._thumbnail_loaded = True
+        self._base_pm = pm
         self._apply_icon()
 
     def _build_body(self) -> QWidget:  # override

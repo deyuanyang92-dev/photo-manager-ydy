@@ -27,7 +27,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QLabel, QPushButton, QWidget
 
 from app.widgets.workspace_breadcrumb import (
     WorkspaceBreadcrumb,
@@ -160,15 +160,34 @@ def test_widget_no_project_placeholder():
     menu = w._build_placeholder_menu()
     labels = [a.text() for a in menu.actions() if not a.isSeparator()]
     assert any("最近使用" in s for s in labels)
-    assert any("项目总览" in s for s in labels)
-    assert any("打开文件夹" in s for s in labels)
+    assert any("选择已有文件夹" in s for s in labels)
     # 用户 2026-07-12: 顶栏「选择工作区 ▾」里也要能一次建好「项目 + 采样点」
     # §7 旧: assert any("新建工作区" in s for s in labels)
-    assert any("新建项目" in s for s in labels)
-    assert any("新建单个工作区" in s for s in labels)
-    overview = next(a for a in menu.actions() if "项目总览" in a.text())
-    overview.trigger()
-    assert got == ["overview"]
+    panel = menu.findChild(QWidget, "WorkspaceLocationPanel")
+    assert panel is not None
+    buttons = [b.text() for b in panel.findChildren(QPushButton)]
+    assert "＋ 项目" in buttons
+    assert "＋ 下级目录" in buttons
+    tree = next(a for a in menu.actions() if "打开项目树" in a.text())
+    tree.trigger()
+    assert got == ["project_tree"]
+
+
+def test_topbar_location_panel_shows_project_and_save_folder(tmp_path):
+    root = tmp_path / "江苏盐城2026"
+    workspace = root / "断面A"
+    workspace.mkdir(parents=True)
+    w = WorkspaceBreadcrumb(_Ctx(str(workspace), str(root)))
+
+    menu = w._btn_folder.menu()
+    panel = menu.findChild(QWidget, "WorkspaceLocationPanel")
+    assert panel is not None
+    buttons = [b.text() for b in panel.findChildren(QPushButton)]
+    labels = [x.text() for x in panel.findChildren(QLabel)]
+
+    assert buttons == ["＋ 项目", "＋ 下级目录"]
+    assert "江苏盐城2026" in labels
+    assert "断面A" in labels
 
 
 def test_placeholder_menu_lists_recent_workspaces(tmp_path, monkeypatch):

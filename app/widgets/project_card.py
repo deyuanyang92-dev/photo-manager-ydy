@@ -1,10 +1,38 @@
-"""project_card.py — 项目树卡片视图单卡 (spec §4.2)."""
+"""project_card.py — 项目树卡片视图单卡 (spec §4.2).
+
+性能/线程约定（2026-07-12 重做）:
+  * 主线程**零磁盘 I/O**：封面的「路径选取(SQLite + 递归扫目录) + 解码」整体
+    丢进一条**常驻工作线程**(`_CoverLoadWorker` QObject + moveToThread，范式抄
+    `app/workers/thumbnail_worker.py::GridThumbnailWorker`)。
+  * 工作线程只 emit ``QImage``（线程安全）；``QPixmap`` 只在主线程用
+    ``make_pixmap`` 构造。
+  * 封面路径按**目录 stat 签名**做 memo 缓存，避免重复扫盘；
+    ``invalidate_cover_path_cache()`` 供 ``refresh_cover`` 精确失效。
+  * 只给**视口内可见**的卡片派发任务；滚动/resize/show 用一个归本 widget 所有
+    的单次 ``QTimer(0ms)`` 合并触发（定时器复用，不重建；只在主线程 start/stop）。
+  * 退出只 ``quit() + wait(2000)`` 一次。
+
+§7: 被替换的旧逻辑（每卡一条 ``CoverThumbnailWorker`` QThread、主线程
+``pick_project_cover_path``、逐个 ``wait(500)``）以 ``#`` 注释保留在文末归档区。
+"""
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from typing import Callable, Optional
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import (
+    Q_ARG,
+    QMetaObject,
+    QObject,
+    QPoint,
+    QRect,
+    Qt,
+    QThread,
+    QTimer,
+    pyqtSignal,
+    pyqtSlot,
+)
 from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import (
     QFrame,
@@ -20,8 +48,87 @@ from PyQt6.QtWidgets import (
 
 from app.config import icons
 from app.services.cover_pick_service import pick_project_cover_path
-from app.utils.image_thumbnail import make_pixmap
-from app.workers.thumbnail_worker import CoverThumbnailWorker
+from app.utils.image_thumbnail import decode_image_data, make_pixmap
+# §7 旧: 每张卡起一条一次性 QThread —— N 卡 = N 个 OS 线程同时解 TIFF。
+# from app.workers.thumbnail_worker import CoverThumbnailWorker
+
+
+# ── 封面路径 memo 缓存（按目录 stat 签名失效） ─────────────────────────────────
+#
+# ``pick_project_cover_path`` 会开 SQLite + 递归扫 results/incoming-jpg，代价高。
+# 目录内容变化必然改变下列路径之一的 mtime/size，因此用它们的 stat 组成签名：
+# 签名不变 ⇒ 直接复用上次结果（连 stat 之外的 I/O 都不做）。
+_COVER_SIG_PATHS: tuple[str, ...] = (
+    "",  # 项目根
+    "results",
+    "results/freeform",
+    "incoming-jpg",
+    "新拍JPG",
+    "_data/project.db",  # 手动封面写在 project_meta 里
+)
+
+_COVER_PATH_CACHE: dict[str, tuple[tuple, Optional[str]]] = {}
+_COVER_PATH_LOCK = threading.Lock()
+
+
+def _cover_dir_signature(directory: str) -> tuple:
+    root = Path(directory)
+    parts: list[tuple[str, int, int]] = []
+    for rel in _COVER_SIG_PATHS:
+        target = root / rel if rel else root
+        try:
+            st = target.stat()
+            parts.append((rel, int(st.st_mtime_ns), int(st.st_size)))
+        except OSError:
+            parts.append((rel, -1, -1))
+    return tuple(parts)
+
+
+def resolve_cover_path(directory: str) -> Optional[str]:
+    """Cover path for *directory*, memoized on the directory's stat signature.
+
+    Runs on the cover worker thread — never call from the GUI thread.
+    """
+    if not directory:
+        return None
+    sig = _cover_dir_signature(directory)
+    with _COVER_PATH_LOCK:
+        hit = _COVER_PATH_CACHE.get(directory)
+        if hit is not None and hit[0] == sig:
+            return hit[1]
+    try:
+        path = pick_project_cover_path(directory)
+    except Exception:
+        path = None
+    with _COVER_PATH_LOCK:
+        _COVER_PATH_CACHE[directory] = (sig, path)
+    return path
+
+
+def invalidate_cover_path_cache(directory: Optional[str] = None) -> None:
+    """Drop the memoized cover path for *directory* (or the whole cache)."""
+    with _COVER_PATH_LOCK:
+        if directory is None:
+            _COVER_PATH_CACHE.clear()
+        else:
+            _COVER_PATH_CACHE.pop(str(directory), None)
+
+
+class _CoverLoadWorker(QObject):
+    """Long-lived: lives on a worker ``QThread`` (grid creates + moveToThread).
+
+    One task = 「选路径 + 解码」，两步都在工作线程里做，主线程零磁盘 I/O。
+    Emits ``QImage | None`` only — 绝不在这里构造 ``QPixmap``（GUI 资源类，
+    非主线程构造是未定义行为）。
+    """
+
+    loaded = pyqtSignal(object, object)  # (request_id: int, QImage | None)
+
+    @pyqtSlot(int, str, int)
+    def load(self, request_id: int, directory: str, max_size: int) -> None:
+        path = resolve_cover_path(directory)
+        image = decode_image_data(path, max_size) if path else None
+        self.loaded.emit(request_id, image)
 
 
 class ProjectCard(QFrame):
@@ -244,8 +351,32 @@ class ProjectCardGrid(QFrame):
         self._selected: set[str] = set()
         self._filter_text = ""
         self._entry_meta: dict[str, str] = {}  # directory -> searchable haystack
-        self._cover_workers: list[CoverThumbnailWorker] = []
+        # §7 旧: self._cover_workers: list[CoverThumbnailWorker] = []
         self._cover_req = 0
+        # 常驻封面线程（懒起，见 _ensure_cover_worker）
+        self._cover_thread: Optional[QThread] = None
+        self._cover_worker: Optional[_CoverLoadWorker] = None
+        # destroyed 只在这里连一次, 线程存进 holder —— 否则「teardown → 再进页面 →
+        # 又起线程」每轮都会 destroyed.connect 一个新闭包: N 次进出 = N 个残留连接,
+        # 各自捏着一条已死线程的引用。闭包只捕获 holder 不捕获 self: destroyed 触发时
+        # Python 包装对象可能已经不在了。
+        self._cover_thread_holder: list[QThread] = []
+        _holder = self._cover_thread_holder
+
+        def _cleanup_threads(*_a: object) -> None:
+            for th in list(_holder):
+                try:
+                    th.quit()
+                    th.wait(2000)
+                except Exception:  # pragma: no cover - 防御性
+                    pass
+            _holder.clear()
+
+        self._cover_cleanup_fn = _cleanup_threads  # 强引用，防 GC
+        self.destroyed.connect(_cleanup_threads)
+        self._cover_pending: dict[int, str] = {}  # request_id -> directory
+        self._cover_done: set[str] = set()  # 已派发（含在途）的目录
+        self._cover_eligible: set[str] = set()  # available 的目录才派发
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(8)
@@ -292,6 +423,118 @@ class ProjectCardGrid(QFrame):
         self._scroll.setWidget(self._host)
         outer.addWidget(self._scroll, 1)
 
+        # 单次定时器（归本 widget 所有 ⇒ 主线程 start/stop）。滚动 / resize /
+        # show / 过滤 都只是 start() 它，多次触发自动合并成一次派发。
+        self._cover_timer = QTimer(self)
+        self._cover_timer.setSingleShot(True)
+        self._cover_timer.setInterval(0)
+        self._cover_timer.timeout.connect(self._dispatch_visible_covers)
+        self._scroll.verticalScrollBar().valueChanged.connect(
+            self._schedule_cover_dispatch
+        )
+
+    # ── 封面：可见性派发 + 常驻线程 ───────────────────────────────────────────
+
+    def _schedule_cover_dispatch(self, *_a: object) -> None:
+        """合并触发一次「可见卡片派发」。只在主线程调用（Qt: 定时器所属线程）。"""
+        timer = getattr(self, "_cover_timer", None)
+        if timer is not None:
+            timer.start()
+
+    def showEvent(self, event) -> None:  # noqa: D401 - Qt override
+        super().showEvent(event)
+        self._schedule_cover_dispatch()
+
+    def resizeEvent(self, event) -> None:  # noqa: D401 - Qt override
+        super().resizeEvent(event)
+        self._schedule_cover_dispatch()
+
+    def _ensure_cover_worker(self) -> Optional[_CoverLoadWorker]:
+        """懒起唯一一条常驻解码线程（不 parent 到 self：避免父子销毁抢跑 quit/wait）。"""
+        if self._cover_thread is not None:
+            return self._cover_worker
+        try:
+            thread = QThread()
+            worker = _CoverLoadWorker()
+            worker.moveToThread(thread)
+            worker.loaded.connect(self._on_cover_loaded)  # 自动 → QueuedConnection
+            thread.start()
+        except Exception:  # pragma: no cover - 无法起线程时降级为「不解码」
+            return None
+        self._cover_thread = thread
+        self._cover_worker = worker
+        # §7 旧: 每次起线程都 self.destroyed.connect(_cleanup) —— teardown 后重进页面
+        #        会不断叠加连接。现在 destroyed 在 __init__ 只连一次, 这里只登记线程。
+        self._cover_thread_holder.append(thread)
+        return worker
+
+    def _viewport_visible_directories(self) -> list[str]:
+        """视口矩形 ∩ 卡片 geometry —— 只返回真的看得见的卡片目录。"""
+        scroll = getattr(self, "_scroll", None)
+        if scroll is None or not self._cards:
+            return []
+        viewport = scroll.viewport()
+        vis = QRect(QPoint(0, 0), viewport.size())
+        if vis.isEmpty():
+            return []
+        out: list[str] = []
+        for directory, card in self._cards.items():
+            if card.isHidden():
+                continue
+            try:
+                top_left = card.mapTo(viewport, QPoint(0, 0))
+            except RuntimeError:  # pragma: no cover - 卡片已销毁
+                continue
+            if vis.intersects(QRect(top_left, card.size())):
+                out.append(directory)
+        return out
+
+    def _dispatch_visible_covers(self) -> None:
+        """给「可见 且 未派发过」的卡片投递封面任务（主线程只做几何计算）。"""
+        todo = [
+            d
+            for d in self._viewport_visible_directories()
+            if d not in self._cover_done and d in self._cover_eligible
+        ]
+        if not todo:
+            return
+        worker = self._ensure_cover_worker()
+        if worker is None:
+            return
+        from app.config.project_tree_layout import COVER_CARD_DECODE_MAX
+
+        for directory in todo:
+            self._cover_req += 1
+            req_id = self._cover_req
+            self._cover_pending[req_id] = directory
+            self._cover_done.add(directory)
+            QMetaObject.invokeMethod(
+                worker,
+                "load",
+                Qt.ConnectionType.QueuedConnection,
+                Q_ARG(int, req_id),
+                Q_ARG(str, directory),
+                Q_ARG(int, int(COVER_CARD_DECODE_MAX)),
+            )
+
+    @pyqtSlot(object, object)
+    def _on_cover_loaded(self, req_id: object, image: object) -> None:
+        """Worker 回包（主线程，queued）。QPixmap 只在这里构造。"""
+        try:
+            key = int(req_id)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return
+        directory = self._cover_pending.pop(key, None)
+        if directory is None:
+            return  # stale：set_entries 已重建
+        card = self._cards.get(directory)
+        if card is None:
+            return
+        try:
+            card.set_cover_pixmap(make_pixmap(image))  # type: ignore[arg-type]
+        except RuntimeError:  # pragma: no cover - 卡片已销毁
+            pass
+
     def selected_directories(self) -> list[str]:
         return [d for d in self._cards if d in self._selected and not self._cards[d].isHidden()]
 
@@ -330,11 +573,22 @@ class ProjectCardGrid(QFrame):
                 self._selected.discard(d)
                 card.set_selected(False)
         self._emit_selection()
+        # 过滤会改变可见集合 → 新露出的卡片需要补派发封面。
+        self._schedule_cover_dispatch()
 
     def refresh_cover(self, directory: str) -> None:
-        card = self._cards.get(directory)
-        if card is not None:
-            self._queue_cover(card)
+        # §7 旧: card = self._cards.get(directory)
+        # §7 旧: if card is not None:
+        # §7 旧:     self._queue_cover(card)   # ← 主线程 pick_project_cover_path
+        if directory not in self._cards:
+            return
+        invalidate_cover_path_cache(directory)  # 手动封面/自动封面已变
+        self._cover_done.discard(directory)
+        # 作废该目录的在途请求，否则旧回包会先到、盖掉新封面
+        for req_id, d in list(self._cover_pending.items()):
+            if d == directory:
+                self._cover_pending.pop(req_id, None)
+        self._schedule_cover_dispatch()
 
     def set_entries(
         self,
@@ -343,7 +597,11 @@ class ProjectCardGrid(QFrame):
         stats_loader: Optional[Callable[[str], dict]] = None,
     ) -> None:
         prev = set(self._selected)
-        self._cancel_cover_workers()
+        # §7 旧: self._cancel_cover_workers()   # 逐个 wait(500) 阻塞主线程
+        # 新: 常驻线程留着复用，只作废在途请求（回包按 req_id 判定为 stale 丢弃）。
+        self._cover_pending.clear()
+        self._cover_done.clear()
+        self._cover_eligible.clear()
         while self._grid.count():
             item = self._grid.takeAt(0)
             if item.widget():
@@ -410,8 +668,11 @@ class ProjectCardGrid(QFrame):
                 card.set_selected(True)
                 self._selected.add(directory)
             self._grid.addWidget(card, idx // cols, idx % cols)
+            # §7 旧: if available: self._queue_cover(card)
+            #   —— 不管可不可见一律派发 + 主线程扫盘。新: 只登记 eligible，
+            #      实际派发交给 _dispatch_visible_covers（仅视口内）。
             if available:
-                self._queue_cover(card)
+                self._cover_eligible.add(directory)
         # drop stale selection
         self._selected = {d for d in self._selected if d in self._cards}
         if not entries:
@@ -420,7 +681,7 @@ class ProjectCardGrid(QFrame):
             empty.setWordWrap(True)
             empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self._grid.addWidget(empty, 0, 0, 1, cols)
-        self._apply_filter()
+        self._apply_filter()  # 内部已 _schedule_cover_dispatch()
         self._emit_selection()
 
     def _emit_selection(self) -> None:
@@ -435,38 +696,78 @@ class ProjectCardGrid(QFrame):
         if dirs:
             self.summarize_requested.emit(dirs)
 
-    def _queue_cover(self, card: ProjectCard) -> None:
-        cover_path = pick_project_cover_path(card.directory())
-        if not cover_path:
-            card.set_cover_pixmap(None)
-            return
-        self._cover_req += 1
-        req_id = (card.directory(), self._cover_req)
-        from app.config.project_tree_layout import COVER_CARD_DECODE_MAX
-
-        worker = CoverThumbnailWorker(req_id, cover_path, max_size=COVER_CARD_DECODE_MAX, parent=self)
-        worker.decoded.connect(self._on_cover_decoded)
-        worker.finished.connect(worker.deleteLater)
-        self._cover_workers.append(worker)
-        worker.start()
-
-    def _on_cover_decoded(self, req_id: object, image: object) -> None:
-        if not isinstance(req_id, tuple) or len(req_id) != 2:
-            return
-        directory, _ = req_id
-        card = self._cards.get(str(directory))
-        if card is None:
-            return
-        card.set_cover_pixmap(make_pixmap(image))  # type: ignore[arg-type]
-
-    def _cancel_cover_workers(self) -> None:
-        for worker in self._cover_workers:
+    def teardown(self) -> None:
+        """离页 / 退出：停定时器 + 只 quit()+wait(2000) 一次。幂等。"""
+        # §7 旧: self._cancel_cover_workers()   # 逐个 worker.wait(500)
+        timer = getattr(self, "_cover_timer", None)
+        if timer is not None:
             try:
-                if worker.isRunning():
-                    worker.wait(500)
+                timer.stop()  # 主线程持有 ⇒ 主线程 stop
             except Exception:
                 pass
-        self._cover_workers.clear()
+        # 在途请求作废；这些目录未拿到封面，下次进页面重新派发。
+        for directory in self._cover_pending.values():
+            self._cover_done.discard(directory)
+        self._cover_pending.clear()
 
-    def teardown(self) -> None:
-        self._cancel_cover_workers()
+        thread = self._cover_thread
+        if thread is None:
+            return
+        self._cover_thread = None
+        self._cover_worker = None
+        try:
+            thread.quit()
+            thread.wait(2000)
+        except Exception:  # pragma: no cover - 防御性
+            pass
+        # 从 holder 摘掉, 否则「进页面 → teardown」反复几次会攒一堆已停线程,
+        # 窗口销毁时 _cleanup_threads 还要挨个 quit/wait 它们。
+        try:
+            self._cover_thread_holder.remove(thread)
+        except ValueError:  # pragma: no cover - 已被 _cleanup_threads 清空
+            pass
+
+
+# =============================================================================
+# 【§7 归档】旧封面加载实现 —— 注释保留，勿动（新实现见上）。
+# 问题：(1) _queue_cover 在主线程调 pick_project_cover_path（开 SQLite + 递归扫
+# 目录），N 卡 = N 次主线程磁盘 I/O；(2) 每卡一条 CoverThumbnailWorker(QThread)，
+# 无上限，N 卡 = N 个 OS 线程同时解 TIFF；(3) _cancel_cover_workers 逐个
+# wait(500) 阻塞主线程；(4) 不论卡片可不可见一律派发。
+# =============================================================================
+#
+# def _queue_cover(self, card: ProjectCard) -> None:
+#     cover_path = pick_project_cover_path(card.directory())   # ← 主线程磁盘 I/O
+#     if not cover_path:
+#         card.set_cover_pixmap(None)
+#         return
+#     self._cover_req += 1
+#     req_id = (card.directory(), self._cover_req)
+#     from app.config.project_tree_layout import COVER_CARD_DECODE_MAX
+#
+#     worker = CoverThumbnailWorker(req_id, cover_path, max_size=COVER_CARD_DECODE_MAX, parent=self)
+#     worker.decoded.connect(self._on_cover_decoded)
+#     worker.finished.connect(worker.deleteLater)
+#     self._cover_workers.append(worker)
+#     worker.start()
+#
+# def _on_cover_decoded(self, req_id: object, image: object) -> None:
+#     if not isinstance(req_id, tuple) or len(req_id) != 2:
+#         return
+#     directory, _ = req_id
+#     card = self._cards.get(str(directory))
+#     if card is None:
+#         return
+#     card.set_cover_pixmap(make_pixmap(image))  # type: ignore[arg-type]
+#
+# def _cancel_cover_workers(self) -> None:
+#     for worker in self._cover_workers:
+#         try:
+#             if worker.isRunning():
+#                 worker.wait(500)          # ← 逐个阻塞主线程
+#         except Exception:
+#             pass
+#     self._cover_workers.clear()
+#
+# def teardown(self) -> None:
+#     self._cancel_cover_workers()

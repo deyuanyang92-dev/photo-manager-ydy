@@ -257,6 +257,8 @@ class MainWindow(QMainWindow):
         self._project_switcher.workspace_changed.connect(
             self._on_breadcrumb_switch)
         self._project_switcher.new_workspace_requested.connect(self._on_new_project)
+        self._project_switcher.new_project_child_requested.connect(
+            self._on_new_project_child)
         # 顶栏「选择工作区 ▾」也能一次建好项目 + 采样点(用户 2026-07-12: "在这里也要可以")
         self._project_switcher.new_survey_project_requested.connect(
             self._on_new_survey_project)
@@ -1087,7 +1089,12 @@ class MainWindow(QMainWindow):
         from app.utils import ui
         from PyQt6.QtWidgets import QDialog
 
-        dlg = NewSurveyProjectDialog(self)
+        current_root = (
+            getattr(self.ctx, "current_project_root", None)
+            or getattr(self.ctx.settings, "project_tree_root", None)
+        )
+        default_parent = str(Path(current_root).parent) if current_root else ""
+        dlg = NewSurveyProjectDialog(self, default_parent_dir=default_parent)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         vals = dlg.values()
@@ -1158,6 +1165,27 @@ class MainWindow(QMainWindow):
             "  下面所有采样点自动继承，拍照时右栏直接带出来，不用每次重填\n"
             "· 照片只会落在采样点里，不会堆在项目根",
         )
+
+    def _on_new_project_child(self) -> None:
+        """Top bar: add a child directory to the current project container.
+
+        This is deliberately separate from ``_on_new_project`` (a standalone
+        workspace) and ``_on_new_survey_project`` (a new project container).
+        """
+        from app.utils import ui
+
+        root = (
+            getattr(self.ctx, "current_project_root", None)
+            or getattr(self.ctx.settings, "project_tree_root", None)
+        )
+        if not root:
+            ui.info(self, tr("新建下级目录"),
+                    tr("请先新建或选择一个项目。"))
+            return
+        self.navigate_to("project_tree")
+        tree = self._stack.currentWidget()
+        if hasattr(tree, "prompt_new_child_under_root"):
+            tree.prompt_new_child_under_root()
 
     def _on_open_workspace(self) -> None:
         """Folder menu: open an existing folder as a photo workspace."""

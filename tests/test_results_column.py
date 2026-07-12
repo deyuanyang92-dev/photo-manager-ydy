@@ -553,13 +553,20 @@ def test_results_column_loads_tiff_thumbnail_without_user_action(qtbot, monkeypa
     **同步**解码」这一实现细节, 而同步解码正是「点击反应迟钝」的主因
     (2026-07-10 用户报障)。改为延迟 + 20ms 分批队列后真需求不变:
     无需用户任何操作, 缩略图随后自动填充(下方 waitUntil 即证)。
+
+    2026-07-12: 解码整体搬到 GridThumbnailWorker 线程(TIFF 母图冷解码最坏十几秒,
+    在 GUI 线程做 = 未响应)。monkeypatch 的接缝随之从主线程的同步解码器
+    `results_column._decode_thumb` 移到 worker 线程真正调用的
+    `thumbnail_worker.decode_image_data`。**需求不变**: 无需任何用户操作, 该路径
+    必须被自动解码。
+    §7 旧接缝: monkeypatch.setattr("app.widgets.results_column._decode_thumb", ...)
     """
     from app.widgets.results_column import ResultsColumn
 
     calls = []
     monkeypatch.setattr(
-        "app.widgets.results_column._decode_thumb",
-        lambda path, max_size: calls.append(path) or None,
+        "app.workers.thumbnail_worker.decode_image_data",
+        lambda path, max_size=280, **kw: calls.append(path) or None,
     )
 
     col = ResultsColumn()

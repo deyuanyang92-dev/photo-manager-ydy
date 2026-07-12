@@ -22,6 +22,7 @@ from typing import List, Optional, Tuple
 
 from PyQt6.QtCore import QSize, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
+    QGridLayout,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -29,6 +30,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QToolButton,
     QWidget,
+    QWidgetAction,
 )
 
 from app.config import icons
@@ -165,6 +167,7 @@ class WorkspaceBreadcrumb(QWidget):
     workspace_changed = pyqtSignal(str)   # 切换成功后的新工作区路径
     navigate_requested = pyqtSignal(str)  # 远跳目标 view_id
     new_workspace_requested = pyqtSignal()
+    new_project_child_requested = pyqtSignal()
     # 场景(用户 2026-07-12, 截图指着顶栏「选择工作区 ▾」): "在这里也要可以" ——
     #   一次建好「项目 + 若干采样点」的入口不能只藏在项目树里, 顶栏这个下拉是用户
     #   开工时第一个点的地方。(Fable 5, 2026-07-12)
@@ -396,8 +399,8 @@ class WorkspaceBreadcrumb(QWidget):
         folder_btn.setObjectName("WorkspaceFolderButton")
         folder_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
         folder_btn.setFixedSize(34, 30)
-        folder_btn.setAccessibleName(tr("打开/新建工作区"))
-        folder_btn.setToolTip(tr("打开已有文件夹，或新建一个拍照工作区"))
+        folder_btn.setAccessibleName(tr("照片保存位置"))
+        folder_btn.setToolTip(tr("设置照片保存到哪个项目 / 下级文件夹"))
         folder_btn.setIcon(
             icons.icon("mdi6.folder-open-outline", color=icons.TONE_MUTED,
                        color_active=icons.TONE_ACCENT_HOVER)
@@ -407,27 +410,108 @@ class WorkspaceBreadcrumb(QWidget):
         folder_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         folder_menu = QMenu(folder_btn)
         folder_menu.setObjectName("WorkspaceFolderMenu")
-        new_proj_act = folder_menu.addAction(
-            icons.icon("mdi6.folder-plus-outline", color=icons.TONE_ACCENT),
-            # §7 旧文案 tr("新建项目（含采样点）…") —— 2026-07-12 起新建项目只建一个空项目
-            #    目录, 采样点改在项目树里用「新建子目录」自由加(任意层)。
-            tr("新建项目…"),
-        )
-        new_proj_act.triggered.connect(
-            lambda _=False: self.new_survey_project_requested.emit())
-        new_act = folder_menu.addAction(
-            icons.icon("mdi6.plus", color=icons.TONE_MUTED),
-            tr("新建单个工作区…"),
-        )
-        new_act.triggered.connect(lambda _=False: self.new_workspace_requested.emit())
+        self._add_location_panel(folder_menu)
+        folder_menu.addSeparator()
         open_act = folder_menu.addAction(
             icons.icon("mdi6.folder-open-outline", color=icons.TONE_MUTED),
-            tr("打开文件夹…"),
+            tr("选择已有文件夹…"),
         )
         open_act.triggered.connect(lambda _=False: self.open_workspace_requested.emit())
+        tree_act = folder_menu.addAction(
+            icons.icon("mdi6.file-tree-outline", color=icons.TONE_MUTED),
+            tr("打开项目树…"),
+        )
+        tree_act.triggered.connect(
+            lambda _=False: self.navigate_requested.emit("project_tree"))
         folder_btn.setMenu(folder_menu)
         self._lay.addWidget(folder_btn)
         self._btn_folder = folder_btn
+
+    def _add_location_panel(self, menu: QMenu) -> QWidget:
+        """Embed an OM Capture-style project/save-folder hierarchy in *menu*."""
+        panel = QWidget(menu)
+        panel.setObjectName("WorkspaceLocationPanel")
+        panel.setMinimumWidth(330)
+        grid = QGridLayout(panel)
+        grid.setContentsMargins(14, 12, 14, 12)
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(8)
+
+        title = QLabel(tr("照片保存设置"))
+        title.setObjectName("WorkspaceLocationTitle")
+        font = title.font()
+        font.setBold(True)
+        title.setFont(font)
+        grid.addWidget(title, 0, 0, 1, 2)
+
+        root = self._project_root_for_child()
+        workspace = getattr(self._ctx, "current_project_dir", None)
+        project_value = Path(root).name if root else tr("未选择项目")
+        if workspace and root:
+            try:
+                rel = Path(workspace).resolve().relative_to(Path(root).resolve())
+                folder_value = str(rel) if rel.parts else tr("项目根（尚未选择下级目录）")
+            except ValueError:
+                folder_value = Path(workspace).name
+        elif workspace:
+            folder_value = Path(workspace).name
+        else:
+            folder_value = tr("未选择保存目录")
+
+        project_label = QLabel(tr("项目"))
+        project_label.setObjectName("MutedSmall")
+        project_path = QLabel(project_value)
+        project_path.setObjectName("WorkspaceLocationValue")
+        project_path.setToolTip(str(root or ""))
+        grid.addWidget(project_label, 1, 0)
+        grid.addWidget(project_path, 1, 1)
+
+        folder_label = QLabel(tr("保存目录"))
+        folder_label.setObjectName("MutedSmall")
+        folder_path = QLabel(folder_value)
+        folder_path.setObjectName("WorkspaceLocationValue")
+        folder_path.setToolTip(str(workspace or ""))
+        grid.addWidget(folder_label, 2, 0)
+        grid.addWidget(folder_path, 2, 1)
+
+        hint = QLabel(tr("项目负责汇总；照片保存在进入拍照的下级目录中。"))
+        hint.setObjectName("MutedSmall")
+        hint.setWordWrap(True)
+        grid.addWidget(hint, 3, 0, 1, 2)
+
+        new_project = QPushButton(tr("＋ 项目"))
+        new_project.setObjectName("Primary")
+        new_project.setToolTip(tr("新建一个独立项目文件夹"))
+        new_child = QPushButton(tr("＋ 下级目录"))
+        new_child.setObjectName("Outline")
+        new_child.setEnabled(bool(root))
+        new_child.setToolTip(tr("在当前项目下面增加断面、采样点或其他保存目录"))
+        grid.addWidget(new_project, 4, 0)
+        grid.addWidget(new_child, 4, 1)
+
+        def create_project() -> None:
+            menu.close()
+            self.new_survey_project_requested.emit()
+
+        def create_child() -> None:
+            menu.close()
+            self.new_project_child_requested.emit()
+
+        new_project.clicked.connect(create_project)
+        new_child.clicked.connect(create_child)
+
+        action = QWidgetAction(menu)
+        action.setDefaultWidget(panel)
+        menu.addAction(action)
+        return panel
+
+    def _project_root_for_child(self) -> Optional[str]:
+        """Current project container used by the top-bar child action."""
+        root = getattr(self._ctx, "current_project_root", None)
+        if not root:
+            root = getattr(getattr(self._ctx, "settings", None),
+                           "project_tree_root", None)
+        return str(root) if root else None
 
     # ── 切换 ─────────────────────────────────────────────────────────────
 
@@ -541,35 +625,21 @@ class WorkspaceBreadcrumb(QWidget):
 
     def _build_placeholder_menu(self) -> QMenu:
         menu = QMenu(self)
+        self._add_location_panel(menu)
+        menu.addSeparator()
         self._add_recent_menu(menu)
         menu.addSeparator()
-        overview_act = menu.addAction(
-            icons.icon("mdi6.view-dashboard-outline", color=icons.TONE_MUTED),
-            tr("项目总览"),
-        )
-        overview_act.triggered.connect(
-            lambda _=False: self.navigate_requested.emit("overview"))
         open_act = menu.addAction(
             icons.icon("mdi6.folder-open-outline", color=icons.TONE_MUTED),
-            tr("打开文件夹…"),
+            tr("选择已有文件夹…"),
         )
         open_act.triggered.connect(lambda _=False: self.open_workspace_requested.emit())
-        new_proj_act = menu.addAction(
-            icons.icon("mdi6.folder-plus-outline", color=icons.TONE_ACCENT),
-            # §7 旧文案 tr("新建项目（含采样点）…"), 见上面同名 action 的说明(2026-07-12)
-            tr("新建项目…"),
+        tree_act = menu.addAction(
+            icons.icon("mdi6.file-tree-outline", color=icons.TONE_MUTED),
+            tr("打开项目树…"),
         )
-        new_proj_act.setToolTip(
-            # §7 旧提示: tr("一次建好项目目录和它下面的采样点，例如 江苏盐城2026 / 日出海湾、月亮湾")
-            tr("只建一个项目目录（如 江苏盐城2026）；断面 / 采样点建完后在项目树里自由添加")
-        )
-        new_proj_act.triggered.connect(
-            lambda _=False: self.new_survey_project_requested.emit())
-        new_act = menu.addAction(
-            icons.icon("mdi6.plus", color=icons.TONE_MUTED),
-            tr("新建单个工作区…"),
-        )
-        new_act.triggered.connect(lambda _=False: self.new_workspace_requested.emit())
+        tree_act.triggered.connect(
+            lambda _=False: self.navigate_requested.emit("project_tree"))
         return menu
 
     def _add_project_tree_menu(self, menu: QMenu) -> None:

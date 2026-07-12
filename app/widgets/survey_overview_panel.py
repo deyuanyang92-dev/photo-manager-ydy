@@ -38,6 +38,9 @@ from app.widgets.survey_summary_panel import SurveySummaryPanel
 # 兜底, 挂父后随父析构就是 abort 现场。
 _LIVE_OVERVIEW_WORKERS: list = []
 
+# KPI 加载态占位符（聚合在工作线程跑, 结果到达前显示这个, 而不是让 UI 冻住）。
+_LOADING = "…"
+
 
 def _reap_overview_workers() -> None:
     """收割已结束的聚合线程; 仍在跑的继续持有引用。"""
@@ -186,6 +189,11 @@ class SurveyOverviewPanel(QWidget):
         self._ctx = ctx
         self._workspaces: list[str] = []
         self._scope_label: Optional[str] = None
+        # 聚合代次令牌: 每次 set_workspaces / set_filtered_stats 自增。worker 结果回来时
+        # token 不匹配就丢弃 —— 快速切换断面时, 慢的旧请求不许把旧数字盖到新选中上;
+        # 中栏「数据汇总」落地后, 迟到的概览结果也不许覆盖筛选 KPI。
+        self._token = 0
+        self._worker: Optional[_SurveyOverviewWorker] = None
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -309,10 +317,92 @@ class SurveyOverviewPanel(QWidget):
         label_list = None
         if labels:
             label_list = [labels.get(w) for w in self._workspaces]
-        overview = aggregate_survey_overview(self._workspaces, labels=label_list)
-        self._fill_overview(overview, labels)
+
+        # §7 旧实现（同步聚合, 跑在 GUI 线程 —— 多断面选中时逐库全表 SELECT + 物种
+        # 名录扫描 + results/ 逐文件 stat, 数十秒, Windows 直接判「未响应」）:
+        # overview = aggregate_survey_overview(self._workspaces, labels=label_list)
+        # self._fill_overview(overview, labels)
+        # self._card_photos.set_title("全部成片")
+        # self._species_panel.set_workspaces(self._workspaces, labels=labels)
+
         self._card_photos.set_title("全部成片")
+        # 断面数不需要聚合就知道 → 立刻显示; 其余 KPI 进加载态。
+        self._card_workspaces.set_value(str(len(self._workspaces)))
+        for card in (self._card_specimens, self._card_photos,
+                     self._card_rna, self._card_species):
+            card.set_value(_LOADING)
+
+        self._token += 1
+        token = self._token
+        self._cancel_worker()
+
+        worker = _SurveyOverviewWorker(self._workspaces, label_list)
+        # lambda 里按值捕获 token/labels: 结果回来时 self._token 可能已经又变了。
+        worker.finished_result.connect(
+            lambda overview, _inv, t=token, lb=labels: self._on_overview_ready(t, overview, lb)
+        )
+        worker.failed.connect(lambda msg, t=token: self._on_overview_failed(t, msg))
+        worker.finished.connect(_reap_overview_workers)
+        # 强引用: QThread 被 GC 掉而线程还在跑 = "QThread: Destroyed while thread is
+        # still running" 崩溃。模块级列表兜着, 结束后由 _reap_overview_workers 收割。
+        _LIVE_OVERVIEW_WORKERS.append(worker)
+        self._worker = worker
+        worker.start()
+
         self._species_panel.set_workspaces(self._workspaces, labels=labels)
+
+    def _cancel_worker(self) -> None:
+        """作废在飞的聚合请求（不阻塞主线程等它: 只置取消位, 结果按 token 丢弃）。"""
+        worker = self._worker
+        self._worker = None
+        if worker is None:
+            return
+        try:
+            worker.cancel()
+        except Exception:  # pragma: no cover - 防御性
+            pass
+        # 断开回调: cancel 只挡「还没 emit」的; 已经排队的 queued 信号仍会送达, 那时
+        # 面板可能已被销毁 → RuntimeError: wrapped C/C++ object has been deleted。
+        for sig in (worker.finished_result, worker.failed):
+            try:
+                sig.disconnect()
+            except (TypeError, RuntimeError):  # 没连过 / 对象已没了
+                pass
+
+    def _is_alive(self) -> bool:
+        """底层 C++ 控件还在吗 —— 面板被销毁后, 迟到的信号不许再碰控件。"""
+        try:
+            from PyQt6 import sip
+        except ImportError:  # pragma: no cover - 非 PyQt6 环境
+            return True
+        return not sip.isdeleted(self)
+
+    def _on_overview_ready(
+        self,
+        token: int,
+        overview: Any,
+        labels: Optional[dict[str, str]] = None,
+    ) -> None:
+        if token != self._token or not isinstance(overview, dict):
+            return  # 过期代次（用户已切走 / 数据汇总已落地）→ 丢弃
+        if not self._is_alive():
+            return  # 面板已被销毁, 结果迟到 → 不许再碰控件
+        self._worker = None
+        self._fill_overview(overview, labels)
+
+    def _on_overview_failed(self, token: int, message: str) -> None:
+        """坏库 / 锁库 / 权限错 —— 给出「—」而不是永远停在加载态。"""
+        if token != self._token or not self._is_alive():
+            return
+        self._worker = None
+        for card in (self._card_specimens, self._card_photos,
+                     self._card_rna, self._card_species):
+            card.set_value("—")
+
+    def teardown(self) -> None:
+        """离页 / 关闭：作废在飞请求。仍在跑的线程由模块级列表持有, 不在主线程 wait。"""
+        self._token += 1  # 之后回来的结果一律过期
+        self._cancel_worker()
 
     def _fill_overview(
         self,
@@ -386,6 +476,10 @@ class SurveyOverviewPanel(QWidget):
     ) -> None:
         """筛选后的 KPI / 分布（数据汇总模式）."""
         self._workspaces = [str(w) for w in (workspace_dirs or []) if w]
+        # 概览 worker 可能还在飞。自增令牌 → 它回来时算过期, 不会把「全部成片」
+        # 的数字盖到刚落地的「编号成片」筛选 KPI 上。
+        self._token += 1
+        self._cancel_worker()
         self._fill_overview(stats, labels)
         self._card_photos.set_title("编号成片")
         if scope_label:

@@ -20,6 +20,7 @@ from PyQt6.QtCore import (
     Qt,
     QTimer,
     pyqtSignal,
+    pyqtSlot,
 )
 from PyQt6.QtGui import QKeySequence, QPixmap, QShortcut
 from PyQt6.QtWidgets import (
@@ -726,22 +727,180 @@ class ResultsColumn(QWidget):
         if not self._thumb_timer.isActive():
             self._thumb_timer.start()
 
+    # ── 异步缩略图解码（成果列的 TIFF 母图冷解码最坏十几秒, 绝不能在 GUI 线程） ──
+
+    def _ensure_thumb_worker(self):
+        """懒起唯一一条常驻解码线程 (GridThumbnailWorker + moveToThread)。
+
+        范式同 monitor_panel / project_card: 工作线程只 emit QImage(线程安全),
+        QPixmap 只在主线程由 make_pixmap 构造。decoded 用 AutoConnection ⇒ 跨线程
+        即 QueuedConnection ⇒ 槽在主线程跑。
+        """
+        if self._thumb_worker is not None:
+            return self._thumb_worker
+        from PyQt6.QtCore import QCoreApplication
+
+        if QCoreApplication.instance() is None:
+            return None  # 纯逻辑测试(无 QApplication): 不起线程, 保持占位图
+        from app.workers.thumbnail_worker import GridThumbnailWorker
+
+        try:
+            thread = _new_thumb_qthread()
+            thread.setObjectName("ResultsThumbDecode")
+            worker = GridThumbnailWorker()
+            worker.moveToThread(thread)
+            worker.decoded.connect(self._on_thumb_decoded)
+            thread.finished.connect(worker.deleteLater)
+            thread.start()
+        except Exception:  # pragma: no cover - 起不了线程就降级为不解码
+            return None
+        self._thumb_thread = thread
+        self._thumb_worker = worker
+
+        # destroyed 兜底: 调用方没走 teardown 就被销毁时(测试里常见)线程还在跑 →
+        # "QThread: Destroyed while thread is still running" → abort。闭包只捕获
+        # holder, 不捕获 self(destroyed 触发时 Python 包装对象可能已经没了)。
+        holder = [thread]
+        self._thumb_thread_holder = holder
+
+        def _cleanup(*_a: object) -> None:
+            for th in list(holder):
+                try:
+                    th.quit()
+                    th.wait(2000)
+                except Exception:  # pragma: no cover - 防御性
+                    pass
+            holder.clear()
+
+        self._thumb_cleanup_fn = _cleanup  # 强引用, 防 GC
+        self.destroyed.connect(_cleanup)
+        return worker
+
+    def _request_thumbnail(self, card: "_ResultCardBase", path: str) -> bool:
+        """把一张卡片的缩略图丢给解码线程。返回 True = 已受理(缓存命中或已派发)。"""
+        if not path:
+            return False
+        pm = self._thumb_cache.get(path)
+        if pm is not None:  # 内存缓存命中 → 同帧上屏, 不进线程
+            self._thumb_cache.move_to_end(path)
+            self._apply_thumb_to_card(card, pm)
+            return True
+        if path in self._failed_thumb_paths:  # 负缓存: 解不出来的别反复投
+            return True
+        if path in self._pending_thumb_paths:  # 同路径在飞 → 不重复派发
+            return True
+        worker = self._ensure_thumb_worker()
+        if worker is None:
+            # 降级: 无 QApplication(纯逻辑测试)或线程起不来 —— 退回同步解码。
+            # 宁可慢, 也不能让用户看到「一张图都没有」(PROJECT_MEMORY 不可回归项:
+            # 成果 TIFF 必须显示真实缩略图, 不得只剩占位图标)。
+            try:
+                card.load_thumbnail_now()
+            except RuntimeError:
+                pass
+            return False
+        self._thumb_req_counter += 1
+        req_id = self._thumb_req_counter
+        self._pending_thumbs[req_id] = (card, path)
+        self._pending_thumb_paths.add(path)
+        QMetaObject.invokeMethod(
+            worker, "decode", Qt.ConnectionType.QueuedConnection,
+            Q_ARG(int, req_id), Q_ARG(str, path), Q_ARG(int, _BASE_THUMB),
+        )
+        return True
+
+    def _on_thumb_decoded(self, req_id: object, image: object) -> None:
+        """解码回包(主线程)。卡片可能已随 _clear_rows 销毁 → 陈旧回包一律丢弃。"""
+        entry = self._pending_thumbs.pop(req_id, None)
+        if entry is None:
+            return  # 未知 / 已作废的请求
+        card, path = entry
+        self._pending_thumb_paths.discard(path)
+        if image is None:
+            self._failed_thumb_paths.add(path)
+            return
+        from app.utils.image_thumbnail import make_pixmap
+
+        pm = make_pixmap(image)
+        if pm is None or pm.isNull():
+            self._failed_thumb_paths.add(path)
+            return
+        self._thumb_cache[path] = pm
+        self._thumb_cache.move_to_end(path)
+        while len(self._thumb_cache) > _thumb_cache_limit():
+            self._thumb_cache.popitem(last=False)
+        self._apply_thumb_to_card(card, pm)
+
+    def _apply_thumb_to_card(self, card: "_ResultCardBase", pm) -> None:
+        try:
+            card.set_thumbnail_pixmap(pm)
+        except RuntimeError:
+            return  # 卡片的 C++ 对象已析构(行被重建) → 丢弃
+
+    def _drop_pending_thumbs(self) -> None:
+        """行被重建 → 在途请求整体作废(回包到达时按 req_id 找不到条目即丢弃)。"""
+        self._pending_thumbs.clear()
+        self._pending_thumb_paths.clear()
+
+    def teardown(self) -> None:
+        """离页 / 关闭: 停定时器 + 收解码线程。幂等。"""
+        for timer in (self._thumb_timer, self._layout_refresh_timer):
+            try:
+                timer.stop()
+            except Exception:  # pragma: no cover - 防御性
+                pass
+        self._drop_pending_thumbs()
+        thread, self._thumb_thread, self._thumb_worker = self._thumb_thread, None, None
+        if thread is None:
+            return
+        try:
+            thread.quit()
+            thread.wait(2000)
+        except Exception:  # pragma: no cover - 防御性
+            pass
+        holder = getattr(self, "_thumb_thread_holder", None)
+        if holder is not None:
+            holder.clear()
+
     def _load_next_thumbnail_batch(self) -> None:
-        loaded = 0
-        while self._thumb_queue and loaded < 2:
+        # §7 旧: 每 20ms 在**主线程**同步解码 2 张(card.load_thumbnail_now →
+        #   _thumb_provider → _decode_thumb → decode_image_thumbnail; TIFF 母图
+        #   单张几十~几百 ms, 最坏落到 12s 的 ImageMagick 子进程)。就是「点了没反应」。
+        # loaded = 0
+        # while self._thumb_queue and loaded < 2:
+        #     card = self._thumb_queue.popleft()
+        #     try:
+        #         if card.parent() is not None:
+        #             card.load_thumbnail_now()
+        #             loaded += 1
+        #     except RuntimeError:
+        #         continue
+        # if not self._thumb_queue:
+        #     self._thumb_timer.stop()
+        dispatched = 0
+        batch = _thumb_dispatch_batch()
+        while self._thumb_queue and dispatched < batch:
             card = self._thumb_queue.popleft()
             try:
-                if card.parent() is not None:
-                    card.load_thumbnail_now()
-                    loaded += 1
+                if card.parent() is None:
+                    continue
+                path = str(card._info.get("path", "") or "")
             except RuntimeError:
+                continue  # 卡片已析构
+            if not path:
                 continue
+            # 只派发, 不解码。回包到达前卡片保持占位图标。
+            self._request_thumbnail(card, path)
+            dispatched += 1
         if not self._thumb_queue:
             self._thumb_timer.stop()
 
     def _clear_rows(self) -> None:
         self._thumb_queue.clear()
         self._thumb_timer.stop()
+        # 行要整体重建 → 在途解码请求全部作废(卡片马上 deleteLater, 回包若还去贴图
+        # 就是 RuntimeError: wrapped C/C++ object has been deleted)。
+        self._drop_pending_thumbs()
         while self._rows_lay.count():
             it = self._rows_lay.takeAt(0)
             if it and it.widget():

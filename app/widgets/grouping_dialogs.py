@@ -1,10 +1,19 @@
-"""Picker dialogs used by the specimen grouping editor."""
+"""Picker dialogs used by the specimen grouping editor.
+
+2026-07-12 (卡顿修复 · 接线): 两个 picker 的行缩略图改走
+:class:`~app.widgets.grouping_media_helpers.MediaThumbnailLoader` —— 每个对话框
+自己持有一个 loader(单条长生命周期解码线程),`_apply_thumbnail()` 只**派发**请求,
+GUI 线程零解码;结果由 worker 以 QImage 发回主线程再转 QPixmap 贴图。
+对话框 close/accept/reject 时必须 `shutdown()`(quit()+wait()),否则悬挂线程会挂住
+整个 pytest 进程。同步版 `_media_thumbnail_pixmap` 仅在 loader 缺席时兜底(§7)。
+"""
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Callable, Optional
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import QCoreApplication, QEventLoop, Qt, QTimer
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QAbstractItemView,
@@ -28,6 +37,8 @@ from app.widgets.grouping_media_helpers import (
     _JPG_EXTS,
     _TIFF_EXTS,
     _RELATED_PICKER_DEFAULT_CHECK_SECONDS,
+    MediaThumbnailLoader,
+    _apply_thumb_to_label,
     _media_entries_in_dir,
     _media_thumbnail_pixmap,
     _mtime_text,
@@ -35,8 +46,88 @@ from app.widgets.grouping_media_helpers import (
     _normal_dir,
 )
 
+_THUMB_BOX = 64  # 行缩略图边长(与 _thumbnail_label 的 68px QLabel 一致)
 
-class _MediaLocationPickerDialog(QDialog):
+
+class _ThumbLoaderMixin:
+    """异步行缩略图的公共接线(两个 picker 共用)。
+
+    * `_init_thumb_loader()` —— 建 loader,必须在第一次 `_populate()` 之前调用。
+    * `_apply_thumbnail()` —— 只派发,不解码;返回 True 表示"真派了一次解码"
+      (缓存命中同帧上屏,不计入批次配额 —— 与 monitor_panel 的节流口径一致)。
+    * `_shutdown_thumbs()` —— close/accept/reject 都要走到,quit()+wait() 解码线程。
+    """
+
+    _thumbs: MediaThumbnailLoader | None = None
+
+    def _init_thumb_loader(self) -> None:
+        self._thumb_queue: list[tuple[QLabel, str, str]] = []
+        self._thumbs = MediaThumbnailLoader(self, size=_THUMB_BOX)
+
+    def _reset_thumb_queue(self) -> None:
+        """重建表格前调用:清队列 + bump generation,丢弃在途回包。"""
+        self._thumb_queue.clear()
+        if self._thumbs is not None:
+            self._thumbs.reset()
+
+    def _apply_thumbnail(self, label: "QLabel", path: str, kind: str) -> bool:
+        """派发一行的缩略图请求。返回 True = 投给了解码线程(未命中缓存)。"""
+        loader = self._thumbs
+        try:
+            if loader is None:  # §7 兜底:loader 不在(已 shutdown)时退回同步版
+                _apply_thumb_to_label(label, _media_thumbnail_pixmap(path, _THUMB_BOX), kind)
+                return False
+            served_from_cache = loader.request(
+                label, path, size=_THUMB_BOX, fallback_text=kind or "IMG",
+            )
+        except RuntimeError:
+            return False  # 行已被回收,底层 C++ QLabel 已析构
+        return not served_from_cache
+
+    def _load_next_thumbnail_batch(self, batch: int = 4) -> None:
+        """定时器槽(主线程):每跳最多派发 *batch* 个解码请求,自己绝不解码。"""
+        dispatched = 0
+        while self._thumb_queue and dispatched < batch:
+            label, path, kind = self._thumb_queue.pop(0)
+            if self._apply_thumbnail(label, path, kind):
+                dispatched += 1
+        if self._thumb_queue:
+            QTimer.singleShot(10, self._load_next_thumbnail_batch)
+
+    def _load_all_thumbnails_now(self, timeout_ms: int = 15000) -> None:
+        """全部派发并等待回包(解码仍在子线程)。测试/一次性场景用。"""
+        while self._thumb_queue:
+            label, path, kind = self._thumb_queue.pop(0)
+            self._apply_thumbnail(label, path, kind)
+        loader = self._thumbs
+        if loader is None:
+            return
+        deadline = time.monotonic() + timeout_ms / 1000.0
+        while loader.pending_count() and time.monotonic() < deadline:
+            QCoreApplication.processEvents(QEventLoop.ProcessEventsFlag.AllEvents, 10)
+
+    def _shutdown_thumbs(self) -> None:
+        # 保留 loader 引用（不置 None）: shutdown() 后它自己会把 request() 降级成占位符,
+        # 而置 None 会让 _apply_thumbnail 退回**同步解码**兜底 —— 关窗途中若还有行在派发,
+        # 那等于又把解码搬回 GUI 线程。shutdown() 幂等, 重复调用无害。
+        queue = getattr(self, "_thumb_queue", None)
+        if queue is not None:
+            queue.clear()
+        loader = self._thumbs
+        if loader is not None:
+            loader.shutdown()
+
+    # QDialog 的三个出口(accept/reject 都汇到 done();用户点 X 走 closeEvent)。
+    def done(self, result: int) -> None:  # type: ignore[override]
+        self._shutdown_thumbs()
+        super().done(result)
+
+    def closeEvent(self, event) -> None:  # type: ignore[override]
+        self._shutdown_thumbs()
+        super().closeEvent(event)
+
+
+class _MediaLocationPickerDialog(_ThumbLoaderMixin, QDialog):
     """File/folder browser for directly selecting JPG/TIF or a scan folder."""
 
     def __init__(
@@ -53,7 +144,7 @@ class _MediaLocationPickerDialog(QDialog):
         self._priority_terms = [t for t in (priority_terms or []) if str(t or "").strip()]
         self._file_exts = {e.lower() for e in (file_exts or (_JPG_EXTS | _TIFF_EXTS))}
         self._shortcuts = self._normal_shortcuts(shortcuts or [])
-        self._thumb_queue: list[tuple[QLabel, str, str]] = []
+        self._init_thumb_loader()  # 必须早于第一次 _populate()
         self._selected_paths: list[str] = []
         self._selected_folder = ""
         self._current_dir = self._normal_start_dir(start)
@@ -145,7 +236,9 @@ class _MediaLocationPickerDialog(QDialog):
         root.addWidget(self._buttons)
 
         self._populate()
-        QTimer.singleShot(0, self._load_next_thumbnail_batch)
+        # §7 原来在这里排队首批缩略图;现在 _populate() 自己排(换目录后也能排上,
+        # 旧代码换目录时批次链已耗尽 → 新目录缩略图不会加载)。
+        # QTimer.singleShot(0, self._load_next_thumbnail_batch)
 
     def selected_folder(self) -> str:
         return self._selected_folder
@@ -217,28 +310,31 @@ class _MediaLocationPickerDialog(QDialog):
         self._thumb_queue.append((label, str(path), kind))
         return label
 
-    def _apply_thumbnail(self, label: QLabel, path: str, kind: str) -> None:
-        pixmap = _media_thumbnail_pixmap(path, 64)
-        if pixmap is not None and not pixmap.isNull():
-            label.setPixmap(pixmap)
-            label.setProperty("hasThumbnail", True)
-        else:
-            label.setText(kind or "IMG")
-            label.setProperty("hasThumbnail", False)
-
-    def _load_next_thumbnail_batch(self) -> None:
-        processed = 0
-        while self._thumb_queue and processed < 4:
-            label, path, kind = self._thumb_queue.pop(0)
-            self._apply_thumbnail(label, path, kind)
-            processed += 1
-        if self._thumb_queue:
-            QTimer.singleShot(10, self._load_next_thumbnail_batch)
-
-    def _load_all_thumbnails_now(self) -> None:
-        while self._thumb_queue:
-            label, path, kind = self._thumb_queue.pop(0)
-            self._apply_thumbnail(label, path, kind)
+    # ── §7 原同步实现(GUI 线程整解码,冷 TIFF 卡死对话框)—— 注释保留,勿删 ──
+    #   缩略图/批次逻辑现由 _ThumbLoaderMixin 统一提供(只派发,不解码)。
+    #
+    # def _apply_thumbnail(self, label: QLabel, path: str, kind: str) -> None:
+    #     pixmap = _media_thumbnail_pixmap(path, 64)
+    #     if pixmap is not None and not pixmap.isNull():
+    #         label.setPixmap(pixmap)
+    #         label.setProperty("hasThumbnail", True)
+    #     else:
+    #         label.setText(kind or "IMG")
+    #         label.setProperty("hasThumbnail", False)
+    #
+    # def _load_next_thumbnail_batch(self) -> None:
+    #     processed = 0
+    #     while self._thumb_queue and processed < 4:
+    #         label, path, kind = self._thumb_queue.pop(0)
+    #         self._apply_thumbnail(label, path, kind)
+    #         processed += 1
+    #     if self._thumb_queue:
+    #         QTimer.singleShot(10, self._load_next_thumbnail_batch)
+    #
+    # def _load_all_thumbnails_now(self) -> None:
+    #     while self._thumb_queue:
+    #         label, path, kind = self._thumb_queue.pop(0)
+    #         self._apply_thumbnail(label, path, kind)
 
     def _selected_infos(self) -> list[dict]:
         rows = sorted({index.row() for index in self._table.selectionModel().selectedRows()})
@@ -254,7 +350,8 @@ class _MediaLocationPickerDialog(QDialog):
 
     def _populate(self) -> None:
         self._table.setSortingEnabled(False)
-        self._thumb_queue.clear()
+        # 换目录 = 旧行全部作废:清队列 + bump generation,在途回包一律丢弃。
+        self._reset_thumb_queue()
         self._path_edit.setText(str(self._current_dir))
         entries: list[tuple[bool, bool, float, Path]] = []
         try:
@@ -308,6 +405,7 @@ class _MediaLocationPickerDialog(QDialog):
         self._table.setCurrentCell(-1, -1)
         self._table.setSortingEnabled(True)
         self._table.sortItems(3, Qt.SortOrder.DescendingOrder)
+        QTimer.singleShot(0, self._load_next_thumbnail_batch)
 
     def _go_up(self) -> None:
         parent = self._current_dir.parent
@@ -520,7 +618,7 @@ class _ResultPairPickerDialog(QDialog):
         self.accept()
 
 
-class _RelatedFilesPickerDialog(QDialog):
+class _RelatedFilesPickerDialog(_ThumbLoaderMixin, QDialog):
     """App-owned picker for current UID related JPG/TIFF files."""
 
     def __init__(
@@ -540,7 +638,7 @@ class _RelatedFilesPickerDialog(QDialog):
         self._all_candidates_loader = all_candidates_loader
         self._candidates = list(self._block_candidates)
         self._preserve_checked_paths: set[str] | None = None
-        self._thumb_queue: list[tuple[QLabel, str, str]] = []
+        self._init_thumb_loader()  # 必须早于第一次 _populate()
         display_title = title or f"{uid} 相关文件"
         self.setWindowTitle(display_title)
         self.setMinimumSize(860, 540)
@@ -738,28 +836,30 @@ class _RelatedFilesPickerDialog(QDialog):
             self._thumb_queue.append((label, path, kind))
         return label
 
-    def _apply_thumbnail(self, label: QLabel, path: str, kind: str) -> None:
-        pixmap = _media_thumbnail_pixmap(path, 64)
-        if pixmap is not None and not pixmap.isNull():
-            label.setPixmap(pixmap)
-            label.setProperty("hasThumbnail", True)
-        else:
-            label.setText(kind or "IMG")
-            label.setProperty("hasThumbnail", False)
-
-    def _load_next_thumbnail_batch(self) -> None:
-        processed = 0
-        while self._thumb_queue and processed < 2:
-            label, path, kind = self._thumb_queue.pop(0)
-            self._apply_thumbnail(label, path, kind)
-            processed += 1
-        if self._thumb_queue:
-            QTimer.singleShot(10, self._load_next_thumbnail_batch)
-
-    def _load_all_thumbnails_now(self) -> None:
-        while self._thumb_queue:
-            label, path, kind = self._thumb_queue.pop(0)
-            self._apply_thumbnail(label, path, kind)
+    # ── §7 原同步实现(GUI 线程整解码)—— 注释保留,勿删;现由 _ThumbLoaderMixin 提供 ──
+    #
+    # def _apply_thumbnail(self, label: QLabel, path: str, kind: str) -> None:
+    #     pixmap = _media_thumbnail_pixmap(path, 64)
+    #     if pixmap is not None and not pixmap.isNull():
+    #         label.setPixmap(pixmap)
+    #         label.setProperty("hasThumbnail", True)
+    #     else:
+    #         label.setText(kind or "IMG")
+    #         label.setProperty("hasThumbnail", False)
+    #
+    # def _load_next_thumbnail_batch(self) -> None:
+    #     processed = 0
+    #     while self._thumb_queue and processed < 2:
+    #         label, path, kind = self._thumb_queue.pop(0)
+    #         self._apply_thumbnail(label, path, kind)
+    #         processed += 1
+    #     if self._thumb_queue:
+    #         QTimer.singleShot(10, self._load_next_thumbnail_batch)
+    #
+    # def _load_all_thumbnails_now(self) -> None:
+    #     while self._thumb_queue:
+    #         label, path, kind = self._thumb_queue.pop(0)
+    #         self._apply_thumbnail(label, path, kind)
 
     def _distance_text(self, item: dict) -> tuple[str, str]:
         if item.get("anchor"):
@@ -785,7 +885,8 @@ class _RelatedFilesPickerDialog(QDialog):
         self._syncing_checks = True
         preserve = self._preserve_checked_paths
         self._preserve_checked_paths = None
-        self._thumb_queue.clear()
+        # 表格重建 = 旧行作废:清队列 + bump generation,在途回包一律丢弃。
+        self._reset_thumb_queue()
         try:
             self._table.setSortingEnabled(False)
             self._table.setRowCount(len(self._candidates))

@@ -1442,6 +1442,9 @@ def test_new_subfolder_button_exists_in_toolbar(qtbot, tmp_path, ctx):
 
     assert hasattr(view, "_btn_new_subfolder")
     assert view._btn_new_subfolder.isVisible() or not view._btn_new_subfolder.isHidden()
+    assert hasattr(view, "_btn_new_project")
+    assert view._btn_new_project.isVisible() or not view._btn_new_project.isHidden()
+    assert "下级目录" in view._btn_new_subfolder.text()
 
 
 def test_new_subfolder_button_creates_plain_dir_not_workspace(

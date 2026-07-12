@@ -486,6 +486,25 @@ class MediaThumbnailLoader(QObject):
         self._thread.finished.connect(self._worker.deleteLater)
         self._thread.start()
 
+        # 析构兜底：调用方**应该**在 close/accept/reject 里调 shutdown()，但对话框也可能
+        # 被直接 GC 掉（测试里尤其常见）。那时线程还在跑 → Qt 抛
+        # "QThread: Destroyed while thread is still running" → abort/段错误。
+        # destroyed 触发时 Python 包装对象可能已经没了，所以闭包只捕获 holder，不捕获 self。
+        self._thread_holder: list = [self._thread]
+        _holder = self._thread_holder
+
+        def _cleanup_thread(*_a: object) -> None:
+            for th in list(_holder):
+                try:
+                    th.quit()
+                    th.wait(2000)
+                except Exception:  # pragma: no cover - 防御性
+                    pass
+            _holder.clear()
+
+        self._cleanup_fn = _cleanup_thread  # 强引用，防 GC
+        self.destroyed.connect(_cleanup_thread)
+
     @property
     def generation(self) -> int:
         return self._generation
@@ -510,6 +529,10 @@ class MediaThumbnailLoader(QObject):
             return
         thread.quit()
         thread.wait()
+        # holder 清空：正常关闭后 destroyed 的兜底闭包就没活可干了（避免二次 quit/wait）。
+        holder = getattr(self, "_thread_holder", None)
+        if holder is not None:
+            holder.clear()
 
     def request(self, label, path: str, *, size: int | None = None,
                 fallback_text: str = "") -> bool:

@@ -80,3 +80,22 @@ def test_new_project_lands_on_project_tree(win, tmp_path, monkeypatch):
 
     current = win._stack.currentWidget()
     assert getattr(current, "view_id", None) == "project_tree"
+
+
+def test_topbar_new_child_creates_directly_under_current_project(
+    win, tmp_path, monkeypatch
+):
+    """OM-style top-bar entry must target the project container, not a stale node."""
+    root = tmp_path / "江苏盐城2026"
+    root.mkdir()
+    win.ctx.settings.project_tree_root = str(root)
+    win.ctx.current_project_root = str(root)
+    monkeypatch.setattr(
+        "app.views.project_tree_view.QInputDialog.getText",
+        lambda *a, **kw: ("断面A", True),
+    )
+
+    win._on_new_project_child()
+
+    assert (root / "断面A").is_dir()
+    assert not (root / "断面A" / "_data").exists()

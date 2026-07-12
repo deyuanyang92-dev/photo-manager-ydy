@@ -451,6 +451,35 @@ def _show_error_dialog(win, text: str, detail: str) -> None:
         pass
 
 
+# ── Qt 内部噪声过滤 ───────────────────────────────────────────────────────
+# Qt 6.10 的 windows11 样式 + 我们 QSS 里的像素字号 (`QWidget { font-size: 13px }`,
+# theme.py 的 font_* token 全是 px) 组合后，Qt 自己会在内部把 QFont.pointSize()
+# (px 定义的字体 → 恒为 -1) 回填给 QFont::setPointSize()，于是每建一个
+# QComboBox / QCalendarWidget / 带日历弹窗的 QDateEdit 就刷几条
+#     QFont::setPointSize: Point size <= 0 (-1), must be greater than 0
+# 一次启动能刷出几十上百条。已实测确认：
+#   * 纯 Qt 最小复现(不含本项目任何代码): setStyleSheet("QWidget{font-size:13px}")
+#     + QComboBox/QCalendarWidget → windows11 样式 14 条；fusion / windowsvista
+#     / 不加 QSS → 0 条；Linux(Qt 6.11, Fusion) → 0 条。
+#   * 复现时 Python 调用栈里没有任何本项目帧 —— 调用发生在 Qt C++ 内部，
+#     我们没有可修的调用点(项目自己的 setPointSize 调用全是正数常量或已 clamp)。
+# 既然改不了调用方，又不能为了它改字号(px→pt 会改变实际观感，违反 UI 冻结)，
+# 就在日志桥这里把这条已知噪声丢掉。设 SPECIMEN_QT_VERBOSE=1 可以放行，
+# 便于日后排查我们自己代码真的传了 <=0 的情况。
+_QT_NOISE_SUBSTRINGS = (
+    "QFont::setPointSize: Point size <= 0",
+    "QFont::setPointSizeF: Point size <= 0",
+)
+
+
+def _is_qt_noise(message: str) -> bool:
+    """已知的、无害的 Qt 内部告警 —— 不写日志，也不转发给上一个 handler。"""
+    if os.environ.get("SPECIMEN_QT_VERBOSE"):
+        return False
+    text = message or ""
+    return any(noise in text for noise in _QT_NOISE_SUBSTRINGS)
+
+
 def _install_qt_message_handler(installer=None) -> None:
     """Bridge Qt runtime warnings into the rotating application log."""
     global _QT_MESSAGE_HANDLER, _QT_PREVIOUS_MESSAGE_HANDLER
@@ -463,6 +492,10 @@ def _install_qt_message_handler(installer=None) -> None:
     previous_holder = {"handler": None}
 
     def _handler(message_type, context, message) -> None:
+        # §7 旧逻辑(无过滤，所有 Qt 消息一律入日志)保留在下面注释里：
+        # levels = { ... }   ← 原来直接从这里开始，没有噪声过滤
+        if _is_qt_noise(message):
+            return
         levels = {
             QtMsgType.QtDebugMsg: logging.DEBUG,
             QtMsgType.QtInfoMsg: logging.INFO,

@@ -105,9 +105,12 @@ class LunarCalendarWidget(QCalendarWidget):
                 "month": _qcolor("text_soft"),
             }.get(info.kind, _qcolor("muted"))
 
-        base_pt = self.font().pointSizeF()
-        if base_pt <= 0:
-            base_pt = 9.0
+        # §7 旧写法(行内 guard)保留：
+        # base_pt = self.font().pointSizeF()
+        # if base_pt <= 0:
+        #     base_pt = 9.0
+        from app.config.theme import safe_point_size
+        base_pt = safe_point_size(self.font(), 9.0)  # 同一个 fallback，字号观感不变
         num_font = QFont(self.font())
         num_font.setBold(selected or is_today)
         sub_font = QFont(self.font())

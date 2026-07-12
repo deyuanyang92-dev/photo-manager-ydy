@@ -1220,6 +1220,29 @@ def load_fonts(app) -> dict[str, bool]:
     return result
 
 
+def safe_point_size(font, fallback: float) -> float:
+    """把 QFont 的点值读成一个「一定 > 0」的数。
+
+    QSS 里的字号全是像素 (``font-size: 13px``)，被 QSS 命中的 widget，其
+    ``QFont.pointSize()`` / ``pointSizeF()`` 恒为 **-1**(Qt 文档: 用 setPixelSize
+    定义的字体，pointSize 返回 -1)。任何拿它做算术、再回填 setPointSize(F) 的代码
+    都会踩出
+        QFont::setPointSize: Point size <= 0 (-1), must be greater than 0
+    这里是全项目唯一的读取入口：读不到点值就用调用方给的 *fallback*。
+
+    注意 **不要**改成 QFontInfo(font).pointSizeF() —— 那会返回实际解析后的点值
+    (如 9.75)，与现有 fallback(10.0 / 9.0)不同，会改变字号观感(UI 冻结)。
+    fallback 由调用方给，保持与修复前逐像素一致。
+    """
+    try:
+        pt = float(font.pointSizeF())
+    except Exception:  # noqa: BLE001 - 非 QFont / 未初始化，一律走 fallback
+        return float(fallback)
+    if pt <= 0:
+        return float(fallback)
+    return pt
+
+
 def apply_default_font(app) -> Optional[str]:
     """Set the app's default font to the first *installed* family in FONT_SANS.
 
@@ -1254,9 +1277,11 @@ def apply_default_font(app) -> Optional[str]:
     # Scale the base point size so widgets WITHOUT an explicit QSS font-size
     # (the inline-styled minority) track 字体大小 too. QSS font-size px still wins
     # for styled widgets.
-    base_pt = f.pointSizeF()
-    if base_pt <= 0:
-        base_pt = 10.0
+    # §7 旧写法(行内 guard)保留：
+    # base_pt = f.pointSizeF()
+    # if base_pt <= 0:
+    #     base_pt = 10.0
+    base_pt = safe_point_size(f, 10.0)  # 同一个 fallback，观感不变
     f.setPointSizeF(base_pt * _FONT_SCALE)
     app.setFont(f)
     return chosen

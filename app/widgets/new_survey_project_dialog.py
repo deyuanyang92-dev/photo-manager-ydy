@@ -62,12 +62,20 @@ from app.utils import ui
 class NewSurveyProjectDialog(QDialog):
     def __init__(self, parent: Optional[QWidget] = None, default_parent_dir: str = "") -> None:
         super().__init__(parent)
-        self.setWindowTitle("新建项目")
+        self.setWindowTitle("新建项目文件夹")
         self.setMinimumWidth(560)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(16, 16, 16, 16)
         root.setSpacing(10)
+
+        intro = QLabel(
+            "先建立项目文件夹，再像 OM Capture 一样在项目下面逐层增加保存目录。\n"
+            "如果只是给当前项目增加断面，请使用“＋ 下级目录”。"
+        )
+        intro.setObjectName("InfoBanner")
+        intro.setWordWrap(True)
+        root.addWidget(intro)
 
         form = QFormLayout()
         form.setSpacing(8)
@@ -77,7 +85,7 @@ class NewSurveyProjectDialog(QDialog):
 
         dir_row = QHBoxLayout()
         self._dir = QLineEdit(default_parent_dir)
-        self._dir.setPlaceholderText("项目文件夹建在哪个目录下")
+        self._dir.setPlaceholderText("选择所有项目的上级目录，如 N:\\标本项目")
         browse = QPushButton("浏览…")
         browse.setObjectName("Outline")
         browse.clicked.connect(self._pick_dir)
@@ -85,7 +93,7 @@ class NewSurveyProjectDialog(QDialog):
         dir_row.addWidget(browse)
         dir_wrap = QWidget()
         dir_wrap.setLayout(dir_row)
-        form.addRow("建在哪里 *", dir_wrap)
+        form.addRow("项目保存位置 *", dir_wrap)
 
         # §7 旧字段(2026-07-12 移入「项目设置」抽屉, 见本文件顶部说明) ────────────
         # self._location = QLineEdit()
@@ -158,9 +166,11 @@ class NewSurveyProjectDialog(QDialog):
 
     def _refresh_preview(self) -> None:
         name = self._name.text().strip() or "（项目名）"
+        parent = self._dir.text().strip()
+        target = str(Path(parent) / name) if parent else name
         self._preview.setText(
-            f"将创建：{name}/\n"
-            "    （空项目；建完进去再加断面 / 采样点，照片只落在采样点里）"
+            f"独立项目路径：{target}/\n"
+            "    （项目文件夹；创建后可继续增加断面 / 采样点）"
         )
         # §7 旧预览(列出采样点树), 恢复时反注释:
         # sites = self.site_names()

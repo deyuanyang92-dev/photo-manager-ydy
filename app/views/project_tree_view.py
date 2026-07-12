@@ -232,15 +232,27 @@ class ProjectTreeView(BaseView):
         self._btn_pick.clicked.connect(self._pick_root)
         bar.addWidget(self._btn_pick)
 
+        self._btn_new_project = QPushButton("＋ 项目")
+        self._btn_new_project.setObjectName("Primary")
+        self._btn_new_project.setFixedHeight(34)
+        self._btn_new_project.setToolTip(
+            "新建一个项目文件夹；项目下面的断面 / 采样点用“＋ 下级目录”添加。"
+        )
+        self._btn_new_project.setCursor(Qt.CursorShape.PointingHandCursor)
+        icons.set_button_icon(self._btn_new_project, "mdi6.folder-plus-outline",
+                              color="#ffffff", size=15)
+        self._btn_new_project.clicked.connect(self._new_region)
+        bar.addWidget(self._btn_new_project)
+
         # 「+ 新建子目录」提到工具栏(用户 2026-07-12): 采样点不再在「新建项目」时一次问完,
         # 改为建完项目后在树里自由加(任意层, 空壳; 进入时才初始化为工作区) —— 这个入口是
         # 新流程的主动作, 不能只藏在右键菜单和「⋯」里。
-        self._btn_new_subfolder = QPushButton("新建子目录")
+        self._btn_new_subfolder = QPushButton("＋ 下级目录")
         self._btn_new_subfolder.setObjectName("Outline")
         self._btn_new_subfolder.setFixedHeight(34)
         self._btn_new_subfolder.setToolTip(
-            "在选中的节点下新建子目录（断面 / 采样点）；不选则建在根目录下。\n"
-            "新建的是空目录，双击进入时才初始化为拍照工作区。"
+            "在选中的文件夹下增加一层（如断面 / 采样点）；不选则建在项目根下。\n"
+            "进入这个目录拍照时，它会自动成为工作区。"
         )
         self._btn_new_subfolder.setCursor(Qt.CursorShape.PointingHandCursor)
         icons.set_button_icon(self._btn_new_subfolder, "mdi6.folder-plus-outline",
@@ -290,7 +302,7 @@ class ProjectTreeView(BaseView):
         self._more_menu.addSeparator()
         # §7 旧文案: "新建项目…" —— 现在这个入口一次建好「项目 + 若干采样点」,
         # 叫「新建项目」更贴用户的说法(Fable 5, 2026-07-12)
-        self._act_new_region = self._more_menu.addAction("新建项目…")
+        self._act_new_region = self._more_menu.addAction("新建项目文件夹…")
         self._act_new_region.triggered.connect(self._new_region)
         self._act_scan = self._more_menu.addAction("扫描磁盘…")
         self._act_scan.triggered.connect(self._scan_disk)
@@ -302,7 +314,7 @@ class ProjectTreeView(BaseView):
         )
         self._act_refresh_index.triggered.connect(self._refresh_index_cache_manual)
         self._more_menu.addSeparator()
-        self._act_newsub = self._more_menu.addAction("新建采样点")
+        self._act_newsub = self._more_menu.addAction("新建下级目录…")
         self._act_newsub.triggered.connect(self._new_subfolder)
         self._more_btn.setMenu(self._more_menu)
         bar.addWidget(self._more_btn)
@@ -4845,8 +4857,12 @@ class ProjectTreeView(BaseView):
             "· 照片只会落在采样点里，不会堆在项目根",
         )
 
-    def _new_subfolder(self) -> None:
-        parent = self._selected_path() or self._root
+    def prompt_new_child_under_root(self) -> None:
+        """Public top-bar entry: always create directly under this project."""
+        self._new_subfolder(parent_override=self._root)
+
+    def _new_subfolder(self, parent_override: Optional[str] = None) -> None:
+        parent = parent_override or self._selected_path() or self._root
         # 安全闸(GUI 实测 2026-07-12): 选中的节点可能属于**别的项目**(「全部项目」模式下
         # 树里列着所有已知项目; 或选中项是上一个根的残留) —— 那样会把子目录静默建到别人
         # 家里去。当前有根时, 只允许建在根的子树内, 否则退回根本身。
@@ -4858,7 +4874,11 @@ class ProjectTreeView(BaseView):
         if not parent:
             ui.info(self, "项目树", "请先选择根目录或一个文件夹。")
             return
-        name, ok = QInputDialog.getText(self, "新建子文件夹", "文件夹名称（如 断面a）：")
+        name, ok = QInputDialog.getText(
+            self,
+            "新建下级目录",
+            "目录名称（如 断面A、采样点1）：",
+        )
         name = (name or "").strip()
         if not ok or not name:
             return
