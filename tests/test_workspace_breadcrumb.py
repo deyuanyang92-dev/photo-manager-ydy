@@ -162,7 +162,10 @@ def test_widget_no_project_placeholder():
     assert any("最近使用" in s for s in labels)
     assert any("项目总览" in s for s in labels)
     assert any("打开文件夹" in s for s in labels)
-    assert any("新建工作区" in s for s in labels)
+    # 用户 2026-07-12: 顶栏「选择工作区 ▾」里也要能一次建好「项目 + 采样点」
+    # §7 旧: assert any("新建工作区" in s for s in labels)
+    assert any("新建项目" in s for s in labels)
+    assert any("新建单个工作区" in s for s in labels)
     overview = next(a for a in menu.actions() if "项目总览" in a.text())
     overview.trigger()
     assert got == ["overview"]

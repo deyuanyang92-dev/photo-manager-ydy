@@ -165,6 +165,10 @@ class WorkspaceBreadcrumb(QWidget):
     workspace_changed = pyqtSignal(str)   # 切换成功后的新工作区路径
     navigate_requested = pyqtSignal(str)  # 远跳目标 view_id
     new_workspace_requested = pyqtSignal()
+    # 场景(用户 2026-07-12, 截图指着顶栏「选择工作区 ▾」): "在这里也要可以" ——
+    #   一次建好「项目 + 若干采样点」的入口不能只藏在项目树里, 顶栏这个下拉是用户
+    #   开工时第一个点的地方。(Fable 5, 2026-07-12)
+    new_survey_project_requested = pyqtSignal()
     open_workspace_requested = pyqtSignal()
 
     def __init__(self, ctx, parent: Optional[QWidget] = None) -> None:
@@ -372,9 +376,15 @@ class WorkspaceBreadcrumb(QWidget):
         folder_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         folder_menu = QMenu(folder_btn)
         folder_menu.setObjectName("WorkspaceFolderMenu")
+        new_proj_act = folder_menu.addAction(
+            icons.icon("mdi6.folder-plus-outline", color=icons.TONE_ACCENT),
+            tr("新建项目（含采样点）…"),
+        )
+        new_proj_act.triggered.connect(
+            lambda _=False: self.new_survey_project_requested.emit())
         new_act = folder_menu.addAction(
             icons.icon("mdi6.plus", color=icons.TONE_MUTED),
-            tr("新建工作区…"),
+            tr("新建单个工作区…"),
         )
         new_act.triggered.connect(lambda _=False: self.new_workspace_requested.emit())
         open_act = folder_menu.addAction(
@@ -511,9 +521,18 @@ class WorkspaceBreadcrumb(QWidget):
             tr("打开文件夹…"),
         )
         open_act.triggered.connect(lambda _=False: self.open_workspace_requested.emit())
+        new_proj_act = menu.addAction(
+            icons.icon("mdi6.folder-plus-outline", color=icons.TONE_ACCENT),
+            tr("新建项目（含采样点）…"),
+        )
+        new_proj_act.setToolTip(
+            tr("一次建好项目目录和它下面的采样点，例如 江苏盐城2026 / 日出海湾、月亮湾")
+        )
+        new_proj_act.triggered.connect(
+            lambda _=False: self.new_survey_project_requested.emit())
         new_act = menu.addAction(
             icons.icon("mdi6.plus", color=icons.TONE_MUTED),
-            tr("新建工作区…"),
+            tr("新建单个工作区…"),
         )
         new_act.triggered.connect(lambda _=False: self.new_workspace_requested.emit())
         return menu

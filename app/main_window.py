@@ -245,6 +245,9 @@ class MainWindow(QMainWindow):
         self._project_switcher.workspace_changed.connect(
             self._on_breadcrumb_switch)
         self._project_switcher.new_workspace_requested.connect(self._on_new_project)
+        # 顶栏「选择工作区 ▾」也能一次建好项目 + 采样点(用户 2026-07-12: "在这里也要可以")
+        self._project_switcher.new_survey_project_requested.connect(
+            self._on_new_survey_project)
         self._project_switcher.open_workspace_requested.connect(self._on_open_workspace)
         lay.addWidget(self._project_switcher)
 
@@ -1055,6 +1058,81 @@ class MainWindow(QMainWindow):
     def _on_new_project(self) -> None:
         """Folder menu: create a photo workspace."""
         self._open_project_dialog(mode="new")
+
+    def _on_new_survey_project(self) -> None:
+        """顶栏「选择工作区 ▾」→「新建项目（含采样点）…」。
+
+        场景(用户 2026-07-12, 截图指着顶栏那个下拉): 一次建好「项目 + 若干采样点」的
+          入口不能只藏在项目树里 —— 顶栏这个下拉才是开工时第一个点的地方。
+        与项目树用**同一个**对话框和同一个服务(project_scaffold_service), 不另造一套。
+        建完直接进入第一个采样点, 用户马上能拍。(Fable 5, 2026-07-12)
+        """
+        from app.widgets.new_survey_project_dialog import NewSurveyProjectDialog
+        from app.services.project_scaffold_service import create_survey_project
+        from app.services.project_service import (
+            default_user_projects_json_path,
+            load_user_projects,
+            save_project_descriptor,
+        )
+        from app.utils import ui
+        from PyQt6.QtWidgets import QDialog
+
+        dlg = NewSurveyProjectDialog(self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        vals = dlg.values()
+        try:
+            res = create_survey_project(
+                vals["parent_dir"],
+                name=vals["name"],
+                sites=vals["sites"],
+                meta=vals["meta"],
+                collector=vals["collector"],
+                province=vals["province"],
+            )
+            for site_dir in res["sites"]:
+                save_project_descriptor(
+                    default_user_projects_json_path(),
+                    {
+                        "name": Path(site_dir).name,
+                        "directory": site_dir,
+                        "location": vals["meta"].get("location", ""),
+                        "year": vals["meta"].get("year", ""),
+                        "collector": vals["collector"],
+                    },
+                    existing_projects=load_user_projects(),
+                )
+        except (ValueError, FileExistsError, FileNotFoundError) as exc:
+            ui.warn(self, tr("新建项目"), str(exc))
+            return
+        except Exception as exc:  # pragma: no cover - defensive
+            ui.warn(self, tr("新建项目"), f"创建失败：{exc}")
+            return
+
+        # 项目根设为项目树根; 有采样点则直接进第一个, 马上能拍
+        try:
+            self.ctx.settings.project_tree_root = res["root"]
+        except Exception:  # noqa: BLE001
+            pass
+        if res["sites"]:
+            # 与项目对话框同一条统一入口(enter_workspace: 建目录 + 设 ctx + 记最近)
+            from app.services.project_service import enter_workspace
+            try:
+                enter_workspace(
+                    self.ctx,
+                    res["sites"][0],
+                    projects_json_path=default_user_projects_json_path(),
+                )
+                self.navigate_to("workbench")
+                self.refresh_context_bar()
+            except Exception as exc:  # noqa: BLE001
+                ui.warn(self, tr("新建项目"), f"项目已建好，但进入采样点失败：{exc}")
+        ui.info(
+            self,
+            tr("新建项目"),
+            f"项目「{vals['name']}」已建好，含 {len(res['sites'])} 个采样点。\n"
+            "照片只会落在采样点里，不会堆在项目根。",
+        )
 
     def _on_open_workspace(self) -> None:
         """Folder menu: open an existing folder as a photo workspace."""

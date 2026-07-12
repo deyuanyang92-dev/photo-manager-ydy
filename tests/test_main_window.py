@@ -234,7 +234,8 @@ def test_workspace_actions_are_integrated_into_breadcrumb(tmp_path):
     assert not hasattr(win, "_project_actions_btn")
     assert folder_btn.objectName() == "WorkspaceFolderButton"
     assert folder_btn.accessibleName() == "打开/新建工作区"
-    assert actions == ["新建工作区…", "打开文件夹…"]
+    # §7 旧: ["新建工作区…", "打开文件夹…"] —— 现在多了一次建好「项目+采样点」的入口
+    assert actions == ["新建项目（含采样点）…", "新建单个工作区…", "打开文件夹…"]
 
 
 def test_nav_pin_menu_toggles_topbar_segments():
