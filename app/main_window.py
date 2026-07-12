@@ -1061,20 +1061,18 @@ class MainWindow(QMainWindow):
         self._open_project_dialog(mode="new")
 
     def _on_new_survey_project(self) -> None:
-        """顶栏「选择工作区 ▾」→「新建项目（含采样点）…」。
+        """顶栏「选择工作区 ▾」→「新建项目…」: 只建**一个空项目目录**(容器)。
 
-        场景(用户 2026-07-12, 截图指着顶栏那个下拉): 一次建好「项目 + 若干采样点」的
-          入口不能只藏在项目树里 —— 顶栏这个下拉才是开工时第一个点的地方。
-        与项目树用**同一个**对话框和同一个服务(project_scaffold_service), 不另造一套。
-        建完直接进入第一个采样点, 用户马上能拍。(Fable 5, 2026-07-12)
+        场景(用户 2026-07-12): "只建立一个项目目录, 后续点击这个目录, 也可以建立子目录"。
+          项目根是容器(只汇总, 不放照片), 断面/采样点建完项目后在项目树里用「新建子目录」
+          自由加(任意层)。与项目树用**同一个**对话框和同一个服务, 不另造一套。
+          项目根不是工作区 -> 进不去工作台 -> 建完落到**项目树**, 在那里加断面、填项目设置。
+
+        §7 旧行为(2026-07-12 上午, 同日被否): 对话框一次问完 6 个字段 + 采样点列表,
+          建完直接 enter_workspace(第一个采样点) → 跳工作台。恢复时反注释下面两段。
         """
         from app.widgets.new_survey_project_dialog import NewSurveyProjectDialog
         from app.services.project_scaffold_service import create_survey_project
-        from app.services.project_service import (
-            default_user_projects_json_path,
-            load_user_projects,
-            save_project_descriptor,
-        )
         from app.utils import ui
         from PyQt6.QtWidgets import QDialog
 
@@ -1083,26 +1081,30 @@ class MainWindow(QMainWindow):
             return
         vals = dlg.values()
         try:
+            # §7 旧调用(恢复时反注释): 一次建好项目 + N 个采样点, 每个点登记进最近项目
+            # from app.services.project_service import (
+            #     default_user_projects_json_path, load_user_projects,
+            #     save_project_descriptor,
+            # )
+            # res = create_survey_project(
+            #     vals["parent_dir"], name=vals["name"], sites=vals["sites"],
+            #     meta=vals["meta"], collector=vals["collector"],
+            #     province=vals["province"],
+            # )
+            # for site_dir in res["sites"]:
+            #     save_project_descriptor(
+            #         default_user_projects_json_path(),
+            #         {
+            #             "name": Path(site_dir).name, "directory": site_dir,
+            #             "location": vals["meta"].get("location", ""),
+            #             "year": vals["meta"].get("year", ""),
+            #             "collector": vals["collector"],
+            #         },
+            #         existing_projects=load_user_projects(),
+            #     )
             res = create_survey_project(
-                vals["parent_dir"],
-                name=vals["name"],
-                sites=vals["sites"],
-                meta=vals["meta"],
-                collector=vals["collector"],
-                province=vals["province"],
+                vals["parent_dir"], name=vals["name"], sites=[]
             )
-            for site_dir in res["sites"]:
-                save_project_descriptor(
-                    default_user_projects_json_path(),
-                    {
-                        "name": Path(site_dir).name,
-                        "directory": site_dir,
-                        "location": vals["meta"].get("location", ""),
-                        "year": vals["meta"].get("year", ""),
-                        "collector": vals["collector"],
-                    },
-                    existing_projects=load_user_projects(),
-                )
         except (ValueError, FileExistsError, FileNotFoundError) as exc:
             ui.warn(self, tr("新建项目"), str(exc))
             return
@@ -1110,29 +1112,31 @@ class MainWindow(QMainWindow):
             ui.warn(self, tr("新建项目"), f"创建失败：{exc}")
             return
 
-        # 项目根设为项目树根; 有采样点则直接进第一个, 马上能拍
+        # 项目根 = 项目树根。项目根是容器(非工作区), 进不去 —— 落到项目树。
         try:
             self.ctx.settings.project_tree_root = res["root"]
         except Exception:  # noqa: BLE001
             pass
-        if res["sites"]:
-            # 与项目对话框同一条统一入口(enter_workspace: 建目录 + 设 ctx + 记最近)
-            from app.services.project_service import enter_workspace
-            try:
-                enter_workspace(
-                    self.ctx,
-                    res["sites"][0],
-                    projects_json_path=default_user_projects_json_path(),
-                )
-                self.navigate_to("workbench")
-                self.refresh_context_bar()
-            except Exception as exc:  # noqa: BLE001
-                ui.warn(self, tr("新建项目"), f"项目已建好，但进入采样点失败：{exc}")
+        # §7 旧落点(恢复时反注释): 有采样点则直接进第一个 → 工作台
+        # if res["sites"]:
+        #     from app.services.project_service import enter_workspace
+        #     try:
+        #         enter_workspace(self.ctx, res["sites"][0],
+        #                         projects_json_path=default_user_projects_json_path())
+        #         self.navigate_to("workbench")
+        #         self.refresh_context_bar()
+        #     except Exception as exc:  # noqa: BLE001
+        #         ui.warn(self, tr("新建项目"), f"项目已建好，但进入采样点失败：{exc}")
+        self.navigate_to("project_tree")
+        self.refresh_context_bar()
         ui.info(
             self,
             tr("新建项目"),
-            f"项目「{vals['name']}」已建好，含 {len(res['sites'])} 个采样点。\n"
-            "照片只会落在采样点里，不会堆在项目根。",
+            f"项目「{vals['name']}」已建好（空项目）。\n\n"
+            "· 点「新建子目录」添加断面 / 采样点，双击进去就能拍\n"
+            "· 点「项目设置」填采集人、地区代码、默认坐标、拍摄场地——\n"
+            "  下面所有采样点自动继承，拍照时右栏直接带出来，不用每次重填\n"
+            "· 照片只会落在采样点里，不会堆在项目根",
         )
 
     def _on_open_workspace(self) -> None:

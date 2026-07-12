@@ -112,3 +112,22 @@ def test_existing_project_is_not_clobbered(tmp_path):
         create_survey_project(str(tmp_path), name="江苏盐城2026", sites=["日出海湾"])
 
     assert (tmp_path / "江苏盐城2026" / "日出海湾" / "results" / "old.tif").is_file()
+
+
+def test_empty_project_creates_container_only(tmp_path):
+    """sites=[] → 只建项目根容器；照片目录一个都不许有（红线）。
+
+    需求(用户 2026-07-12): "只建立一个项目目录, 后续点击这个目录, 也可以建立子目录"
+    —— 新建项目不再一次问完采样点, 断面/采样点之后在项目树里用「+ 新建子目录」自由加。
+    见 docs/specs/2026-07-12-slim-new-project-and-settings-inheritance.md
+    """
+    res = create_survey_project(str(tmp_path), name="江苏盐城2026", sites=[])
+    root = Path(res["root"])
+
+    assert root.is_dir()
+    assert (root / "_data" / "region.json").is_file()   # 「这是容器」标记
+    assert (root / "_data" / "project.db").is_file()    # 设置锚点
+    assert res["sites"] == []
+    # 红线: 项目根是容器, 不是拍照工作区 —— 照片不得堆在项目根
+    assert not (root / "incoming-jpg").exists()
+    assert not (root / "results").exists()

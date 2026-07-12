@@ -95,9 +95,10 @@ def test_prefill_combines_codelabels_and_personnel_up_tree(tmp_path):
 def test_prefill_empty_when_no_settings(tmp_path):
     leaf = tmp_path / "blank"
     pf = effective_new_specimen_prefill(str(leaf))
+    # photo_location(拍摄场地)于 2026-07-12 加入预填; 其余键不变。
     assert pf == {"province": "", "site": "", "stations": {},
                   "collector": "", "photographer": "", "identifier": "",
-                  "lon": "", "lat": "", "geo_area": ""}
+                  "lon": "", "lat": "", "geo_area": "", "photo_location": ""}
 
 
 def test_stops_at_root(tmp_path):
@@ -109,3 +110,26 @@ def test_stops_at_root(tmp_path):
     _make_project(leaf, {})
     eff = get_effective(str(leaf), "code_labels", DEFAULT_CODE_LABELS, root=str(root))
     assert eff["province"] == "GD"
+
+
+def test_prefill_includes_photo_location(tmp_path):
+    """拍摄场地(需求 2026-07-12): project_meta 里存了、抽屉能填, 但右栏一直没预填。
+
+    specimens.photo_location 列本来就有(schema.sql:388) —— 只是 prefill 没返回它,
+    每个新号都要手打一遍。它是项目/工作区级常量(实验室/船上), 正适合继承。
+    """
+    root = tmp_path / "江苏盐城2026"
+    leaf = root / "断面A"
+    _make_project(root, {"project_meta": {"photo_location": "厦门大学海洋生物标本馆"}})
+    leaf.mkdir(parents=True, exist_ok=True)
+
+    prefill = effective_new_specimen_prefill(str(leaf), root=str(root))
+
+    assert prefill["photo_location"] == "厦门大学海洋生物标本馆"
+
+
+def test_prefill_photo_location_defaults_empty(tmp_path):
+    root = tmp_path / "p"
+    _make_project(root, {})
+
+    assert effective_new_specimen_prefill(str(root), root=str(root))["photo_location"] == ""

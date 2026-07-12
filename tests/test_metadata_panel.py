@@ -355,3 +355,93 @@ class TestWorkerLifetime:
         panel._auto_fill_geo_area_from_lon_lat()
         assert started, "sanity: worker 应被启动"
         assert started[0] in panel._live_workers
+
+
+class TestStickyDefaults:
+    """拍摄途中换人(需求 2026-07-12)。
+
+    "拍照过程有可能有变化, 主界面信息可以修改的, 项目中提前的信息可以被临时改动,
+     比如拍照人、鉴定人等, 这些信息会被记录。"
+
+    「临时改 + 落库留痕」本来就有(手改 -> 脱离 _auto_fields -> autosave)。这里加的是:
+    手改后问一句「以后的新号也用它吗」, 免得中途换人要一个号一个号手改。
+    """
+
+    def test_manual_person_edit_suggests_new_default(self, qtbot):
+        from app.widgets.metadata_panel import MetadataPanel
+        panel = MetadataPanel(_make_ctx())
+        qtbot.addWidget(panel)
+
+        with qtbot.waitSignal(panel.default_change_suggested, timeout=500) as sig:
+            panel._on_field_edited("photographer", "李四")
+
+        assert sig.args == ["photographer", "李四"]
+
+    def test_photo_location_edit_suggests_new_default(self, qtbot):
+        from app.widgets.metadata_panel import MetadataPanel
+        panel = MetadataPanel(_make_ctx())
+        qtbot.addWidget(panel)
+
+        with qtbot.waitSignal(panel.default_change_suggested, timeout=500) as sig:
+            panel._on_field_edited("photo_location", "实验室")
+
+        assert sig.args == ["photo_location", "实验室"]
+
+    def test_coordinate_edit_does_not_suggest_default(self, qtbot):
+        """经纬度/地理区是**站位级**数据(采集记录按站位覆盖) —— 弹提示只会误写。"""
+        from app.widgets.metadata_panel import MetadataPanel
+        panel = MetadataPanel(_make_ctx())
+        qtbot.addWidget(panel)
+        received = []
+        panel.default_change_suggested.connect(lambda f, v: received.append((f, v)))
+
+        panel._on_field_edited("lon", "119.5")
+        panel._on_field_edited("lat", "31.2")
+        panel._on_field_edited("geo_area", "东海")
+
+        assert received == []
+
+    def test_blank_value_does_not_suggest(self, qtbot):
+        from app.widgets.metadata_panel import MetadataPanel
+        panel = MetadataPanel(_make_ctx())
+        qtbot.addWidget(panel)
+        received = []
+        panel.default_change_suggested.connect(lambda f, v: received.append((f, v)))
+
+        panel._on_field_edited("photographer", "   ")
+
+        assert received == []
+
+    def test_manual_edit_still_protects_field_from_autofill(self, qtbot):
+        """回归红线: 手改过的字段, 任何自动来源都不得覆盖(_auto_fields 语义)。"""
+        from app.widgets.metadata_panel import MetadataPanel
+        panel = MetadataPanel(_make_ctx())
+        qtbot.addWidget(panel)
+
+        panel._photographer.setText("李四")
+        panel._on_field_edited("photographer", "李四")
+        panel.apply_autofill({"photographer": "张三"}, override_auto=True)
+
+        assert panel._photographer.text() == "李四"
+
+
+class TestPhotoLocationField:
+    def test_photo_location_row_exists(self, qtbot):
+        """拍摄场地行(需求 2026-07-12): 右栏本来没有这一行, 每个号都要手打。"""
+        from app.widgets.metadata_panel import MetadataPanel
+        panel = MetadataPanel(_make_ctx())
+        qtbot.addWidget(panel)
+
+        assert hasattr(panel, "_photo_location")
+        assert "photo_location" in panel._rows
+
+    def test_photo_location_is_autofillable(self, qtbot):
+        from app.widgets.metadata_panel import MetadataPanel
+        panel = MetadataPanel(_make_ctx())
+        qtbot.addWidget(panel)
+
+        panel.apply_autofill({"photo_location": "实验室"})
+
+        assert panel._photo_location.text() == "实验室"
+        assert "photo_location" in panel.auto_fields()
+        assert panel.current_values()["photo_location"] == "实验室"

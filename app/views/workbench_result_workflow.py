@@ -593,6 +593,9 @@ class WorkbenchResultWorkflowMixin:
             "photographer":    panel._photographer.text(),
             "identifier":      panel._identifier.text(),
             "geo_area":        panel._geo_area.text(),
+            # 拍摄场地(2026-07-12): specimens.photo_location 列早就有; 下面按
+            # PRAGMA table_info 动态过滤, 老库没这列也不会炸。
+            "photo_location":  panel._photo_location.text(),
             # 卡1 命名（日期 / 保存方式 / 拍照备注）
             "collection_date": naming._collection_date.text(),
             "photo_date":      naming._photo_date.text(),

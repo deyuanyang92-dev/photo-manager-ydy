@@ -586,3 +586,31 @@ def test_main_window_uses_breadcrumb(tmp_path):
     assert isinstance(win._project_switcher, WorkspaceBreadcrumb)
     t = win._project_switcher.text()
     assert "断面A" in t and "B2" in t
+
+
+def test_shows_project_name_when_root_set_but_no_workspace(qtbot, tmp_path):
+    """刚建完空项目、还没建采样点(需求 2026-07-12)。
+
+    新建项目现在只建一个空项目目录(容器, 非工作区)。那一刻没有工作区可显示, 面包屑
+    旧行为退回「选择工作区 ▾」—— 用户刚建完项目却看不到项目名, 会以为没建成。
+    """
+    root = tmp_path / "江苏盐城2026"
+    root.mkdir()
+    w = WorkspaceBreadcrumb(_Ctx(None, str(root)))
+    qtbot.addWidget(w)
+
+    w.refresh()
+
+    text = w.text()
+    assert "江苏盐城2026" in text
+    assert "未选采样点" in text
+
+
+def test_still_plain_placeholder_when_no_root(qtbot):
+    """§7 回归: 完全没项目根时仍是「选择工作区 ▾」。"""
+    w = WorkspaceBreadcrumb(_Ctx(None, None))
+    qtbot.addWidget(w)
+
+    w.refresh()
+
+    assert "选择工作区" in w.text()

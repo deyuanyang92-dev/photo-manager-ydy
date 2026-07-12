@@ -56,6 +56,22 @@ class MetadataPanel(QWidget):
 
     metadata_changed = pyqtSignal(str, str, str)
     save_requested = pyqtSignal(str)
+    # 拍摄途中换人(用户 2026-07-12: "拍照过程有可能有变化, 主界面信息可以修改的,
+    # 项目中提前的信息可以被临时改动, 比如拍照人、鉴定人等, 这些信息会被记录")。
+    #
+    # 「临时改 + 落库留痕」本来就有: 手改 -> _on_field_edited 把字段移出 _auto_fields ->
+    # 此后任何自动来源都不得覆盖它 -> metadata_changed -> 工作台 autosave 到该标本的
+    # specimens 行。缺的是: 手改只作用于**当前标本**, 下一个新号又预填回项目默认,
+    # 换了拍摄人就得一个个手改。
+    #
+    # 于是这里对「一批拍摄期间通常不变」的 4 个字段发出建议信号, 由工作台问一句
+    # 「以后的新号也用它吗」, 选「以后都用」才写回**当前工作区**的设置(不写项目根)。
+    # 不做隐式的会话粘滞: 改一个号却悄悄影响后面 50 个, 出错无从追查是哪步换的人。
+    # 经纬度/地理区**不发** —— 那是站位级数据, 该由采集记录按站位覆盖, 弹提示只会误写。
+    default_change_suggested = pyqtSignal(str, str)   # (field, value)
+
+    #: 会发 default_change_suggested 的字段(见上)
+    STICKY_CANDIDATES = ("collector", "photographer", "identifier", "photo_location")
 
     def __init__(self, ctx: "AppContext", parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -143,6 +159,13 @@ class MetadataPanel(QWidget):
                                     help_text="拍摄人姓名")
         self._identifier = _field("identifier", "鉴定人", "Identifier",
                                   help_text="物种鉴定人姓名")
+
+        # 拍摄场地(用户 2026-07-12): "拍摄场地等信息…方便主界面右侧自动读取, 减少每次
+        # 拍照都要填写"。specimens.photo_location 列早就有(schema.sql:388)、项目设置
+        # 「概览」tab 也能填, 只是右栏一直没有这一行 -> 每个号都得手打。它是项目/工作区级
+        # 常量(实验室 / 船上), 由 project_meta 沿目录树继承预填。
+        self._photo_location = _field("photo_location", "拍摄场地", "如：实验室",
+                                      help_text="拍摄地点；项目设置里填一次，新号自动带出")
 
         # 站位经度 — field + 📍 map button on the lon row (oracle app.js:10295)
         self._lon = QLineEdit()
@@ -234,6 +257,7 @@ class MetadataPanel(QWidget):
             ("采集人", ["collector"]),
             ("拍摄人", ["photographer"]),
             ("鉴定人", ["identifier"]),
+            ("拍摄场地", ["photo_location"]),
             ("站位经纬度", ["lon", "lat"]),
             ("采集地理区", ["geo_area"]),
         ]
@@ -269,6 +293,13 @@ class MetadataPanel(QWidget):
         _set_line_edit_without_dirty_signal(self._photographer, specimen.photographer)
         _set_line_edit_without_dirty_signal(self._identifier, specimen.identifier)
         _set_line_edit_without_dirty_signal(self._geo_area, specimen.geo_area)
+        # 拍摄场地(2026-07-12 新增): Specimen dataclass 里没有这个字段的老库会取到
+        # raw_json 兜底值; getattr 不硬依赖, 老数据不炸。
+        _set_line_edit_without_dirty_signal(
+            self._photo_location,
+            getattr(specimen, "photo_location", None)
+            or (specimen.raw.get("photo_location") if hasattr(specimen, "raw") else None),
+        )
         _set_line_edit_without_dirty_signal(
             self._lon, str(specimen.lon) if specimen.lon is not None else ""
         )
@@ -290,18 +321,23 @@ class MetadataPanel(QWidget):
 
     # ── Collection-record auto-fill ───────────────────────────────────────────
 
+    # §7 旧集合(2026-07-12 前): 无 photo_location —— 拍摄场地新增, 见 _setup_ui 的说明
     _AUTOFILL_MAP_ATTRS = (
         "collector", "photographer", "identifier", "lon", "lat", "geo_area",
+        "photo_location",
     )
 
-    def current_values(self) -> dict:
-        """Return the current text of every auto-fillable field (for empty check)."""
-        edits = {
+    def _autofill_edits(self) -> dict:
+        return {
             "collector": self._collector, "photographer": self._photographer,
             "identifier": self._identifier, "lon": self._lon,
             "lat": self._lat, "geo_area": self._geo_area,
+            "photo_location": self._photo_location,
         }
-        return {k: e.text() for k, e in edits.items()}
+
+    def current_values(self) -> dict:
+        """Return the current text of every auto-fillable field (for empty check)."""
+        return {k: e.text() for k, e in self._autofill_edits().items()}
 
     def auto_fields(self) -> set:
         """Fields whose current value came from an automatic source (overridable)."""
@@ -319,11 +355,7 @@ class MetadataPanel(QWidget):
 
         被填的字段加入 ``_auto_fields``，并发 ``metadata_changed`` 让工作台 autosave。
         """
-        edits = {
-            "collector": self._collector, "photographer": self._photographer,
-            "identifier": self._identifier, "lon": self._lon,
-            "lat": self._lat, "geo_area": self._geo_area,
-        }
+        edits = self._autofill_edits()
         for key in self._AUTOFILL_MAP_ATTRS:
             if key not in values:
                 continue
@@ -345,7 +377,7 @@ class MetadataPanel(QWidget):
     def _all_edits(self) -> list:
         return [
             self._collector, self._photographer, self._identifier,
-            self._geo_area, self._lon, self._lat,
+            self._geo_area, self._lon, self._lat, self._photo_location,
         ]
 
     def _on_geo_edited(self, value: str) -> None:
@@ -493,6 +525,10 @@ class MetadataPanel(QWidget):
         # 用户一动手 → 该字段不再是「自动」，此后任何自动来源都不得覆盖它。
         self._auto_fields.discard(field)
         self._emit_change(field, value)
+        # 拍摄途中换人/换场地 → 建议把它设为后续新号的默认(由工作台决定怎么问)。
+        # 见 default_change_suggested 的说明。
+        if field in self.STICKY_CANDIDATES and value.strip():
+            self.default_change_suggested.emit(field, value.strip())
 
     def _emit_change(self, field: str, value: str) -> None:
         # 仅发出变更信号触发 autosave（web scheduleRightPanelPersist app.js:9098），

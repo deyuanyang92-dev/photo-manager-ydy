@@ -1428,3 +1428,73 @@ def test_compact_project_tree_chrome_uses_horizontal_header_and_metrics(qtbot, c
         assert metric_layout.indexOf(view._tree_metrics_inline) >= 0
     finally:
         view.stop_background_work()
+
+
+def test_new_subfolder_button_exists_in_toolbar(qtbot, tmp_path, ctx):
+    """「新建子目录」提到工具栏(需求 2026-07-12), 不再只藏在右键菜单里。"""
+    root = tmp_path / "survey"
+    _make_workspace(root)
+    ctx.settings.project_tree_root = str(root)
+
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    view.on_activate()
+
+    assert hasattr(view, "_btn_new_subfolder")
+    assert view._btn_new_subfolder.isVisible() or not view._btn_new_subfolder.isHidden()
+
+
+def test_new_subfolder_button_creates_plain_dir_not_workspace(
+    qtbot, tmp_path, ctx, monkeypatch
+):
+    """点「新建子目录」建的是**空壳**, 不是工作区(需求 2026-07-12)。
+
+    "然后我可以在目录中, 自由创建子目录" —— 中间层必须能当纯容器, 只有真正进去拍的
+    那层才初始化为工作区。所以这里绝不能建成 workspace。
+    """
+    from app.services import project_tree_service as pts
+
+    root = tmp_path / "survey"
+    _make_workspace(root)
+    ctx.settings.project_tree_root = str(root)
+
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    view.on_activate()
+
+    monkeypatch.setattr(
+        "app.views.project_tree_view.QInputDialog.getText",
+        lambda *a, **kw: ("断面A", True),
+    )
+    view._new_subfolder()
+
+    child = root / "断面A"
+    assert child.is_dir()
+    assert not pts.is_workspace(str(child))
+    assert not (child / "_data").exists()
+
+
+def test_project_settings_action_opens_dialog_on_selected_node(
+    qtbot, tmp_path, ctx, monkeypatch
+):
+    """「项目设置」按钮/菜单在选中节点上开设置对话框(需求 2026-07-12)。"""
+    root = tmp_path / "survey"
+    _make_workspace(root)
+    ctx.settings.project_tree_root = str(root)
+
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    view.on_activate()
+
+    captured = {}
+
+    def _fake_open(parent, ctx_arg, project_dir):
+        captured["project_dir"] = project_dir
+
+    monkeypatch.setattr(
+        "app.widgets.project_settings_dialog.open_project_settings_dialog",
+        _fake_open,
+    )
+    view._open_node_settings()
+
+    assert captured.get("project_dir")

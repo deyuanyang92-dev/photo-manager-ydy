@@ -264,7 +264,38 @@ class WorkspaceBreadcrumb(QWidget):
             return
         self._build_chain(chain)
 
+    def _project_root_only(self) -> Optional[str]:
+        """有项目根、但没进任何工作区时返回项目根; 否则 None。
+
+        场景(用户 2026-07-12): 新建项目现在只建**一个空项目目录**(容器, 非工作区), 断面/
+        采样点之后在项目树里加。刚建完的那一刻没有工作区可显示, 面包屑会退回「选择工作区 ▾」
+        —— 用户刚建完项目却看不到项目名, 会以为没建成。这里让它显示项目名 + 未选采样点。
+        """
+        if getattr(self._ctx, "current_project_dir", None):
+            return None
+        root = getattr(self._ctx, "current_project_root", None)
+        if not root:
+            root = getattr(getattr(self._ctx, "settings", None), "project_tree_root", None)
+        return str(root) if root else None
+
     def _build_placeholder(self) -> None:
+        root = self._project_root_only()
+        if root:
+            btn = QPushButton(f"{Path(root).name}（{tr('未选采样点')}） ▾")
+            btn.setObjectName("CrumbLeaf")
+            btn.setToolTip(
+                tr("已进入项目，但还没选采样点。到「项目树」里新建子目录（断面/采样点），"
+                   "双击进去就能拍。")
+            )
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            icons.set_button_icon(btn, "mdi6.folder-outline",
+                                  color=icons.TONE_MUTED, size=15)
+            btn.clicked.connect(self._show_placeholder_menu)
+            self._lay.addWidget(btn)
+            self._placeholder_btn = btn
+            return
+
+        # §7 旧行为(无项目根时仍是纯空态, 不变)
         btn = QPushButton(tr("选择工作区 ▾"))
         btn.setObjectName("CrumbLeaf")
         btn.setToolTip(tr("最近使用 / 打开文件夹 / 新建工作区"))
@@ -378,7 +409,9 @@ class WorkspaceBreadcrumb(QWidget):
         folder_menu.setObjectName("WorkspaceFolderMenu")
         new_proj_act = folder_menu.addAction(
             icons.icon("mdi6.folder-plus-outline", color=icons.TONE_ACCENT),
-            tr("新建项目（含采样点）…"),
+            # §7 旧文案 tr("新建项目（含采样点）…") —— 2026-07-12 起新建项目只建一个空项目
+            #    目录, 采样点改在项目树里用「新建子目录」自由加(任意层)。
+            tr("新建项目…"),
         )
         new_proj_act.triggered.connect(
             lambda _=False: self.new_survey_project_requested.emit())
@@ -523,10 +556,12 @@ class WorkspaceBreadcrumb(QWidget):
         open_act.triggered.connect(lambda _=False: self.open_workspace_requested.emit())
         new_proj_act = menu.addAction(
             icons.icon("mdi6.folder-plus-outline", color=icons.TONE_ACCENT),
-            tr("新建项目（含采样点）…"),
+            # §7 旧文案 tr("新建项目（含采样点）…"), 见上面同名 action 的说明(2026-07-12)
+            tr("新建项目…"),
         )
         new_proj_act.setToolTip(
-            tr("一次建好项目目录和它下面的采样点，例如 江苏盐城2026 / 日出海湾、月亮湾")
+            # §7 旧提示: tr("一次建好项目目录和它下面的采样点，例如 江苏盐城2026 / 日出海湾、月亮湾")
+            tr("只建一个项目目录（如 江苏盐城2026）；断面 / 采样点建完后在项目树里自由添加")
         )
         new_proj_act.triggered.connect(
             lambda _=False: self.new_survey_project_requested.emit())

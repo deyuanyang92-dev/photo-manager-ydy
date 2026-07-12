@@ -21,12 +21,15 @@ Oracle: docs/modules/workbench.md, monitor.md; web app.js workspace render.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
 import sqlite3
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 from PyQt6.QtCore import (
     QByteArray,
@@ -564,6 +567,15 @@ class WorkbenchView(WorkbenchSpecimenIdentityMixin, WorkbenchMediaWorkflowMixin,
         self._metadata.save_requested.connect(self._on_save_metadata)
         self._metadata.metadata_changed.connect(lambda *_: self._schedule_rail_save())
         self._metadata.metadata_changed.connect(lambda *_: self._sync_uid_display_summary())
+        # 拍摄途中换人(用户 2026-07-12) —— 手改人员/场地后问一句「以后的新号也用它吗」。
+        # 防抖: textEdited 每敲一个字符都会发, 直接弹框会在打字途中弹出。
+        self._sticky_pending: Optional[tuple] = None
+        self._sticky_asked: dict[str, str] = {}
+        self._sticky_timer = QTimer(self)
+        self._sticky_timer.setSingleShot(True)
+        self._sticky_timer.setInterval(1500)
+        self._sticky_timer.timeout.connect(self._ask_sticky_default)
+        self._metadata.default_change_suggested.connect(self._on_default_change_suggested)
         right_lay.addWidget(self._metadata)
 
         # 卡4 协作状态（默认折叠）
@@ -1352,13 +1364,78 @@ class WorkbenchView(WorkbenchSpecimenIdentityMixin, WorkbenchMediaWorkflowMixin,
         用户仍可在右侧手改（不同站位/临时换人）；手填值不会被覆盖。
         """
         prefill = self._effective_prefill()
+        # §7 旧字段集(2026-07-12 前): ("collector", "photographer", "identifier",
+        #    "lon", "lat", "geo_area") —— 新增 photo_location(拍摄场地): 用户
+        #    2026-07-12 "拍摄场地等信息…方便主界面右侧自动读取, 减少每次拍照都要填写"。
         self._metadata.apply_autofill({
             k: prefill[k]
             for k in ("collector", "photographer", "identifier",
-                      "lon", "lat", "geo_area")
+                      "lon", "lat", "geo_area", "photo_location")
             if prefill.get(k)
         }, override_auto=override_auto)
         self._sync_uid_display_summary()
+
+    _STICKY_LABELS = {
+        "collector": "采集人",
+        "photographer": "拍摄人",
+        "identifier": "鉴定人",
+        "photo_location": "拍摄场地",
+    }
+
+    def _on_default_change_suggested(self, field: str, value: str) -> None:
+        """手改人员/场地 → 记下来, 停手 1.5s 后再问(防抖)。
+
+        场景(用户 2026-07-12): "拍照过程有可能有变化, 主界面信息可以修改的, 项目中提前的
+        信息可以被临时改动, 比如拍照人、鉴定人等, 这些信息会被记录。"
+        改动本身早就落库留痕(手改 -> 脱离 _auto_fields -> autosave 到这个标本的行);
+        这里只解决「下一个新号又回到项目默认」—— 中途换人得一个个手改的问题。
+        """
+        if self._sticky_asked.get(field) == value:
+            return          # 同字段同值只问一次(每敲一个字符都会触发 textEdited)
+        self._sticky_pending = (field, value)
+        self._sticky_timer.start()
+
+    def _ask_sticky_default(self) -> None:
+        """停止输入后问: 以后的新号也用它吗? 选「以后都用」→ 写回**当前工作区**设置。
+
+        写工作区(ctx.get_db())而不是项目根: 只影响这个断面, 不污染整个项目。
+        选「只这一个」/忽略 → 维持现状(只改当前标本)。
+        """
+        if not self._sticky_pending:
+            return
+        field, value = self._sticky_pending
+        self._sticky_pending = None
+        if self._metadata.current_values().get(field, "").strip() != value:
+            return          # 用户又改了 -> 这次不问, 等下一轮防抖
+        self._sticky_asked[field] = value
+
+        db = self.ctx.get_db()
+        if not db:
+            return
+        label = self._STICKY_LABELS.get(field, field)
+        from PyQt6.QtWidgets import QMessageBox
+        resp = ui.question(
+            self,
+            "设为后续默认？",
+            f"{label}改成了「{value}」。\n\n"
+            f"以后在本工作区新建的编号也用这个{label}吗？\n"
+            "（选「否」则只有当前这个编号用它；当前编号无论如何都已保存）",
+        )
+        if resp != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            from app.services import project_settings_service as pss
+            if field == "photo_location":
+                meta = pss.load_setting(db, "project_meta", pss.DEFAULT_PROJECT_META)
+                meta["photo_location"] = value
+                pss.save_setting(db, "project_meta", meta)
+            else:
+                personnel = pss.load_setting(db, "personnel", pss.DEFAULT_PERSONNEL)
+                personnel[field] = value
+                pss.save_setting(db, "personnel", personnel)
+            db.commit()
+        except Exception as exc:  # noqa: BLE001 —— 写默认失败不该影响已保存的标本
+            logger.exception("写回工作区默认失败: %s=%s (%s)", field, value, exc)
 
     def _on_project_personnel_changed(self, personnel: dict) -> None:
         """Apply project personnel defaults to empty/auto fields on the right rail.

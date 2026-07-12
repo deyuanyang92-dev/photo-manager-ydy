@@ -41,6 +41,9 @@ class Specimen:
     collector: Optional[str] = None
     photographer: Optional[str] = None
     identifier: Optional[str] = None
+    # 拍摄场地 —— specimens.photo_location 列一直存在(schema.sql:388), 但 dataclass 漏了,
+    # 于是右栏拿不到、也预填不了(用户 2026-07-12: "拍摄场地…方便主界面右侧自动读取")。
+    photo_location: Optional[str] = None
     notes: Optional[str] = None
     photo_notes: Optional[str] = None
     angle: Optional[str] = None

@@ -427,7 +427,7 @@ def effective_new_specimen_prefill(
 
         {"province": str, "site": str, "stations": dict,
          "collector": str, "photographer": str, "identifier": str,
-         "lon": str, "lat": str, "geo_area": str}
+         "lon": str, "lat": str, "geo_area": str, "photo_location": str}
 
     经纬度/采集地理区是站位级数据，没有项目级"正确值"；这里返回的是
     **项目默认坐标**（capture_defaults），仅作新号兜底。选定具体站位后，
@@ -436,6 +436,11 @@ def effective_new_specimen_prefill(
     code_labels = get_effective(project_dir, "code_labels", DEFAULT_CODE_LABELS, root=root)
     personnel = get_effective(project_dir, "personnel", DEFAULT_PERSONNEL, root=root)
     capture = get_effective(project_dir, "capture_defaults", DEFAULT_CAPTURE_DEFAULTS, root=root)
+    # 拍摄场地(用户 2026-07-12: "拍摄场地等信息…方便主界面右侧自动读取, 减少每次拍照都要填写")
+    # —— photo_location 一直存在 project_meta、抽屉「概览」tab 也能填、specimens 表也有这列
+    # (schema.sql:388), 唯独没进预填 -> 每个新号都要手打一遍。它是项目/工作区级的常量
+    # (实验室 / 船上), 正适合沿目录树继承。
+    meta = get_effective(project_dir, "project_meta", DEFAULT_PROJECT_META, root=root)
     return {
         "province": code_labels.get("province", "") or "",
         "site": code_labels.get("site", "") or "",
@@ -446,6 +451,7 @@ def effective_new_specimen_prefill(
         "lon": str(capture.get("lon", "") or ""),
         "lat": str(capture.get("lat", "") or ""),
         "geo_area": capture.get("geoArea", "") or "",
+        "photo_location": meta.get("photo_location", "") or "",
     }
 
 

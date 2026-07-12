@@ -210,6 +210,37 @@ class ProjectTreeView(BaseView):
         self._btn_pick.clicked.connect(self._pick_root)
         bar.addWidget(self._btn_pick)
 
+        # 「+ 新建子目录」提到工具栏(用户 2026-07-12): 采样点不再在「新建项目」时一次问完,
+        # 改为建完项目后在树里自由加(任意层, 空壳; 进入时才初始化为工作区) —— 这个入口是
+        # 新流程的主动作, 不能只藏在右键菜单和「⋯」里。
+        self._btn_new_subfolder = QPushButton("新建子目录")
+        self._btn_new_subfolder.setObjectName("Outline")
+        self._btn_new_subfolder.setFixedHeight(34)
+        self._btn_new_subfolder.setToolTip(
+            "在选中的节点下新建子目录（断面 / 采样点）；不选则建在根目录下。\n"
+            "新建的是空目录，双击进入时才初始化为拍照工作区。"
+        )
+        self._btn_new_subfolder.setCursor(Qt.CursorShape.PointingHandCursor)
+        icons.set_button_icon(self._btn_new_subfolder, "mdi6.folder-plus-outline",
+                              color=icons.TONE_MUTED, size=15)
+        self._btn_new_subfolder.clicked.connect(self._new_subfolder)
+        bar.addWidget(self._btn_new_subfolder)
+
+        # 「项目设置」提到工具栏: 项目根是容器(进不去工作台), 它的设置本来无 UI 可填 ——
+        # 这是「新建项目」对话框砍到 2 个字段的前提(spec §3.4)。
+        self._btn_node_settings = QPushButton("项目设置")
+        self._btn_node_settings.setObjectName("Outline")
+        self._btn_node_settings.setFixedHeight(34)
+        self._btn_node_settings.setToolTip(
+            "为选中的项目/目录填采集人、地区代码、默认坐标、拍摄场地等；\n"
+            "下面所有采样点自动继承，拍照时右栏直接带出来，不用每次重填。"
+        )
+        self._btn_node_settings.setCursor(Qt.CursorShape.PointingHandCursor)
+        icons.set_button_icon(self._btn_node_settings, "mdi6.cog-outline",
+                              color=icons.TONE_MUTED, size=15)
+        self._btn_node_settings.clicked.connect(self._open_node_settings)
+        bar.addWidget(self._btn_node_settings)
+
         self._btn_refresh = QPushButton("刷新")
         self._btn_refresh.setObjectName("Outline")
         self._btn_refresh.setFixedHeight(34)
@@ -2372,6 +2403,10 @@ class ProjectTreeView(BaseView):
         new_child_action = menu.addAction("新建子文件夹")
         new_child_action.triggered.connect(self._new_subfolder)
 
+        # 项目根(容器)的设置入口 —— 见 _open_node_settings 的说明(用户 2026-07-12)
+        settings_action = menu.addAction("项目设置…")
+        settings_action.triggered.connect(self._open_node_settings)
+
         menu.addSeparator()
         summary_action = menu.addAction("汇总导出…")
         summary_action.triggered.connect(self._open_summary_export)
@@ -4458,21 +4493,19 @@ class ProjectTreeView(BaseView):
         ui.info(self, "已添加", f"已登记到项目列表:\n{path}")
 
     def _new_region(self) -> None:
-        """新建项目: 一次填完「项目名 + 若干采样点」, 直接建出可进入的目录树。
+        """新建项目: 只建**一个空项目目录**(容器), 断面/采样点之后在树里自由加。
 
-        场景(用户 2026-07-12 报障): "我开展一个大项目, 比如江苏盐城2026, 在这个区域
-          设置了 2 个点: 日出海湾、月亮湾 —— 软件在创建工作区时无法自动建出项目目录 +
-          内部两个子目录, 我可以切换进去。"
-        旧流程的毛病: ① 建区域会顺手在**项目根**建 incoming-jpg/ results/ ——
-          项目根自己变成拍照工作区, 照片堆在项目根上; ② 子点只 mkdir 空壳,
-          不是工作区; ③ 没有一次建好的入口, 要点 4~5 次。
-        现在: 一个对话框 -> project_scaffold_service.create_survey_project ->
-          项目根只放共享设置(采样点自动继承), 每个采样点是**建完即可进入**的工作区。
-        §7 旧实现(ProjectDialog + seed_region_settings, 会污染项目根)整段注释保留:
-        #     from app.views.project_dialog import ProjectDialog
-        #     dlg = ProjectDialog(mode="new", existing_projects=[], parent=self)
-        #     ... seed_region_settings(directory, collector=..., meta=...)
-        #     ... save_project_descriptor(...)
+        场景(用户 2026-07-12): "只建立一个项目目录, 后续点击这个目录, 也可以建立子目录"
+          "我创建了江苏盐城2026, 可以再创建 2 个实际的工作区, 即 2 个断面进行拍照;
+           江苏盐城只是汇总这两个断面 —— 目录中 2 个子目录。然后我可以在目录中自由创建子目录。"
+
+        §7 旧流程(2026-07-12 上午, 同日被否): 一个对话框问完 项目名/位置/年份/采集人/地区代码
+          + 采样点多行列表, 一次建好「项目 + N 个采样点」, 建完直接进第一个采样点开拍。
+          旧对话框之所以塞这么满, 是因为项目根是容器(非工作区) → 设置抽屉打不开 → 项目级
+          默认值**只有那一次机会**可填。现在项目树补了「项目设置」入口(_open_node_settings),
+          字段有了事后填的地方, 对话框才砍得掉。
+          恢复旧行为: 反注释下面 create_survey_project(sites=...) 那段 + 采样点登记 +
+          「建完直接进第一个点」分支, 并反注释 new_survey_project_dialog 里的字段。
         (Fable 5, 2026-07-12)
         """
         from app.widgets.new_survey_project_dialog import NewSurveyProjectDialog
@@ -4487,33 +4520,32 @@ class ProjectTreeView(BaseView):
 
         try:
             from app.services.project_scaffold_service import create_survey_project
-            from app.services.project_service import (
-                default_user_projects_json_path,
-                load_user_projects,
-                save_project_descriptor,
-            )
 
+            # §7 旧调用(恢复时反注释): 一次建好项目 + N 个采样点, 并把每个点登记进
+            #    user_projects.json 供顶栏「最近项目」直接切。
+            # from app.services.project_service import (
+            #     default_user_projects_json_path, load_user_projects,
+            #     save_project_descriptor,
+            # )
+            # res = create_survey_project(
+            #     vals["parent_dir"], name=vals["name"], sites=vals["sites"],
+            #     meta=vals["meta"], collector=vals["collector"],
+            #     province=vals["province"],
+            # )
+            # for site_dir in res["sites"]:
+            #     save_project_descriptor(
+            #         default_user_projects_json_path(),
+            #         {
+            #             "name": Path(site_dir).name, "directory": site_dir,
+            #             "location": vals["meta"].get("location", ""),
+            #             "year": vals["meta"].get("year", ""),
+            #             "collector": vals["collector"],
+            #         },
+            #         existing_projects=load_user_projects(),
+            #     )
             res = create_survey_project(
-                vals["parent_dir"],
-                name=vals["name"],
-                sites=vals["sites"],
-                meta=vals["meta"],
-                collector=vals["collector"],
-                province=vals["province"],
+                vals["parent_dir"], name=vals["name"], sites=[]
             )
-            # 每个采样点也登记进 user_projects.json —— 顶栏「最近项目」能直接切
-            for site_dir in res["sites"]:
-                save_project_descriptor(
-                    default_user_projects_json_path(),
-                    {
-                        "name": Path(site_dir).name,
-                        "directory": site_dir,
-                        "location": vals["meta"].get("location", ""),
-                        "year": vals["meta"].get("year", ""),
-                        "collector": vals["collector"],
-                    },
-                    existing_projects=load_user_projects(),
-                )
         except (ValueError, FileExistsError, FileNotFoundError) as exc:
             ui.warn(self, "新建项目", str(exc))
             return
@@ -4526,14 +4558,17 @@ class ProjectTreeView(BaseView):
         self.ctx.settings.project_tree_root = self._root
         self._reload_project_tree()
 
-        n = len(res["sites"])
+        # §7 旧提示(含 N 个采样点), 恢复时反注释:
+        # n = len(res["sites"])
+        # ui.info(self, "新建项目", f"项目「{vals['name']}」已建好，含 {n} 个采样点。...")
         ui.info(
             self,
             "新建项目",
-            f"项目「{vals['name']}」已建好，含 {n} 个采样点。\n\n"
-            "· 项目根只保存共享设置（地区/采集人），采样点自动继承\n"
-            "· 双击任一采样点即可进入拍照；照片只会落在采样点里，不会堆在项目根\n"
-            "· 之后可以右键项目 →「新建子文件夹」继续加点",
+            f"项目「{vals['name']}」已建好（空项目）。\n\n"
+            "· 点「新建子目录」添加断面 / 采样点，双击进去就能拍\n"
+            "· 点「项目设置」填采集人、地区代码、默认坐标、拍摄场地——\n"
+            "  下面所有采样点自动继承，拍照时右栏直接带出来，不用每次重填\n"
+            "· 照片只会落在采样点里，不会堆在项目根",
         )
 
     def _new_subfolder(self) -> None:
@@ -4555,6 +4590,24 @@ class ProjectTreeView(BaseView):
             return
         pts.clear_project_tree_cache(self._root or parent)
         self._reload_project_tree()
+
+    def _open_node_settings(self) -> None:
+        """选中节点 →「项目设置…」: 在该节点(通常是项目根)自己的库上开设置抽屉。
+
+        需求场景(用户 2026-07-12): "每个项目、子项目或工作区, 可以设计一些采集人、采集时间、
+        坐标、经纬度、拍摄场地等信息吗, 方便主界面右侧可以自动读取, 减少每次拍照都要填写?"
+
+        继承机制早就有(project_settings_service.get_effective 沿目录树向上找, 近的祖先赢),
+        缺的是**入口**: 项目根是容器(非工作区), 进不去工作台 → 抽屉打不开 → 项目级默认值
+        无处可填。这正是旧「新建项目」对话框塞满 6 个字段的原因; 补上这个入口, 那些字段才
+        有了事后填的地方。详见 docs/specs/2026-07-12-slim-new-project-and-settings-inheritance.md
+        """
+        path = self._selected_path() or self._root
+        if not path:
+            ui.info(self, "项目树", "请先选择一个项目或文件夹。")
+            return
+        from app.widgets.project_settings_dialog import open_project_settings_dialog
+        open_project_settings_dialog(self, self.ctx, path)
 
     def _enter_selected(self) -> None:
         path = self._selected_path()
