@@ -13,6 +13,7 @@ matplotlib>=3.8              # 采集地图出版底图渲染 + 导出（PNG/PDF
 pyproj>=3.6                  # 采集地图生成底图（Nature/R 风）投影变换；自带 PROJ wheel
 qrcode[pil]>=7.4              # 标签二维码，纠错级 Q
 python-barcode>=0.15          # 标签 1D 条码 (Code128)，可选：缺失时降级为占位框
+send2trash>=1.8              # 项目树删除走系统回收站（红线：TIFF 母图不可再生，绝不直接抹除）
 openpyxl>=3.1                 # Excel 导出（34 列）
 
 # 截图全局快捷键（可选：缺失时快捷键仅在窗口前台生效，不影响其它功能）

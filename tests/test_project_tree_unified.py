@@ -138,3 +138,53 @@ def test_focus_project_keeps_other_projects_in_tree(qtbot, tmp_path, ctx, monkey
     current = view._tree.currentItem()
     assert current is not None
     assert "新项目" in current.text(0)
+
+
+# ── 基本操作：右键菜单必须有 重命名 / 移动 / 删除（R-009） ─────────────────────
+
+def test_context_menu_has_rename_move_delete(qtbot, tmp_path, ctx, monkeypatch):
+    """用户 R-009: "这种属于基本操作，我都不应该提，你都应该加入"。
+
+    同时锁住：汇总能力（汇总导出 / 数据筛选）不得因为加了这三个动作而丢失。
+    """
+    proj = _mk_project(tmp_path, "北方多样性调查")
+    _seed(tmp_path / "user_projects.json", [
+        {"name": "北方多样性调查", "directory": str(proj)},
+    ])
+
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    view.on_activate()
+
+    top = view._tree.topLevelItem(0)
+    assert top is not None
+    view._tree.setCurrentItem(top)
+
+    captured: list[str] = []
+
+    class _FakeMenu:
+        def __init__(self, *a, **kw):
+            pass
+
+        def addAction(self, text):
+            captured.append(text)
+            from PyQt6.QtGui import QAction
+            return QAction(text)
+
+        def addSeparator(self):
+            pass
+
+        def exec(self, *a, **kw):
+            return None
+
+    monkeypatch.setattr("app.views.project_tree_view.QMenu", _FakeMenu)
+    from PyQt6.QtCore import QPoint
+
+    rect = view._tree.visualItemRect(top)
+    view._show_tree_context_menu(rect.center())
+
+    assert "重命名…" in captured, captured
+    assert "移动到项目…" in captured, captured
+    assert "删除…" in captured, captured
+    assert "汇总导出…" in captured, captured
+    assert "数据筛选…" in captured, captured

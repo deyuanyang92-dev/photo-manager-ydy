@@ -67,6 +67,16 @@ if TYPE_CHECKING:
     from app.app_context import AppContext
 
 _PATH_ROLE = Qt.ItemDataRole.UserRole
+
+
+def _resolved_eq(a: str, b: str) -> bool:
+    """两个路径指向同一个目录吗（归一化后比较）。"""
+    if not a or not b:
+        return False
+    try:
+        return Path(a).expanduser().resolve() == Path(b).expanduser().resolve()
+    except (OSError, ValueError):
+        return str(a) == str(b)
 _KIND_ROLE = Qt.ItemDataRole.UserRole.value + 1
 
 # 退休但可能仍在跑的预热线程(v0.56): 保持 Python/Qt 对象存活直到线程真正结束,
@@ -2592,6 +2602,19 @@ class ProjectTreeView(BaseView):
         settings_action = menu.addAction("项目设置…")
         settings_action.triggered.connect(self._open_node_settings)
 
+        # 基本操作(用户 R-009, 2026-07-13: "这种属于基本操作, 我都不应该提")。
+        # 危险动作全部走 project_node_ops 的确认口径: 删除默认回收站, 有 TIFF 母图
+        # 必须手打目录名; 移动先预览再动。
+        menu.addSeparator()
+        rename_action = menu.addAction("重命名…")
+        rename_action.triggered.connect(self._rename_node)
+
+        move_action = menu.addAction("移动到项目…")
+        move_action.triggered.connect(self._move_node)
+
+        delete_action = menu.addAction("删除…")
+        delete_action.triggered.connect(self._delete_node)
+
         menu.addSeparator()
         summary_action = menu.addAction("汇总导出…")
         summary_action.triggered.connect(self._open_summary_export)
@@ -4927,6 +4950,142 @@ class ProjectTreeView(BaseView):
             return
         pts.clear_project_tree_cache(self._root or parent)
         self._reload_project_tree()
+
+    # ── 基本操作: 重命名 / 移动 / 删除 (用户 R-009, 2026-07-13) ─────────────────
+    #
+    # 用户: "有些属于基本操作…用户输入错了，都不能改正的" —— 项目树此前只能新建,
+    # 改名/挪窝/删除全都做不到。危险动作的事实与口径统一走 app/services/project_node_ops:
+    #   * 删除默认送系统回收站(可找回); 有 TIFF 母图(无价、不可再生)必须手打目录名;
+    #   * 移动 = 整个文件夹搬走(_data/project.db 跟着走, 零迁移), 动手前先预览;
+    #   * 改名/移动之后, user_projects.json 里的路径同步改写(否则「最近使用」指空)。
+
+    def _ask_yes(self, title: str, text: str) -> bool:
+        """Yes/No 确认。危险动作(删除/移动)统一走这里。"""
+        from PyQt6.QtWidgets import QMessageBox
+
+        resp = ui.question(self, title, text)
+        return resp == QMessageBox.StandardButton.Yes
+
+    def _rename_node(self) -> None:
+        from app.services import project_node_ops as ops
+
+        path = self._selected_path()
+        if not path:
+            ui.info(self, "重命名", "请先选中一个项目或目录。")
+            return
+        old_name = Path(path).name
+        name, ok = QInputDialog.getText(self, "重命名", "新名称：", text=old_name)
+        if not ok or not str(name).strip() or str(name).strip() == old_name:
+            return
+        try:
+            new_path = ops.rename_node(path, str(name))
+        except (ValueError, FileExistsError, FileNotFoundError, OSError) as exc:
+            ui.warn(self, "重命名失败", str(exc))
+            return
+        pts.clear_project_tree_cache(self._root or str(Path(new_path).parent))
+        if self._root and _resolved_eq(self._root, path):
+            self._root = new_path
+            self.ctx.settings.project_tree_root = new_path
+        self._reload_project_tree()
+        self._reload_card_grid()
+        self._select_tree_path(new_path)
+
+    def _move_node(self) -> None:
+        from app.services import project_node_ops as ops
+
+        path = self._selected_path()
+        if not path:
+            ui.info(self, "移动", "请先选中要移动的目录。")
+            return
+        start = str(Path(path).parent)
+        target = ui.get_existing_directory(self, "移动到哪个项目 / 目录下", start)
+        if not target:
+            return
+        try:
+            preview = ops.preview_move(path, target)
+        except OSError as exc:
+            ui.warn(self, "移动失败", str(exc))
+            return
+
+        contents = preview["contents"]
+        lines = [
+            f"来源：{preview['source_path']}",
+            f"目标：{preview['target_path']}",
+            "",
+            f"随目录一起搬走：{contents['workspace_count']} 个拍摄目录 · "
+            f"{contents['tiff_count']} 张 TIFF 母图 · {contents['jpg_count']} 张 JPG",
+            "",
+            "文件夹整体移动，数据库跟着走（零迁移）；已填过的资料一律保留，"
+            "只有空字段才继承新上级项目。",
+        ]
+        if not self._ask_yes("移动到项目", "\n".join(lines)):
+            return
+        try:
+            dest = ops.move_node(path, target)
+        except (ValueError, FileExistsError, FileNotFoundError, OSError) as exc:
+            ui.warn(self, "移动失败", str(exc))
+            return
+        pts.clear_project_tree_cache(self._root or target)
+        self._reload_project_tree()
+        self._reload_card_grid()
+        self._select_tree_path(dest)
+
+    def _delete_node(self) -> None:
+        from app.services import project_node_ops as ops
+
+        path = self._selected_path()
+        if not path:
+            ui.info(self, "删除", "请先选中要删除的项目或目录。")
+            return
+        name = Path(path).name
+        level = ops.confirm_level(path)
+        summary = ops.summarize_for_confirm(path)
+
+        if level == "typed":
+            # 有 TIFF 母图 —— 不可再生。必须手打目录名, 挡住手滑。
+            typed, ok = QInputDialog.getText(
+                self,
+                "删除项目（含母图）",
+                f"{summary}\n\n"
+                f"删除将把整个目录移入系统回收站（可找回）。\n"
+                f"确认请输入目录名「{name}」：",
+            )
+            if not ok or str(typed).strip() != name:
+                if ok:
+                    ui.info(self, "删除", "名称不匹配，已取消。")
+                return
+        elif level == "confirm":
+            if not self._ask_yes(
+                "删除项目",
+                f"{summary}\n\n删除将把整个目录移入系统回收站（可找回）。仍要删除吗？",
+            ):
+                return
+        else:
+            if not self._ask_yes(
+                "删除",
+                f"{summary}\n\n删除将把整个目录移入系统回收站（可找回）。仍要删除吗？",
+            ):
+                return
+
+        try:
+            ops.delete_node(path)  # 默认回收站, 不是真删
+        except RuntimeError as exc:  # 回收站不可用 —— 绝不静默改成永久删除
+            ui.warn(self, "删除失败", str(exc))
+            return
+        except (ValueError, FileNotFoundError, OSError) as exc:
+            ui.warn(self, "删除失败", str(exc))
+            return
+
+        parent = str(Path(path).parent)
+        if self._root and _resolved_eq(self._root, path):
+            self._root = None
+            self.ctx.settings.project_tree_root = None
+            self.ctx.settings.project_tree_view_mode = "all"
+            self._sync_view_mode_buttons()
+        pts.clear_project_tree_cache(self._root or parent)
+        self._reload_project_tree()
+        self._reload_card_grid()
+        ui.info(self, "删除", f"「{name}」已移入回收站。")
 
     def _open_node_settings(self) -> None:
         """选中节点 →「项目设置…」: 在该节点(通常是项目根)自己的库上开设置抽屉。
