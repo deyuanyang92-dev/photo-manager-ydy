@@ -11,9 +11,12 @@ import socket
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 from PyQt6.QtCore import QThread, pyqtSignal
+
+if TYPE_CHECKING:  # 仅供类型注解 —— uvicorn 在运行时保持惰性导入(见 build_uvicorn_config)
+    import uvicorn
 
 from app.models.activity_log import ActivityLog
 from app.services.collab_api import _build_fastapi_app
@@ -23,6 +26,30 @@ from app.services.collab_types import _get_local_ip
 logger = logging.getLogger(__name__)
 
 _MDNS_SERVICE_TYPE = "_specimen._tcp.local."
+
+
+def build_uvicorn_config(app: Any, port: int) -> "uvicorn.Config":
+    """构建 uvicorn.Config —— 关键点：`log_config=None`。
+
+    PyInstaller `--windowed` 打出来的 exe 没有控制台，`sys.stdout is None`；
+    uvicorn 默认 LOGGING_CONFIG 的 `uvicorn.logging.DefaultFormatter.__init__`
+    会执行 `sys.stdout.isatty()` → AttributeError → dictConfig 抛
+    `ValueError: Unable to configure formatter 'default'`，协作服务器直接起不来
+    （现场日志：v0.57/v0.59 win64 包）。开发时 `python main.py` 有控制台，复现不了。
+
+    传 log_config=None 让 uvicorn 完全不碰 logging，日志沿用 app 自己的配置
+    （app/utils/diagnostics.py 已经装好 root logger + 文件 handler）。
+    """
+    import uvicorn  # 局部导入：与 run() 内的惰性导入保持一致
+
+    return uvicorn.Config(
+        app,
+        host="0.0.0.0",
+        port=port,
+        loop="asyncio",
+        log_level="warning",
+        log_config=None,
+    )
 
 
 class CollabServerThread(QThread):
@@ -106,13 +133,16 @@ class CollabServerThread(QThread):
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
 
-        config = uvicorn.Config(
-            app,
-            host="0.0.0.0",
-            port=port,
-            loop="asyncio",
-            log_level="warning",
-        )
+        # §7 旧实现保留：默认 log_config 在 frozen exe（无 stdout）里会抛
+        # ValueError: Unable to configure formatter 'default'
+        # config = uvicorn.Config(
+        #     app,
+        #     host="0.0.0.0",
+        #     port=port,
+        #     loop="asyncio",
+        #     log_level="warning",
+        # )
+        config = build_uvicorn_config(app, port)
         server = uvicorn.Server(config)
         self._server = server
 
