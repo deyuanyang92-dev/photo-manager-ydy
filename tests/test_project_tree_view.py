@@ -1498,3 +1498,56 @@ def test_project_settings_action_opens_dialog_on_selected_node(
     view._open_node_settings()
 
     assert captured.get("project_dir")
+
+
+def test_focus_project_selects_new_project_and_switches_to_rooted(qtbot, tmp_path, ctx):
+    """建完项目必须把树焦点钉到新项目上(GUI 实测 2026-07-12 抓到的 bug)。
+
+    否则树停在「全部项目」模式、选中的还是**上一个项目**, 用户接着点「新建子目录」,
+    目录就静默建到别的项目下面(实测报 Permission denied: '/mnt/n' —— 另一台机器的旧项目)。
+    """
+    old = tmp_path / "旧项目"
+    _make_workspace(old)
+    new_root = tmp_path / "江苏盐城2026"
+    new_root.mkdir()
+    ctx.settings.project_tree_view_mode = "all"
+    ctx.settings.project_tree_root = str(old)
+
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    view.on_activate()
+
+    view.focus_project(str(new_root))
+
+    assert ctx.settings.project_tree_view_mode == "rooted"
+    assert view._root == str(new_root.resolve())
+    cur = view._tree.currentItem()
+    assert cur is not None and "江苏盐城2026" in cur.text(0)
+
+
+def test_new_subfolder_never_builds_outside_current_root(qtbot, tmp_path, ctx, monkeypatch):
+    """安全闸: 选中节点若不在当前根之下, 绝不把子目录建到那里去。"""
+    from app.views.project_tree_view import _PATH_ROLE
+
+    root = tmp_path / "本项目"
+    root.mkdir()
+    outsider = tmp_path / "别的项目"
+    outsider.mkdir()
+    ctx.settings.project_tree_root = str(root)
+
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    view.on_activate()
+    view._root = str(root)
+
+    # 伪造一个「选中了别的项目」的状态
+    monkeypatch.setattr(view, "_selected_path", lambda: str(outsider))
+    monkeypatch.setattr(
+        "app.views.project_tree_view.QInputDialog.getText",
+        staticmethod(lambda *a, **kw: ("断面A", True)),
+        raising=False,
+    )
+    view._new_subfolder()
+
+    assert (root / "断面A").is_dir()            # 退回当前根
+    assert not (outsider / "断面A").exists()    # 绝不建到别人家

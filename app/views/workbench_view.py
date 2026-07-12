@@ -1458,9 +1458,11 @@ class WorkbenchView(WorkbenchSpecimenIdentityMixin, WorkbenchMediaWorkflowMixin,
 
     def _effective_prefill(self) -> dict:
         """Inherited new-specimen defaults for the current project, or empties."""
+        # 形状必须和 pss.effective_new_specimen_prefill 完全一致 —— 少一个键, 走兜底
+        # 分支的调用方就会 KeyError。photo_location 于 2026-07-12 加入。
         empty = {"province": "", "site": "", "stations": {},
                  "collector": "", "photographer": "", "identifier": "",
-                 "lon": "", "lat": "", "geo_area": ""}
+                 "lon": "", "lat": "", "geo_area": "", "photo_location": ""}
         project_dir = getattr(self.ctx, "current_project_dir", None)
         if not project_dir:
             return empty

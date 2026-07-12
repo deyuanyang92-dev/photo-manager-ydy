@@ -1128,6 +1128,15 @@ class MainWindow(QMainWindow):
         #     except Exception as exc:  # noqa: BLE001
         #         ui.warn(self, tr("新建项目"), f"项目已建好，但进入采样点失败：{exc}")
         self.navigate_to("project_tree")
+        # 把树焦点钉到新项目(切「按根目录」+ 选中它)。不做的话树可能停在「全部项目」模式、
+        # 选中的还是上一个项目 —— 用户接着点「新建子目录」, 目录就静默建到别的项目下面
+        # (GUI 实测 2026-07-12 抓到: 建到了 /mnt/n 的旧项目上)。
+        tree = self._stack.currentWidget()
+        if getattr(tree, "view_id", None) == "project_tree" and hasattr(tree, "focus_project"):
+            try:
+                tree.focus_project(res["root"])
+            except Exception:  # noqa: BLE001 —— 聚焦失败不该让「项目已建好」变成报错
+                pass
         self.refresh_context_bar()
         ui.info(
             self,

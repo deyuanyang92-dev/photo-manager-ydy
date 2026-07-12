@@ -1728,6 +1728,29 @@ class ProjectTreeView(BaseView):
         self._sync_view_mode_buttons()
         self._reload_project_tree()
 
+    def focus_project(self, root_path: str) -> None:
+        """切到「按根目录」模式、以 *root_path* 为根、并选中该项目节点。
+
+        GUI 实测(2026-07-12)抓到的 bug: 新建项目后落到项目树, 但树若停在「全部项目」
+        模式, 选中的仍是**上一个项目**(用户 QSettings 里的旧记录) —— 接着点
+        「新建子目录」, 目录就静默建到了**别的项目**下面(实测报
+        `Permission denied: '/mnt/n'`, 因为那是另一台机器的旧项目路径)。
+        建完项目必须把树焦点钉到新项目上。
+        """
+        if not root_path or not Path(root_path).is_dir():
+            return
+        self.ctx.settings.project_tree_root = root_path
+        self.ctx.settings.project_tree_view_mode = "rooted"
+        self._root = str(Path(root_path).resolve())
+        pts.clear_project_tree_cache(self._root)
+        self._sync_view_mode_buttons()
+        self._reload_project_tree()
+        top = self._tree.topLevelItem(0)
+        if top is not None:
+            self._tree.setCurrentItem(top)
+            top.setSelected(True)
+            self._tree.expandItem(top)
+
     def _is_rooted_view(self) -> bool:
         return (
             getattr(self.ctx.settings, "project_tree_view_mode", "all") == "rooted"
@@ -4553,10 +4576,9 @@ class ProjectTreeView(BaseView):
             ui.warn(self, "新建项目", f"创建失败：{exc}")
             return
 
-        self._root = str(Path(res["root"]).resolve())
-        pts.clear_project_tree_cache(self._root)
-        self.ctx.settings.project_tree_root = self._root
-        self._reload_project_tree()
+        # 焦点钉到新项目(切「按根目录」+ 选中它) —— 否则树可能停在「全部项目」模式、
+        # 选中的还是上一个项目, 接着点「新建子目录」就建到别人家去了(GUI 实测抓到)。
+        self.focus_project(res["root"])
 
         # §7 旧提示(含 N 个采样点), 恢复时反注释:
         # n = len(res["sites"])
@@ -4573,6 +4595,14 @@ class ProjectTreeView(BaseView):
 
     def _new_subfolder(self) -> None:
         parent = self._selected_path() or self._root
+        # 安全闸(GUI 实测 2026-07-12): 选中的节点可能属于**别的项目**(「全部项目」模式下
+        # 树里列着所有已知项目; 或选中项是上一个根的残留) —— 那样会把子目录静默建到别人
+        # 家里去。当前有根时, 只允许建在根的子树内, 否则退回根本身。
+        if self._root and parent:
+            try:
+                Path(parent).resolve().relative_to(Path(self._root).resolve())
+            except ValueError:
+                parent = self._root
         if not parent:
             ui.info(self, "项目树", "请先选择根目录或一个文件夹。")
             return
