@@ -1114,15 +1114,23 @@ def test_specimen_summary_table_uses_windows_extended_selection(qtbot, ctx):
 
 
 def test_specimen_table_supports_row_and_column_reorder(qtbot, ctx):
+    """行排序走**垂直表头拖动**, 不是单元格 InternalMove。
+
+    §7 旧断言(Fable 5, 2026-07-12 改): 曾经要求
+        table.dragDropMode() == InternalMove / dragEnabled / acceptDrops
+    —— 那正是丢数据的配置: QTableWidget 不发 rowsMoved, InternalMove 实际走
+    dropMimeData 覆盖单元格 + 删源行, 用户拖一次就少一行数据
+    (见 tests/test_summary_table_reorder.py)。
+    """
     view = ProjectTreeView(ctx)
     qtbot.addWidget(view)
     try:
         table = view._specimen_table
-        assert table.dragDropMode() == QAbstractItemView.DragDropMode.InternalMove
-        assert table.dragEnabled() is True
-        assert table.acceptDrops() is True
+        assert table.dragDropMode() == QAbstractItemView.DragDropMode.NoDragDrop
+        assert table.acceptDrops() is False
+        assert table.verticalHeader().sectionsMovable() is True   # 行排序:拖行号
         hdr = table.horizontalHeader()
-        assert hdr.sectionsMovable() is True
+        assert hdr.sectionsMovable() is True                      # 列排序:拖表头
     finally:
         view.stop_background_work()
 
@@ -1420,4 +1428,3 @@ def test_compact_project_tree_chrome_uses_horizontal_header_and_metrics(qtbot, c
         assert metric_layout.indexOf(view._tree_metrics_inline) >= 0
     finally:
         view.stop_background_work()
-

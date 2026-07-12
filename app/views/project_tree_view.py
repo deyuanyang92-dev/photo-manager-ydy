@@ -3252,20 +3252,42 @@ class ProjectTreeView(BaseView):
         self._rebuild_specimen_table_structure()
         self._refresh_specimen_table()
 
+    @staticmethod
+    def _configure_specimen_table_interaction_for(table) -> None:
+        """编号表的**行排序**配置 —— 拖行号(垂直表头), 不拖单元格。
+
+        场景(审计 2026-07-12 实锤, 用户裁定 PROJECT_MEMORY:242「可拖动行排序」):
+          旧配置 InternalMove + MoveAction 把 QTableWidget 的原生模型当成可移动行的
+          模型用 —— 但 QTableWidget **不发 rowsMoved**(_on_specimen_table_rows_moved
+          是死代码), 真正执行的是 QTableModel::dropMimeData 的**单元格覆盖**语义:
+              A / B / C, 把 C 拖到第 1 行 -> A / C / C(B 被覆盖) -> 删源行 -> A / C
+          用户拖一次, **B 行的数据凭空消失**。要的是排序, 拿到的是删行。
+        理由(Fable 5, 2026-07-12): 行排序改走 verticalHeader().setSectionsMovable(True)
+          —— Qt 只调整**视觉行序**, 一个单元格都不动, 天然无损; sectionMoved 信号
+          真实可用, 顺序据此重算。单元格拖放彻底关掉(NoDragDrop)。
+        §7 旧:
+            table.setDragEnabled(True); table.setAcceptDrops(True)
+            table.setDropIndicatorShown(True); table.setDragDropOverwriteMode(False)
+            table.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+            table.setDefaultDropAction(Qt.DropAction.MoveAction)
+            model.rowsMoved.connect(self._on_specimen_table_rows_moved)
+        """
+        table.setDragEnabled(False)
+        table.setAcceptDrops(False)
+        table.setDropIndicatorShown(False)
+        table.setDragDropMode(QAbstractItemView.DragDropMode.NoDragDrop)
+        vhdr = table.verticalHeader()
+        vhdr.setSectionsMovable(True)      # 拖行号 = 真排序(不动数据)
+        vhdr.setVisible(True)              # 看得见行号才拖得动
+        vhdr.setToolTip("拖动行号可调整编号顺序")
+
     def _configure_specimen_table_interaction(self) -> None:
-        """编号表：行内拖动排序、表头拖动调列序、选中联动成片。"""
+        """编号表：拖行号排序、表头拖动调列序、选中联动成片。"""
         table = getattr(self, "_specimen_table", None)
         if table is None or getattr(self, "_specimen_table_interaction_ready", False):
             return
-        table.setDragEnabled(True)
-        table.setAcceptDrops(True)
-        table.setDropIndicatorShown(True)
-        table.setDragDropOverwriteMode(False)
-        table.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
-        table.setDefaultDropAction(Qt.DropAction.MoveAction)
-        model = table.model()
-        if model is not None:
-            model.rowsMoved.connect(self._on_specimen_table_rows_moved)
+        self._configure_specimen_table_interaction_for(table)
+        table.verticalHeader().sectionMoved.connect(self._on_specimen_rows_reordered)
         hdr = table.horizontalHeader()
         hdr.sectionMoved.connect(self._on_summary_header_section_moved)
         hdr.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -3409,18 +3431,32 @@ class ProjectTreeView(BaseView):
             [key for key, _label in new_cols],
         )
 
-    def _on_specimen_table_rows_moved(
-        self,
-        _parent,
-        _start: int,
-        _end: int,
-        _destination,
-        _row: int,
-    ) -> None:
-        order = self._table_row_uids()
+    def _on_specimen_rows_reordered(self, _logical: int, _old_v: int, _new_v: int) -> None:
+        """拖行号之后: 按**视觉顺序**重算编号顺序 -> 同步下方照片网格。
+
+        (Fable 5, 2026-07-12) 旧的 _on_specimen_table_rows_moved 挂在 QTableWidget
+        永不发射的 rowsMoved 上 = 死代码, 见 _configure_specimen_table_interaction_for。
+        """
+        table = getattr(self, "_specimen_table", None)
+        if table is None:
+            return
+        vhdr = table.verticalHeader()
+        order: list[str] = []
+        for visual in range(table.rowCount()):
+            logical = vhdr.logicalIndex(visual)
+            uid = self._row_uid_from_table_item(logical)
+            if uid:
+                order.append(uid)
         if order:
             self._summary_row_uid_order = order
         self._sync_summary_grid_from_table()
+
+    # §7 旧(死代码, QTableWidget 从不发 rowsMoved):
+    # def _on_specimen_table_rows_moved(self, _parent, _start, _end, _destination, _row):
+    #     order = self._table_row_uids()
+    #     if order:
+    #         self._summary_row_uid_order = order
+    #     self._sync_summary_grid_from_table()
 
     def _on_summary_header_section_moved(
         self,
