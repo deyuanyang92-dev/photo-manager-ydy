@@ -306,7 +306,7 @@ class ProjectTreeView(BaseView):
         self._act_new_region.triggered.connect(self._new_region)
         self._act_scan = self._more_menu.addAction("扫描磁盘…")
         self._act_scan.triggered.connect(self._scan_disk)
-        self._act_add_ws = self._more_menu.addAction("添加工作区…")
+        self._act_add_ws = self._more_menu.addAction("添加已有文件夹…")
         self._act_add_ws.triggered.connect(self._add_workspace_manual)
         self._act_refresh_index = self._more_menu.addAction("刷新汇总索引…")
         self._act_refresh_index.setToolTip(
@@ -367,7 +367,7 @@ class ProjectTreeView(BaseView):
         self._tree_count_lbl.setObjectName("MutedSmall")
         tree_head.addWidget(self._tree_count_lbl)
         tree_head.addSpacing(4)
-        self._tree_metrics_inline = QLabel("0 区域 · 0 工作区 · 0 待导入")
+        self._tree_metrics_inline = QLabel("0 项目 · 0 拍摄目录 · 0 待导入")
         self._tree_metrics_inline.setObjectName("TreeMetricsInline")
         tree_head.addWidget(self._tree_metrics_inline, 1)
         tl.addLayout(tree_head)
@@ -385,8 +385,8 @@ class ProjectTreeView(BaseView):
         filter_row.setSpacing(6)
         for key, label in (
             ("all", "全部"),
-            ("workspace", "工作区"),
-            ("folder", "区域"),
+            ("workspace", "拍摄目录"),
+            ("folder", "文件夹"),
             ("candidate", "待导入"),
         ):
             chip = QPushButton(label)
@@ -399,18 +399,18 @@ class ProjectTreeView(BaseView):
             chip.clicked.connect(lambda _checked=False, k=key: self._set_kind_filter(k))
             self._kind_filter_buttons[key] = chip
             filter_row.addWidget(chip)
-        self._btn_select_all_ws = QPushButton("全选工作区")
+        self._btn_select_all_ws = QPushButton("全选拍摄目录")
         self._btn_select_all_ws.setObjectName("Outline")
         self._btn_select_all_ws.setFixedHeight(26)
         self._btn_select_all_ws.setToolTip(
-            "选中当前列表中全部工作区（Ctrl/Shift 也可多选部分项目）"
+            "选中当前列表中全部拍摄目录（Ctrl/Shift 也可多选）"
         )
         self._btn_select_all_ws.clicked.connect(self._select_all_visible_workspaces)
         filter_row.addWidget(self._btn_select_all_ws)
         self._kind_filter_buttons["all"].setChecked(True)
         tl.addLayout(filter_row)
         select_hint = QLabel(
-            "① 全选或多选工作区  ② 右侧看调查概览  ③ 中间自动显示编号与照片"
+            "① 选择一个或多个拍摄目录  ② 右侧看概览  ③ 中间显示编号与照片"
         )
         select_hint.setObjectName("MutedSmall")
         select_hint.setWordWrap(True)
@@ -557,9 +557,9 @@ class ProjectTreeView(BaseView):
         action_lbl = QLabel("操作")
         action_lbl.setObjectName("Section")
         dl.addWidget(action_lbl)
-        self._btn_enter = QPushButton("进入工作区拍照")
+        self._btn_enter = QPushButton("设为当前拍摄目录")
         self._btn_enter.setObjectName("Primary")
-        self._btn_enter.setToolTip("把选中文件夹作为当前拍照工作区")
+        self._btn_enter.setToolTip("选中任意文件夹作为照片保存位置；需要的数据结构会自动建立")
         self._btn_enter.setFixedHeight(38)
         self._btn_enter.setCursor(Qt.CursorShape.PointingHandCursor)
         icons.set_button_icon(self._btn_enter, "mdi6.camera-outline",
@@ -575,9 +575,9 @@ class ProjectTreeView(BaseView):
         self._btn_adopt.clicked.connect(self._adopt_selected_candidate)
         dl.addWidget(self._btn_adopt)
         # 精简模式：右栏顶部固定主操作条（概览页也能看到「进入」）
-        self._btn_enter_sticky = QPushButton("进入工作区拍照")
+        self._btn_enter_sticky = QPushButton("设为当前拍摄目录")
         self._btn_enter_sticky.setObjectName("Primary")
-        self._btn_enter_sticky.setToolTip("把选中文件夹作为当前拍照工作区")
+        self._btn_enter_sticky.setToolTip("选中任意文件夹作为照片保存位置")
         self._btn_enter_sticky.setFixedHeight(38)
         self._btn_enter_sticky.setCursor(Qt.CursorShape.PointingHandCursor)
         icons.set_button_icon(
@@ -672,7 +672,7 @@ class ProjectTreeView(BaseView):
         grid_head_row.addWidget(self._grid_count_lbl)
         grid_panel_lay.addLayout(grid_head_row)
         self._grid_idle_hint = QLabel(
-            "请先在左侧选择至少一个工作区。"
+            "请先在左侧选择至少一个拍摄目录。"
             "统计在右侧「调查概览」，编号与照片将显示在本栏。"
         )
         self._grid_idle_hint.setObjectName("MutedSmall")
@@ -1081,9 +1081,9 @@ class ProjectTreeView(BaseView):
         # 左栏引导：精简时隐藏长说明，只保留状态行
         if hasattr(self, "_select_hint"):
             self._select_hint.setText(
-                "多选工作区 → 右侧概览 · 中间编号照片"
+                "多选拍摄目录 → 右侧概览 · 中间编号照片"
                 if v2
-                else "① 全选或多选工作区  ② 右侧看调查概览  ③ 中间自动显示编号与照片"
+                else "① 选择一个或多个拍摄目录  ② 右侧看概览  ③ 中间显示编号与照片"
             )
             self._select_hint.setVisible(not v2)
         self._apply_compact_header_metrics(v2)
@@ -1854,17 +1854,41 @@ class ProjectTreeView(BaseView):
         """
         if not root_path or not Path(root_path).is_dir():
             return
-        self.ctx.settings.project_tree_root = root_path
-        self.ctx.settings.project_tree_view_mode = "rooted"
-        self._root = str(Path(root_path).resolve())
-        pts.clear_project_tree_cache(self._root)
-        self._sync_view_mode_buttons()
+        target = str(Path(root_path).resolve())
+        # §7 旧实现(切成 rooted 单项目模式 —— 建完新项目, 其余项目从树里全消失,
+        #   用户 2026-07-12 截图报障):
+        # self.ctx.settings.project_tree_root = root_path
+        # self.ctx.settings.project_tree_view_mode = "rooted"
+        # self._root = str(Path(root_path).resolve())
+        # pts.clear_project_tree_cache(self._root)
+        # self._sync_view_mode_buttons()
+        # self._reload_project_tree()
+        # top = self._tree.topLevelItem(0)
+        # if top is not None:
+        #     self._tree.setCurrentItem(top)
+        #     ...
+        # 新: 不动视图模式 —— 树里所有项目照旧并排, 只把焦点钉到新项目那个节点上。
+        # (焦点必须钉住: 否则接着点「新建子目录」会静默建到**上一个**选中的项目下面,
+        #  实测报过 Permission denied: '/mnt/n' —— 那是另一台机器的旧项目路径。)
+        pts.clear_project_tree_cache(target)
         self._reload_project_tree()
-        top = self._tree.topLevelItem(0)
-        if top is not None:
-            self._tree.setCurrentItem(top)
-            top.setSelected(True)
-            self._tree.expandItem(top)
+        item = None
+        for i in range(self._tree.topLevelItemCount()):
+            item = self._find_item_by_path(self._tree.topLevelItem(i), target)
+            if item is not None:
+                break
+        if item is None:  # 新项目还没进 user_projects.json / 不在当前树里 → 退回原行为
+            self.ctx.settings.project_tree_root = target
+            self.ctx.settings.project_tree_view_mode = "rooted"
+            self._root = target
+            self._sync_view_mode_buttons()
+            self._reload_project_tree()
+            item = self._tree.topLevelItem(0)
+        if item is not None:
+            self._tree.setCurrentItem(item)
+            item.setSelected(True)
+            self._tree.expandItem(item)
+            self._tree.scrollToItem(item)
 
     def _is_rooted_view(self) -> bool:
         return (
@@ -2215,7 +2239,7 @@ class ProjectTreeView(BaseView):
         inline = getattr(self, "_tree_metrics_inline", None)
         if inline is not None:
             inline.setText(
-                f"{regions} 区域 · {workspaces} 工作区 · {candidates} 待导入"
+                f"{regions} 文件夹 · {workspaces} 拍摄目录 · {candidates} 待导入"
             )
             return
         if getattr(self, "_metric_regions", None) is not None:
@@ -2442,13 +2466,24 @@ class ProjectTreeView(BaseView):
                 exists = Path(directory).expanduser().exists()
             except OSError:
                 exists = False
+            # §7 旧: "children": [] —— 假树。全部项目模式下每个项目都展不开, 于是
+            #   「想看全部就没层级, 想看层级就只剩一个」。用户实测 bug(2026-07-12 截图):
+            #   点「＋项目」后 focus_project 把树切成 rooted 单项目模式, 其余项目全消失。
+            #   现在全部项目模式也扫真实子树 —— 一棵树管到底(项目 → 任意层子目录 → 拍摄目录)。
+            children: list = []
+            if exists and not candidate:
+                try:
+                    scanned = pts.scan_tree(directory)
+                    children = list(scanned.get("children") or [])
+                except (OSError, ValueError):
+                    children = []
             nodes.append({
                 "name": name or Path(directory).name or "(未命名)",
                 "path": directory,
                 "has_data": pts.is_workspace(directory) if exists else False,
                 "is_candidate": candidate,
                 "unavailable": not exists,
-                "children": [],
+                "children": children,
             })
 
         scan_roots: set[str] = set()
@@ -2495,17 +2530,17 @@ class ProjectTreeView(BaseView):
         return nodes
 
     def _build_item(self, node: dict) -> QTreeWidgetItem:
-        # Two-level semantics: a node with its own project.db is a 工作区 (where
-        # you actually shoot); everything else is a 区域/文件夹 (an inheritance
-        # anchor or just a container) — never call them all "项目".
+        # Keep the internal workspace distinction in _KIND_ROLE only. The user
+        # sees one ordinary folder tree; entering a folder initializes it when
+        # needed, so the tree must not append implementation labels to names.
         if node.get("unavailable"):
             label = f"{node['name']}  ·  不可用"
             glyph = "mdi6.folder-alert-outline"
             tone = icons.TONE_WARN
             kind = "unavailable"
         elif node["has_data"]:
-            label = f"{node['name']} · 工作区"
-            glyph = "mdi6.database-outline"
+            label = str(node["name"])
+            glyph = "mdi6.folder-open-outline"
             tone = icons.TONE_ACCENT
             kind = "workspace"
         elif node.get("is_candidate"):
@@ -2547,10 +2582,10 @@ class ProjectTreeView(BaseView):
 
         menu = QMenu(self._tree)
 
-        enter_action = menu.addAction("进入工作区拍照")
+        enter_action = menu.addAction("设为当前拍摄目录")
         enter_action.triggered.connect(self._enter_selected)
 
-        new_child_action = menu.addAction("新建子文件夹")
+        new_child_action = menu.addAction("新建下级目录…")
         new_child_action.triggered.connect(self._new_subfolder)
 
         # 项目根(容器)的设置入口 —— 见 _open_node_settings 的说明(用户 2026-07-12)
@@ -2637,7 +2672,7 @@ class ProjectTreeView(BaseView):
             workspace = pts.is_workspace(path)
         except OSError:
             workspace = False
-        kind = "工作区" if workspace else "文件夹"
+        kind = "拍摄目录" if workspace else "文件夹"
         state = "存在" if exists else "不可访问"
         ui.info(
             self,
@@ -2668,7 +2703,7 @@ class ProjectTreeView(BaseView):
         self._clear_child_preview()
         self._clear_media_preview()
         self._clear_stats()
-        self._set_enter_action_style("Primary", "进入工作区拍照", "mdi6.camera-outline")
+        self._set_enter_action_style("Primary", "设为当前拍摄目录", "mdi6.camera-outline")
         self._empty_state.setText("没有匹配的节点。请调整搜索词或类型筛选。")
         self._empty_state.show()
         self._sync_sticky_enter_from_primary()
@@ -2680,7 +2715,7 @@ class ProjectTreeView(BaseView):
         n = len(labeled)
         if n >= 2:
             self._scope_status_lbl.setText(
-                f"已选 {n} 个工作区 — 右侧概览 · 中间编号照片"
+                f"已选 {n} 个拍摄目录 — 右侧概览 · 中间编号照片"
             )
         elif n == 1:
             self._scope_status_lbl.setText(
@@ -2688,7 +2723,7 @@ class ProjectTreeView(BaseView):
             )
         else:
             self._scope_status_lbl.setText(
-                "未选择；点「全选工作区」或 Ctrl+点击多选"
+                "未选择；点「全选拍摄目录」或 Ctrl+点击多选"
             )
 
     def _update_detail_panel_for_selected_project(self) -> None:
@@ -2708,11 +2743,11 @@ class ProjectTreeView(BaseView):
                 self._btn_open_dir.setEnabled(False)
                 self._btn_copy_path.setEnabled(False)
                 self._detail_kind.setText("多选汇总")
-                self._detail_name.setText(f"{n_ws} 个工作区")
+                self._detail_name.setText(f"{n_ws} 个拍摄目录")
                 self._detail_path.setText(names)
                 self._info_type.setText("多选汇总")
                 self._info_status.setText("右侧看调查概览统计，中间看编号与照片")
-                self._info_children.setText(f"{n_ws} 个工作区")
+                self._info_children.setText(f"{n_ws} 个拍摄目录")
                 self._info_block.show()
                 self._child_block.hide()
                 self._clear_child_preview()
@@ -2739,8 +2774,8 @@ class ProjectTreeView(BaseView):
             self._clear_child_preview()
             self._clear_media_preview()
             self._clear_stats()
-            self._set_enter_action_style("Primary", "进入工作区拍照", "mdi6.camera-outline")
-            self._empty_state.setText("选择左侧文件夹后，可进入工作区、汇总导出或导入站位表。")
+            self._set_enter_action_style("Primary", "设为当前拍摄目录", "mdi6.camera-outline")
+            self._empty_state.setText("选择左侧文件夹后，可设为拍摄目录、汇总导出或导入站位表。")
             self._empty_state.show()
             self._sync_sticky_enter_from_primary()
             return
@@ -2766,10 +2801,10 @@ class ProjectTreeView(BaseView):
             workspace = False
         node_kind = current_item.data(0, _KIND_ROLE) if current_item else None
         if workspace:
-            kind = "工作区"
+            kind = "拍摄目录"
             state = "已初始化，可拍照"
             self._set_enter_action_style(
-                "Primary", "进入工作区拍照", "mdi6.camera-outline",
+                "Primary", "设为当前拍摄目录", "mdi6.camera-outline",
                 color=icons.TONE_ON_ACCENT,
             )
         elif not exists:
@@ -2801,10 +2836,10 @@ class ProjectTreeView(BaseView):
             )
         else:
             kind = "文件夹"
-            state = "进入时自动初始化工作区" if exists else "路径不可访问或磁盘未连接"
+            state = "设为拍摄目录时自动准备" if exists else "路径不可访问或磁盘未连接"
             self._btn_adopt.hide()
             self._set_enter_action_style(
-                "Primary", "初始化并进入拍照", "mdi6.camera-plus-outline",
+                "Primary", "设为当前拍摄目录", "mdi6.camera-plus-outline",
                 color=icons.TONE_ON_ACCENT,
             )
         if workspace:
@@ -3060,7 +3095,7 @@ class ProjectTreeView(BaseView):
 
         # busy 反馈复用现有状态标签(不新增控件): 点击立即可见"查询中"
         try:
-            self._summary_stats_lbl.setText(f"查询中… ({len(dirs)} 个工作区)")
+            self._summary_stats_lbl.setText(f"查询中… ({len(dirs)} 个拍摄目录)")
             self._grid_count_lbl.setText("查询中…")
         except Exception:
             pass
@@ -3170,7 +3205,7 @@ class ProjectTreeView(BaseView):
         self._apply_summary_groups_to_grid(self._groups_for_summary_display())
         panel = getattr(self, "_overview_panel", None)
         if panel is not None:
-            scope = f"数据汇总 · {len(dirs)} 个工作区"
+            scope = f"数据汇总 · {len(dirs)} 个拍摄目录"
             if self._summary_conditions:
                 scope += f" · {len(self._summary_conditions)} 项筛选"
             panel.set_filtered_stats(
@@ -3765,7 +3800,7 @@ class ProjectTreeView(BaseView):
 
         all_cols = getattr(self, "_summary_all_columns", [])
         if not all_cols:
-            ui.info(self, "显示列", "请先选择工作区并加载数据汇总。")
+            ui.info(self, "显示列", "请先选择拍摄目录并加载数据汇总。")
             return
         dlg = SummaryColumnPickerDialog(
             all_cols,
@@ -4234,7 +4269,7 @@ class ProjectTreeView(BaseView):
         icon_lbl.setFixedSize(18, 18)
         kind = item.data(0, _KIND_ROLE) or "folder"
         if kind == "workspace":
-            glyph, tone, badge = "mdi6.database-outline", icons.TONE_ACCENT, "工作区"
+            glyph, tone, badge = "mdi6.folder-open-outline", icons.TONE_ACCENT, "拍摄目录"
         elif kind == "candidate":
             glyph, tone, badge = "mdi6.folder-search-outline", icons.TONE_WARN, "待导入"
         else:
@@ -4744,7 +4779,7 @@ class ProjectTreeView(BaseView):
                 self,
                 "指到新位置",
                 "新路径已选，但项目列表里没有找到旧路径记录。\n"
-                "可改用「添加工作区」登记。",
+                "可改用「添加已有文件夹」登记。",
             )
             return
         cur = getattr(self.ctx, "current_project_dir", None)
@@ -4963,7 +4998,7 @@ class ProjectTreeView(BaseView):
                     "项目数据库正忙",
                     "当前项目数据库正在被其它操作占用。\n\n"
                     "请稍等几秒后重试；如果一直出现，请关闭其它正在打开该项目的程序窗口，"
-                    "或先回到照片工作区停止正在运行的合成/整理任务。",
+                    "或先回到照片工作台停止正在运行的合成/整理任务。",
                 )
                 return
             ui.warn(
