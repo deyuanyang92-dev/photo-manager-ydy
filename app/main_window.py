@@ -32,6 +32,7 @@ line up with nav order, exactly as before.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 from PyQt6.QtCore import QSize, Qt, QTimer
