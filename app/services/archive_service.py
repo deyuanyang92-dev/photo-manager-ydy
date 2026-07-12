@@ -857,13 +857,15 @@ def _safe_archive_member_path(root: str | Path, member_name: str) -> Path:
     ):
         raise ValueError(f"ZIP 包含不安全路径: {member_name}")
 
-    root_path = Path(root).resolve()
-    target = root_path.joinpath(*member.parts).resolve()
+    root_input = Path(root)
+    root_path = root_input.resolve()
+    target_input = root_input.joinpath(*member.parts)
+    target = target_input.resolve()
     try:
         target.relative_to(root_path)
     except ValueError as exc:
         raise ValueError(f"ZIP 包含越界路径: {member_name}") from exc
-    return target
+    return target_input
 
 
 def _extract_zip_safely(zf: zipfile.ZipFile, temp_dir: str) -> list[str]:

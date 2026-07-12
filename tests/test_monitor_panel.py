@@ -1230,6 +1230,11 @@ class TestElideLabelNoOscillation:
         qtbot.addWidget(lbl)
         lbl.set_texts("很长很长的一整句提示文字啊啊啊", "短句")
         fm = lbl.fontMetrics()
+        if (
+            fm.horizontalAdvance("很长很长的一整句提示文字啊啊啊") <= 0
+            or fm.horizontalAdvance("短句") <= 0
+        ):
+            pytest.skip("Qt runner has no usable CJK font metrics")
 
         lbl.resize(fm.horizontalAdvance("很长很长的一整句提示文字啊啊啊") + 10, 20)
         assert lbl.picked_text() == "很长很长的一整句提示文字啊啊啊"
