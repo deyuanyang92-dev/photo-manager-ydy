@@ -683,6 +683,7 @@ class TestReleaseTask:
     def test_release_broadcasts_to_same_group_peer(self):
         svc = CollabService()
         svc.set_group_code("G")
+        svc._spawn = lambda fn: fn()   # release broadcast is now off-thread
         from app.services.collab_service import PeerInfo
         svc.store.create("R1")
         with svc._peers_lock:
@@ -1733,6 +1734,10 @@ class TestPhotoIndexReporting:
     def _make_service(self) -> CollabService:
         svc = CollabService()
         svc._project_name = "PhotoIndexTest"
+        # post_photo_index now posts off the Qt main thread via _spawn; run it
+        # synchronously here so the assertions stay deterministic (and no real
+        # daemon thread escapes the patched httpx).
+        svc._spawn = lambda fn: fn()
         return svc
 
     def test_post_photo_index_no_peers_no_http(self):

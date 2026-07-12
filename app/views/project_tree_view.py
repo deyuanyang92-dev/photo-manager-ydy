@@ -13,7 +13,16 @@ from pathlib import Path
 import sqlite3
 from typing import TYPE_CHECKING, Optional
 
-from PyQt6.QtCore import QItemSelectionModel, QSize, Qt, pyqtSignal
+from PyQt6.QtCore import (
+    Q_ARG,
+    QItemSelectionModel,
+    QMetaObject,
+    QSize,
+    QThread,
+    QTimer,
+    Qt,
+    pyqtSignal,
+)
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (
     QAbstractItemView,
@@ -118,6 +127,19 @@ class ProjectTreeView(BaseView):
         self._kind_filter = "all"
         self._kind_filter_buttons: dict[str, QPushButton] = {}
         self._grid_cols_buttons: dict[int, QPushButton] = {}
+        # ── 缩略图解码 worker(性能修复): 详情预览大图 + 影像预览小图都改成
+        # 「主线程只查缓存, 未命中丢给 worker 线程解码, QImage 回主线程转 QPixmap」。
+        # QThread 懒建(第一次真的需要解码时才起), 不 parent 到 self —— 见
+        # uid_grouped_grid.py:517 的同款处置(避免 Qt 父子销毁与 quit/wait 抢跑)。
+        self._thumb_thread: Optional[QThread] = None
+        self._thumb_worker = None
+        self._thumb_req_counter: int = 0
+        # req_id -> (kind, target, path, extra)；kind ∈ {"preview", "media"}
+        self._thumb_pending: dict[int, tuple] = {}
+        self._thumb_pending_paths: set[str] = set()
+        self._preview_req: int = 0
+        self._preview_pixmap = None  # 最近一次成功解码的原始 QPixmap(主线程构造)
+        self._media_gen: int = 0  # 每次清空影像预览自增 → 迟到结果作废
         super().__init__(ctx)
 
     # ── UI ──────────────────────────────────────────────────────────────────
@@ -247,7 +269,9 @@ class ProjectTreeView(BaseView):
         self._btn_refresh.setToolTip("重新扫描当前列表")
         self._btn_refresh.setCursor(Qt.CursorShape.PointingHandCursor)
         icons.set_button_icon(self._btn_refresh, "mdi6.refresh", color=icons.TONE_MUTED, size=15)
-        self._btn_refresh.clicked.connect(self._reload_project_tree)
+        # self._btn_refresh.clicked.connect(self._reload_project_tree)  # §7 旧: 直连重载,
+        #     但 scan_tree 默认 use_cache=True → 缓存 TTL 内点「刷新」拿到的是陈旧树。
+        self._btn_refresh.clicked.connect(self._on_refresh_clicked)
         bar.addWidget(self._btn_refresh)
 
         self._more_btn = QToolButton()
@@ -1380,13 +1404,87 @@ class ProjectTreeView(BaseView):
         self._preview_mode = False
         self._grid_stack.setCurrentIndex(0)
 
-    def _show_preview_image(self, path: str) -> None:
-        from app.utils.image_thumbnail import decode_image_thumbnail
+    # def _show_preview_image(self, path: str) -> None:   # §7 旧: 主线程全尺寸解码
+    #     from app.utils.image_thumbnail import decode_image_thumbnail
+    #
+    #     pm = decode_image_thumbnail(path, max_size=ptl.PREVIEW_DECODE_MAX)
+    #     #  ↑ 1600px 解码走 GUI 线程; TIFF 母版没有 720 的 master 缓存可用,
+    #     #    冷路径要真解 TIFF, 最坏还会 fork ImageMagick(timeout=12s) → 界面卡死。
+    #     self._preview_image.setScaledContents(False)
+    #     if pm is not None and not pm.isNull():
+    #         QApplication.processEvents()   # ← 在 paint/布局调用栈里重入事件循环
+    #         w = max(ptl.PREVIEW_MIN_WIDTH, self._preview_image.width())
+    #         h = max(ptl.PREVIEW_MIN_HEIGHT, self._preview_image.height())
+    #         scaled = pm.scaled(
+    #             w,
+    #             h,
+    #             Qt.AspectRatioMode.KeepAspectRatio,
+    #             Qt.TransformationMode.SmoothTransformation,
+    #         )
+    #         self._preview_image.setPixmap(scaled)
+    #         self._preview_image.setText("")
+    #     else:
+    #         self._preview_image.clear()
+    #         self._preview_image.setText("无法预览此文件")
+    #     self._preview_title.setText(Path(path).name)
 
-        pm = decode_image_thumbnail(path, max_size=ptl.PREVIEW_DECODE_MAX)
+    def _show_preview_image(self, path: str) -> None:
+        """新: 两段式。主线程只做「查缓存」(绝不解码), 未命中丢给 worker 线程。
+
+        行为等价: 命中缓存 → 与旧代码同一帧、同样的 scaled 结果; 未命中 → 先显示
+        「载入中…」, 解码完成后由主线程槽 (_on_thumb_decoded) 填图; 解码失败仍然是
+        「无法预览此文件」。QApplication.processEvents() 被删除 —— 它唯一的作用是等
+        布局刷新拿到最新的 label 宽度, 现在用一次 singleShot(0) 的重新适配替代, 不再
+        在 paint 栈里重入事件循环。
+        """
+        from app.utils.image_thumbnail import try_cached_image_data
+
         self._preview_image.setScaledContents(False)
-        if pm is not None and not pm.isNull():
-            QApplication.processEvents()
+        self._preview_title.setText(Path(path).name)
+        self._preview_req += 1
+        req = self._preview_req
+        self._preview_pixmap = None
+
+        image = None
+        try:
+            image = try_cached_image_data(path, ptl.PREVIEW_DECODE_MAX)
+        except Exception:  # pragma: no cover - 防御性
+            image = None
+        if image is not None and not image.isNull():
+            self._apply_preview_image(req, image)
+            return
+
+        self._preview_image.clear()
+        self._preview_image.setText("载入中…")
+        self._request_thumb_decode(
+            "preview", path, ptl.PREVIEW_DECODE_MAX, target=None, extra=req,
+        )
+
+    def _apply_preview_image(self, req: int, image) -> None:
+        """主线程: QImage → QPixmap → 按当前 label 尺寸缩放上屏。"""
+        from app.utils.image_thumbnail import make_pixmap
+
+        if req != self._preview_req:
+            return  # 用户已经切到别的图, 丢弃过期结果
+        pm = make_pixmap(image)  # QPixmap 只能在主线程构造
+        if pm is None or pm.isNull():
+            self._preview_pixmap = None
+            self._preview_image.clear()
+            self._preview_image.setText("无法预览此文件")
+            return
+        self._preview_pixmap = pm
+        self._rescale_preview_pixmap()
+        # 旧代码用 processEvents() 等布局, 这里改成下一轮事件循环再按最终宽度适配一次
+        # (主线程 singleShot, 不是 worker 线程里的 QTimer)。
+        QTimer.singleShot(0, lambda r=req: self._rescale_preview_pixmap(r))
+
+    def _rescale_preview_pixmap(self, req: Optional[int] = None) -> None:
+        if req is not None and req != self._preview_req:
+            return
+        pm = self._preview_pixmap
+        if pm is None or pm.isNull():
+            return
+        try:
             w = max(ptl.PREVIEW_MIN_WIDTH, self._preview_image.width())
             h = max(ptl.PREVIEW_MIN_HEIGHT, self._preview_image.height())
             scaled = pm.scaled(
@@ -1397,10 +1495,8 @@ class ProjectTreeView(BaseView):
             )
             self._preview_image.setPixmap(scaled)
             self._preview_image.setText("")
-        else:
-            self._preview_image.clear()
-            self._preview_image.setText("无法预览此文件")
-        self._preview_title.setText(Path(path).name)
+        except RuntimeError:  # pragma: no cover - label 已销毁
+            pass
 
     def _fit_grid_thumb_to_panel(self) -> None:
         """Keep current density preset aligned with viewport width."""
@@ -1683,7 +1779,14 @@ class ProjectTreeView(BaseView):
         mode = ptl.normalize_content_mode(self.ctx.settings.project_tree_content_mode)
         self.ctx.settings.project_tree_content_mode = mode
         self._reload_project_tree()
-        self._reload_card_grid()
+        # self._reload_card_grid()  # §7 旧: 无条件重建卡片网格 —— 树模式(默认)下卡片
+        #     根本不可见, 却照样对每个项目跑一次 get_project_summary(sqlite + results/
+        #     + freeform/ + incoming-jpg/ 全量 iterdir + per-file stat), 与 _reload_project_tree
+        #     串成「进页两次全盘扫描」。
+        # 新: 只有卡片布局才加载卡片数据; 切到 cards 时 _set_layout_mode 已有重载路径
+        #     (见 _set_layout_mode), 认领后的刷新亦仍显式调用, 行为等价。
+        if getattr(self.ctx.settings, "project_tree_layout_mode", "tree") == "cards":
+            self._reload_card_grid()
 
     def _sync_view_mode_from_settings(self) -> None:
         mode = getattr(self.ctx.settings, "project_tree_view_mode", "all")
@@ -1997,6 +2100,18 @@ class ProjectTreeView(BaseView):
         return None
 
     # ── Data / tree build ─────────────────────────────────────────────────────
+    def _on_refresh_clicked(self) -> None:
+        """「刷新」按钮: 必须绕过 scan_tree 的 TTL 缓存, 否则点了等于没点。
+
+        建目录 / 改根目录等路径本来就调用了 clear_project_tree_cache, 只有这个
+        按钮没有 —— 显式清一次, 再走原来的重载。
+        """
+        try:
+            pts.clear_project_tree_cache(self._root)
+        except Exception:  # pragma: no cover - 防御性
+            pass
+        self._reload_project_tree()
+
     def _reload_project_tree(self) -> None:
         self._tree.clear()
         self._tree_count_lbl.setText("0 个节点")
@@ -3980,10 +4095,25 @@ class ProjectTreeView(BaseView):
         except Exception:  # pragma: no cover - 防御性
             pass
 
+    def _stop_thumb_worker(self, wait_ms: int = 2000) -> None:
+        """join 缩略图解码线程(退出/销毁时). 在途请求先作废。"""
+        self._thumb_pending.clear()
+        thread = self._thumb_thread
+        if thread is None:
+            return
+        self._thumb_thread = None
+        self._thumb_worker = None
+        try:
+            thread.quit()
+            thread.wait(wait_ms)
+        except Exception:  # pragma: no cover - 防御性
+            pass
+
     def stop_background_work(self) -> None:
         """App 退出时 join worker 线程."""
         self._stop_tiff_preview_warmup_worker()
         self._stop_summary_query_worker(wait_ms=2000)
+        self._stop_thumb_worker(wait_ms=2000)
         try:
             grid = getattr(self, "_uid_grid", None)
             if grid is not None:
@@ -4050,6 +4180,12 @@ class ProjectTreeView(BaseView):
     def _clear_media_preview(self) -> None:
         from app.utils.ui import clear_layout_widgets
 
+        # 卡片(以及卡片里的 QLabel)马上要被销毁: 让所有在途的 media 解码结果作废,
+        # 免得迟到的图往已销毁的 label 上贴 / 贴到新节点的卡片上。
+        self._media_gen += 1
+        for rid, info in list(self._thumb_pending.items()):
+            if info and info[0] == "media":
+                self._thumb_pending.pop(rid, None)
         clear_layout_widgets(self._media_grid)
         self._media_empty_lbl.show()
         self._media_count_lbl.setText("")
@@ -4236,22 +4372,25 @@ class ProjectTreeView(BaseView):
         thumb.setObjectName("MediaThumb")
         thumb.setFixedSize(112, 78)
         thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        pm = None
-        try:
-            from app.utils.image_thumbnail import decode_image_thumbnail
-            pm = decode_image_thumbnail(str(path), max_size=150)
-        except Exception:
-            pm = None
-        if pm is not None and not pm.isNull():
-            thumb.setPixmap(
-                pm.scaled(
-                    thumb.size(),
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-            )
-        else:
-            thumb.setText(path.suffix.upper().lstrip(".") or "FILE")
+        # pm = None                                                  # §7 旧: 建卡循环里逐张同步解码
+        # try:                                                       #   (TIFF 还可能 fork ImageMagick),
+        #     from app.utils.image_thumbnail import decode_image_thumbnail   #   6 张 = 6 次全量解码堵住 GUI。
+        #     pm = decode_image_thumbnail(str(path), max_size=150)
+        # except Exception:
+        #     pm = None
+        # if pm is not None and not pm.isNull():
+        #     thumb.setPixmap(
+        #         pm.scaled(
+        #             thumb.size(),
+        #             Qt.AspectRatioMode.KeepAspectRatio,
+        #             Qt.TransformationMode.SmoothTransformation,
+        #         )
+        #     )
+        # else:
+        #     thumb.setText(path.suffix.upper().lstrip(".") or "FILE")
+        # 新: 主线程只查缓存(try_cached_image_data 永不全量解码); 未命中先放占位文字,
+        #     解码丢给 worker 线程, 结果经 QImage 回主线程再 make_pixmap。
+        self._fill_media_thumb(thumb, path)
         lay.addWidget(thumb)
         name = QLabel()
         name.setObjectName("MediaName")
@@ -4267,6 +4406,119 @@ class ProjectTreeView(BaseView):
         meta.setObjectName("MediaMeta")
         lay.addWidget(meta)
         return card
+
+    def _fill_media_thumb(self, thumb: QLabel, path: Path) -> None:
+        """影像预览缩略图: 缓存命中即同步上屏, 未命中异步解码(占位不变形)."""
+        from app.utils.image_thumbnail import try_cached_image_data
+
+        image = None
+        try:
+            image = try_cached_image_data(str(path), 150)
+        except Exception:
+            image = None
+        if image is not None and not image.isNull():
+            self._apply_media_thumb(thumb, image, path)
+            return
+        thumb.setText(path.suffix.upper().lstrip(".") or "FILE")
+        self._request_thumb_decode(
+            "media", str(path), 150, target=thumb, extra=self._media_gen,
+        )
+
+    def _apply_media_thumb(self, thumb: QLabel, image, path: Path) -> None:
+        from app.utils.image_thumbnail import make_pixmap
+
+        pm = make_pixmap(image)  # QPixmap 只能在主线程构造
+        try:
+            if pm is not None and not pm.isNull():
+                thumb.setPixmap(
+                    pm.scaled(
+                        thumb.size(),
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation,
+                    )
+                )
+                thumb.setText("")
+            else:
+                thumb.setText(path.suffix.upper().lstrip(".") or "FILE")
+        except RuntimeError:  # pragma: no cover - 卡片已被销毁
+            pass
+
+    # ── 缩略图解码 worker (GUI 线程零解码) ─────────────────────────────────────
+    def _ensure_thumb_worker(self) -> bool:
+        """懒起一条常驻解码线程; 只在真的需要解码时才创建。"""
+        if self._thumb_thread is not None:
+            return True
+        try:
+            from app.workers.thumbnail_worker import GridThumbnailWorker
+
+            thread = QThread()  # 不 parent 到 self: 避免父子销毁与 quit/wait 抢跑
+            worker = GridThumbnailWorker()
+            worker.moveToThread(thread)
+            worker.decoded.connect(self._on_thumb_decoded)  # 自动 → QueuedConnection
+            thread.start()
+        except Exception:  # pragma: no cover - 无 Qt 线程时降级为「不解码」
+            return False
+        self._thumb_thread = thread
+        self._thumb_worker = worker
+
+        thread_ref = thread
+
+        def _cleanup(*_a: object) -> None:
+            try:
+                thread_ref.quit()
+                thread_ref.wait(2000)
+            except Exception:
+                pass
+
+        self._thumb_cleanup_fn = _cleanup  # 强引用, 别让 GC 收走
+        try:
+            self.destroyed.connect(_cleanup)
+        except Exception:  # pragma: no cover
+            pass
+        return True
+
+    def _request_thumb_decode(
+        self,
+        kind: str,
+        path: str,
+        max_size: int,
+        *,
+        target=None,
+        extra=None,
+    ) -> None:
+        if not path or not self._ensure_thumb_worker():
+            return
+        self._thumb_req_counter += 1
+        req_id = self._thumb_req_counter
+        self._thumb_pending[req_id] = (kind, target, path, extra)
+        QMetaObject.invokeMethod(
+            self._thumb_worker,
+            "decode",
+            Qt.ConnectionType.QueuedConnection,
+            Q_ARG(int, req_id),
+            Q_ARG(str, path),
+            Q_ARG(int, max_size),
+        )
+
+    def _on_thumb_decoded(self, req_id: object, image: object) -> None:
+        """worker 回调 —— 队列连接, 跑在主线程。只有这里能碰 QPixmap/QWidget。"""
+        try:
+            key = int(req_id)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return
+        info = self._thumb_pending.pop(key, None)
+        if info is None:
+            return  # 过期(视图已重建/已切走)
+        kind, target, path, extra = info
+        if kind == "preview":
+            self._apply_preview_image(int(extra or 0), image)
+            return
+        if kind == "media":
+            if extra != self._media_gen:
+                return  # 已经切到别的节点, 丢弃
+            if target is None:
+                return
+            self._apply_media_thumb(target, image, Path(path))
 
     def _media_file_meta(self, path: Path) -> str:
         try:

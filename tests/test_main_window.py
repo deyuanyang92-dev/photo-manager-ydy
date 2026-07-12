@@ -234,8 +234,10 @@ def test_workspace_actions_are_integrated_into_breadcrumb(tmp_path):
     assert not hasattr(win, "_project_actions_btn")
     assert folder_btn.objectName() == "WorkspaceFolderButton"
     assert folder_btn.accessibleName() == "打开/新建工作区"
-    # §7 旧: ["新建工作区…", "打开文件夹…"] —— 现在多了一次建好「项目+采样点」的入口
-    assert actions == ["新建项目（含采样点）…", "新建单个工作区…", "打开文件夹…"]
+    # §7 旧: ["新建工作区…", "打开文件夹…"] —— 后来多了一次建好「项目+采样点」的入口
+    # §7 旧: ["新建项目（含采样点）…", ...] —— 2026-07-12 起「新建项目」只建一个空项目
+    #        目录(容器, 非工作区), 采样点在项目树里加, 故文案回落为「新建项目…」。
+    assert actions == ["新建项目…", "新建单个工作区…", "打开文件夹…"]
 
 
 def test_nav_pin_menu_toggles_topbar_segments():
@@ -266,6 +268,10 @@ def test_navigate_to_shows_page_and_activates():
 
 def test_context_bar_no_project():
     win = _fresh_window()
+    # 「完全没有项目」= 既没进工作区, 也没有项目根。开发机 QSettings 里可能残留
+    # project_tree_root(面包屑会据此显示「项目名（未选采样点）」, 见
+    # workspace_breadcrumb._project_root_only), 会污染这条纯空态断言 —— 显式清掉。
+    win.ctx.settings.project_tree_root = ""
     win.refresh_context_bar()
     assert "选择工作区" in win._project_switcher.text()
     assert win._project_switcher._btn_folder is None

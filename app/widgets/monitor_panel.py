@@ -28,11 +28,23 @@ Badge palette (mirrors web styles.css):
 """
 from __future__ import annotations
 
+import atexit
 from collections import OrderedDict, deque
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Optional
 
-from PyQt6.QtCore import Qt, QEvent, QMimeData, QSize, QTimer, QUrl, pyqtSignal
+from PyQt6.QtCore import (
+    Q_ARG,
+    Qt,
+    QEvent,
+    QMetaObject,
+    QMimeData,
+    QSize,
+    QTimer,
+    QUrl,
+    pyqtSignal,
+    pyqtSlot,
+)
 from PyQt6.QtGui import QDrag, QKeySequence, QPixmap, QShortcut
 from PyQt6.QtWidgets import (
     QApplication,
@@ -55,7 +67,8 @@ from app.config import icons
 from app.config.theme import TOKENS
 from app.services import grouping_service, activation_service
 from app.services.photo_import_service import is_media_path
-from app.utils.image_thumbnail import decode_image_thumbnail
+from app.utils.image_thumbnail import decode_image_thumbnail, make_pixmap
+from app.workers.thumbnail_worker import GridThumbnailWorker
 
 if TYPE_CHECKING:
     from app.app_context import AppContext
@@ -86,6 +99,12 @@ _FILE_THUMB_CACHE_LIMIT = 512
 _FILE_THUMB_CACHE: "OrderedDict[tuple[str, int, int], Optional[QPixmap]]" = OrderedDict()
 _FILE_THUMB_ICON_CACHE: dict[str, QPixmap] = {}
 
+# 共享缩略图解码线程(全进程 1 条, 见 _thumb_worker_singleton)。模块级强引用 ⇒
+# 永不被 GC ⇒ 不会出现「QThread 仍在运行就被析构」的 abort。
+_THUMB_THREAD = None            # QThread | None
+_THUMB_WORKER = None            # GridThumbnailWorker | None
+_THUMB_REQ_SEQ: int = 0         # 全局请求号(跨面板唯一)
+
 
 def clear_file_thumb_cache() -> None:
     """Drop monitor-panel QPixmap thumbnails (e.g. when leaving workbench)."""
@@ -106,18 +125,52 @@ def _file_thumb_cache_key(path: str) -> tuple[str, int, int] | None:
         return None
 
 
-def _file_thumb_pixmap(path: str) -> Optional[QPixmap]:
+def _file_thumb_cache_get(path: str) -> tuple[bool, Optional[QPixmap]]:
+    """内存缓存**只读**查询(主线程): 返回 (是否命中, 图)。命中 None = 负缓存。
+
+    命中即零解码 —— MonitorPanel 的派发路径靠它决定「直接贴图」还是「丢给
+    worker 线程解码」, 主线程永远不碰解码器。
+    """
     key = _file_thumb_cache_key(path)
     if key is not None and key in _FILE_THUMB_CACHE:
         _FILE_THUMB_CACHE.move_to_end(key)
-        return _FILE_THUMB_CACHE[key]
+        return True, _FILE_THUMB_CACHE[key]
+    return False, None
 
-    pm = decode_image_thumbnail(path, _FILE_THUMB_DECODE_SIZE, use_cache=False)
-    if key is not None:
-        _FILE_THUMB_CACHE[key] = pm
-        _FILE_THUMB_CACHE.move_to_end(key)
-        while len(_FILE_THUMB_CACHE) > _file_thumb_cache_limit():
-            _FILE_THUMB_CACHE.popitem(last=False)
+
+def _file_thumb_cache_put(path: str, pm: Optional[QPixmap]) -> None:
+    """把 worker 解出来的图(或 None 负缓存)写进内存缓存。
+
+    线程红线: `_FILE_THUMB_CACHE` 是**无锁** OrderedDict, 且存 QPixmap ——
+    只能在主线程(decoded 槽)里写, worker 线程绝不可碰。
+    """
+    key = _file_thumb_cache_key(path)
+    if key is None:
+        return
+    _FILE_THUMB_CACHE[key] = pm
+    _FILE_THUMB_CACHE.move_to_end(key)
+    while len(_FILE_THUMB_CACHE) > _file_thumb_cache_limit():
+        _FILE_THUMB_CACHE.popitem(last=False)
+
+
+def _file_thumb_pixmap(path: str) -> Optional[QPixmap]:
+    """取缩略图。**命中缓存时零解码**; 未命中才走同步解码。
+
+    调用者注意: MonitorPanel 的待处理流(_dispatch_thumbnail → worker 线程)会先
+    把结果写进 _FILE_THUMB_CACHE 再让卡片贴图, 所以那条路径上这里恒为缓存命中,
+    不会在 GUI 线程解码。仅「非 defer 的独立卡片」(_FileCard(defer_thumbnail=False))
+    仍走同步解码 —— 那是单张、调用方自愿的路径。
+    """
+    hit, cached = _file_thumb_cache_get(path)
+    if hit:
+        return cached
+
+    # §7 旧: pm = decode_image_thumbnail(path, _FILE_THUMB_DECODE_SIZE, use_cache=False)
+    #   use_cache=False ⇒ thumbnail_disk_cache 既不读也不写 ⇒ 每次启动/每次重建都
+    #   全量重解码(24MP JPEG 40–100ms, 无 720px 代理的新 TIFF 0.5–5s)。
+    #   改为默认 use_cache=True: 磁盘缩略图缓存对 JPG/TIFF 真正生效, 跨启动复用。
+    pm = decode_image_thumbnail(path, _FILE_THUMB_DECODE_SIZE)
+    _file_thumb_cache_put(path, pm)
     return pm
 
 
@@ -598,9 +651,21 @@ class MonitorPanel(QWidget):
         self._last_scan_sig = None  # change-detection: skip rebuild when unchanged
         self._cards: list[_FileCard] = []  # all current cards (for selection ops)
         self._thumb_queue: deque[_FileCard] = deque()
+        # 16ms 定时器保留, 但**只做派发节流**(见 _load_next_thumbnail_batch):
+        # 每跳最多 post N 个 decode 请求到 worker 线程, 主线程零解码。
+        # QTimer 红线: start()/stop() 只能在本(主)线程调用, 绝不可进 worker。
         self._thumb_timer = QTimer(self)
         self._thumb_timer.setInterval(16)
         self._thumb_timer.timeout.connect(self._load_next_thumbnail_batch)
+
+        # ── 缩略图解码 worker(P0: 原来 4 张/16ms 全量解码钉死主线程) ──────────
+        # request_id -> path。decoded 回包在 _thumb_pending 里查不到 = 陈旧, 丢弃
+        # (也包含**别的面板**的回包 —— 解码线程全进程共享, 见 _thumb_worker_singleton;
+        #  req_id 是全局序号, 所以两个面板不会张冠李戴)。
+        self._thumb_pending: dict[int, str] = {}
+        self._thumb_pending_paths: set[str] = set()  # 同路径去重, 不重复派发
+        self._thumb_worker: Optional[GridThumbnailWorker] = None  # 首次派发时接线
+
         # Incremental rebuild: reuse card widgets across scans keyed by file
         # path, so a single new photo builds one card instead of rebuilding all.
         self._card_by_key: dict[str, _FileCard] = {}
@@ -1459,21 +1524,120 @@ class MonitorPanel(QWidget):
         if not self._thumb_timer.isActive():
             self._thumb_timer.start()
 
+    # §7 旧实现(P0 卡顿根因, 保留备查):
+    #   def _load_next_thumbnail_batch(self) -> None:
+    #       from app.config.memory_profile import MONITOR_THUMB_BATCH_SIZE
+    #
+    #       loaded = 0
+    #       batch = max(1, int(MONITOR_THUMB_BATCH_SIZE))
+    #       while self._thumb_queue and loaded < batch:
+    #           card = self._thumb_queue.popleft()
+    #           try:
+    #               if card.parent() is not None:
+    #                   card.load_thumbnail_now()   # ← GUI 主线程全量解码 JPG/TIFF
+    #                   loaded += 1
+    #           except RuntimeError:
+    #               continue
+    #       if not self._thumb_queue:
+    #           self._thumb_timer.stop()
+    #   每 16ms 同步解 4 张: 24MP JPEG 40–100ms/张、无代理的新 TIFF 0.5–5s/张
+    #   ⇒ 每跳阻塞主线程 160–400ms+, 连拍/合成后主界面直接"未响应"。
     def _load_next_thumbnail_batch(self) -> None:
+        """定时器槽(主线程): 只**派发**解码请求, 自己绝不解码。
+
+        每跳最多派发 MONITOR_THUMB_BATCH_SIZE 个请求(节流, 避免一次 post 上千条
+        跨线程事件); 缓存命中的卡片直接贴图(零解码), 不计入配额。
+        """
         from app.config.memory_profile import MONITOR_THUMB_BATCH_SIZE
 
-        loaded = 0
+        dispatched = 0
         batch = max(1, int(MONITOR_THUMB_BATCH_SIZE))
-        while self._thumb_queue and loaded < batch:
+        while self._thumb_queue and dispatched < batch:
             card = self._thumb_queue.popleft()
             try:
-                if card.parent() is not None:
-                    card.load_thumbnail_now()
-                    loaded += 1
+                if card.parent() is None:
+                    continue  # 卡片已被回收
+                if self._dispatch_thumbnail(card):
+                    dispatched += 1
             except RuntimeError:
-                continue
+                continue  # 底层 C++ 对象已析构
         if not self._thumb_queue:
             self._thumb_timer.stop()
+
+    def _ensure_thumb_worker(self) -> Optional[GridThumbnailWorker]:
+        """接上共享解码线程(懒接线, 主线程)。
+
+        decoded 用 AutoConnection ⇒ 跨线程即 QueuedConnection ⇒ 槽回主线程跑。
+        接收者是本 QObject, 面板析构时 Qt 自动断开, 无需手动 disconnect。
+        """
+        if self._thumb_worker is not None:
+            return self._thumb_worker
+        worker = _thumb_worker_singleton()
+        if worker is None:
+            return None
+        worker.decoded.connect(self._on_thumb_decoded)
+        self._thumb_worker = worker
+        return worker
+
+    def _dispatch_thumbnail(self, card: "_FileCard") -> bool:
+        """把一张卡片的缩略图丢给 worker 线程解码。返回是否真的派发了一次解码。"""
+        path = str(getattr(getattr(card, "_entry", None), "path", "") or "")
+        kind = getattr(card, "_thumbnail_kind", "jpg")
+        if not path or kind not in {"jpg", "tiff"}:
+            card.load_thumbnail_now()  # 非图片: 直接落到占位图标, 不解码
+            return False
+
+        hit, _pm = _file_thumb_cache_get(path)
+        if hit:
+            # 内存缓存命中(含负缓存): load_thumbnail_now 内部走缓存, 零解码。
+            card.load_thumbnail_now()
+            return False
+
+        if path in self._thumb_pending_paths:
+            return False  # 同一路径已在解码中(卡片按 path 唯一, 回包会找当前卡片)
+
+        worker = self._ensure_thumb_worker()
+        if worker is None:
+            return False  # 无 QApplication(纯逻辑测试): 保持占位图, 不解码
+
+        req_id = _next_thumb_req_id()
+        self._thumb_pending[req_id] = path
+        self._thumb_pending_paths.add(path)
+        QMetaObject.invokeMethod(
+            worker,
+            "decode",
+            Qt.ConnectionType.QueuedConnection,
+            Q_ARG(int, req_id),
+            Q_ARG(str, path),
+            Q_ARG(int, _FILE_THUMB_DECODE_SIZE),
+        )
+        return True
+
+    @pyqtSlot(object, object)
+    def _on_thumb_decoded(self, req_id: object, image: object) -> None:
+        """worker 解码完成(队列连接 ⇒ 本槽在主线程)。QPixmap 只能在这里造。"""
+        try:
+            key_id = int(req_id)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return
+        path = self._thumb_pending.pop(key_id, None)
+        if path is None:
+            return  # 陈旧回包(网格已清空/重建)
+        self._thumb_pending_paths.discard(path)
+
+        # QImage → QPixmap 只在主线程做(thumbnail_worker.py 红线)。
+        pm = make_pixmap(image)  # type: ignore[arg-type]
+        # 写内存缓存(含 None 负缓存, 键含 mtime/size ⇒ 文件改动自动失效)。
+        _file_thumb_cache_put(path, pm)
+
+        card = self._card_by_key.get(path)
+        if card is None:
+            return  # 文件已消失 / 卡片已重建, 结果留在缓存里给下次用
+        try:
+            # 缓存已就绪 ⇒ 这里恒命中, 不会触发 GUI 线程解码。
+            card.load_thumbnail_now()
+        except RuntimeError:
+            pass
 
     def _sync_cards(self, all_files: list) -> None:
         """Reconcile the card grid with *all_files*, reusing widgets.
@@ -1497,9 +1661,10 @@ class MonitorPanel(QWidget):
                     self._card_sig_by_key.pop(key, None)
                     dispose_widget(card)
 
-            # Detach all remaining cards from the grid (reposition without delete).
-            while self._grid.count():
-                self._grid.takeAt(0)
+            # §7 旧: 这里先 takeAt 清空一遍网格, 末尾的 _layout_cards 又清一遍 ——
+            # 重复劳动(量级小, 非卡顿主因), 收敛为只由 _layout_cards 负责。
+            # while self._grid.count():
+            #     self._grid.takeAt(0)
 
             self._cards = []
             for idx, f in enumerate(all_files):
@@ -1550,7 +1715,11 @@ class MonitorPanel(QWidget):
 
     def _clear_grid(self) -> None:
         self._thumb_queue.clear()
-        self._thumb_timer.stop()
+        self._thumb_timer.stop()  # QTimer 只在主线程 stop —— 本方法恒在主线程
+        # 在途的 decode 回包全部作废(卡片马上就没了)。worker 仍会把结果发回来,
+        # 但 _on_thumb_decoded 在 _thumb_pending 里查不到 req_id ⇒ 直接丢弃。
+        self._thumb_pending.clear()
+        self._thumb_pending_paths.clear()
         while self._grid.count():
             item = self._grid.takeAt(0)
             if item and item.widget():
@@ -2059,6 +2228,69 @@ class MonitorPanel(QWidget):
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _new_qthread():
+    """QThread 工厂(与 uid_grouped_grid 同款): 留一个测试可 patch 的接缝。"""
+    from PyQt6.QtCore import QThread
+
+    return QThread()
+
+
+def shutdown_thumbnail_worker() -> None:
+    """停掉共享解码线程(主线程调用)。幂等; atexit / aboutToQuit 都会走到。"""
+    global _THUMB_THREAD, _THUMB_WORKER
+    thread, _THUMB_THREAD = _THUMB_THREAD, None
+    _THUMB_WORKER = None
+    if thread is None:
+        return
+    try:
+        thread.quit()
+        thread.wait(2000)
+    except (RuntimeError, Exception):  # C++ 对象可能已随 QApplication 析构
+        pass
+
+
+def _thumb_worker_singleton() -> Optional[GridThumbnailWorker]:
+    """全进程**共享**一条缩略图解码线程(必须在主线程调用)。
+
+    为什么是单例而不是每个面板一条:
+      QThread 若被某个 widget 持有, 那么当该 widget 只被 Python GC 回收(而不是走
+      Qt 的 destroyed 析构链)时, QThread 会在**仍在运行**时被析构 —— Qt 直接
+      qFatal("QThread: Destroyed while thread is still running") ⇒ 整个进程 abort。
+      test_workbench_view 会造出成百个 WorkbenchView(各带一个 MonitorPanel)并让
+      GC 回收它们, 实测就是在 GC 里 abort 的。改成模块级单例后: 线程被模块全局变量
+      强引用, 永不被 GC; 全进程恒定 1 条解码线程, 与面板数量无关。
+    实际运行时本来也只有一个 MonitorPanel, 共享线程不损失并发。
+    """
+    global _THUMB_THREAD, _THUMB_WORKER
+    if _THUMB_WORKER is not None:
+        return _THUMB_WORKER
+    app = QApplication.instance()
+    if app is None:
+        return None  # 没有 QApplication 就没有事件循环, 不起线程
+
+    thread = _new_qthread()
+    worker = GridThumbnailWorker()
+    worker.moveToThread(thread)
+    thread.start()
+    _THUMB_THREAD, _THUMB_WORKER = thread, worker
+    try:
+        app.aboutToQuit.connect(shutdown_thumbnail_worker)
+    except Exception:
+        pass
+    return worker
+
+
+def _next_thumb_req_id() -> int:
+    """全局请求号: 共享 worker 的回包要能被**唯一**一个面板认领。"""
+    global _THUMB_REQ_SEQ
+    _THUMB_REQ_SEQ += 1
+    return _THUMB_REQ_SEQ
+
+
+# 解释器退出前先收线程: 否则模块全局被清空时 QThread 可能"仍在运行就被析构" ⇒ abort。
+atexit.register(shutdown_thumbnail_worker)
+
 
 def _divider() -> QFrame:
     line = QFrame()

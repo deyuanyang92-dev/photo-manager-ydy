@@ -673,6 +673,10 @@ class WorkbenchView(WorkbenchSpecimenIdentityMixin, WorkbenchMediaWorkflowMixin,
 
         # Track current UID for grouping edits
         self._current_uid: Optional[str] = None
+        # 侧栏「渲染指纹」: on_activate 时先算一个廉价指纹, 与上次渲染成功的指纹
+        # 相同 ⇒ 跳过 _sidebar.refresh() 的全量 row widget 重建(N=300 时 ~370ms,
+        # N=1000 时 ~1.9s, 每次切页都白付)。范式同 monitor_panel._scan_signature。
+        self._sidebar_sig = None
         # 侧栏是否处于「多选编号」范围(决定退出多选时是否恢复当前编号视图)
         self._multi_scope_active: bool = False
         self._pending_grouping = None  # SpecimenGrouping awaiting save

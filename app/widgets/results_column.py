@@ -7,11 +7,20 @@ monkeypatch points used by tests.
 from __future__ import annotations
 
 import os
-from collections import deque
+from collections import OrderedDict, deque
 from pathlib import Path
 from typing import Optional
 
-from PyQt6.QtCore import QEvent, QPoint, QSettings, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import (
+    Q_ARG,
+    QEvent,
+    QMetaObject,
+    QPoint,
+    QSettings,
+    Qt,
+    QTimer,
+    pyqtSignal,
+)
 from PyQt6.QtGui import QKeySequence, QPixmap, QShortcut
 from PyQt6.QtWidgets import (
     QFrame,
@@ -51,6 +60,31 @@ from app.widgets.results_column_lightbox import (
     _decode_preview_pixmap,
 )
 
+
+def _new_thumb_qthread():
+    """Indirection so tests can patch the QThread factory if needed.
+
+    Mirrors ``uid_grouped_grid._new_qthread`` (same async-decode pattern).
+    """
+    from PyQt6.QtCore import QThread
+
+    return QThread()
+
+
+def _thumb_cache_limit() -> int:
+    """Read the ceiling at call time — memory_profile mutates it at startup."""
+    from app.config import memory_profile
+
+    return max(16, int(memory_profile.MONITOR_THUMB_CACHE_LIMIT))
+
+
+def _thumb_dispatch_batch() -> int:
+    """How many queued cards get dispatched per 20 ms tick (perf mode → 1)."""
+    from app.config import memory_profile
+
+    return max(1, int(memory_profile.MONITOR_THUMB_BATCH_SIZE))
+
+
 class ResultsColumn(QWidget):
     """② 成果内容 column: collapsible, zoomable, paired TIFF↔ZIP rows."""
 
@@ -75,11 +109,28 @@ class ResultsColumn(QWidget):
         self._view_mode_qs_key = "ui/results_view_mode"
         saved = str(QSettings().value(self._view_mode_qs_key, "large_thumbnail") or "")
         self._result_view_mode = saved if saved in {"list", "large_thumbnail"} else "large_thumbnail"
-        self._thumb_cache: dict = {}
+        # §7 旧: self._thumb_cache: dict = {}
+        #   —— 无上限、无 LRU 的 path → QPixmap 字典, 只在 _clear_rows... 其实
+        #   连 _clear_rows 都不清, 成果多的工作区进去内存直接爆。改有界 LRU。
+        self._thumb_cache: "OrderedDict[str, QPixmap]" = OrderedDict()
+        # 解码失败的路径(负缓存): 不再反复投递解码请求。
+        self._failed_thumb_paths: set[str] = set()
         self._thumb_queue: deque[_ResultCardBase] = deque()
         self._thumb_timer = QTimer(self)
         self._thumb_timer.setInterval(20)
+        # §7 旧: timeout → 主线程每 20ms 解码 2 张(TIFF 母图, 单张几十~几百 ms,
+        #   最坏落到 12s 的 ImageMagick 子进程) —— 就是「点了没反应」的根因。
+        #   现在 _load_next_thumbnail_batch 只做「查缓存 / 投递解码请求」, 真正
+        #   的解码在 GridThumbnailWorker 线程上跑, 回主线程只做 QImage→QPixmap。
         self._thumb_timer.timeout.connect(self._load_next_thumbnail_batch)
+        # 异步解码线程(懒启动: 第一次真的需要解码时才建, 见 _ensure_thumb_worker)
+        self._thumb_thread = None
+        self._thumb_worker = None
+        self._thumb_cleanup_fn = None
+        self._thumb_req_counter = 0
+        # request_id → (card, path); _clear_rows 会整体丢弃 → 迟到的回包即陈旧
+        self._pending_thumbs: dict[int, tuple] = {}
+        self._pending_thumb_paths: set[str] = set()
         self._layout_refresh_timer = QTimer(self)
         self._layout_refresh_timer.setSingleShot(True)
         self._layout_refresh_timer.setInterval(60)

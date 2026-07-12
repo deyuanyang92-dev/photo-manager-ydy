@@ -351,11 +351,42 @@ def _ensure_main_window_visible(win, app, target) -> None:
         pass
 
 
-def _install_exception_hook(win) -> None:
-    """Route uncaught Qt-slot errors to both stderr and a copyable dialog."""
+def _is_main_qt_thread() -> bool:
+    """True only when the caller runs on the GUI (QApplication) thread.
+
+    Constructing/exec()ing a QWidget outside the GUI thread is undefined
+    behaviour in Qt: the box is parented across threads
+    ("QObject::setParent: Cannot set parent, new parent is in a different
+    thread"), its exec() drives the *whole* widget stack from the worker
+    thread ("QBasicTimer::start: Timers cannot be started from another
+    thread" ×N, "QWidget::repaint: Recursive repaint detected") and the real
+    GUI loop starves → the window goes "未响应".
+    """
+    try:
+        from PyQt6.QtCore import QCoreApplication, QThread
+    except ImportError:  # PyQt6 absent (library import path) — nothing to guard
+        return True
+    qapp = QCoreApplication.instance()
+    if qapp is None:
+        return False
+    return QThread.currentThread() is qapp.thread()
+
+
+def _install_exception_hook(win):
+    """Route uncaught Qt-slot errors to both stderr and a copyable dialog.
+
+    The dialog is ALWAYS built on the GUI thread: uncaught exceptions escaping a
+    ``QThread.run()`` (e.g. collab_net's uvicorn config) reach ``sys.excepthook``
+    *on that worker thread*, so the hook may not touch any QWidget directly.
+    Worker threads only ``emit`` — the signal is delivered to ``_ErrorReporter``
+    (main-thread affinity) as a QueuedConnection, and the QMessageBox is created
+    there.
+    """
     import traceback
 
     old_hook = sys.excepthook
+    reporter = _ErrorReporter(win) if _ErrorReporter is not None else None
+    globals()["_ERROR_REPORTER"] = reporter  # keep a strong ref (also parented to win)
 
     def _hook(exc_type, exc, tb):
         old_hook(exc_type, exc, tb)
@@ -370,23 +401,54 @@ def _install_exception_hook(win) -> None:
             pass
         if _HEADLESS_SMOKE or os.environ.get("QT_QPA_PLATFORM") == "offscreen":
             return
-        try:
-            from app.utils import ui
-            ui.critical(
-                win,
-                "程序遇到错误",
-                str(exc) or exc_type.__name__,
-                informative_text=(
-                    "操作没有按预期完成，错误已写入日志。\n"
-                    f"日志文件：{diagnostics.log_path()}\n"
-                    "展开详细信息或点击“复制详情”可复制给维护者排查。"
-                ),
-                detailed_text=detail,
-            )
-        except Exception:  # noqa: BLE001
-            pass
+        text = str(exc) or exc_type.__name__
+        # §7 旧实现（无线程闸门，任何线程都直接构造 QMessageBox）保留备查：
+        # try:
+        #     from app.utils import ui
+        #     ui.critical(
+        #         win,
+        #         "程序遇到错误",
+        #         str(exc) or exc_type.__name__,
+        #         informative_text=(
+        #             "操作没有按预期完成，错误已写入日志。\n"
+        #             f"日志文件：{diagnostics.log_path()}\n"
+        #             "展开详细信息或点击“复制详情”可复制给维护者排查。"
+        #         ),
+        #         detailed_text=detail,
+        #     )
+        # except Exception:  # noqa: BLE001
+        #     pass
+        if not _is_main_qt_thread():
+            # 非 GUI 线程：绝不构造/exec 任何 QWidget，只把内容甩回主线程。
+            if reporter is not None:
+                try:
+                    reporter.error.emit(text, detail)
+                except Exception:  # noqa: BLE001
+                    pass
+            return
+        _show_error_dialog(win, text, detail)
 
     sys.excepthook = _hook
+    return reporter
+
+
+def _show_error_dialog(win, text: str, detail: str) -> None:
+    """Build + exec the error QMessageBox. GUI-thread only (callers must check)."""
+    try:
+        from app.utils import ui
+        ui.critical(
+            win,
+            "程序遇到错误",
+            text,
+            informative_text=(
+                "操作没有按预期完成，错误已写入日志。\n"
+                f"日志文件：{diagnostics.log_path()}\n"
+                "展开详细信息或点击“复制详情”可复制给维护者排查。"
+            ),
+            detailed_text=detail,
+        )
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _install_qt_message_handler(installer=None) -> None:
@@ -485,7 +547,7 @@ def _bootstrap_cli_runtime() -> None:
 # Qt / app imports: allow ``from main import _choose_startup_screen`` without
 # forcing a process exit when PyQt6 is absent (CLI path re-checks below).
 try:
-    from PyQt6.QtCore import QTimer
+    from PyQt6.QtCore import QObject, QTimer, pyqtSignal, pyqtSlot
     from PyQt6.QtWidgets import QApplication
 
     from app.app_context import AppContext
@@ -497,7 +559,10 @@ try:
 
     _QT_IMPORT_ERROR: BaseException | None = None
 except ImportError as _qt_exc:  # noqa: BLE001 — soft-fail for library import
+    QObject = None  # type: ignore[misc, assignment]
     QTimer = None  # type: ignore[misc, assignment]
+    pyqtSignal = None  # type: ignore[misc, assignment]
+    pyqtSlot = None  # type: ignore[misc, assignment]
     QApplication = None  # type: ignore[misc, assignment]
     AppContext = None  # type: ignore[misc, assignment]
     AppSettings = None  # type: ignore[misc, assignment]
@@ -509,6 +574,33 @@ except ImportError as _qt_exc:  # noqa: BLE001 — soft-fail for library import
     diagnostics = None  # type: ignore[misc, assignment]
     ALL_VIEW_SPECS = ()  # type: ignore[misc, assignment]
     _QT_IMPORT_ERROR = _qt_exc
+
+
+# ── 跨线程错误上报 ────────────────────────────────────────────────────────
+# 唯一 100% 安全的跨线程弹窗姿势：主线程 QObject + pyqtSignal。signal 可以从任意
+# 线程 emit，AutoConnection 会自动排队(QueuedConnection)到接收者所属线程执行槽。
+# 不用 QTimer.singleShot 兜底：Qt6 的 QSingleShotTimer 在非 GUI 线程构造时仍可能
+# 在错误线程上 startTimer，复现同类 QBasicTimer 警告(❓未实测，不值得赌)。
+_ERROR_REPORTER = None
+
+if QObject is not None:
+
+    class _ErrorReporter(QObject):
+        """Marshals worker-thread error reports onto the GUI thread."""
+
+        error = pyqtSignal(str, str)  # text, detail
+
+        def __init__(self, win):
+            super().__init__(win)  # 父=MainWindow → affinity 主线程
+            self._win = win
+            self.error.connect(self._show)  # 跨线程 emit ⇒ QueuedConnection
+
+        @pyqtSlot(str, str)
+        def _show(self, text: str, detail: str) -> None:
+            _show_error_dialog(self._win, text, detail)
+
+else:  # PyQt6 absent — importing main as a library must still work
+    _ErrorReporter = None  # type: ignore[assignment]
 
 
 def _acquire_single_instance_lock() -> bool:

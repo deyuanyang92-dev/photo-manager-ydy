@@ -1,12 +1,21 @@
 """survey_overview_panel.py — 项目树右栏「调查概览」(系统汇总).
 
 默认只显示 KPI 数字; 地图 / 分布 / 物种名录点击展开, 避免右栏信息堆砌。
+
+线程模型 (v0.60 卡顿修复):
+    ``aggregate_survey_overview`` 会逐库全表 SELECT specimens、再扫一遍物种名录、
+    再对每个 workspace 的 results/ 做 iterdir + stat —— 20 断面 × 800 编号在网络盘/
+    drvfs 上要数十秒。它过去跑在 **Qt 主线程**(每次进页 + 每次点选断面都跑) →
+    Windows 直接判「未响应」。现在整段聚合搬进 ``_SurveyOverviewWorker(QThread)``,
+    worker 只 emit 纯 python dict/list, 填控件一律回主线程槽 (AutoConnection ⇒
+    队列投递)。token 防过期 + 退休名单的处置照抄 ``project_tree_view`` 里已验证的
+    ``SummaryQueryWorker`` 模式, 防止「视图销毁连带销毁运行中线程 → 原生 abort」。
 """
 from __future__ import annotations
 
 from typing import Any, Optional
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -19,8 +28,76 @@ from PyQt6.QtWidgets import (
 )
 
 from app.services.survey_overview_service import aggregate_survey_overview
+from app.services.taxon_inventory_service import aggregate_taxon_inventory
 from app.widgets.survey_overview_mini_map import SurveyOverviewMiniMap
 from app.widgets.survey_summary_panel import SurveySummaryPanel
+
+# 仍在跑的聚合线程: 模块级强引用, 保证 QThread 对象不会在运行中被 GC/析构
+# (destroy-while-running 会 abort 整个进程 —— 与 _RETIRED_WARMUP_WORKERS 同因)。
+# worker 一律 **不挂 Qt 父对象**: 本面板是 QStackedWidget 的子控件, 没有 closeEvent
+# 兜底, 挂父后随父析构就是 abort 现场。
+_LIVE_OVERVIEW_WORKERS: list = []
+
+
+def _reap_overview_workers() -> None:
+    """收割已结束的聚合线程; 仍在跑的继续持有引用。"""
+    still: list = []
+    for w in _LIVE_OVERVIEW_WORKERS:
+        try:
+            if w.isRunning():
+                still.append(w)
+        except Exception:  # pragma: no cover - 判定失败的对象直接丢弃
+            pass
+    _LIVE_OVERVIEW_WORKERS[:] = still
+
+
+class _SurveyOverviewWorker(QThread):
+    """跨 workspace 概览聚合 + 物种名录聚合 (全部只读 sqlite / 文件 stat)。
+
+    run() 里只碰纯 python 数据: **禁止**构造任何 QWidget / QPixmap / QTimer。
+    结果经 signal 回主线程再填控件。
+    """
+
+    finished_result = pyqtSignal(object, object)  # (overview: dict|None, inventory: list)
+    failed = pyqtSignal(str)
+
+    def __init__(
+        self,
+        workspaces: list[str],
+        label_list: Optional[list[str]],
+        *,
+        with_overview: bool = True,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self._workspaces = list(workspaces or [])
+        self._label_list = list(label_list) if label_list else None
+        self._with_overview = bool(with_overview)
+        self._cancel_requested = False
+
+    def cancel(self) -> None:
+        self._cancel_requested = True
+
+    def run(self) -> None:  # noqa: D401 - Qt override
+        try:
+            overview = None
+            if self._with_overview:
+                # 模块级名字, 保证测试的 monkeypatch 生效。
+                overview = aggregate_survey_overview(
+                    self._workspaces, labels=self._label_list
+                )
+            if self._cancel_requested:
+                return
+            inventory = aggregate_taxon_inventory(
+                self._workspaces, labels=self._label_list
+            )
+        except Exception as exc:  # 坏库/锁库也要给反馈, 不能静默假死
+            if not self._cancel_requested:
+                self.failed.emit(str(exc))
+            return
+        if self._cancel_requested:
+            return
+        self.finished_result.emit(overview, list(inventory or []))
 
 
 class _StatCard(QFrame):

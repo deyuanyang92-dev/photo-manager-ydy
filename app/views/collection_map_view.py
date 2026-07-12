@@ -14,6 +14,7 @@
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
@@ -80,6 +81,22 @@ def _theme():
 def _user_projects_json() -> Path:
     """data/user_projects.json（同 overview_view 的解析）。"""
     return Path(__file__).resolve().parents[2] / "data" / "user_projects.json"
+
+
+def _has_collection_records(db) -> bool:
+    """该库是否已有 collection_records 表。
+
+    跨项目读用的私有连接是 ensure=False（纯读、不建表），老库里这张表可能还不
+    存在。旧路径靠 ensure_schema 现场建一张空表——聚合结果同样是 0 个点，所以
+    这里直接跳过该库，输出等价，但不再对别人的库写字节。
+    """
+    try:
+        row = db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='collection_records'"
+        ).fetchone()
+        return row is not None
+    except Exception:
+        return False
 
 
 class CollectionMapView(BaseView):
@@ -717,9 +734,17 @@ class CollectionMapView(BaseView):
 
     def on_activate(self) -> None:
         self._apply_style()
-        self._populate_projects()
-        self._load_marker_style()
-        self._reload_collection_map_points()
+        # §7 旧实现：三个调用各自把「所有已知项目」的库用 ctx.get_db 打开一轮
+        # （缓存连接 + 首开 ensure_schema 写盘），N 个项目 = N 次 ensure + N+1 次
+        # 跨库聚合，全在主线程上 → 每次进采集地图页都冻几百毫秒到数秒。
+        # self._populate_projects()
+        # self._load_marker_style()
+        # self._reload_collection_map_points()
+        # 新实现：一轮私有只读连接，徽章计数与地图点复用同一批 conn，随后 close。
+        with self._project_dbs([d for _n, d in self._known_projects()]) as conns:
+            self._populate_projects(counts=self._station_counts(conns))
+            self._load_marker_style()
+            self._reload_collection_map_points(conns=conns)
         self._update_edit_buttons()
         self._sync_zoom_slider()
         self._position_zoom_panel()
@@ -766,19 +791,103 @@ class CollectionMapView(BaseView):
             out.append((Path(cur).name, cur))
         return out
 
-    def _station_count(self, directory) -> Optional[int]:
-        """该项目（或全部）的站位数；用于项目行徽章。出错则 None。"""
-        try:
-            if directory:
-                db = self.ctx.get_db(directory)
-                return len(crs.map_points(db, "station")) if db is not None else None
-            dbs = [self.ctx.get_db(d) for _n, d in self._known_projects()]
-            dbs = [d for d in dbs if d is not None]
-            return len(crs.map_points_across(dbs, "station")) if dbs else 0
-        except Exception:
-            return None
+    # ── 跨项目只读连接（性能 + 锁泄漏红线）───────────────────────────────────────
+    # §7 旧实现：跨项目一律走 self.ctx.get_db(dir) → db_manager.open_project_db()
+    #   → 进 _db_cache（连接永不释放，Windows 上该工作区目录随后无法移动/删除，
+    #     违反 CLAUDE.md「Cross-workspace sweeps never use the cached connection」）
+    #   → 首次打开还跑 ensure_schema()（executescript(schema.sql) + 内存库物化列 diff
+    #     + 迁移 + DROP/CREATE darwin_core VIEW + commit），drvfs 上每库几十毫秒的写。
+    # 新实现：跨项目一律 open_project_db_private(create=False, ensure=False)
+    #   —— 纯读、不建表、不缓存 —— 用完在 finally 里 close()。
+    #   只有「当前项目自身」（标识样式读写）仍用 ctx.get_db()。
+    def _open_project_readonly(self, directory) -> tuple:
+        """打开 *directory* 的项目库供只读聚合。
 
-    def _populate_projects(self) -> None:
+        返回 ``(conn, owned)``；``owned=True`` 表示这是本方法新开的私有连接，
+        调用方必须 close()。失败返回 ``(None, False)``。
+
+        私有打开失败（库不存在 / 盘未挂载 / 测试注入的内存库上下文）时**回退**到
+        旧路径 ctx.get_db(dir)——此时它要么快速抛「工作区不可用」返回 None，要么
+        返回已缓存的当前项目连接（不归本方法所有，绝不 close）。
+        """
+        if not directory:
+            return (None, False)
+        try:
+            from app.db.db_manager import open_project_db_private
+            db = open_project_db_private(str(directory), create=False, ensure=False)
+        except Exception:
+            db = None
+        if db is not None:
+            if not _has_collection_records(db):
+                try:
+                    db.close()
+                except Exception:
+                    pass
+                return (None, False)
+            return (db, True)
+        try:
+            return (self.ctx.get_db(directory), False)
+        except Exception:
+            return (None, False)
+
+    @contextmanager
+    def _project_dbs(self, dirs):
+        """一次性打开一批项目库（只读），yield ``[(directory, conn), ...]``。
+
+        退出时只 close 本上下文自己开的私有连接；回退拿到的缓存连接不动。
+        """
+        opened: list[tuple] = []      # [(dir, conn, owned)]
+        try:
+            for d in dirs:
+                conn, owned = self._open_project_readonly(d)
+                if conn is not None:
+                    opened.append((d, conn, owned))
+            yield [(d, c) for d, c, _o in opened]
+        finally:
+            for _d, c, owned in opened:
+                if not owned:
+                    continue
+                try:
+                    c.close()
+                except Exception:
+                    pass
+
+    # def _station_count(self, directory) -> Optional[int]:
+    #     """该项目（或全部）的站位数；用于项目行徽章。出错则 None。"""
+    #     try:
+    #         if directory:
+    #             db = self.ctx.get_db(directory)
+    #             return len(crs.map_points(db, "station")) if db is not None else None
+    #         dbs = [self.ctx.get_db(d) for _n, d in self._known_projects()]
+    #         dbs = [d for d in dbs if d is not None]
+    #         return len(crs.map_points_across(dbs, "station")) if dbs else 0
+    #     except Exception:
+    #         return None
+    def _station_counts(self, conns) -> dict:
+        """由**已打开**的连接算全部徽章计数：``{directory: 站位数, None: 全部项目}``。
+
+        取代逐项目 _station_count()（每次都重开一次库）。缺失/出错的项目不进 dict，
+        取值时 .get() → None → 行显示「—」（与旧行为一致）。
+        """
+        counts: dict = {}
+        for d, db in conns:
+            try:
+                counts[d] = len(crs.map_points(db, "station"))
+            except Exception:
+                counts[d] = None
+        dbs = [db for _d, db in conns]
+        try:
+            counts[None] = len(crs.map_points_across(dbs, "station")) if dbs else 0
+        except Exception:
+            counts[None] = None
+        return counts
+
+    def _populate_projects(self, counts: Optional[dict] = None) -> None:
+        """刷新项目列表。*counts* = 已算好的徽章计数（on_activate 复用同一轮扫描）；
+        为 None 时自行开一轮只读连接算（独立调用点：新建/移除/导入项目后）。"""
+        if counts is None:
+            with self._project_dbs([d for _n, d in self._known_projects()]) as conns:
+                counts = self._station_counts(conns)
         self._proj_list.blockSignals(True)
         self._proj_list.clear()
         entries = [("全部项目", None)] + self._known_projects()
@@ -787,7 +896,8 @@ class CollectionMapView(BaseView):
         for i, (name, d) in enumerate(entries):
             offline = bool(d) and not project_root_available(d)
             item, w = self._make_project_item(
-                name, None if offline else self._station_count(d), d,
+                # name, None if offline else self._station_count(d), d,   # §7 旧
+                name, None if offline else counts.get(d), d,
                 offline=offline,
             )
             self._proj_list.addItem(item)
@@ -1258,21 +1368,55 @@ class CollectionMapView(BaseView):
         except Exception:
             pass
 
-    def _dbs_for_filter(self) -> list:
-        """当前项目过滤对应的 DB 连接列表。全部 = 所有已知项目。"""
+    # §7 旧实现：又一轮 ctx.get_db(所有已知项目)（缓存连接 + 首开 ensure_schema），
+    # 与 _populate_projects 的那一轮完全重复。新实现见 _dirs_for_filter/_points_from。
+    # def _dbs_for_filter(self) -> list:
+    #     """当前项目过滤对应的 DB 连接列表。全部 = 所有已知项目。"""
+    #     if self._project_filter:
+    #         db = self.ctx.get_db(self._project_filter)
+    #         return [db] if db is not None else []
+    #     dbs = []
+    #     for _name, d in self._known_projects():
+    #         db = self.ctx.get_db(d)
+    #         if db is not None:
+    #             dbs.append(db)
+    #     if not dbs:                       # 无注册项目 → 退回当前项目
+    #         db = self.ctx.get_db()
+    #         if db is not None:
+    #             dbs = [db]
+    #     return dbs
+
+    def _dirs_for_filter(self) -> list:
+        """当前过滤要读哪些项目目录：单选 = 该项目；全部 = 所有已知项目。"""
         if self._project_filter:
-            db = self.ctx.get_db(self._project_filter)
-            return [db] if db is not None else []
-        dbs = []
-        for _name, d in self._known_projects():
-            db = self.ctx.get_db(d)
+            return [self._project_filter]
+        return [d for _n, d in self._known_projects()]
+
+    def _points_from(self, conns) -> list[dict]:
+        """从**已打开**的连接算当前层级的地图点（聚合逻辑保持不变）。"""
+        if self._project_filter:
+            db = next(
+                (c for d, c in conns if str(d) == str(self._project_filter)), None
+            )
             if db is not None:
-                dbs.append(db)
-        if not dbs:                       # 无注册项目 → 退回当前项目
+                return crs.map_points(db, self._level)
+            # 过滤项目不在本批连接里（未注册 / 单独刷新）→ 现开现关
+            db, owned = self._open_project_readonly(self._project_filter)
+            if db is None:
+                return []
+            try:
+                return crs.map_points(db, self._level)
+            finally:
+                if owned:
+                    try:
+                        db.close()
+                    except Exception:
+                        pass
+        dbs = [c for _d, c in conns]
+        if not dbs:                               # 无注册项目 → 退回当前项目（旧回退）
             db = self.ctx.get_db()
-            if db is not None:
-                dbs = [db]
-        return dbs
+            dbs = [db] if db is not None else []
+        return crs.map_points_across(dbs, self._level) if dbs else []
 
     # ── 数据 ────────────────────────────────────────────────────────────────
 
@@ -1287,14 +1431,26 @@ class CollectionMapView(BaseView):
         self._update_edit_buttons()
         self._reload_collection_map_points()
 
-    def _reload_collection_map_points(self) -> None:
-        dbs = self._dbs_for_filter()
-        if self._project_filter and dbs:
-            self._points = crs.map_points(dbs[0], self._level)
-        elif dbs:
-            self._points = crs.map_points_across(dbs, self._level)
+    def _reload_collection_map_points(self, conns=None) -> None:
+        # §7 旧实现（每次都自己再开一轮跨项目缓存连接）：
+        # dbs = self._dbs_for_filter()
+        # if self._project_filter and dbs:
+        #     self._points = crs.map_points(dbs[0], self._level)
+        # elif dbs:
+        #     self._points = crs.map_points_across(dbs, self._level)
+        # else:
+        #     self._points = []
+        # 新实现：conns 由调用方传入（on_activate 与徽章计数共用同一轮打开）；
+        # 独立调用点（切项目/切层级/写库后）自己开一轮私有只读连接并 close。
+        if conns is None:
+            with self._project_dbs(self._dirs_for_filter()) as cs:
+                self._points = self._points_from(cs)
         else:
-            self._points = []
+            self._points = self._points_from(conns)
+        self._render_points()
+
+    def _render_points(self) -> None:
+        """把 self._points 画到当前底图 + 刷新计数标签（纯 UI，无 DB）。"""
         self._tile_map.set_points(self._points)
         if self._is_publication_mode():
             self._pub_map.set_points(self._points)

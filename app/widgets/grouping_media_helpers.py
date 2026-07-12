@@ -1,4 +1,19 @@
-"""Media/path helpers for the specimen grouping editor."""
+"""Media/path helpers for the specimen grouping editor.
+
+2026-07-12 (卡顿修复): 关联媒体行缩略图原先在 GUI 线程整解码 (`_media_thumbnail_pixmap`
+→ `decode_image_thumbnail`),冷 TIFF 会落到 ImageMagick subprocess(最长 12s 超时)
+→ 对话框整体卡死。本文件现提供两条路径:
+
+* `_cached_media_thumbnail_pixmap()` —— **GUI 安全**:只查内存/磁盘缓存
+  (`image_thumbnail.try_cached_image_data` 明确 "never runs a full decode"),
+  未命中返回 None,绝不整解码。
+* `MediaThumbnailLoader` —— 单条长生命周期 QThread + `GridThumbnailWorker`
+  (QObject + moveToThread)。命中缓存同帧上屏;未命中投给 worker 解码,
+  worker 只产出 QImage,主线程 `make_pixmap` 转 QPixmap。带 generation 计数器
+  丢弃陈旧回包,`shutdown()` 做 quit()+wait() 防悬挂线程。
+
+`_media_thumbnail_pixmap()` 保持同步语义(旧调用方未改),但已改为先走缓存快路。
+"""
 from __future__ import annotations
 
 from collections import OrderedDict
@@ -6,7 +21,7 @@ from pathlib import Path
 from typing import Optional
 from typing import TYPE_CHECKING
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Q_ARG, QMetaObject, QObject, Qt, QThread, pyqtSlot
 
 from app.services import grouping_service
 
@@ -361,36 +376,247 @@ def _find_related_media_dirs(
     )
 
 
-def _media_thumbnail_pixmap(path: str, size: int = 64):
-    """Return a bounded thumbnail pixmap for JPG/TIF rows, cached by file stat."""
+def _thumb_cache_key(path: str, size: int):
+    """LRU key for the row-thumbnail cache: file identity + requested box size."""
     try:
         stat = Path(path).stat()
-        key = (str(Path(path).resolve()), int(stat.st_mtime_ns), int(stat.st_size), size)
-        cached = _RELATED_THUMB_CACHE.get(key)
-        if cached is not None:
-            _RELATED_THUMB_CACHE.move_to_end(key)
-            return cached
-    except Exception:
-        key = None
-    try:
-        from app.utils.image_thumbnail import decode_image_thumbnail
-        pixmap = decode_image_thumbnail(path, max_size=size * 2)
-        if pixmap is None or pixmap.isNull():
-            return None
-        pixmap = pixmap.scaled(
-            size,
-            size,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
+        return (str(Path(path).resolve()), int(stat.st_mtime_ns), int(stat.st_size), int(size))
     except Exception:
         return None
-    if key is not None:
-        _RELATED_THUMB_CACHE[key] = pixmap
-        _RELATED_THUMB_CACHE.move_to_end(key)
-        while len(_RELATED_THUMB_CACHE) > _THUMB_ICON_CACHE_LIMIT:
-            _RELATED_THUMB_CACHE.popitem(last=False)
+
+
+def _thumb_cache_get(key):
+    if key is None:
+        return None
+    cached = _RELATED_THUMB_CACHE.get(key)
+    if cached is None:
+        return None
+    _RELATED_THUMB_CACHE.move_to_end(key)
+    return cached
+
+
+def _thumb_cache_put(key, pixmap) -> None:
+    if key is None or pixmap is None:
+        return
+    _RELATED_THUMB_CACHE[key] = pixmap
+    _RELATED_THUMB_CACHE.move_to_end(key)
+    while len(_RELATED_THUMB_CACHE) > _THUMB_ICON_CACHE_LIMIT:
+        _RELATED_THUMB_CACHE.popitem(last=False)
+
+
+def _scaled_thumb_pixmap(pixmap, size: int):
+    """Fit a decoded pixmap into the *size* box. Main thread only (QPixmap)."""
+    if pixmap is None or pixmap.isNull():
+        return None
+    return pixmap.scaled(
+        size,
+        size,
+        Qt.AspectRatioMode.KeepAspectRatio,
+        Qt.TransformationMode.SmoothTransformation,
+    )
+
+
+def _cached_media_thumbnail_pixmap(path: str, size: int = 64):
+    """GUI-thread-safe lookup: memory/disk cache only, **never a full decode**.
+
+    Returns ``None`` on a miss — callers must then hand the path to
+    :class:`MediaThumbnailLoader` instead of decoding inline.
+    """
+    key = _thumb_cache_key(path, size)
+    cached = _thumb_cache_get(key)
+    if cached is not None:
+        return cached
+    try:
+        # try_cached_image_data() is documented as "never runs a full decode
+        # (GUI-thread safe)": memory cache -> disk JPEG cache -> None.
+        from app.utils.image_thumbnail import make_pixmap, try_cached_image_data
+        pixmap = _scaled_thumb_pixmap(make_pixmap(try_cached_image_data(path, size * 2)), size)
+    except Exception:
+        return None
+    if pixmap is not None:
+        _thumb_cache_put(key, pixmap)
     return pixmap
+
+
+def _apply_thumb_to_label(label, pixmap, fallback_text: str = "") -> None:
+    """Paint a row thumbnail (or the text placeholder) onto *label*. Main thread."""
+    if pixmap is not None and not pixmap.isNull():
+        label.setPixmap(pixmap)
+        label.setProperty("hasThumbnail", True)
+    else:
+        label.setText(fallback_text or "IMG")
+        label.setProperty("hasThumbnail", False)
+
+
+class MediaThumbnailLoader(QObject):
+    """Off-GUI-thread decoder for the related-media row thumbnails.
+
+    One long-lived ``QThread`` + one ``GridThumbnailWorker`` per owner dialog
+    (NOT one thread per row). Usage::
+
+        self._thumbs = MediaThumbnailLoader(self)      # in __init__
+        self._thumbs.request(label, path, fallback_text=kind)   # per row
+        self._thumbs.reset()                           # in _populate()
+        self._thumbs.shutdown()                        # in closeEvent/accept/reject
+
+    Staleness: every ``reset()`` bumps a monotonic ``generation`` and drops the
+    in-flight request map, so replies for a rebuilt table are discarded instead
+    of being painted onto recycled/destroyed labels. Labels also unregister
+    themselves via ``QObject.destroyed`` — no ``sip.isdeleted`` guessing.
+
+    Threading: the worker only ever touches ``QImage``; ``QPixmap`` is built in
+    :meth:`_on_decoded`, which runs on the main thread (queued connection).
+    """
+
+    def __init__(self, parent=None, *, size: int = 64):
+        super().__init__(parent)
+        from app.workers.thumbnail_worker import GridThumbnailWorker
+
+        self._size = int(size)
+        self._generation = 0
+        self._next_id = 0
+        # request_id -> (generation, label, path, size, fallback_text)
+        self._pending: dict[int, tuple] = {}
+        self._thread = QThread()
+        self._thread.setObjectName("GroupingThumbDecode")
+        self._worker = GridThumbnailWorker()
+        self._worker.moveToThread(self._thread)
+        # Auto connection + receiver on the main thread == queued delivery.
+        self._worker.decoded.connect(self._on_decoded)
+        self._thread.finished.connect(self._worker.deleteLater)
+        self._thread.start()
+
+    @property
+    def generation(self) -> int:
+        return self._generation
+
+    def pending_count(self) -> int:
+        return len(self._pending)
+
+    def reset(self) -> None:
+        """Invalidate every in-flight request (call before rebuilding rows)."""
+        self._generation += 1
+        self._pending.clear()
+
+    def shutdown(self) -> None:
+        """quit()+wait() the decode thread. Mandatory on dialog close.
+
+        Skipping this leaves a dangling thread and hangs a full pytest run
+        (memory: workbench-timer-leak-hang).
+        """
+        self.reset()
+        thread, self._thread, self._worker = self._thread, None, None
+        if thread is None:
+            return
+        thread.quit()
+        thread.wait()
+
+    def request(self, label, path: str, *, size: int | None = None,
+                fallback_text: str = "") -> bool:
+        """Show *path*'s thumbnail on *label*.
+
+        Returns ``True`` when it was served from cache in this very frame,
+        ``False`` when it was queued for background decode (label keeps its
+        text placeholder until the reply lands).
+        """
+        box = int(size or self._size)
+        cached = _cached_media_thumbnail_pixmap(path, box)
+        if cached is not None:
+            _apply_thumb_to_label(label, cached, fallback_text)
+            return True
+        if not path or self._worker is None:  # after shutdown(): no decode thread
+            _apply_thumb_to_label(label, None, fallback_text)
+            return False
+        self._next_id += 1
+        rid = self._next_id
+        self._pending[rid] = (self._generation, label, path, box, fallback_text)
+        label.destroyed.connect(lambda *_a, _rid=rid: self._pending.pop(_rid, None))
+        QMetaObject.invokeMethod(
+            self._worker,
+            "decode",
+            Qt.ConnectionType.QueuedConnection,
+            Q_ARG(int, rid),
+            Q_ARG(str, path),
+            Q_ARG(int, box * 2),
+        )
+        return False
+
+    @pyqtSlot(object, object)
+    def _on_decoded(self, request_id, image) -> None:
+        """Main thread: QImage -> QPixmap -> label. Drops stale replies."""
+        entry = self._pending.pop(int(request_id), None)
+        if entry is None:
+            return  # label destroyed, or reset() dropped this generation
+        generation, label, path, box, fallback_text = entry
+        if generation != self._generation:
+            return  # table was rebuilt while this decode was in flight
+        try:
+            from app.utils.image_thumbnail import make_pixmap
+            pixmap = _scaled_thumb_pixmap(make_pixmap(image), box)
+        except Exception:
+            pixmap = None
+        if pixmap is not None:
+            _thumb_cache_put(_thumb_cache_key(path, box), pixmap)
+        _apply_thumb_to_label(label, pixmap, fallback_text)
+
+
+def _media_thumbnail_pixmap(path: str, size: int = 64):
+    """Return a bounded thumbnail pixmap for JPG/TIF rows, cached by file stat.
+
+    Synchronous fallback kept for callers that have not adopted
+    :class:`MediaThumbnailLoader` yet. Cache hits no longer re-enter the decode
+    chain; only a genuine cold miss still decodes on the calling thread.
+    """
+    cached = _cached_media_thumbnail_pixmap(path, size)
+    if cached is not None:
+        return cached
+    try:
+        from app.utils.image_thumbnail import decode_image_thumbnail
+        pixmap = _scaled_thumb_pixmap(decode_image_thumbnail(path, max_size=size * 2), size)
+    except Exception:
+        return None
+    if pixmap is not None:
+        _thumb_cache_put(_thumb_cache_key(path, size), pixmap)
+    return pixmap
+
+
+# =============================================================================
+# 【§7 归档】原同步整解码实现 —— 注释保留,勿删(新实现见上)。
+# 问题:缓存未命中时在 GUI 线程调 decode_image_thumbnail,冷 TIFF 会走
+# ImageMagick subprocess(timeout=12s)→ 对话框冻结。
+# =============================================================================
+#
+# def _media_thumbnail_pixmap(path: str, size: int = 64):
+#     """Return a bounded thumbnail pixmap for JPG/TIF rows, cached by file stat."""
+#     try:
+#         stat = Path(path).stat()
+#         key = (str(Path(path).resolve()), int(stat.st_mtime_ns), int(stat.st_size), size)
+#         cached = _RELATED_THUMB_CACHE.get(key)
+#         if cached is not None:
+#             _RELATED_THUMB_CACHE.move_to_end(key)
+#             return cached
+#     except Exception:
+#         key = None
+#     try:
+#         from app.utils.image_thumbnail import decode_image_thumbnail
+#         pixmap = decode_image_thumbnail(path, max_size=size * 2)
+#         if pixmap is None or pixmap.isNull():
+#             return None
+#         pixmap = pixmap.scaled(
+#             size,
+#             size,
+#             Qt.AspectRatioMode.KeepAspectRatio,
+#             Qt.TransformationMode.SmoothTransformation,
+#         )
+#     except Exception:
+#         return None
+#     if key is not None:
+#         _RELATED_THUMB_CACHE[key] = pixmap
+#         _RELATED_THUMB_CACHE.move_to_end(key)
+#         while len(_RELATED_THUMB_CACHE) > _THUMB_ICON_CACHE_LIMIT:
+#             _RELATED_THUMB_CACHE.popitem(last=False)
+#     return pixmap
+
 
 def _resolve_path_for_group(p: str) -> Optional[str]:
     """Normalize a path for grouping; return None if file missing."""

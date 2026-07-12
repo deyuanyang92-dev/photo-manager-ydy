@@ -14,7 +14,7 @@ import socket
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QApplication,
@@ -98,6 +98,33 @@ def _project_display(project: Optional[str]) -> str:
 
 # ── Panel ──────────────────────────────────────────────────────────────────────
 
+# 正在运行的扫描线程强引用池：QThread 若被 Python GC 掉而 C++ 端仍在跑会崩溃。
+# finished 时移除。
+_ALIVE_SCAN_WORKERS: "set[_LanScanWorker]" = set()
+
+
+class _LanScanWorker(QThread):
+    """在后台线程里跑 CollabService.scan_lan()（全子网 × SCAN_PORTS 全端口扫描）。
+
+    只发 signal，绝不碰任何 widget —— 接收者在主线程，连接自动为 QueuedConnection。
+    scan_lan() 内部对 _peers 有锁保护，且用 peers_changed(signal) 通知 UI，
+    因此从工作线程调用是安全的。
+    """
+
+    scan_done = pyqtSignal(int)  # 发现的节点数
+
+    def __init__(self, svc: "CollabService") -> None:
+        super().__init__()          # 不设 parent：线程对象跨线程存活，靠 _ALIVE_SCAN_WORKERS 持有
+        self._svc = svc
+
+    def run(self) -> None:  # noqa: D102 — QThread entry point
+        try:
+            found = self._svc.scan_lan()
+        except Exception:  # noqa: BLE001 — 扫描失败不该带崩 UI
+            found = []
+        self.scan_done.emit(len(found or []))
+
+
 class CollabPanel(QWidget):
     """One-stop collaboration side-panel."""
 
@@ -110,6 +137,7 @@ class CollabPanel(QWidget):
         self.setFixedWidth(380)
         self.hide()
 
+        self._scan_worker: Optional[_LanScanWorker] = None
         self._svc: Optional[CollabService] = getattr(ctx, "collab_service", None)
         self._build_ui()
         self._connect_signals()
@@ -1087,13 +1115,45 @@ class CollabPanel(QWidget):
         dlg.exec()
 
     def _on_scan(self) -> None:
+        # §7 keep-old: scan_lan() 是同步全子网扫描（254 IP × 20 端口，每个探测
+        # timeout=3s），在主线程直调会把 UI 冻住数秒到数十秒；下面那个 5s 定时器
+        # 只是「假装」扫描在后台跑，并不能让它不阻塞。
+        # svc = self._svc
+        # if svc is None:
+        #     return
+        # self._peer_scan_btn.setEnabled(False)
+        # self._peer_scan_btn.setText("搜索中…")
+        # svc.scan_lan()
+        # QTimer.singleShot(5000, self._re_enable_scan)
+        #
+        # 新实现：把同一个 scan_lan()（保留 20 端口全扫描能力，不降级成
+        # scan_subnet_peers 的单端口扫描）放进一个 QThread 里跑，扫完后用
+        # queued signal 回主线程恢复按钮。工作线程只发 signal，不碰任何 widget。
         svc = self._svc
         if svc is None:
             return
+        if self._scan_worker is not None:
+            return  # 已有一次扫描在跑，忽略重复点击（按钮此时本就是 disabled）
         self._peer_scan_btn.setEnabled(False)
         self._peer_scan_btn.setText("搜索中…")
-        svc.scan_lan()
-        QTimer.singleShot(5000, self._re_enable_scan)
+
+        worker = _LanScanWorker(svc)
+        self._scan_worker = worker
+        _ALIVE_SCAN_WORKERS.add(worker)          # 防止 GC 掉正在跑的 QThread
+        worker.scan_done.connect(self._on_scan_done)   # 跨线程 → 自动 queued
+        worker.finished.connect(lambda w=worker: _ALIVE_SCAN_WORKERS.discard(w))
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
+
+    def _on_scan_done(self, found: int) -> None:
+        """扫描线程结束（主线程 slot）：恢复按钮。
+
+        发现的 peer 由 CollabService.scan_lan() 内部写入并 emit peers_changed，
+        面板已在 _connect_signals 里连到 _refresh_devices/_refresh_health，
+        所以这里不需要额外刷新——与旧行为等价。
+        """
+        self._scan_worker = None
+        self._re_enable_scan()
 
     def _re_enable_scan(self) -> None:
         self._peer_scan_btn.setEnabled(True)

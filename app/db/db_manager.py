@@ -4,6 +4,7 @@ Each project directory gets its own _data/project.db file.
 Connections are cached per resolved project_dir path.
 """
 
+import hashlib
 import os
 import sqlite3
 from pathlib import Path
@@ -16,6 +17,77 @@ _db_cache: dict[str, sqlite3.Connection] = {}
 
 # Load schema SQL once
 _SCHEMA_SQL_PATH = Path(__file__).parent / "schema.sql"
+
+# §7 旧: ensure_schema 每次调用都 `_SCHEMA_SQL_PATH.read_text(...)` —— 每开一个子库
+#      就多一次真实磁盘 IO（drvfs/网络盘上尤其贵）。
+# 新: 进程内只读一次并缓存（schema.sql 是打包进程序的静态资源，运行期不会变）。
+_SCHEMA_SQL_CACHE: Optional[str] = None
+_SCHEMA_FP_CACHE: Optional[str] = None
+
+
+def _schema_sql() -> str:
+    """Return schema.sql text, read from disk at most once per process."""
+    global _SCHEMA_SQL_CACHE
+    if _SCHEMA_SQL_CACHE is None:
+        _SCHEMA_SQL_CACHE = _SCHEMA_SQL_PATH.read_text(encoding="utf-8")
+    return _SCHEMA_SQL_CACHE
+
+
+def _schema_fingerprint() -> str:
+    """sha256(schema.sql + darwin_core 视图 SQL + SCHEMA_VERSION)，进程内只算一次。
+
+    指纹覆盖 ensure_schema 会写进库里的**全部**东西：
+      - schema.sql（建表 + 补列的参照形状）
+      - ``_DARWIN_CORE_SQL``（视图定义；改视图不改表时指纹也必须变）
+      - ``migrations.SCHEMA_VERSION``（编号迁移的目标版本）
+    任一变化 → 指纹变化 → 老库下次打开重新跑完整 ensure。
+    """
+    global _SCHEMA_FP_CACHE
+    if _SCHEMA_FP_CACHE is None:
+        from app.db.migrations import SCHEMA_VERSION
+
+        h = hashlib.sha256()
+        h.update(_schema_sql().encode("utf-8"))
+        h.update(_DARWIN_CORE_SQL.encode("utf-8"))
+        h.update(f"|v{int(SCHEMA_VERSION)}".encode("utf-8"))
+        _SCHEMA_FP_CACHE = h.hexdigest()
+    return _SCHEMA_FP_CACHE
+
+
+def _stored_schema_fp(conn: sqlite3.Connection) -> Optional[str]:
+    """读库里记录的 schema 指纹；老库（无 _schema_meta / 无 schema_fp 列）返回 None。
+
+    纯 SELECT，不建表、不写盘 —— 命中即让 ensure_schema 直接返回。
+    """
+    try:
+        row = conn.execute("SELECT schema_fp FROM _schema_meta WHERE id=1").fetchone()
+    except sqlite3.Error:
+        return None  # 没有 _schema_meta 表，或该表还没有 schema_fp 列
+    if row is None:
+        return None
+    try:
+        value = row["schema_fp"]
+    except (IndexError, TypeError, KeyError):
+        value = row[0]
+    return str(value) if value else None
+
+
+def _persist_schema_fp(conn: sqlite3.Connection, fp: str) -> None:
+    """把当前指纹写进 _schema_meta（缺列则先 ALTER 补上）。
+
+    调用点在 run_pending_migrations 之后 —— 那时 ``_schema_meta`` 必然存在。
+    Best-effort：只读盘 / 权限受限时静默跳过，退回「每次全量 ensure」的旧行为，
+    正确性不受影响（只是没有加速）。
+    """
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(_schema_meta)").fetchall()}
+        if not cols:
+            return  # 理论上不会发生（migrations 已建表）
+        if "schema_fp" not in cols:
+            conn.execute("ALTER TABLE _schema_meta ADD COLUMN schema_fp TEXT")
+        conn.execute("UPDATE _schema_meta SET schema_fp=? WHERE id=1", (fp,))
+    except sqlite3.Error:
+        pass
 
 
 def is_database_locked(exc: BaseException) -> bool:
@@ -228,7 +300,7 @@ def get_db(project_dir: str) -> sqlite3.Connection:
     return _db_cache[resolved]
 
 
-def ensure_schema(conn: sqlite3.Connection) -> None:
+def ensure_schema(conn: sqlite3.Connection, *, force: bool = False) -> None:
     """Idempotently apply schema.sql, then recreate darwin_core view.
 
     ``CREATE TABLE IF NOT EXISTS`` creates *missing tables* but never adds new
@@ -241,14 +313,31 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
 
     After structural sync, numbered data migrations in ``app.db.migrations`` run
     so future upgrades (backfill / index init) have a stable version hook.
+
+    **快速 gate（性能红线）**：完整路径 = executescript 全量 schema + 在一次性内存库里
+    物化整份 schema 做列 diff + DROP/CREATE 视图 + commit(写盘)，单库本地 10–30 ms，
+    drvfs/网络盘 50–150 ms。它以前在**每个** project.db 首次打开时都跑（open_project_db
+    → get_db 的每条新路径），N 个项目的跨库统计因此在主线程上叠成秒级冻结，而且这是一条
+    「读页面却写子库」的路径。现在开头先做一条 SELECT 读 ``_schema_meta.schema_fp``：
+    指纹与当前代码一致 → 直接 return，全程零写入（~0.5 ms）。指纹缺失/不匹配（老库、
+    schema 升级后首次打开）才走完整路径，跑完把新指纹与版本号在同一个 commit 里落库。
+    ``force=True`` 无条件跑完整路径（供测试/修复用）。
     """
-    schema_sql = _SCHEMA_SQL_PATH.read_text(encoding="utf-8")
+    fp = _schema_fingerprint()
+    if not force and _stored_schema_fp(conn) == fp:
+        return  # 已是当前 schema：不 executescript、不物化内存库、不重建视图、不 commit
+
+    # §7 旧: schema_sql = _SCHEMA_SQL_PATH.read_text(encoding="utf-8")  # 每次调用都读盘
+    schema_sql = _schema_sql()
     conn.executescript(schema_sql)
     _migrate_add_missing_columns(conn, schema_sql)
     from app.db.migrations import run_pending_migrations
 
     run_pending_migrations(conn)
     conn.executescript(_DARWIN_CORE_SQL)
+    # 指纹最后写，与 set_schema_version 落在同一个 commit 里：中途崩溃 → 指纹不落库
+    # → 下次打开重跑完整 ensure（宁可慢一次，不可跳过必要迁移）。
+    _persist_schema_fp(conn, fp)
     conn.commit()
 
 

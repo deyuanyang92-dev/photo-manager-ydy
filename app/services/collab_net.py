@@ -103,7 +103,31 @@ class CollabServerThread(QThread):
             port += 1
         raise OSError("No free port found near %d" % start)
 
+    # §7 旧实现保留：整个方法体原本直接写在 run() 里，只有 `_loop.run_until_complete`
+    # 那一小段被 try 包住（旧 157-163 行）。于是 `_build_fastapi_app(...)`、
+    # `uvicorn.Config(...)`、`uvicorn.Server(...)`、`asyncio.new_event_loop()` 抛的任何
+    # 异常都会逃出 QThread.run() → PyQt 交给 sys.excepthook → main.py 的 hook 在
+    # **工作线程**里 new QWidget 弹窗（Qt 硬性禁止）→ 弹窗风暴 + 主线程冻结。
+    # 现场证据：app.log 的 `collab_net.py line 109 in run` → uvicorn/config.py
+    # → configure_logging → ValueError。
+    #
+    # 新实现：run() 只做一件事 —— 兜住一切异常，转成 server_error signal。
+    # signal 是 auto-connection，会自动 queued 回接收者所属线程（主线程），
+    # 这是工作线程唯一合法的回主线程通道；工作线程绝不碰 widget。
+    #
+    # def run(self) -> None:
+    #     ...（旧方法体，现整体移入 _run_impl，逻辑一字未改）...
     def run(self) -> None:
+        try:
+            self._run_impl()
+        except BaseException as exc:  # noqa: BLE001  故意兜到 BaseException：异常绝不许逃出 run()
+            logger.exception("collab server thread crashed")
+            try:
+                self.server_error.emit(str(exc) or exc.__class__.__name__)
+            except Exception:  # noqa: BLE001  连发信号都失败时也不能再往外抛
+                pass
+
+    def _run_impl(self) -> None:
         try:
             import uvicorn
         except ImportError:
@@ -215,7 +239,26 @@ class CollabDiscoveryThread(QThread):
         self._info: Any = None
         self._browser: Any = None
 
+    # §7 旧实现保留：方法体原本直接写在 run() 里，只有 ImportError 和
+    # register_service 被 try 包住 —— `_get_local_ip()`、`ServiceInfo(...)`、
+    # `Zeroconf()`（网卡/权限/防火墙问题会抛）全都在 try 之外，异常会以和
+    # CollabServerThread 完全相同的方式逃出 run() → 引爆同一个跨线程弹窗风暴。
+    #
+    # 新实现：run() 兜住一切，转成 discovery_error signal（queued 回主线程）。
+    #
+    # def run(self) -> None:
+    #     ...（旧方法体，现整体移入 _run_impl，逻辑一字未改）...
     def run(self) -> None:
+        try:
+            self._run_impl()
+        except BaseException as exc:  # noqa: BLE001  异常绝不许逃出 QThread.run()
+            logger.exception("collab discovery thread crashed")
+            try:
+                self.discovery_error.emit(str(exc) or exc.__class__.__name__)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _run_impl(self) -> None:
         try:
             from zeroconf import ServiceBrowser, ServiceInfo, Zeroconf
             import ipaddress

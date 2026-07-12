@@ -15,7 +15,9 @@ an independent Opus does acceptance. Specs are the implementer's *only* input �
 self-contradictory or impossible, **stop and report; do not redesign unilaterally**.
 
 Before changing core workflow behavior, read `docs/PROJECT_MEMORY.md`. It records user-repeated
-requirements that must not be rediscovered through chat.
+requirements that must not be rediscovered through chat. `docs/REQUIREMENTS_CURRENT.md` +
+`PROJECT_MEMORY.md` describe **current** behavior; `docs/audit/` is a *historical* snapshot —
+its findings are NOT a live gap list, do not "fix" them on sight.
 
 ## Commands
 
@@ -28,13 +30,16 @@ QT_QPA_PLATFORM=xcb python main.py               # WSL2/WSLg: force X11 — Wayl
                                                  #   on the Windows desktop via WSLg, no browser.
 QT_QPA_PLATFORM=offscreen python main.py         # headless smoke check (CI / WSL)
 
-pytest tests/ -v                                 # full suite
-pytest tests/test_import_service.py -v           # one file
+pytest tests/test_import_service.py -v           # one file  <- THE normal way to run tests
 pytest tests/test_naming_uid.py::test_<name> -v  # one test
-QT_QPA_PLATFORM=offscreen pytest tests/ -v       # view/widget tests headless (pytest-qt)
+QT_QPA_PLATFORM=offscreen pytest tests/<file>    # view/widget tests headless (pytest-qt)
+# pytest tests/ -v  — do NOT: a whole-suite run hangs (see Conventions). Use the per-file path,
+#                     or scripts\run_tests_batched.ps1 on Windows, for full coverage.
 
 python scripts/run_core_regression.py --list     # named regression suites for high-risk flows
 python scripts/run_core_regression.py naming     # run one suite (quick/naming/workbench/...)
+
+ruff check app tests scripts main.py --select=F821   # the CI lint gate (pip install ruff; not in requirements.txt)
 ```
 
 Windows (PowerShell): `scripts\run_tests_batched.ps1` runs the whole suite one pytest process
@@ -52,8 +57,20 @@ Windows desktop double-click launch: `launch_windows.cmd` → `wsl.exe` into the
 
 `pytest.ini` pins `qt_api = pyqt6` on purpose: the dev box has PySide6 + PyQt6 co-installed, and
 pytest-qt auto-loads PySide6 first — its older `libQt6Core` then gets reused by PyQt6 → missing
-`Qt_6.11` symbols → whole-suite collection error. Do not delete that line. No linter/formatter is
-configured; the **test suite is the only quality gate** (TDD red→green→commit per convention).
+`Qt_6.11` symbols → whole-suite collection error. Do not delete that line. It also sets
+`timeout = 30` / `timeout_method = thread`: tile-map / geocode / collab tests dial out to blocked
+network hosts (OSM), and a C-level socket block is only killable by the thread method — a hung
+test must **fail at 30 s**, not stall the run. A new test that legitimately needs >30 s must mark
+its own timeout, not raise the global one.
+
+**CI = the merge gate** (`.github/workflows/ci.yml`, three sequential jobs):
+`ruff check app tests scripts main.py --select=F821` (undefined names only — F401/F811 etc. are
+being cleaned up per-directory and are deliberately *not* gated; do not "fix" the ruff config to
+enable them) → Windows `scripts\run_tests_batched.ps1 -IncludePackaging` → PyInstaller build,
+which fails unless both `dist\SpecimenPhotoWorkbench-*-win64.zip` and the packaged `.exe` appear.
+So: no formatter, F821-only lint, and the **test suite is the real quality gate** (TDD
+red→green→commit per convention). Release: push a `v*` tag → `.github/workflows/release.yml`
+builds and publishes the win64 zip (bump `app/config/version.py::APP_VERSION` first).
 
 ## Architecture
 

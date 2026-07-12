@@ -124,6 +124,41 @@ _HEADER_H = 26
 
 _THUMB_SIZE = DEFAULT_THUMB_SIZE  # legacy alias for tests / cache keys
 
+# 预取/合并参数（性能修复，见本模块 docstring 顶部的 "Async decode" 段）:
+#   * 只预取「可见带 = 视口 ±1 屏」内的格子，且单轮最多投递这么多解码请求，
+#     防止单个 worker 被上千条过期请求塞死。
+#   * 滚动用 debounce 定时器合并；解码回来的单元格用 ~16ms 定时器攒批刷新。
+_PREFETCH_BUDGET = 96
+_PREFETCH_SCROLL_DEBOUNCE_MS = 80
+_DIRTY_FLUSH_MS = 16
+
+# QPixmapCache 全局上限（KB）。main.py 只设 8MB(性能模式 4MB)，按「一屏 30 格 ×
+# 每格 ~0.25MB」根本装不下一屏，导致 paint 永远未命中 → 反复解码 → 抖动。
+# 这里在首个网格构造时「只升不降」地抬高上限（低内存/性能模式减半）。
+_PIXMAP_CACHE_TARGET_KB = 65536          # 64 MB
+_PIXMAP_CACHE_TARGET_KB_LOW = 32768      # 32 MB（低内存 / 性能模式）
+_pixmap_cache_limit_applied = False
+
+
+def _ensure_pixmap_cache_limit() -> None:
+    """Raise the process-wide ``QPixmapCache`` ceiling (never lowers it)."""
+    global _pixmap_cache_limit_applied
+    if _pixmap_cache_limit_applied:
+        return
+    _pixmap_cache_limit_applied = True
+    try:
+        from app.config.memory_profile import QPIXMAP_CACHE_KB, is_low_memory_machine
+
+        low = QPIXMAP_CACHE_KB <= 4096 or is_low_memory_machine()
+    except Exception:
+        low = False
+    target = _PIXMAP_CACHE_TARGET_KB_LOW if low else _PIXMAP_CACHE_TARGET_KB
+    try:
+        if QPixmapCache.cacheLimit() < target:
+            QPixmapCache.setCacheLimit(target)
+    except Exception:
+        pass
+
 
 def _cell_dims(thumb_size: int) -> tuple[int, int, int]:
     return cell_dims(thumb_size)
@@ -132,9 +167,21 @@ def _cell_dims(thumb_size: int) -> tuple[int, int, int]:
 _, _CELL_W, _CELL_H = _cell_dims(_THUMB_SIZE)  # legacy test constants
 
 
+def _display_box(thumb_size: int) -> QSize:
+    """The on-screen thumbnail box for one cell — must mirror ``_ThumbDelegate``'s
+    ``thumb_rect`` (cell width - 4, cell height - 22)."""
+    _, cw, ch = _cell_dims(thumb_size)
+    return QSize(max(1, cw - 4), max(1, ch - 22))
+
+
 def _cache_key_for(thumb_size: int, path: str) -> str:
+    # §7 旧: return f"uidgrid#{bucket}#{path}"
+    #   —— 缓存的是 bucket 原尺寸 pixmap（最大 720px≈2MB），且同一 bucket 下不同
+    #      网格密度共用一条目。现在缓存的是「已缩放到显示尺寸」的 pixmap，所以
+    #      key 必须带上显示框尺寸，否则密度变化会拿到尺寸不符的图去放大（糊）。
     bucket = normalize_thumb_cache_size(thumb_size) or int(thumb_size)
-    return f"uidgrid#{bucket}#{path}"
+    box = _display_box(int(thumb_size))
+    return f"uidgrid#{bucket}#{box.width()}x{box.height()}#{path}"
 
 
 def _cache_key(path: str) -> str:
@@ -381,11 +428,20 @@ class _ThumbDelegate(QStyledItemDelegate):
             pixmap = QPixmapCache.find(cache_key)
 
         if pixmap is not None and not pixmap.isNull():
-            scaled = pixmap.scaled(
-                thumb_rect.size(),
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
+            # §7 旧: scaled = pixmap.scaled(...)  # 每帧都做一次 SmoothTransformation
+            # 现在缓存里已是「显示尺寸」的 pixmap（见 _store_decoded_pixmap），
+            # 命中时直接 drawPixmap；只有外部塞进来的超大 pixmap 才走缩放兜底。
+            if (
+                pixmap.width() <= thumb_rect.width()
+                and pixmap.height() <= thumb_rect.height()
+            ):
+                scaled = pixmap
+            else:
+                scaled = pixmap.scaled(
+                    thumb_rect.size(),
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
             x = thumb_rect.left() + (thumb_rect.width() - scaled.width()) // 2
             y = thumb_rect.top() + (thumb_rect.height() - scaled.height()) // 2
             painter.drawPixmap(x, y, scaled)
@@ -512,6 +568,30 @@ class UidGroupedGrid(QFrame):
         # Paths whose decode returned None (negative cache; no busy re-request).
         self._failed_paths: set[str] = set()
         self._settings = None
+        # path -> 已插入 QPixmapCache 的 key 集合（refresh 时精确剔除；key 现在
+        # 含显示框尺寸，不能再靠 CACHE_SIZE_BUCKETS 反推）。
+        self._pixmap_keys: dict[str, set[str]] = {}
+        # 解码回填的脏格子：section_idx -> {row}，由 _dirty_timer 攒批刷新，
+        # 避免上千次单格 dataChanged 自身构成信号风暴。
+        self._dirty_cells: dict[int, set[int]] = {}
+
+        # QPixmapCache 上限（只升不降），否则一屏都缓存不下，命中率恒为 0。
+        _ensure_pixmap_cache_limit()
+
+        # 三个「归主线程所有」的单发定时器（复用，不重复新建）:
+        #   _repaint_timer  — 重建后合并一次 可见重绘 + 可见带预取
+        #   _prefetch_timer — 滚动 debounce 后增量预取
+        #   _dirty_timer    — 解码回填的脏格子攒批刷新
+        self._repaint_timer = QTimer(self)
+        self._repaint_timer.setSingleShot(True)
+        self._repaint_timer.timeout.connect(self._on_repaint_timer)
+        self._prefetch_timer = QTimer(self)
+        self._prefetch_timer.setSingleShot(True)
+        self._prefetch_timer.timeout.connect(self._prefetch_visible_thumbnails)
+        self._dirty_timer = QTimer(self)
+        self._dirty_timer.setSingleShot(True)
+        self._dirty_timer.setInterval(_DIRTY_FLUSH_MS)
+        self._dirty_timer.timeout.connect(self._flush_dirty_cells)
 
         # Worker thread — NOT parented to ``self`` so Qt's parent-child teardown
         # can't race our quit()+wait() (memory: shutdown-lock-leak-must-reboot).
@@ -564,6 +644,18 @@ class UidGroupedGrid(QFrame):
         self._scroll.setWidget(self._container)
         outer.addWidget(self._scroll, 1)
 
+        # 滚动 → debounce → 只补预取新进入可见带的格子（新增预取的唯一入口）。
+        # 定时器归主线程所有，且 _setup_ui 只在 __init__ 调一次，不会重复连接。
+        try:
+            self._scroll.verticalScrollBar().valueChanged.connect(
+                self._on_scrolled
+            )
+        except Exception:
+            pass
+
+    def _on_scrolled(self, _value: int = 0) -> None:
+        self._prefetch_timer.start(_PREFETCH_SCROLL_DEBOUNCE_MS)
+
     def bind_settings(self, settings) -> None:
         """Sync preview master-size profile from persisted settings."""
         self._settings = settings
@@ -607,12 +699,17 @@ class UidGroupedGrid(QFrame):
         clear_thumbnail_cache()
         self._failed_paths.clear()
         self._pending_paths.clear()
+        self._pixmap_keys.clear()
         QPixmapCache.clear()
         self._schedule_visible_repaint()
 
     def _drop_pixmap_cache_for(self, path: str) -> None:
         from app.utils.thumbnail_disk_cache import CACHE_SIZE_BUCKETS
 
+        # key 现在含显示框尺寸, 无法只靠 bucket 反推 —— 精确剔除本 widget 实际
+        # 插入过的 key（_pixmap_keys 记录）。旧的按 bucket 猜测保留为兜底。
+        for key in self._pixmap_keys.pop(path, set()):
+            QPixmapCache.remove(key)
         sizes = {self._thumb_size, normalize_thumb_cache_size(self._thumb_size)}
         sizes.update(CACHE_SIZE_BUCKETS)
         for bucket in sizes:
@@ -740,6 +837,17 @@ class UidGroupedGrid(QFrame):
         """Stop the worker thread. Call from the parent view's
         ``on_deactivate`` / ``closeEvent`` (also auto-invoked on ``destroyed``).
         """
+        # 主线程持有的定时器 —— 在主线程 stop（Qt: 只能在所属线程 start/stop）。
+        for timer in (
+            getattr(self, "_repaint_timer", None),
+            getattr(self, "_prefetch_timer", None),
+            getattr(self, "_dirty_timer", None),
+        ):
+            try:
+                if timer is not None:
+                    timer.stop()
+            except Exception:
+                pass
         try:
             self._thread.quit()
             self._thread.wait(2000)
@@ -893,38 +1001,109 @@ class UidGroupedGrid(QFrame):
 
     def _schedule_visible_repaint(self) -> None:
         """Ensure visible cells paint (and post decode requests) after rebuild."""
-        QTimer.singleShot(0, self._repaint_visible_cells)
-        QTimer.singleShot(0, self._prefetch_all_thumbnails)
+        # §7 旧: QTimer.singleShot(0, self._repaint_visible_cells)
+        # §7 旧: QTimer.singleShot(0, self._prefetch_all_thumbnails)
+        #   —— singleShot 无去重, 连续 3 次筛选 = 3 份【全表】主线程扫描排队。
+        # 现在: 一个复用的单发成员定时器, 重复 start 只重置不叠加。
+        self._repaint_timer.start(0)
 
-    def _prefetch_all_thumbnails(self) -> None:
-        """Instant disk/memory hits; queue remaining decodes shortly after."""
+    def _on_repaint_timer(self) -> None:
+        self._repaint_visible_cells()
+        self._prefetch_visible_thumbnails()
+
+    # §7 旧实现 —— 主线程遍历「全部分组的全部行」, 每张都 try_cached_image_data
+    # (Path.resolve + stat + sha256 + 读盘 + 全量 JPEG 解码), 汇总上千张时秒级冻结;
+    # 且没有任何视口裁剪。已由 _prefetch_visible_thumbnails 取代。
+    #
+    # def _prefetch_all_thumbnails(self) -> None:
+    #     """Instant disk/memory hits; queue remaining decodes shortly after."""
+    #     ts = self._thumb_size
+    #     missing: list[tuple[int, int, str]] = []
+    #     for sec_idx, sec in enumerate(self._sections):
+    #         model = sec.model
+    #         for row in range(model.rowCount()):
+    #             path = model.data(model.index(row), UidSectionModel.PATH_ROLE) or ""
+    #             if not path or path in self._failed_paths:
+    #                 continue
+    #             if QPixmapCache.find(_cache_key_for(ts, path)) is not None:
+    #                 continue
+    #             cached = try_cached_image_data(path, ts)
+    #             if cached is not None and not cached.isNull():
+    #                 self._store_decoded_pixmap(sec_idx, row, path, cached)
+    #                 continue
+    #             if path in self._pending_paths:
+    #                 continue
+    #             missing.append((sec_idx, row, path))
+    #     if missing:
+    #         QTimer.singleShot(50, lambda m=list(missing): self._prefetch_missing_decodes(m))
+    #
+    # def _prefetch_missing_decodes(self, items: list[tuple[int, int, str]]) -> None:
+    #     for sec_idx, row, path in items:
+    #         if path in self._failed_paths or path in self._pending_paths:
+    #             continue
+    #         if QPixmapCache.find(_cache_key_for(self._thumb_size, path)) is not None:
+    #             continue
+    #         self._request_decode(sec_idx, row, path)
+
+    def _visible_row_span(self, sec: "_Section") -> Optional[tuple[int, int]]:
+        """Rows of *sec* intersecting the visible band (外层 QScrollArea 视口 ±1 屏).
+
+        每个 section 的 QListView 被 ``_apply_section_height`` 撑成「全部行的总高」,
+        滚动的是外层 QScrollArea —— 所以 ``lv.viewport().rect()`` 覆盖该 section 的
+        全部行, ``indexAt`` 会把所有行都算成可见。必须以外层视口为基准做映射。
+        """
+        lv = sec.list_view
+        model = sec.model
+        if lv is None or model is None:
+            return None
+        n = model.rowCount()
+        if n <= 0:
+            return None
+        try:
+            vp = self._scroll.viewport()
+            band = vp.rect().adjusted(0, -vp.height(), 0, vp.height())
+            lvp = lv.viewport()
+            top_left = lvp.mapFrom(vp, band.topLeft())
+            r = QRect(top_left, band.size()).intersected(lvp.rect())
+        except Exception:
+            return None
+        if r.isEmpty():
+            return None  # 整个 section 在屏外 —— 一行都不碰
+        _, cw, ch = _cell_dims(self._thumb_size)
+        cols = max(1, lvp.width() // max(1, cw))
+        first_line = max(0, r.top() // max(1, ch))
+        last_line = max(first_line, r.bottom() // max(1, ch))
+        first = first_line * cols
+        if first > n - 1:
+            return None
+        last = min(n - 1, (last_line + 1) * cols - 1)
+        return first, max(first, last)
+
+    def _prefetch_visible_thumbnails(self) -> None:
+        """预取「可见带」内尚未缓存的缩略图 —— 只投递解码请求给 worker 线程.
+
+        主线程在这里【不做任何磁盘 I/O】: 内存/磁盘缓存的快路径由 worker 的
+        ``decode_image_data(use_cache=True)`` 负责（它本来就先查内存缓存再查磁盘
+        缓存），把它从 GUI 线程删掉是零功能损失。
+        """
         ts = self._thumb_size
-        missing: list[tuple[int, int, str]] = []
+        budget = _PREFETCH_BUDGET
         for sec_idx, sec in enumerate(self._sections):
+            span = self._visible_row_span(sec)
+            if span is None:
+                continue
+            first, last = span
             model = sec.model
-            for row in range(model.rowCount()):
+            for row in range(first, last + 1):
+                if budget <= 0:
+                    return
                 path = model.data(model.index(row), UidSectionModel.PATH_ROLE) or ""
-                if not path or path in self._failed_paths:
+                if not path or path in self._failed_paths or path in self._pending_paths:
                     continue
                 if QPixmapCache.find(_cache_key_for(ts, path)) is not None:
                     continue
-                cached = try_cached_image_data(path, ts)
-                if cached is not None and not cached.isNull():
-                    self._store_decoded_pixmap(sec_idx, row, path, cached)
-                    continue
-                if path in self._pending_paths:
-                    continue
-                missing.append((sec_idx, row, path))
-        if missing:
-            QTimer.singleShot(50, lambda m=list(missing): self._prefetch_missing_decodes(m))
-
-    def _prefetch_missing_decodes(self, items: list[tuple[int, int, str]]) -> None:
-        for sec_idx, row, path in items:
-            if path in self._failed_paths or path in self._pending_paths:
-                continue
-            if QPixmapCache.find(_cache_key_for(self._thumb_size, path)) is not None:
-                continue
-            self._request_decode(sec_idx, row, path)
+                self._request_decode(sec_idx, row, path)
+                budget -= 1
 
     def _store_decoded_pixmap(
         self,
@@ -933,19 +1112,52 @@ class UidGroupedGrid(QFrame):
         path: str,
         image: object,
     ) -> None:
+        """Main thread only (``_on_decoded`` 的 queued 槽) —— QPixmap 只能主线程构造."""
         pixmap = make_pixmap(image)  # type: ignore[arg-type]
         if pixmap is None or pixmap.isNull():
             self._failed_paths.add(path)
             return
-        QPixmapCache.insert(_cache_key_for(self._thumb_size, path), pixmap)
+        # §7 旧: QPixmapCache.insert(_cache_key_for(self._thumb_size, path), pixmap)
+        #   —— 存 bucket 原尺寸(最大 720px≈2MB), paint 每帧还要再平滑缩放一次。
+        # 现在: 插入前缩到显示尺寸, 单条内存降到 ~1/10, paint 直接 drawPixmap。
+        box = _display_box(self._thumb_size)
+        if pixmap.width() > box.width() or pixmap.height() > box.height():
+            pixmap = pixmap.scaled(
+                box,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        key = _cache_key_for(self._thumb_size, path)
+        QPixmapCache.insert(key, pixmap)
+        self._pixmap_keys.setdefault(path, set()).add(key)
+        # §7 旧: sec.model.notify_cell_changed(row) + lv.viewport().update(...)
+        #   —— 逐格 dataChanged; 上千格回填时信号本身就是一场风暴。
+        # 现在: 攒进 _dirty_cells, 由 ~16ms 的单发定时器合并刷新。
         if 0 <= section_idx < len(self._sections):
+            self._dirty_cells.setdefault(section_idx, set()).add(row)
+            if not self._dirty_timer.isActive():
+                self._dirty_timer.start(_DIRTY_FLUSH_MS)
+
+    def _flush_dirty_cells(self) -> None:
+        """合并刷新已解码回填的格子（主线程）。"""
+        dirty = self._dirty_cells
+        self._dirty_cells = {}
+        for section_idx, rows in dirty.items():
+            if not (0 <= section_idx < len(self._sections)) or not rows:
+                continue
             sec = self._sections[section_idx]
-            sec.model.notify_cell_changed(row)
+            model = sec.model
+            n = model.rowCount()
+            valid = [r for r in rows if 0 <= r < n]
+            if not valid:
+                continue
+            lo, hi = min(valid), max(valid)
+            top, bottom = model.index(lo), model.index(hi)
+            if top.isValid() and bottom.isValid():
+                model.dataChanged.emit(top, bottom)
             lv = sec.list_view
             if lv is not None:
-                ix = sec.model.index(row)
-                if ix.isValid():
-                    lv.viewport().update(lv.visualRect(ix))
+                lv.viewport().update()
 
     def _repaint_visible_cells(self) -> None:
         for sec in self._sections:
@@ -1048,6 +1260,8 @@ class UidGroupedGrid(QFrame):
         # Drop all in-flight requests: any reply that lands now is stale.
         self._pending.clear()
         self._pending_paths.clear()
+        # 陈旧的脏格子指向已销毁的 section, 一并丢弃。
+        self._dirty_cells.clear()
         # NOTE: ``_failed_paths`` is intentionally NOT cleared here — a path
         # that genuinely failed to decode (missing/corrupt file) will fail
         # again next time; re-requesting it on every paint is a busy loop.
@@ -1444,10 +1658,18 @@ class UidGroupedGrid(QFrame):
         ts = self._thumb_size
         if QPixmapCache.find(_cache_key_for(ts, path)) is not None:
             return
-        cached = try_cached_image_data(path, ts)
-        if cached is not None and not cached.isNull():
-            self._store_decoded_pixmap(section_idx, row, path, cached)
-            return
+        # §7 旧: cached = try_cached_image_data(path, ts)
+        # §7 旧: if cached is not None and not cached.isNull():
+        # §7 旧:     self._store_decoded_pixmap(section_idx, row, path, cached)
+        # §7 旧:     return
+        #   —— 这条在 delegate.paint() 的调用栈里同步做 Path.resolve + stat +
+        #      sha256 + 读盘 + 全量 JPEG 解码 (~2ms/张, 一屏 30 格 ≈ 60ms 卡在
+        #      paint 上), 并在 paint 内递归触发 dataChanged/viewport.update。
+        #   —— 删除是零功能损失: worker 的 decode_image_data(use_cache=True)
+        #      (image_thumbnail.py) 本来就先查内存缓存、再查磁盘缓存
+        #      (read_disk_thumbnail), 这条快路径在 worker 线程上已经具备。
+        # paint 现在只允许 QPixmapCache.find + drawPixmap; 未命中就画占位、标
+        # pending、把解码投递给 worker。
         self._req_counter += 1
         req_id = self._req_counter
         self._pending[req_id] = (section_idx, row, path)

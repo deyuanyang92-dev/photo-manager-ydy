@@ -165,6 +165,26 @@ class CollabService(QObject):
         # racing the store / spec-sync counter.
         self._sync_lock = threading.Lock()
 
+        # Re-entrancy guard for the offline-draft retry cycle (15 s timer).
+        # Same semantics as _sync_lock but a SEPARATE lock on purpose: reusing
+        # _sync_lock would let a in-flight pull cycle silently swallow a retry
+        # firing (and vice versa).  D drafts × P peers × 4 s HTTP can outlast the
+        # 15 s cadence, so without this guard the daemon threads would stack up
+        # and re-POST the same uid concurrently.
+        self._retry_lock = threading.Lock()
+
+        # Re-entrancy guard for the "pull the whole specimen set from the
+        # session" cycle (join_session / project switch / manual button).  Also
+        # separate from _sync_lock: the 5 s cycle holds that one, and a project
+        # switch during a cycle must NOT drop the pull.  Without any lock, two
+        # rapid project switches would write the same DB concurrently.
+        self._specimen_pull_lock = threading.Lock()
+
+        # Threads that outlived their bounded shutdown wait: keep a strong ref
+        # so Python does not GC a still-running QThread ("QThread: Destroyed
+        # while thread is still running" → abort).
+        self._retired_threads: list[QThread] = []
+
         # Same-name project bind suggestions already shown (peer project_ids);
         # prevents re-nagging after the user declines.  Reset on project switch.
         self._bind_prompted: set[str] = set()
@@ -275,19 +295,145 @@ class CollabService(QObject):
         self._subnet_scan_timer.start()
         self.run_diagnostics()
 
+    # Total budget for the (main-thread) shutdown wait.  The old serial path
+    # could block the GUI for 2 s + 3 s + 5 s + 1 s ≈ 11 s on exit / project
+    # switch ("未响应").  Threads are now signalled first and waited on against
+    # ONE shared deadline, so a slow thread eats the budget instead of adding
+    # to it.
+    _STOP_BUDGET_MS = 2500
+    _STOP_TERMINATE_WAIT_MS = 500
+
     def stop(self) -> None:
-        """Gracefully shut down all background threads.  Idempotent."""
+        """Gracefully shut down all background threads.  Idempotent.
+
+        Three phases (the wait must still be *bounded but real*: MainWindow
+        calls ``db_manager.close_all()`` right after us, and a surviving server
+        thread holding a SQLite/WAL handle is the historic must-reboot bug —
+        so fire-and-forget is NOT an option):
+
+          A. signal only (non-blocking): stop timers, requestInterruption() on
+             the discovery / subnet-scan threads, poke uvicorn's ``should_exit``.
+          B. one shared deadline (_STOP_BUDGET_MS) — wait each thread for the
+             remaining time; a thread that finishes early leaves budget behind.
+          C. fallback: still running ⇒ terminate() + short wait; keep a strong
+             reference either way so a still-running QThread is never GC'd.
+        """
+        # §7 keep-old: serial stop() calls — each did its own quit()+wait()
+        #   self._running = False
+        #   self._sync_timer.stop()
+        #   self._retry_timer.stop()
+        #   self._subnet_scan_timer.stop()
+        #   self._stop_subnet_scanner()                  # wait(2000)
+        #   if self._discovery_thread:
+        #       self._discovery_thread.stop()            # quit(); wait(3000)
+        #       self._discovery_thread = None
+        #   if self._server_thread:
+        #       self._server_thread.stop()               # quit(); wait(5000); terminate(); wait(1000)
+        #       self._server_thread = None
         self._running = False
+        # QTimers are owned by (and only touched on) the main thread.
         self._sync_timer.stop()
         self._retry_timer.stop()
         self._subnet_scan_timer.stop()
-        self._stop_subnet_scanner()
-        if self._discovery_thread:
-            self._discovery_thread.stop()
-            self._discovery_thread = None
-        if self._server_thread:
-            self._server_thread.stop()
-            self._server_thread = None
+
+        scanner = self._subnet_scanner
+        discovery = self._discovery_thread
+        server = self._server_thread
+
+        # ── Phase A: signal, do not wait ──────────────────────────────────
+        for th in (scanner, discovery):
+            if th is None:
+                continue
+            try:
+                th.requestInterruption()
+            except Exception:  # noqa: BLE001
+                pass
+        if server is not None:
+            self._signal_server_exit(server)
+
+        # ── Phase B: bounded wait against one shared deadline ─────────────
+        deadline = time.monotonic() + (self._STOP_BUDGET_MS / 1000.0)
+        for th in (scanner, discovery, server):
+            if th is None:
+                continue
+            remaining_ms = int(max(0.0, deadline - time.monotonic()) * 1000)
+            try:
+                th.wait(remaining_ms)
+            except Exception:  # noqa: BLE001
+                pass
+
+        # ── Phase C: cleanup / last-resort terminate ──────────────────────
+        if discovery is not None:
+            try:
+                if discovery.isRunning():
+                    discovery.terminate()
+                    discovery.wait(self._STOP_TERMINATE_WAIT_MS)
+                else:
+                    # Thread already exited its poll loop: stop() now only
+                    # unregisters the mDNS service and closes zeroconf, its
+                    # quit()/wait() return immediately.
+                    discovery.stop()
+            except Exception:  # noqa: BLE001
+                pass
+        if server is not None:
+            try:
+                if server.isRunning():
+                    server.terminate()
+                    server.wait(self._STOP_TERMINATE_WAIT_MS)
+            except Exception:  # noqa: BLE001
+                pass
+
+        for th in (scanner, discovery, server):
+            if th is None:
+                continue
+            try:
+                if th.isRunning():
+                    # Never drop the last Python reference to a live QThread.
+                    self._retired_threads.append(th)
+            except Exception:  # noqa: BLE001
+                self._retired_threads.append(th)
+
+        self._subnet_scanner = None
+        self._discovery_thread = None
+        self._server_thread = None
+
+    def _signal_server_exit(self, server: QThread) -> None:
+        """Ask the uvicorn server thread to exit — non-blocking.
+
+        Mirrors the first half of ``CollabServerThread.stop()`` (collab_net.py)
+        without its quit()/wait()/terminate() tail, so the main thread can
+        signal all threads first and wait once (see stop()).  Falls back to the
+        thread's own stop() when it does not expose the uvicorn internals
+        (test doubles).
+        """
+        srv = getattr(server, "_server", None)
+        loop = getattr(server, "_loop", None)
+        closed = True
+        if loop is not None:
+            try:
+                closed = bool(loop.is_closed())
+            except Exception:  # noqa: BLE001
+                closed = True
+        if srv is not None and loop is not None and not closed:
+            try:
+                loop.call_soon_threadsafe(setattr, srv, "should_exit", True)
+            except Exception:  # noqa: BLE001
+                pass
+        elif loop is not None and not closed:
+            try:
+                loop.call_soon_threadsafe(loop.stop)
+            except Exception:  # noqa: BLE001
+                pass
+        # NOTE: deliberately NOT calling ``server.stop()`` here — its quit()+
+        # wait(5000)+terminate() tail is exactly the blocking we are removing.
+        # A thread that has not reached its event loop yet (e.g. still inside
+        # _find_free_port) cannot be asked to exit cooperatively; phase C
+        # terminates it once the shared budget runs out.
+        for call in ("requestInterruption", "quit"):
+            try:
+                getattr(server, call)()
+            except Exception:  # noqa: BLE001
+                pass
 
     def is_running(self) -> bool:
         """True between start() and stop()."""
@@ -571,7 +717,9 @@ class CollabService(QObject):
         # Pull task records immediately
         QTimer.singleShot(100, self._sync_all_peers)
         # Pull specimen records (full dataset from all peers in this session)
-        QTimer.singleShot(300, self.pull_all_specimens_from_session)
+        # §7 keep-old: ran the 8 s-per-peer pull ON the Qt main thread
+        # QTimer.singleShot(300, self.pull_all_specimens_from_session)
+        QTimer.singleShot(300, self.pull_all_specimens_from_session_async)
 
     def leave_session(self) -> None:
         """Leave the current team (clears team code, stops syncing)."""
@@ -597,7 +745,9 @@ class CollabService(QObject):
             # same project (team connection itself is unaffected).
             if self._running and self._group_code:
                 QTimer.singleShot(500, self._sync_all_peers)
-                QTimer.singleShot(1000, self.pull_all_specimens_from_session)
+                # §7 keep-old: blocked the main thread for 8 s × N peers
+                # QTimer.singleShot(1000, self.pull_all_specimens_from_session)
+                QTimer.singleShot(1000, self.pull_all_specimens_from_session_async)
         else:
             self._project_id = ""
 
@@ -1403,20 +1553,77 @@ class CollabService(QObject):
         with self._peers_lock:
             peers_snapshot = [p for p in self._peers.values() if self._task_sync_allowed(p)]
 
+        # §7 keep-old: serial peer loop — every unreachable peer added its own
+        # full HTTP timeout to the claim, so 「激活/认领编号」 blocked the GUI for
+        # 4 s × N.  It also early-returned on the first 409, leaving peers that
+        # had already returned 201 *out of the rollback set* (ghost claims).
+        #   claimed_peers: list[PeerInfo] = []
+        #   unreachable_peers: list[PeerInfo] = []
+        #   for peer in peers_snapshot:
+        #       ok, conflict_msg, created = self._remote_create(peer, uid, assignee, device_id)
+        #       if not ok:
+        #           self.conflict_detected.emit(uid)
+        #           self._log_activity("conflict", uid, detail=f"编号 {uid} 在远程设备已存在", severity="error")
+        #           self._rollback_task_claim(uid, claimed_peers)
+        #           return False, conflict_msg
+        #       if created:
+        #           claimed_peers.append(peer)
+        #       else:
+        #           # Network failure (not a 409) — peer unreachable, task not broadcast
+        #           unreachable_peers.append(peer)
+        #
+        # New: probe every peer CONCURRENTLY, then decide.  This call stays
+        # synchronous on purpose — a 409 from any peer must block the claim
+        # before the caller saves — but its wall time is now ~one peer's
+        # timeout, not the sum.  All futures are collected before judging: a
+        # peer that already answered 201 must be in the rollback set.
+        results: list[tuple[PeerInfo, tuple[bool, str, bool]]] = []
+        if len(peers_snapshot) <= 1:
+            for peer in peers_snapshot:
+                results.append(
+                    (peer, self._remote_create(peer, uid, assignee, device_id))
+                )
+        else:
+            import concurrent.futures
+
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=min(8, len(peers_snapshot)),
+                thread_name_prefix="collab-create",
+            ) as pool:
+                futures = {
+                    pool.submit(self._remote_create, peer, uid, assignee, device_id): peer
+                    for peer in peers_snapshot
+                }
+                # Preserve peer order in the results (deterministic messages).
+                by_peer = {}
+                for fut, peer in futures.items():
+                    try:
+                        by_peer[id(peer)] = fut.result()
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug("collab: remote create task failed for %s: %s",
+                                     peer.base_url, exc)
+                        by_peer[id(peer)] = (True, "", False)  # treat as unreachable
+                results = [(p, by_peer[id(p)]) for p in peers_snapshot]
+
         claimed_peers: list[PeerInfo] = []
         unreachable_peers: list[PeerInfo] = []
-        for peer in peers_snapshot:
-            ok, conflict_msg, created = self._remote_create(peer, uid, assignee, device_id)
+        conflict_msg: str = ""
+        for peer, (ok, msg, created) in results:
             if not ok:
-                self.conflict_detected.emit(uid)
-                self._log_activity("conflict", uid, detail=f"编号 {uid} 在远程设备已存在", severity="error")
-                self._rollback_task_claim(uid, claimed_peers)
-                return False, conflict_msg
+                if not conflict_msg:
+                    conflict_msg = msg
+                continue
             if created:
                 claimed_peers.append(peer)
             else:
                 # Network failure (not a 409) — peer unreachable, task not broadcast
                 unreachable_peers.append(peer)
+
+        if conflict_msg:
+            self.conflict_detected.emit(uid)
+            self._log_activity("conflict", uid, detail=f"编号 {uid} 在远程设备已存在", severity="error")
+            self._rollback_task_claim(uid, claimed_peers)
+            return False, conflict_msg
 
         # If any peer was unreachable, queue for retry so it gets the task later.
         # This prevents split-brain if B comes online after A created the UID.
@@ -1432,14 +1639,33 @@ class CollabService(QObject):
         self.specimen_status_changed.emit(uid)
         return True, "ok"
 
+    @staticmethod
+    def _task_http_timeout(read: float = 4.0) -> Any:
+        """Split connect/read timeout for the task endpoints.
+
+        A dead/firewalled peer burns the *connect* phase — that is what stalls a
+        claim.  httpx counts every phase separately, so a flat ``timeout=4.0``
+        means "up to 4 s to connect, then up to 4 s to read".  Tighten connect
+        (1.5 s) but keep read at 4 s: a LAN peer with a big payload must not be
+        killed mid-read.  Falls back to a plain float if httpx is unavailable.
+        """
+        httpx = get_httpx()
+        if httpx is None:
+            return read
+        try:
+            return httpx.Timeout(connect=1.5, read=read, write=read, pool=1.0)
+        except Exception:  # noqa: BLE001
+            return read
+
     def _remote_release(self, peer: PeerInfo, uid: str) -> None:
         """Ask a peer to release a UID claim (best-effort compensation)."""
         try:
             httpx = get_httpx()
+            # §7 keep-old: timeout=4.0 (flat — 4 s just to fail connecting)
             httpx.post(
                 f"{peer.base_url}/api/collab/tasks/release",
                 json={"uid": uid, "groupCode": self._group_code},
-                timeout=4.0,
+                timeout=self._task_http_timeout(),
             )
         except Exception as exc:  # noqa: BLE001
             logger.debug("collab: remote release failed for %s: %s", peer.base_url, exc)
@@ -1463,6 +1689,7 @@ class CollabService(QObject):
         """
         try:
             httpx = get_httpx()
+            # §7 keep-old: timeout=4.0 (flat)
             resp = httpx.post(
                 f"{peer.base_url}/api/collab/tasks/create",
                 json={
@@ -1472,7 +1699,7 @@ class CollabService(QObject):
                     "projectName": self._project_name,
                     "groupCode": self._group_code,
                 },
-                timeout=4.0,
+                timeout=self._task_http_timeout(),
             )
             if resp.status_code == 409:
                 detail = resp.json().get("detail", "conflict")
@@ -1629,11 +1856,44 @@ class CollabService(QObject):
         return True, "ok"
 
     def _maybe_retry_offline_drafts(self) -> None:
-        """Timer slot: silently attempt to flush offline drafts."""
+        """Timer slot (15 s, main thread): **schedule** an offline-draft flush.
+
+        §7 keep-old — the old body ran the whole flush inline on the Qt main
+        thread; with D drafts × P peers × 4 s HTTP timeouts that froze the UI for
+        seconds, every 15 s (the 5 s _sync_timer already does it right, see
+        _sync_all_peers):
+            try:
+                self.retry_offline_drafts()
+            except Exception:  # noqa: BLE001
+                pass
+
+        Now: same shape as ``_sync_all_peers`` — a non-blocking lock skips this
+        firing when the previous cycle is still in flight (otherwise cycles stack
+        up and re-POST the same uid concurrently, racing the draft list), and the
+        actual HTTP work runs via ``_spawn`` (overridden to run synchronously in
+        tests).  The public ``retry_offline_drafts()`` stays synchronous for
+        manual "retry now" buttons and tests.
+        """
+        if not self._retry_lock.acquire(blocking=False):
+            return
+        self._spawn(self._run_retry_cycle)
+
+    def _run_retry_cycle(self) -> None:
+        """One offline-draft flush — runs in a worker thread (or sync in tests).
+
+        Everything it touches is thread-safe off the main thread:
+        ``_offline_drafts_lock`` / ``_peers_lock`` guard the lists,
+        ``_save_drafts_to_disk`` is plain file IO, ``ActivityLog.append`` holds
+        its own lock, and the pyqtSignal emits are queued back to the main
+        thread.  It must never start/stop ``_retry_timer`` (QTimer is owned by
+        the main thread).
+        """
         try:
             self.retry_offline_drafts()
         except Exception:  # noqa: BLE001
             pass
+        finally:
+            self._retry_lock.release()
 
     # ── Specimen data sync (L2: metadata replication) ────────────────────
 
@@ -1746,8 +2006,41 @@ class CollabService(QObject):
             logger.debug("collab: specimen pull from %s failed: %s", peer.base_url, exc)
         return 0
 
+    def pull_all_specimens_from_session_async(self) -> None:
+        """Schedule :meth:`pull_all_specimens_from_session` off the Qt main thread.
+
+        The blocking body does ``httpx.get(..., timeout=8.0)`` (+ a 2 s clock-skew
+        probe) per peer, serially — running it on the main thread froze the UI for
+        ~10 s × N peers on join_session / project switch.  Nothing in that path
+        touches Qt objects: the DB write uses ``open_project_db_private`` (fresh
+        connection, closed in ``finally``), ``ActivityLog.append`` holds its own
+        lock, and ``specimens_updated`` / ``activity_logged`` are pyqtSignals
+        (queued back to the main thread), so the work is safe off-thread.
+
+        Re-entrancy: a dedicated non-blocking lock (NOT ``_sync_lock``) makes a
+        second request a no-op while a pull is in flight, so two rapid project
+        switches cannot write the same DB concurrently.
+        """
+        if not self._specimen_pull_lock.acquire(blocking=False):
+            logger.debug("collab: specimen pull already in flight — skipping")
+            return
+        self._spawn(self._run_specimen_pull_cycle)
+
+    def _run_specimen_pull_cycle(self) -> None:
+        """Worker body for :meth:`pull_all_specimens_from_session_async`."""
+        try:
+            self.pull_all_specimens_from_session()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("collab: specimen pull cycle failed: %s", exc)
+        finally:
+            self._specimen_pull_lock.release()
+
     def pull_all_specimens_from_session(self) -> int:
-        """Pull all specimens from same-team same-project peers (used on join)."""
+        """Pull all specimens from same-team same-project peers (used on join).
+
+        BLOCKING — callers on the Qt main thread should use
+        :meth:`pull_all_specimens_from_session_async` instead.
+        """
         with self._peers_lock:
             peers = [p for p in self._peers.values() if self._data_sync_allowed(p)]
         total = 0
@@ -1924,20 +2217,41 @@ class CollabService(QObject):
         )
         payload = record.to_dict()
 
-        # §7 keep-old: was ``try: import httpx / except ImportError: return``
-        httpx = get_httpx()
-        if httpx is None:
-            return
+        # §7 keep-old: the httpx probe AND the POST loop ran on the CALLING
+        # thread — which is the Qt main thread (workbench 合成/整理 finished
+        # slots), so every peer added up to 3 s of frozen UI:
+        #   httpx = get_httpx()
+        #   if httpx is None:
+        #       return
+        #   for peer in peers_snapshot:
+        #       try:
+        #           httpx.post(
+        #               f"{peer.base_url}/api/collab/photo-index",
+        #               json=payload,
+        #               timeout=3.0,
+        #           )
+        #       except Exception:  # noqa: BLE001
+        #           pass
+        #
+        # Now fire-and-forget off the main thread, like broadcast_status_update /
+        # push_specimen.  ``_spawn`` (not a raw threading.Thread) because tests
+        # override it to run synchronously.  The worker only touches httpx + a
+        # plain dict — no Qt objects — and needs no result signal.
+        def _send() -> None:
+            httpx = get_httpx()
+            if httpx is None:
+                return
+            for peer in peers_snapshot:
+                try:
+                    httpx.post(
+                        f"{peer.base_url}/api/collab/photo-index",
+                        json=payload,
+                        timeout=3.0,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
 
-        for peer in peers_snapshot:
-            try:
-                httpx.post(
-                    f"{peer.base_url}/api/collab/photo-index",
-                    json=payload,
-                    timeout=3.0,
-                )
-            except Exception:  # noqa: BLE001
-                pass
+        self._spawn(_send)
 
     # ── Node info ─────────────────────────────────────────────────────────
 
@@ -2075,17 +2389,38 @@ class CollabService(QObject):
 
         if peers_snapshot:
             # §7 keep-old: was ``try: import httpx / ...<loop>... / except ImportError: pass``
-            httpx = get_httpx()
-            if httpx is not None:
+            # §7 keep-old: the release broadcast ran on the calling (main) thread —
+            # 4 s × N of frozen UI on 释放编号 with a dead peer:
+            #   httpx = get_httpx()
+            #   if httpx is not None:
+            #       for peer in peers_snapshot:
+            #           try:
+            #               httpx.post(
+            #                   f"{peer.base_url}/api/collab/tasks/release",
+            #                   json={"uid": uid, "groupCode": self._group_code},
+            #                   timeout=4.0,
+            #               )
+            #           except Exception:  # noqa: BLE001
+            #               pass
+            # It is fire-and-forget (no return value is read), so it moves
+            # off-thread like broadcast_status_update.
+            group_code = self._group_code
+
+            def _send_release() -> None:
+                httpx = get_httpx()
+                if httpx is None:
+                    return
                 for peer in peers_snapshot:
                     try:
                         httpx.post(
                             f"{peer.base_url}/api/collab/tasks/release",
-                            json={"uid": uid, "groupCode": self._group_code},
-                            timeout=4.0,
+                            json={"uid": uid, "groupCode": group_code},
+                            timeout=self._task_http_timeout(),
                         )
                     except Exception:  # noqa: BLE001
                         pass
+
+            self._spawn(_send_release)
 
         self.tasks_changed.emit()
         self._log_activity("released", uid, detail=f"释放了编号 {uid}")

@@ -31,7 +31,9 @@ line up with nav order, exactly as before.
 """
 from __future__ import annotations
 
+import logging
 import os
+from importlib import import_module
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
@@ -62,6 +64,8 @@ from app.views.base_view import BaseView
 
 if TYPE_CHECKING:
     from app.app_context import AppContext
+
+logger = logging.getLogger(__name__)
 
 _K_SCREENSHOT_TOOL_ENABLED = "ui/screenshot_tool_enabled"
 _K_SCREENSHOT_DEFAULT_MIGRATED = "ui/screenshot_tool_default_migrated"
@@ -96,6 +100,13 @@ class MainWindow(QMainWindow):
         self._helicon_status_timer = QTimer(self)
         self._helicon_status_timer.setSingleShot(True)
         self._helicon_status_timer.timeout.connect(self._refresh_helicon_status)
+        # 空闲期预取:窗口画出来之后, 一 tick 一个地 import 各 LazyViewSpec 的模块,
+        # 把「首次点某个页 → 3~4s 白屏」里的 import 成本挪到空闲期。只做
+        # importlib.import_module(纯模块导入, 不构造任何 QWidget), 且跑在主线程。
+        self._prefetch_timer = QTimer(self)
+        self._prefetch_timer.setSingleShot(True)
+        self._prefetch_timer.timeout.connect(self._prefetch_next_view_module)
+        self._prefetch_queue: list[str] = []
 
         self.setWindowTitle(tr("标本影像"))
         self.resize(1440, 900)
@@ -1428,6 +1439,44 @@ class MainWindow(QMainWindow):
     def _activate_initial_view(self) -> None:
         if not getattr(self, "_torn_down", False):
             self._activate_index(0, persist=False)
+            self._start_view_prefetch()
+
+    # ── Idle-time view-module prefetch ────────────────────────────────────
+
+    def _start_view_prefetch(self) -> None:
+        """首页画完之后, 排队在空闲期把其余页面的模块 import 掉。
+
+        LazyViewSpec.resolve() 的 import_module 是页面首次打开时才付的成本
+        (registry.py:28) —— 重的页面 (labels_view / collection_map_view /
+        project_tree_view, 各 1500~5000 行 + matplotlib/pyproj 等重依赖) 会让
+        第一次点它时白屏数秒。这里把这笔 import 挪到窗口已经可交互之后的空闲期,
+        一个 tick 一个模块, 每次之间让事件循环喘口气, 所以不会造成新的卡顿。
+
+        只做纯模块 import, 不构造任何 QWidget (页面实例仍由 _ensure_view 懒建)。
+        全程主线程 —— import 不是线程安全的, 且 QTimer 只能在自己所属线程 start。
+        """
+        if getattr(self, "_torn_down", False):
+            return
+        queue: list[str] = []
+        for view_ref in self._view_classes:
+            module = getattr(view_ref, "module", "")
+            if module and module not in queue:
+                queue.append(module)
+        self._prefetch_queue = queue
+        if queue:
+            self._prefetch_timer.start(1200)  # 先让首页彻底安定下来
+
+    def _prefetch_next_view_module(self) -> None:
+        """预取队列的一个 tick:import 一个模块, 然后把下一个排到后面。"""
+        if getattr(self, "_torn_down", False) or not self._prefetch_queue:
+            return
+        module = self._prefetch_queue.pop(0)
+        try:
+            import_module(module)
+        except Exception as exc:  # noqa: BLE001 — 预取失败无害, 页面照常懒加载
+            logger.debug("view prefetch skipped %s: %s", module, exc)
+        if self._prefetch_queue:
+            self._prefetch_timer.start(150)
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self.ctx.settings.save_geometry(self.saveGeometry())

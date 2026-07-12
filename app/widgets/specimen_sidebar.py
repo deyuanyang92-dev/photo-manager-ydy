@@ -11,7 +11,8 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Optional
 
-from PyQt6.QtCore import QSize, Qt, pyqtSignal
+from PyQt6.QtCore import QRect, QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QFontMetrics
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -134,6 +135,25 @@ class SpecimenSidebar(QWidget):
         self._phase_dots: dict[str, dict[str, QPushButton]] = {}
         self._phase_state: dict[str, Optional[str]] = {}
         self._uid_normalized_projects: set[str] = set()
+        # ── 搜索防抖 ──────────────────────────────────────────────────────────
+        # 每敲一个键都 clear() + 重建整棵列表(N=800 时几百 ms~数秒冻结)。
+        # 定时器在主线程创建, 也只在主线程 start/stop —— 无跨线程隐患;
+        # 只建一次(__init__), on_activate/refresh 不会再新建。
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(200)
+        self._search_timer.timeout.connect(
+            lambda: self._apply_filter(self._search.text())
+        )
+        # ── 行高几何缓存(替代逐行 heightForWidth 全量布局计算) ────────────────
+        # _uid_fm[active]        : 编号标签的 QFontMetrics(取自已 polish 的真实标签)
+        # _uid_width_delta[active]: 行宽 → 编号标签可用宽度 的固定差值(边框/边距)
+        # _chrome_cache[(active, sig)]: 行内「除编号标签外」的固定高度
+        # _row_height_cache[(text, width, active, sig)]: 最终行高
+        self._uid_fm: dict[bool, QFontMetrics] = {}
+        self._uid_width_delta: dict[bool, int] = {}
+        self._chrome_cache: dict[tuple, int] = {}
+        self._row_height_cache: dict[tuple, int] = {}
         self._setup_ui()
 
     # ── UI ────────────────────────────────────────────────────────────────────
@@ -192,6 +212,13 @@ class SpecimenSidebar(QWidget):
                 icons.icon("mdi6.magnify", color=icons.TONE_MUTED),
                 QLineEdit.ActionPosition.LeadingPosition,
             )
+        # §7 旧: self._search.textChanged.connect(self._on_search) —— 直连、无防抖,
+        # 每敲一个键就 clear() + 为每个编号新建一整棵 row widget(零虚拟化)。
+        # self._search.textChanged.connect(self._on_search)
+        # 新: 用户键入(textEdited, 先于 textChanged 发出)只重启 200ms 防抖定时器;
+        #     textChanged 仍连着 —— 程序化 setText() 不发 textEdited, 定时器不在跑,
+        #     此时立即过滤(保持旧的同步语义, 调用方/测试不受影响)。
+        self._search.textEdited.connect(self._on_search_edited)
         self._search.textChanged.connect(self._on_search)
         top_row.addWidget(self._search, stretch=1)
 
@@ -547,6 +574,9 @@ class SpecimenSidebar(QWidget):
         4 clickable phase dots (拍摄中/已拍完/整理中/完成).  Clicking a dot marks
         that 编号's phase via :attr:`phase_mark_requested` — no activation needed.
         """
+        # 任何一次真正的重建都吃掉待触发的防抖(排序/筛选/refresh 已用最新文本重建,
+        # 不必 200ms 后再来一遍)。stop() 只在主线程调用 —— 定时器归主线程所有。
+        self._search_timer.stop()
         was_enabled = self._list.updatesEnabled()
         self._list.setUpdatesEnabled(False)
         # 重建期间 clear()/addItem() 会连发 itemSelectionChanged —— 不抑制的话
@@ -742,6 +772,9 @@ class SpecimenSidebar(QWidget):
         uid_lbl.setSizePolicy(_uid_sp)
         uid_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         v.addWidget(uid_lbl)
+        # 行高几何缓存要用到:编号标签的显示文本 + 标签本身(取字体/可用宽度)。
+        row._uid_display = uid_lbl.text()   # type: ignore[attr-defined]
+        row._uid_label = uid_lbl            # type: ignore[attr-defined]
 
         # ── 第 2 行:物种名(左) + 激活状态 pill(右)──
         # 状态 pill 从编号行下移到这里(用户要求),给编号腾出整行。
@@ -836,6 +869,15 @@ class SpecimenSidebar(QWidget):
         line.addWidget(print_btn)
 
         v.addLayout(line)
+        # 「chrome 签名」= 除编号标签外, 所有会影响行高的结构差异。同签名的行,
+        # 非编号部分的高度完全一样 → 只需真正测量一次(见 `_chrome_height`)。
+        row._chrome_sig = (                      # type: ignore[attr-defined]
+            bool(active),
+            bool(is_rna),
+            bool(progress_text),
+            bool(badge),
+            bool(name_text),
+        )
         return row
 
     @staticmethod
@@ -906,15 +948,111 @@ class SpecimenSidebar(QWidget):
 
         侧栏很窄, ``_display_uid`` 强制折一行后 wordWrap 还可能再折 ——
         写死高度必然裁字。宽度取 viewport(尚未布局时回退到控件宽)。
+
+        §7 旧实现对**每一行**调 ``row.heightForWidth(width)`` —— 每行强制一次
+        完整 layout 计算(实测 N=800 约 75~100ms, 且拖动侧栏宽度每一步都要重付)。
+        新实现纯几何:行高 = chrome(同结构的行只测一次) + 编号标签在当前宽度下
+        用 QFontMetrics 算出的折行高度; 结果按 (文本, 宽度, active, 签名) 记忆。
+        实测与旧值逐 px 相同(见 tests/test_specimen_sidebar_perf.py)。
         """
         base = 96 if active else 90
         width = self._list.viewport().width()
         if width <= 8:
             width = max(1, self._list.width() - 8)
-        need = row.heightForWidth(width) if row.hasHeightForWidth() else -1
+
+        # §7 旧: 逐行 heightForWidth / sizeHint —— 保留作回退路径(拿不到几何
+        # 元数据、或几何计算抛错时仍走它, 行为与从前完全一致)。
+        # need = row.heightForWidth(width) if row.hasHeightForWidth() else -1
+        # if need <= 0:
+        #     need = row.sizeHint().height()
+        # return max(base, int(need) + 4)  # +4 呼吸位, 防贴边
+        need = self._row_content_height(row, width, active=active)
         if need <= 0:
-            need = row.sizeHint().height()
+            need = row.heightForWidth(width) if row.hasHeightForWidth() else -1
+            if need <= 0:
+                need = row.sizeHint().height()
         return max(base, int(need) + 4)  # +4 呼吸位, 防贴边
+
+    # ── 行高几何(纯计算, 不建 widget、不跑 layout) ─────────────────────────────
+
+    def _row_content_height(self, row, width: int, *, active: bool) -> int:
+        """行内容所需高度 = chrome + 编号标签折行高度。失败返回 -1(调用方回退)。"""
+        text = getattr(row, "_uid_display", None)
+        sig = getattr(row, "_chrome_sig", None)
+        if text is None or sig is None:
+            return -1
+        key = (text, width, bool(active), sig)
+        cached = self._row_height_cache.get(key)
+        if cached is not None:
+            return cached
+        try:
+            self._uid_metrics(row, active)     # 首次标定字体度量
+            delta = self._uid_label_width_delta(row, active)
+            chrome = self._chrome_height(row, width, active, sig, delta)
+            if chrome < 0:
+                return -1
+            need = chrome + self._uid_text_height(text, width - delta, active)
+        except Exception:
+            return -1
+        # 拖动侧栏宽度会不断产生新 width 键 —— 加个上限, 免得缓存无限长。
+        if len(self._row_height_cache) > 4096:
+            self._row_height_cache.clear()
+        self._row_height_cache[key] = need
+        return need
+
+    def _uid_metrics(self, row, active: bool) -> QFontMetrics:
+        """编号标签的字体度量 —— 取自真实(已 polish)标签, 所以 QSS 字体生效。"""
+        fm = self._uid_fm.get(bool(active))
+        if fm is None:
+            lbl = row._uid_label
+            lbl.ensurePolished()
+            fm = QFontMetrics(lbl.font())
+            self._uid_fm[bool(active)] = fm
+        return fm
+
+    def _uid_label_width_delta(self, row, active: bool) -> int:
+        """行宽 - 编号标签可用宽度(边框/内外边距之和), 与行宽无关的常数。"""
+        delta = self._uid_width_delta.get(bool(active))
+        if delta is not None:
+            return delta
+        lbl = row._uid_label
+        row.ensurePolished()
+        lbl.ensurePolished()
+        probe = 400
+        old = row.size()
+        row.resize(probe, 1000)
+        lay = row.layout()
+        if lay is not None:
+            lay.activate()
+        delta = max(0, probe - lbl.width())
+        row.resize(old)          # 还原:行马上会被列表重新布局, 这里只是量一下
+        self._uid_width_delta[bool(active)] = delta
+        return delta
+
+    def _chrome_height(self, row, width: int, active: bool, sig, delta: int) -> int:
+        """行内「除编号标签外」的固定高度。同签名只真正测一次(与行宽无关)。"""
+        key = (bool(active), sig)
+        chrome = self._chrome_cache.get(key)
+        if chrome is not None:
+            return chrome
+        total = row.heightForWidth(width) if row.hasHeightForWidth() else -1
+        if total <= 0:
+            total = row.sizeHint().height()
+        if total <= 0:
+            return -1
+        text = row._uid_display
+        chrome = int(total) - self._uid_text_height(text, width - delta, active)
+        self._chrome_cache[key] = chrome
+        return chrome
+
+    def _uid_text_height(self, text: str, width: int, active: bool) -> int:
+        """编号文本在 *width* px 内自动折行后的高度(与 QLabel 的算法一致)。"""
+        fm = self._uid_fm.get(bool(active))
+        if fm is None:                       # 还没标定过 → 调用方保证先标定
+            raise RuntimeError("uid font metrics not calibrated")
+        flags = int(Qt.TextFlag.TextWordWrap) | int(Qt.AlignmentFlag.AlignLeft)
+        rect = fm.boundingRect(QRect(0, 0, max(1, int(width)), 100000), flags, text)
+        return int(rect.height())
 
     def _resync_row_heights(self) -> None:
         """侧栏宽度变化会改变折行数 → 重算每行高度(纯几何, 不重建 widget)。"""
@@ -1222,7 +1360,18 @@ class SpecimenSidebar(QWidget):
 
     # ── Slots ─────────────────────────────────────────────────────────────────
 
+    def _on_search_edited(self, _text: str) -> None:
+        """用户在搜索框里敲键 —— 只重启防抖定时器, 不立刻重建列表。
+
+        Qt 保证 textEdited 先于 textChanged 发出(实测), 所以随后的 `_on_search`
+        看到定时器在跑就直接返回, 把这次按键交给 200ms 后的一次性重建。
+        """
+        self._search_timer.start()
+
     def _on_search(self, text: str) -> None:
+        # 定时器在跑 = 用户正在键入 → 交给防抖, 本次不重建。
+        if self._search_timer.isActive():
+            return
         self._apply_filter(text)
 
     def _show_sort_menu(self) -> None:
