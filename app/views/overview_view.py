@@ -776,13 +776,13 @@ class OverviewView(BaseView):
         header_row.addWidget(self._title_lbl)
         header_row.addStretch()
 
-        self._btn_new = QPushButton("+ 新建工作区")
+        self._btn_new = QPushButton("+ 新建项目")
         self._btn_new.setObjectName("Primary")
         self._btn_new.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._btn_new.clicked.connect(self._on_new_project)
+        self._btn_new.clicked.connect(self._on_new_survey_project)
         header_row.addWidget(self._btn_new)
 
-        self._btn_open = QPushButton("+ 打开文件夹")
+        self._btn_open = QPushButton("+ 选择已有文件夹")
         self._btn_open.setObjectName("Outline")
         self._btn_open.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_open.clicked.connect(self._on_open_workspace)
@@ -1076,7 +1076,7 @@ class OverviewView(BaseView):
         directory = _project_directory(proj)
         menu = QMenu(self._table)
 
-        enter_action = menu.addAction("进入工作区")
+        enter_action = menu.addAction("设为当前拍摄目录")
         enter_action.triggered.connect(lambda _=False, p=proj: self._on_enter_workspace(p))
 
         detail_action = menu.addAction("属性 / 详情")
@@ -1128,7 +1128,7 @@ class OverviewView(BaseView):
         lay.setContentsMargins(10, 6, 10, 6)
         lay.setSpacing(8)
 
-        enter_btn = QPushButton("进入工作区")
+        enter_btn = QPushButton("设为拍摄目录")
         enter_btn.setObjectName("Primary")
         enter_btn.setFixedHeight(30)
         enter_btn.setStyleSheet(
@@ -1212,6 +1212,20 @@ class OverviewView(BaseView):
         """Show a detail dialog for the project."""
         dlg = _ProjectDetailDialog(proj, parent=self)
         dlg.exec()
+
+    def _on_new_survey_project(self) -> None:
+        """Use the shell's single project-folder creation flow.
+
+        The overview used to open a second, incompatible "new workspace"
+        dialog. Keeping one entry prevents first-time users from creating two
+        different kinds of things with nearly identical buttons.
+        """
+        main_win = self.window()
+        handler = getattr(main_win, "_on_new_survey_project", None)
+        if callable(handler):
+            handler()
+            return
+        self._on_new_project()  # standalone-test / embedded fallback
 
     def _on_new_project(self) -> None:
         """Open new-workspace modal and persist the workspace."""

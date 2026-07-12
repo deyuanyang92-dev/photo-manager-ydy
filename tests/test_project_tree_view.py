@@ -211,9 +211,14 @@ def test_builds_tree_from_root(qtbot, tmp_path, ctx):
     assert "雷州半岛多样性" in top.text(0)
     child_texts = [top.child(i).text(0) for i in range(top.childCount())]
     assert any("断面a" in t for t in child_texts)
-    # workspace nodes (have project.db) are tagged 工作区; plain folders/regions are not
-    assert any("断面a" in t and "工作区" in t for t in child_texts)
-    assert any("断面b" in t and "工作区" not in t for t in child_texts)
+    # 用户只看普通文件夹名；是否已准备拍摄保留在内部 kind，不污染树标签。
+    assert any(t == "断面a" for t in child_texts)
+    assert any(t == "断面b" for t in child_texts)
+    assert any(
+        top.child(i).text(0) == "断面a"
+        and top.child(i).data(0, _KIND_ROLE) == "workspace"
+        for i in range(top.childCount())
+    )
 
 
 def test_tree_has_context_menu(qtbot, tmp_path, ctx):
@@ -291,8 +296,12 @@ def test_no_root_empty_json_shows_placeholder(qtbot, tmp_path, ctx, monkeypatch)
     qtbot.addWidget(view)
     view.on_activate()
     assert view._tree.topLevelItemCount() == 0
-    assert "未选根目录" in view._root_lbl.text()
-    assert "没有已记录的项目" in view._empty_state.text()
+    # §7 旧文案「（未选根目录）」—— 空态现在直接告诉用户下一步怎么做(2026-07-13)
+    assert "还没有项目" in view._root_lbl.text()
+    # §7 旧空态文案(「还没有选择调查根目录，也没有已记录的项目」) —— 只描述状态、不给出路。
+    #   新文案直接告诉用户下一步: 点「＋ 项目」新建; 有旧数据就「扫描磁盘」找回(2026-07-13)。
+    assert "＋ 项目" in view._empty_state.text()
+    assert "扫描磁盘" in view._empty_state.text()
 
 
 def test_no_root_flat_lists_known_projects(qtbot, tmp_path, ctx, monkeypatch):
@@ -321,13 +330,20 @@ def test_no_root_flat_lists_known_projects(qtbot, tmp_path, ctx, monkeypatch):
 
     # demo skipped + dup deduped -> 2 nodes, most-recent-first (json tail on top)
     assert view._tree.topLevelItemCount() == 2
-    assert "全部已建项目" in view._root_lbl.text()
+    # §7 旧文案「（全部已建项目 · N）」—— 标题栏现在给「N 个项目 · 数据位置」,
+    #   取代那条被 360px 截断的绝对路径(用户 2026-07-13 截图)。
+    assert "个项目" in view._root_lbl.text()
     assert "2" in view._root_lbl.text()
     labels = [view._tree.topLevelItem(i).text(0) for i in range(2)]
     # most-recent-first: dup(id4) was last in json but deduped against id1's dir,
     # so the tail-survivor is 乙(workspace) on top, then 甲.
-    assert any("乙" in t and "工作区" in t for t in labels)
-    assert any("甲" in t and "工作区" not in t for t in labels)
+    assert any(t == "乙" for t in labels)
+    assert any(t == "甲" for t in labels)
+    assert any(
+        view._tree.topLevelItem(i).text(0) == "乙"
+        and view._tree.topLevelItem(i).data(0, _KIND_ROLE) == "workspace"
+        for i in range(view._tree.topLevelItemCount())
+    )
     # 乙 (the later entry) comes first
     assert "乙" in labels[0]
     assert "甲" in labels[1]
@@ -516,7 +532,12 @@ def test_no_root_auto_discovers_workspace_candidates_near_cwd(qtbot, tmp_path, c
         view._tree.topLevelItem(i).text(0)
         for i in range(view._tree.topLevelItemCount())
     ]
-    assert any("ceshi6" in text and "工作区" in text for text in labels)
+    assert any(text == "ceshi6" for text in labels)
+    assert any(
+        view._tree.topLevelItem(i).text(0) == "ceshi6"
+        and view._tree.topLevelItem(i).data(0, _KIND_ROLE) == "workspace"
+        for i in range(view._tree.topLevelItemCount())
+    )
     assert any("ceshi8" in text and "可导入" in text for text in labels)
 
 
@@ -535,8 +556,9 @@ def test_kind_filter_selects_first_matching_workspace(qtbot, tmp_path, ctx):
     view._set_kind_filter("workspace")
 
     assert view._tree_count_lbl.text() == "1/3 个匹配"
-    assert "工作区" in view._tree.currentItem().text(0)
-    assert view._detail_kind.text() == "工作区"
+    assert view._tree.currentItem().text(0) == "断面a"
+    assert view._tree.currentItem().data(0, _KIND_ROLE) == "workspace"
+    assert view._detail_kind.text() == "拍摄目录"
     assert view._detail_path.text() == str(workspace)
 
 
@@ -941,7 +963,12 @@ def test_select_all_filter_with_three_column_grid(qtbot, tmp_path, ctx, monkeypa
     view = ProjectTreeView(ctx)
     qtbot.addWidget(view)
     view.on_activate()
-    assert len(view._tree.selectedItems()) == 3
+    # §7 旧断言: assert len(view._tree.selectedItems()) == 3
+    #   —— 冻结的是「一打开页面就自动全选所有拍摄目录」这个行为, 而它正是「死按键」的成因:
+    #   多选状态下「设为当前拍摄目录」被禁用 → 用户什么都没点, 大绿按钮已经是死的
+    #   (用户 2026-07-13 报障)。现在打开只单选第一个; 全选是**用户主动**点按钮的结果 ——
+    #   本测试真正要测的是下面那半段。
+    assert len(view._tree.selectedItems()) <= 1
     view._tree.clearSelection()
     view._btn_select_all_ws.click()
     assert len(view._tree.selectedItems()) == 3

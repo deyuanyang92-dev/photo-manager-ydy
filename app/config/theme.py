@@ -1259,12 +1259,21 @@ def apply_default_font(app) -> Optional[str]:
         from PyQt6.QtGui import QFont, QFontDatabase
     except Exception:
         return None
-    families = set(QFontDatabase.families())
-    chosen = None
-    # User override wins when it's actually installed.
-    if _FONT_FAMILY and _FONT_FAMILY in families:
-        chosen = _FONT_FAMILY
+    # Native Windows always ships Microsoft YaHei UI. Enumerating the complete
+    # QFontDatabase before first paint can take around a second in a frozen app,
+    # and also triggers Qt's packaged-font-directory warning. Let QFont resolve
+    # an explicit user family (or the native CJK default) directly; if a custom
+    # family is absent Qt falls back normally.
+    if sys.platform == "win32":
+        chosen = _FONT_FAMILY or "Microsoft YaHei UI"
+        families = None
     else:
+        families = set(QFontDatabase.families())
+        chosen = None
+    # User override wins when it's actually installed.
+    if chosen is None and _FONT_FAMILY and _FONT_FAMILY in families:
+        chosen = _FONT_FAMILY
+    elif chosen is None:
         for fam in FONT_SANS:
             if fam == "sans-serif":
                 break

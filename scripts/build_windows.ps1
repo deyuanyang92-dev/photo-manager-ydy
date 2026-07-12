@@ -9,6 +9,21 @@ $ErrorActionPreference = "Stop"
 $Repo = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $Repo
 
+# Conda keeps Python's runtime DLLs in Library\bin instead of beside
+# python.exe. PyInstaller does not add that directory automatically when this
+# script is launched from a regular PowerShell window, producing an EXE without
+# sqlite/OpenSSL/ffi/lzma DLLs that hangs during smoke startup.
+$pythonExe = (& $Python -c "import sys; print(sys.executable)").Trim()
+$pythonRoot = Split-Path -Parent $pythonExe
+foreach ($runtimeDir in @(
+    (Join-Path $pythonRoot "Library\bin"),
+    (Join-Path $pythonRoot "DLLs")
+)) {
+    if (Test-Path -LiteralPath $runtimeDir) {
+        $env:PATH = "$runtimeDir;$env:PATH"
+    }
+}
+
 if ([string]::IsNullOrWhiteSpace($Version)) {
     $Version = (& $Python -c "from app.config.version import APP_VERSION; print(APP_VERSION)").Trim()
 }

@@ -58,6 +58,42 @@ def available() -> bool:
 # Tone tokens are snapshotted at import (see TONE_* below), so a given colour
 # string always maps to the same glyph — caching changes nothing visually.
 _ICON_CACHE: dict = {}
+LIGHTWEIGHT_MODE = False
+
+
+def set_lightweight_mode(enabled: bool) -> None:
+    """Use cheap native Qt icons instead of loading all qtawesome fonts."""
+    global LIGHTWEIGHT_MODE
+    LIGHTWEIGHT_MODE = bool(enabled)
+
+
+def _native_icon(name: str):
+    from PyQt6.QtWidgets import QApplication, QStyle
+    from PyQt6.QtGui import QIcon
+
+    app = QApplication.instance()
+    if app is None:
+        return QIcon()
+    key = str(name or "").lower()
+    mappings = (
+        (("folder-open", "folder-outline", "folder"), QStyle.StandardPixmap.SP_DirIcon),
+        (("update", "refresh", "reload"), QStyle.StandardPixmap.SP_BrowserReload),
+        (("save",), QStyle.StandardPixmap.SP_DialogSaveButton),
+        (("trash", "delete"), QStyle.StandardPixmap.SP_TrashIcon),
+        (("arrow-left", "chevron-left"), QStyle.StandardPixmap.SP_ArrowLeft),
+        (("arrow-right", "chevron-right"), QStyle.StandardPixmap.SP_ArrowRight),
+        (("arrow-up", "chevron-up"), QStyle.StandardPixmap.SP_ArrowUp),
+        (("arrow-down", "chevron-down"), QStyle.StandardPixmap.SP_ArrowDown),
+        (("close", "cancel"), QStyle.StandardPixmap.SP_DialogCancelButton),
+        (("check", "apply"), QStyle.StandardPixmap.SP_DialogApplyButton),
+        (("computer", "desktop"), QStyle.StandardPixmap.SP_ComputerIcon),
+        (("harddisk", "drive"), QStyle.StandardPixmap.SP_DriveHDIcon),
+        (("file", "document"), QStyle.StandardPixmap.SP_FileIcon),
+    )
+    for needles, standard_pixmap in mappings:
+        if any(needle in key for needle in needles):
+            return app.style().standardIcon(standard_pixmap)
+    return QIcon()
 
 
 def icon(name: str, color: Optional[str] = None, **kw):
@@ -73,6 +109,8 @@ def icon(name: str, color: Optional[str] = None, **kw):
     kw:
         Forwarded to ``qtawesome.icon`` (e.g. ``color_active=...``).
     """
+    if LIGHTWEIGHT_MODE:
+        return _native_icon(name)
     if not _AVAILABLE:
         from PyQt6.QtGui import QIcon
         return QIcon()

@@ -22,7 +22,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 
-from PyQt6.QtCore import QEvent
+from PyQt6.QtCore import QEvent, QPoint, QPointF, Qt
+from PyQt6.QtGui import QKeyEvent, QWheelEvent
 from PyQt6.QtWidgets import (
     QApplication, QMenu, QPushButton, QSizePolicy, QToolButton, QWidget,
 )
@@ -180,7 +181,7 @@ def test_function_menu_groups_all_registered_views():
     ]
     project_menu = win._nav_group_menus["project"]
     assert [a.text() for a in project_menu.actions()] == [
-        "照片工作区",
+        "照片工作台",
         "协作",
         "最近使用",
         "项目树",
@@ -245,6 +246,53 @@ def test_workspace_actions_are_integrated_into_breadcrumb(tmp_path):
     ]
 
 
+def test_global_font_zoom_keyboard_and_ctrl_wheel(qapp):
+    ctx = AppContext()
+    ctx.settings.ui_font_scale = 1.0
+    win = MainWindow(ctx)
+    try:
+        plus = QKeyEvent(
+            QEvent.Type.KeyPress,
+            Qt.Key.Key_Equal,
+            Qt.KeyboardModifier.ControlModifier,
+        )
+        QApplication.sendEvent(win, plus)
+        assert plus.isAccepted()
+        assert ctx.settings.ui_font_scale == pytest.approx(1.05)
+
+        wheel = QWheelEvent(
+            QPointF(10, 10), QPointF(10, 10), QPoint(0, 0), QPoint(0, 120),
+            Qt.MouseButton.NoButton, Qt.KeyboardModifier.ControlModifier,
+            Qt.ScrollPhase.ScrollUpdate, False,
+        )
+        QApplication.sendEvent(win, wheel)
+        assert wheel.isAccepted()
+        assert ctx.settings.ui_font_scale == pytest.approx(1.10)
+
+        reset = QKeyEvent(
+            QEvent.Type.KeyPress,
+            Qt.Key.Key_0,
+            Qt.KeyboardModifier.ControlModifier,
+        )
+        QApplication.sendEvent(win, reset)
+        assert reset.isAccepted()
+        assert ctx.settings.ui_font_scale == pytest.approx(1.0)
+    finally:
+        win._set_ui_font_scale(1.0)
+        win.close()
+
+
+def test_global_font_zoom_clamps_to_settings_range(qapp):
+    ctx = AppContext()
+    win = MainWindow(ctx)
+    try:
+        assert win._set_ui_font_scale(9.0) == pytest.approx(1.5)
+        assert win._set_ui_font_scale(0.1) == pytest.approx(0.7)
+    finally:
+        win._set_ui_font_scale(1.0)
+        win.close()
+
+
 def test_nav_pin_menu_toggles_topbar_segments():
     win = _fresh_window()
     for cls in ALL_VIEWS:
@@ -278,7 +326,7 @@ def test_context_bar_no_project():
     # workspace_breadcrumb._project_root_only), 会污染这条纯空态断言 —— 显式清掉。
     win.ctx.settings.project_tree_root = ""
     win.refresh_context_bar()
-    assert "选择工作区" in win._project_switcher.text()
+    assert "选择项目或拍摄目录" in win._project_switcher.text()
     assert win._project_switcher._btn_folder is None
     assert win._active_badge.objectName() == "ActiveBadgeOff"
     # Quick actions (智能压缩 / 🎬Helicon) disabled without a project.
@@ -446,7 +494,7 @@ def test_retranslate_ui_updates_shell_and_grouped_menu():
     assert win.windowTitle() == "Specimen Imaging"
     assert win._brand.text() == "Specimen Imaging Manager"
     assert win._nav_menu_btn.text() == "Toolbox"
-    assert win._nav_buttons[0].text() == "Photo Workspace"
+    assert win._nav_buttons[0].text() == "Photo Workbench"
     assert [a.text() for a in win._nav_group_menus["tools"].actions() if a.isVisible()] == [
         "Label Printing",
         "TIFF 转 JPG",
@@ -489,6 +537,25 @@ def test_restore_state_fast_startup_skips_last_heavy_page(qtbot):
     assert "dummy" in win._views
 
 
+def test_restore_state_can_skip_native_window_layout(monkeypatch):
+    win = _fresh_window()
+    win.register_view(_DummyView)
+    monkeypatch.setattr(
+        win.ctx.settings,
+        "restore_geometry",
+        lambda: pytest.fail("native startup must not restore stale geometry"),
+    )
+    monkeypatch.setattr(
+        win.ctx.settings,
+        "restore_window_state",
+        lambda: pytest.fail("native startup must not restore stale state"),
+    )
+
+    win.restore_state(activate_last_view=False, restore_window_layout=False)
+
+    assert win._nav_buttons[0].isChecked()
+
+
 def test_close_cancels_deferred_startup_activation(qtbot):
     win = _fresh_window()
     win.register_view(_DummyView)
@@ -499,6 +566,21 @@ def test_close_cancels_deferred_startup_activation(qtbot):
 
     assert not win._startup_activation_timer.isActive()
     assert "dummy" not in win._views
+
+
+def test_initial_view_does_not_prefetch_other_modules(monkeypatch):
+    win = _fresh_window()
+    win.register_view(_DummyView)
+    monkeypatch.setattr(
+        win,
+        "_start_view_prefetch",
+        lambda: pytest.fail("startup must not import unopened pages"),
+    )
+
+    win._activate_initial_view()
+
+    assert "dummy" in win._views
+    assert not win._prefetch_timer.isActive()
 
 
 # ── Full registry boots through the new chrome ─────────────────────────────

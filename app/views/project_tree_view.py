@@ -178,7 +178,9 @@ class ProjectTreeView(BaseView):
             QSizePolicy.Policy.Maximum,
             QSizePolicy.Policy.Preferred,
         )
-        self._root_lbl.setMaximumWidth(360)
+        # §7 旧: 360px 硬上限 → 长路径被截断成一串没头没尾的字符。现在标题栏放的是
+        #   「N 个项目 · 数据位置」这类短文本, 放宽上限即可完整显示。
+        self._root_lbl.setMaximumWidth(640)
         bar.addWidget(self._root_lbl)
         bar.addStretch(1)
 
@@ -391,8 +393,21 @@ class ProjectTreeView(BaseView):
         self._search.textChanged.connect(self._on_tree_panel_search_changed)
         self._search.returnPressed.connect(self._enter_selected)
         tl.addWidget(self._search)
-        filter_row = QHBoxLayout()
-        filter_row.setSpacing(6)
+        # §7 旧: 一整排筛选 chip「全部 / 拍摄目录 / 文件夹 / 待导入」+「全选拍摄目录」按钮
+        #   常驻左栏, 占掉一整行。用户 2026-07-13 截图逐个指着说「死按键, 很多一点用都没有」。
+        #
+        # 【用户为什么要「导入」—— 别再当成垃圾删掉】(用户 2026-07-13 亲口说明)
+        #   "我设计导入, 是为了防止这个软件自动识别, 导致一些工作区无法被识别,
+        #    我可以手动导入项目或工作区。"
+        #   → 「待导入」是用户的**安全网**: 自动扫描认不出来的旧工作区、别人拷贝过来的
+        #     目录、盘符变了的项目, 必须有一条手动捞回来的路。这个能力**永久保留**,
+        #     不是可有可无的实现细节。见「认领此文件夹」(_adopt_selected_candidate)。
+        #
+        # 现在的处理: 能力全留, 但不再常驻占地方 ——
+        #   · 筛选/全选这些控件改为隐藏(逻辑与右键动作仍在用);
+        #   · 真的扫到未登记的旧目录时, 树里会显式列出「待导入」节点, 右键即可认领;
+        #   · 需要主动找回来时: 工具栏「更多 → 扫描磁盘…」/「认领此文件夹…」。
+        #   项目树本体就是个目录树 —— 像资源管理器: 搜索框 + 树。
         for key, label in (
             ("all", "全部"),
             ("workspace", "拍摄目录"),
@@ -402,25 +417,16 @@ class ProjectTreeView(BaseView):
             chip = QPushButton(label)
             chip.setObjectName("FilterChip")
             chip.setCheckable(True)
-            chip.setFixedHeight(26)
-            chip.setCursor(Qt.CursorShape.PointingHandCursor)
-            if key == "all":
-                chip.setToolTip("显示全部类型节点（不会自动全选）")
             chip.clicked.connect(lambda _checked=False, k=key: self._set_kind_filter(k))
+            chip.hide()
             self._kind_filter_buttons[key] = chip
-            filter_row.addWidget(chip)
         self._btn_select_all_ws = QPushButton("全选拍摄目录")
         self._btn_select_all_ws.setObjectName("Outline")
-        self._btn_select_all_ws.setFixedHeight(26)
-        self._btn_select_all_ws.setToolTip(
-            "选中当前列表中全部拍摄目录（Ctrl/Shift 也可多选）"
-        )
         self._btn_select_all_ws.clicked.connect(self._select_all_visible_workspaces)
-        filter_row.addWidget(self._btn_select_all_ws)
+        self._btn_select_all_ws.hide()
         self._kind_filter_buttons["all"].setChecked(True)
-        tl.addLayout(filter_row)
         select_hint = QLabel(
-            "① 选择一个或多个拍摄目录  ② 右侧看概览  ③ 中间显示编号与照片"
+            "双击进入拍照 · Ctrl/Shift 多选看汇总 · 右键改名/移动/删除"
         )
         select_hint.setObjectName("MutedSmall")
         select_hint.setWordWrap(True)
@@ -2195,33 +2201,68 @@ class ProjectTreeView(BaseView):
         # instead of showing a blank tree. Each project is a top-level node feeding
         # the same _build_item, so selection / stats / enter / summary / station-import
         # all keep working unchanged.
-        self._act_newsub.setEnabled(False)
+        # §7 旧: self._act_newsub.setEnabled(False)
+        #   —— 「全部项目」模式下把「＋ 下级目录」禁掉。而用户平时**就在这个模式**,
+        #   于是那个按钮一直是死的(用户 2026-07-13:「很多死按键，一点用都没有」)。
+        #   现在树在任何模式下都是真树, 选中哪个节点就能在它下面建 —— 不该禁。
+        self._act_newsub.setEnabled(True)
         nodes = self._load_known_projects_nodes()
         if not nodes:
-            self._root_lbl.setText("（未选根目录）")
+            self._root_lbl.setText("还没有项目 —— 点右上角「＋ 项目」开始")
             self._detail_name.setText("选择或创建项目")
             self._detail_path.setText("")
             self._detail_kind.setText("未选择")
             self._info_block.hide()
             self._child_block.hide()
             self._empty_state.setText(
-                "还没有选择调查根目录，也没有已记录的项目。\n\n"
-                "选择根目录：读取已有文件夹树，不改动原文件。\n"
-                "新建项目：一次建好项目目录和它下面的采样点，采样点自动继承项目设置。"
+                "还没有项目。\n\n"
+                "点右上角「＋ 项目」新建一个 —— 项目就是个文件夹，\n"
+                "下面可以再建任意层子目录，最里层双击进去就能拍照。\n\n"
+                "已经有旧数据？「更多 → 扫描磁盘…」把它们找回来。"
             )
             self._empty_state.show()
             return
-        self._root_lbl.setText(f"（全部已建项目 · {len(nodes)}）")
+        # §7 旧: setText(f"（全部已建项目 · {len(nodes)}）") / 或一条被截断的绝对路径。
+        #   现在给的是有用的信息: 项目数 + 数据所在磁盘/目录。完整路径在右栏详情里。
+        self._root_lbl.setText(self._projects_scope_text(nodes))
         self._tree_count_lbl.setText(f"{len(nodes)} 个项目")
         self._update_tree_metrics(nodes)
         self._empty_state.hide()
         for node in nodes:
             self._tree.addTopLevelItem(self._build_item(node))
         self._filter_tree(self._search.text())
-        if len(nodes) >= 1:
-            self._select_all_visible_workspaces()
-        else:
-            self._select_first_item()
+        # §7 旧: if len(nodes) >= 1: self._select_all_visible_workspaces()
+        #   —— 一进页面就替用户**全选**所有拍摄目录(为了让右侧汇总立刻有数)。后果:
+        #   多选状态下「设为当前拍摄目录」是故意禁用的 → 用户什么都还没点, 那个显眼的
+        #   大绿按钮就已经是死的(实测: 2 个工作区 → enabled=False, 文字「多选时不进入拍照」)。
+        #   用户 2026-07-13 报障:「我进入某个文件目录, 选择也进入不了」。
+        #   现在只选中第一个节点(单选) —— 按钮是活的; 想看多断面汇总请 Ctrl/Shift 主动多选,
+        #   或点「全选拍摄目录」。
+        self._select_first_item()
+
+    def _projects_scope_text(self, nodes: list) -> str:
+        """标题栏那行 —— 说清「有几个项目、数据在哪个盘」。
+
+        §7 旧行为: 直接贴一条绝对路径, 宽度限死 360px → 长路径被拦腰截断,
+        既看不全也没信息量(用户 2026-07-13 截图指着它说看不到磁盘位置)。
+        完整路径在右栏详情面板里本来就有, 这里给的是**概览**。
+        """
+        parents: list[str] = []
+        for node in nodes:
+            path = node.get("path") or ""
+            if not path:
+                continue
+            try:
+                parent = str(Path(path).expanduser().resolve().parent)
+            except (OSError, ValueError):
+                continue
+            if parent not in parents:
+                parents.append(parent)
+        if len(parents) == 1:
+            return f"{len(nodes)} 个项目 · {parents[0]}"
+        if parents:
+            return f"{len(nodes)} 个项目 · {len(parents)} 个位置"
+        return f"{len(nodes)} 个项目"
 
     def _count_nodes(self, node: dict) -> int:
         return 1 + sum(self._count_nodes(child) for child in node.get("children", []))
@@ -2575,7 +2616,19 @@ class ProjectTreeView(BaseView):
         return item
 
     def _selected_path(self) -> Optional[str]:
+        """当前操作的目标节点 —— **主选中项**优先。
+
+        §7 旧: 直接返回 items[0](选中列表的第一个)。多选时这会和界面说的不一致:
+        按钮写着「进入「断面B」」(主选中项), 点下去却进了 items[0]=断面A —— 比死按键还糟。
+        现在优先用 currentItem()(键盘/鼠标最后落点, 也是 Qt 的 anchor), 它不在选中集里
+        时才退回 items[0]。
+        """
         items = self._tree.selectedItems()
+        current = self._tree.currentItem()
+        if current is not None and (not items or current in items):
+            path = current.data(0, _PATH_ROLE)
+            if path:
+                return path
         if not items:
             return None
         return items[0].data(0, _PATH_ROLE)
@@ -2759,7 +2812,10 @@ class ProjectTreeView(BaseView):
                 if n_ws > 5:
                     names += f" 等{n_ws}个"
                 self._empty_state.hide()
-                self._btn_enter.setEnabled(False)
+                # §7 旧: self._btn_enter.setEnabled(False)  + 文字「多选时不进入拍照」
+                #   —— 多选是为了看汇总, 不该把「进入」变成一块砖。现在按钮仍然可用,
+                #   作用于**主选中项**(anchor), 并在文字里说清进的是哪一个。
+                self._btn_enter.setEnabled(True)
                 self._btn_summary.setEnabled(True)
                 self._btn_station_species.setEnabled(True)
                 self._btn_station_import.setEnabled(False)
@@ -2776,8 +2832,14 @@ class ProjectTreeView(BaseView):
                 self._clear_child_preview()
                 self._clear_media_preview()
                 self._clear_stats()
+                # 按钮作用于主选中项(current item) —— 说清进的是哪一个。
+                anchor = self._tree.currentItem()
+                anchor_name = anchor.text(0) if anchor is not None else ""
+                if not anchor_name and labeled:
+                    anchor_name = labeled[0][1]
                 self._set_enter_action_style(
-                    "Outline", "多选时不进入拍照", "mdi6.image-multiple-outline",
+                    "Primary", f"进入「{anchor_name}」拍照" if anchor_name else "设为当前拍摄目录",
+                    "mdi6.camera-outline", color=icons.TONE_ON_ACCENT,
                 )
                 self._update_scope_status_label()
                 self._sync_sticky_enter_from_primary()

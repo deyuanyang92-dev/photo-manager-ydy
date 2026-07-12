@@ -136,7 +136,7 @@ class WorkbenchView(WorkbenchSpecimenIdentityMixin, WorkbenchMediaWorkflowMixin,
     """
 
     view_id = "workbench"
-    nav_title = "照片工作区"
+    nav_title = "照片工作台"
     nav_icon = "🔬"
 
     # ── Build UI ──────────────────────────────────────────────────────────────
@@ -640,7 +640,7 @@ class WorkbenchView(WorkbenchSpecimenIdentityMixin, WorkbenchMediaWorkflowMixin,
 
         # ── No-project banner ───────────────────────────────────────────────
         self._no_project_banner = QLabel(
-            "未选择工作区 — 请先在「项目树」进入一个断面，或在「最近工作区」打开"
+            "未选择拍摄目录 — 请到「项目树」选择一个文件夹并设为当前拍摄目录"
         )
         self._no_project_banner.setObjectName("Muted")
         self._no_project_banner.setAlignment(Qt.AlignmentFlag.AlignCenter)

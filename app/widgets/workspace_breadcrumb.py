@@ -284,11 +284,11 @@ class WorkspaceBreadcrumb(QWidget):
     def _build_placeholder(self) -> None:
         root = self._project_root_only()
         if root:
-            btn = QPushButton(f"{Path(root).name}（{tr('未选采样点')}） ▾")
+            btn = QPushButton(f"{Path(root).name}（{tr('未选拍摄目录')}） ▾")
             btn.setObjectName("CrumbLeaf")
             btn.setToolTip(
-                tr("已进入项目，但还没选采样点。到「项目树」里新建子目录（断面/采样点），"
-                   "双击进去就能拍。")
+                tr("项目已打开，但还没选择照片保存目录。到「项目树」选择或新建文件夹，"
+                   "右键设为当前拍摄目录。")
             )
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             icons.set_button_icon(btn, "mdi6.folder-outline",
@@ -299,9 +299,9 @@ class WorkspaceBreadcrumb(QWidget):
             return
 
         # §7 旧行为(无项目根时仍是纯空态, 不变)
-        btn = QPushButton(tr("选择工作区 ▾"))
+        btn = QPushButton(tr("选择项目或拍摄目录 ▾"))
         btn.setObjectName("CrumbLeaf")
-        btn.setToolTip(tr("最近使用 / 打开文件夹 / 新建工作区"))
+        btn.setToolTip(tr("新建项目 / 选择已有文件夹 / 打开项目树"))
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         icons.set_button_icon(btn, "mdi6.folder-outline",
                               color=icons.TONE_MUTED, size=15)
@@ -590,7 +590,7 @@ class WorkspaceBreadcrumb(QWidget):
         from app.services.project_tree_service import is_workspace, is_workspace_candidate
         name = os.path.basename(path.rstrip("\\/")) or path
         if is_workspace(path):
-            return f"{name} · 工作区"
+            return name
         if is_workspace_candidate(path):
             return f"{name} · 可导入"
         return name

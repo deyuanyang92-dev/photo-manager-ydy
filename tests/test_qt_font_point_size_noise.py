@@ -178,3 +178,18 @@ def test_apply_default_font_emits_no_point_size_warning(qapp):
         qapp.setFont(original)
 
     assert [m for m in seen if "Point size <= 0" in m] == []
+
+
+def test_apply_default_font_skips_family_scan_on_windows(qapp, monkeypatch):
+    """Frozen Windows startup must not enumerate the complete font database."""
+    from PyQt6.QtGui import QFontDatabase
+    from app.config import theme
+
+    monkeypatch.setattr(theme.sys, "platform", "win32")
+    monkeypatch.setattr(
+        QFontDatabase,
+        "families",
+        staticmethod(lambda: (_ for _ in ()).throw(AssertionError("font scan"))),
+    )
+
+    assert theme.apply_default_font(qapp) == "Microsoft YaHei UI"

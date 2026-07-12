@@ -996,3 +996,34 @@ def default_to_recent_real_project(user_projects_json_path: str) -> Optional[str
         if directory and not proj.get("isDemo", False):
             return directory
     return None
+
+
+def register_project_root(
+    root: str,
+    *,
+    name: Optional[str] = None,
+    user_projects_json_path: Optional[str] = None,
+) -> list:
+    """把一个**项目根**（容器目录，通常还没有任何工作区）登记进项目列表。
+
+    为什么需要它（用户 2026-07-13 二次报障）：新建项目建的是一个**空容器目录**，
+    它不是工作区（没有 ``_data/project.db``），所以 ``record_recent_workspace``
+    那条「最近进过的工作区」路径根本不会收录它 —— 结果新项目在「全部项目」列表里
+    **压根不存在**。于是建完项目只能靠把树钉成「单项目」模式才看得见它，
+    而那又会把其余项目全挡住（"新建项目后，之前项目就没了"）。
+
+    登记之后，项目树的「全部项目」就是一棵完整的树：所有项目并排，各自展开自己的子树。
+    """
+    if not root:
+        return []
+    json_path = user_projects_json_path or default_user_projects_json_path()
+    resolved = normalize_path(root)
+    return save_project_descriptor(
+        json_path,
+        {
+            "directory": resolved,
+            "name": name or Path(resolved).name,
+            # 容器项目：没有 incoming/results 子目录，进入某个子目录时才按需初始化。
+            "isProjectRoot": True,
+        },
+    )

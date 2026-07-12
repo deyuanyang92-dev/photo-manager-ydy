@@ -278,6 +278,15 @@ def _startup_target_screen(app):
     return _choose_startup_screen(app.screens(), app.primaryScreen(), cursor_screen)
 
 
+def _should_default_performance_mode(
+    *, is_wsl: bool, platform: str, low_memory: bool, setting_present: bool
+) -> bool:
+    """Choose the safe first-run rendering default without overriding users."""
+    if setting_present:
+        return False
+    return bool(is_wsl or platform == "win32" or low_memory)
+
+
 def _screen_label(screen) -> str:
     if screen is None:
         return "<none>"
@@ -303,12 +312,16 @@ def _window_on_any_screen(win, screens) -> bool:
 
 
 def _place_main_window(win, target) -> None:
-    """Put the main window on *target* and make it foreground-visible."""
+    """Put the main window on *target* with a single maximized transition.
+
+    Calling ``showNormal()``, resizing to the full screen, and then maximizing
+    produced two separately composited full-window frames.  That is especially
+    visible (and occasionally corrupt) through virtual-display drivers.
+    """
     from PyQt6.QtCore import Qt
 
     if target is not None:
         avail = target.availableGeometry()
-        win.showNormal()
         win.setGeometry(avail)
     win.setWindowState(
         (win.windowState() & ~Qt.WindowState.WindowMinimized)
@@ -323,6 +336,14 @@ def _place_main_window(win, target) -> None:
 def _show_main_window_at_startup(win, app, target) -> str:
     """Show the main window without destroying a valid restored position."""
     from PyQt6.QtCore import Qt
+
+    # Native Windows reliably places maximized top-level windows. Avoid reading
+    # restored frame geometry and avoid raise/activate calls: through virtual
+    # display drivers those operations synchronously negotiate with DWM and can
+    # cost hundreds of milliseconds or flash the whole desktop.
+    if sys.platform == "win32" and not _is_wsl:
+        win.showMaximized()
+        return "native-maximized"
 
     if _window_on_any_screen(win, app.screens()):
         win.setWindowState(
@@ -694,6 +715,15 @@ def _acquire_single_instance_lock() -> bool:
 
 
 def main() -> int:
+    startup_t0 = time.perf_counter()
+
+    def startup_mark(stage: str) -> None:
+        logging.getLogger(__name__).info(
+            "Startup stage %-24s %7.1f ms",
+            stage,
+            (time.perf_counter() - startup_t0) * 1000,
+        )
+
     if _QT_IMPORT_ERROR is not None:
         _print_missing_qt_runtime_help(str(_QT_IMPORT_ERROR))
         return 2
@@ -711,6 +741,7 @@ def main() -> int:
         log_path,
         crash_log_path,
     )
+    startup_mark("logging-ready")
 
     # HiDPI: pass through the exact fractional scale (125%/150% on Windows,
     # Retina on macOS) instead of rounding it. Rounding mismatches QSS px
@@ -722,6 +753,7 @@ def main() -> int:
     )
 
     app = QApplication(sys.argv)
+    startup_mark("qapplication-ready")
     app.setApplicationName("标本照片工作台")
     app.setOrganizationName("SpecimenPhotoWorkbench")
     # ASCII app id for the WM/desktop layer. X11 WM_CLASS is Latin-1 only, so a
@@ -761,6 +793,7 @@ def main() -> int:
     # built — otherwise first-paint layout uses Qt's CJK-less default ("Ubuntu"
     # on Linux), causing the startup text-overlap and garbled glyphs.
     apply_default_font(app)
+    startup_mark("fonts-ready")
 
     # ── Language ──────────────────────────────────────────────────────
     # Apply the saved language BEFORE any widget/view is built so first paint is
@@ -774,13 +807,19 @@ def main() -> int:
     # before any card widget is built (apply_card_shadow becomes a no-op).
     from app.config import effects as _fx
     from app.config.memory_profile import apply_memory_profile, is_low_memory_machine
-    if _is_wsl and not _s._qs.contains("appearance/performance_mode"):
-        _s.performance_mode = True
-    elif is_low_memory_machine() and not _s._qs.contains("appearance/performance_mode"):
+    if _should_default_performance_mode(
+        is_wsl=_is_wsl,
+        platform=sys.platform,
+        low_memory=is_low_memory_machine(),
+        setting_present=_s._qs.contains("appearance/performance_mode"),
+    ):
         _s.performance_mode = True
     _fx.PERFORMANCE_MODE = _s.performance_mode
+    from app.config import icons as _icons
+    _icons.set_lightweight_mode(_s.performance_mode)
     apply_memory_profile(performance_mode=_s.performance_mode)
     app.setStyleSheet(apply_theme(_s.current_theme))
+    startup_mark("theme-ready")
 
     from PyQt6.QtGui import QPixmapCache
     from app.config.memory_profile import QPIXMAP_CACHE_KB
@@ -788,6 +827,7 @@ def main() -> int:
 
     # ── App context (shared state + DI container) ─────────────────────
     ctx = AppContext()
+    startup_mark("context-ready")
 
     # ── Collaboration service (P2P mDNS + FastAPI) ────────────────────
     # Lazy: CollabService is created only when collaboration is enabled
@@ -806,6 +846,7 @@ def main() -> int:
 
     # ── Main window ───────────────────────────────────────────────────
     win = MainWindow(ctx)
+    startup_mark("window-shell-ready")
     _install_exception_hook(win)
 
     # Central shutdown hook: closeEvent already calls win._teardown(), but if
@@ -835,6 +876,7 @@ def main() -> int:
     # Register navigation metadata only; individual pages import on first open.
     for view_cls in ALL_VIEW_SPECS:
         win.register_view(view_cls)
+    startup_mark("navigation-ready")
 
     # 启动自动恢复上次项目——免得每次重启都回到 "(未选)" 空项目,用户得重选。
     _restore_last_project(ctx, win)
@@ -843,7 +885,11 @@ def main() -> int:
     # first paint. Heavy pages such as collaboration/project tree can scan local
     # workspaces and open SQLite databases; doing that here made Windows
     # launches feel frozen.
-    win.restore_state(activate_last_view=False)
+    win.restore_state(
+        activate_last_view=False,
+        restore_window_layout=not (sys.platform == "win32" and not _is_wsl),
+    )
+    startup_mark("state-restored")
     # WSLg multi-monitor ordering is unstable across boots and Windows display
     # changes.  The old nearest-to-(0,0) rule often opened the app on a monitor
     # the user was not looking at.  Prefer Qt primary, then cursor screen, and
@@ -852,12 +898,15 @@ def main() -> int:
     if not _HEADLESS_SMOKE:
         _safe_stderr_print(f"启动窗口目标屏幕: {_screen_label(target)}")
     placement = _show_main_window_at_startup(win, app, target)
+    startup_mark("window-shown")
     if not _HEADLESS_SMOKE:
         _safe_stderr_print(f"启动窗口放置策略: {placement}")
-        # offscreen plugin warns "does not support raise()"; only needed for a
-        # real window manager anyway (pull the window to the front + focus it).
-        QTimer.singleShot(250, lambda: _ensure_main_window_visible(win, app, target))
-        QTimer.singleShot(1000, lambda: _ensure_main_window_visible(win, app, target))
+        # WSLg occasionally loses the first focus request.  Native Windows does
+        # not need the rescue; repeating raise/activate/alert there causes
+        # visible full-window flashes with remote/virtual display drivers.
+        if _is_wsl:
+            QTimer.singleShot(250, lambda: _ensure_main_window_visible(win, app, target))
+            QTimer.singleShot(1000, lambda: _ensure_main_window_visible(win, app, target))
 
     if _HEADLESS_SMOKE:
         app.processEvents()

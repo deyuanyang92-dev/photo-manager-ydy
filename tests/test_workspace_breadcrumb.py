@@ -153,7 +153,7 @@ def test_sibling_project_dirs_lists_project_root_peers(tmp_path):
 def test_widget_no_project_placeholder():
     w = WorkspaceBreadcrumb(_Ctx())
     w.refresh()
-    assert "选择工作区" in w.text()
+    assert "选择项目或拍摄目录" in w.text()
     assert w._btn_folder is None
     got = []
     w.navigate_requested.connect(got.append)
@@ -486,7 +486,7 @@ def test_dropdown_lists_peer_project_dirs(tmp_path):
     )
     peer_labels = [a.text() for a in peer_menu.actions()]
     assert any("ceshi7" in s for s in peer_labels)
-    assert any("工作区" in s and "ceshi8" in s for s in peer_labels)
+    assert any(s == "ceshi8" for s in peer_labels)
     top_labels = [
         a.text() for a in menu.actions()
         if a.text() and not a.isSeparator() and not a.menu()
@@ -622,7 +622,7 @@ def test_shows_project_name_when_root_set_but_no_workspace(qtbot, tmp_path):
 
     text = w.text()
     assert "江苏盐城2026" in text
-    assert "未选采样点" in text
+    assert "未选拍摄目录" in text
 
 
 def test_still_plain_placeholder_when_no_root(qtbot):
@@ -632,4 +632,4 @@ def test_still_plain_placeholder_when_no_root(qtbot):
 
     w.refresh()
 
-    assert "选择工作区" in w.text()
+    assert "选择项目或拍摄目录" in w.text()

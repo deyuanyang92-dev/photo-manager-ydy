@@ -168,12 +168,12 @@ class TestHeaderButtons:
     def test_new_project_button_exists(self):
         w = self._make_view()
         assert w._btn_new is not None
-        assert "新建工作区" in w._btn_new.text()
+        assert "新建项目" in w._btn_new.text()
 
     def test_open_workspace_button_exists(self):
         w = self._make_view()
         assert w._btn_open is not None
-        assert "打开文件夹" in w._btn_open.text()
+        assert "选择已有文件夹" in w._btn_open.text()
 
     def test_new_project_button_is_primary(self):
         w = self._make_view()
@@ -317,7 +317,7 @@ class TestTablePopulation:
         cell = w._table.cellWidget(0, 5)
         btns = cell.findChildren(QPushButton)
         labels = [b.text() for b in btns]
-        assert any("进入工作区" in t for t in labels)
+        assert any("设为拍摄目录" in t for t in labels)
 
     def test_action_cell_has_detail_button(self, tmp_path):
         from PyQt6.QtWidgets import QPushButton

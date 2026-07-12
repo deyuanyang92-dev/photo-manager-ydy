@@ -993,7 +993,9 @@ class SettingsTabsMixin:
         note = QLabel(
             tr(
                 "调整后会立即预览并自动保存，下次启动继续使用；"
-                "常用中文字体和 Times 等字体固定列在前面。"
+                "常用中文字体和 Times 等字体固定列在前面。\n"
+                "快捷键：Ctrl++ 放大，Ctrl+- 缩小，Ctrl+0 恢复；"
+                "也可以按住 Ctrl 滚动鼠标滚轮。"
             )
         )
         note.setObjectName("MutedSmall")

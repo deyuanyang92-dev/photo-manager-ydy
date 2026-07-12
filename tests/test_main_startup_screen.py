@@ -52,6 +52,66 @@ def test_choose_startup_screen_falls_back_to_first_screen():
     assert _choose_startup_screen([first, second], None, None) is first
 
 
+def test_windows_first_run_defaults_to_performance_mode():
+    from main import _should_default_performance_mode
+
+    assert _should_default_performance_mode(
+        is_wsl=False,
+        platform="win32",
+        low_memory=False,
+        setting_present=False,
+    )
+
+
+def test_explicit_rendering_preference_is_never_overridden():
+    from main import _should_default_performance_mode
+
+    assert not _should_default_performance_mode(
+        is_wsl=True,
+        platform="win32",
+        low_memory=True,
+        setting_present=True,
+    )
+
+
+def test_fallback_placement_uses_one_show_transition():
+    from PyQt6.QtCore import QRect, Qt
+    from main import _place_main_window
+
+    calls = []
+
+    class _Target:
+        def availableGeometry(self):
+            return QRect(0, 0, 1920, 1040)
+
+    class _Window:
+        def setGeometry(self, rect):
+            calls.append(("geometry", rect))
+
+        def windowState(self):
+            return Qt.WindowState(0)
+
+        def setWindowState(self, state):
+            calls.append(("state", state))
+
+        def showNormal(self):
+            calls.append(("normal", None))
+
+        def showMaximized(self):
+            calls.append(("maximized", None))
+
+        def raise_(self):
+            calls.append(("raise", None))
+
+        def activateWindow(self):
+            calls.append(("activate", None))
+
+    _place_main_window(_Window(), _Target())
+
+    assert "normal" not in [name for name, _value in calls]
+    assert [name for name, _value in calls].count("maximized") == 1
+
+
 def test_qt_message_handler_routes_warning_to_logging(monkeypatch, caplog):
     import main
     from PyQt6.QtCore import QtMsgType

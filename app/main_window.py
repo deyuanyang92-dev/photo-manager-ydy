@@ -37,7 +37,7 @@ from importlib import import_module
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
-from PyQt6.QtCore import QSize, Qt, QTimer
+from PyQt6.QtCore import QEvent, QSize, Qt, QTimer
 from PyQt6.QtGui import QAction, QActionGroup, QCloseEvent, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QApplication,
@@ -122,6 +122,11 @@ class MainWindow(QMainWindow):
         self._wire_collab_status_bar()
         self._wire_helicon_status_bar()
         self._wire_screenshot()
+        app = QApplication.instance()
+        if app is not None:
+            # One application-level filter gives every page and dialog the
+            # same desktop-style UI zoom behaviour.
+            app.installEventFilter(self)
 
     # ── Shell layout ──────────────────────────────────────────────────────
 
@@ -162,6 +167,66 @@ class MainWindow(QMainWindow):
         # 窗口一打开就比屏幕宽(旧的过宽 restore 状态 / 高 DPI)也要夹回屏幕内,
         # 不只在拖动时。最大化状态下 _clamp_into_screen 自会跳过。
         self._clamp_into_screen()
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 — Qt override
+        """Application-wide UI font zoom shortcuts and Ctrl+wheel handling."""
+        event_type = event.type()
+        if event_type == QEvent.Type.KeyPress:
+            modifiers = event.modifiers()
+            if modifiers & Qt.KeyboardModifier.ControlModifier:
+                key = event.key()
+                if key in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
+                    self._adjust_ui_font_scale(+0.05)
+                    event.accept()
+                    return True
+                if key in (Qt.Key.Key_Minus, Qt.Key.Key_Underscore):
+                    self._adjust_ui_font_scale(-0.05)
+                    event.accept()
+                    return True
+                if key == Qt.Key.Key_0:
+                    self._set_ui_font_scale(1.0)
+                    event.accept()
+                    return True
+        elif event_type == QEvent.Type.Wheel:
+            modifiers = event.modifiers()
+            if modifiers & Qt.KeyboardModifier.ControlModifier:
+                delta = event.angleDelta().y()
+                if delta:
+                    self._adjust_ui_font_scale(0.05 if delta > 0 else -0.05)
+                    event.accept()
+                    return True
+        return super().eventFilter(watched, event)
+
+    def _current_ui_font_scale(self) -> float:
+        try:
+            return max(0.7, min(1.5, float(self.ctx.settings.ui_font_scale)))
+        except (AttributeError, TypeError, ValueError):
+            return 1.0
+
+    def _adjust_ui_font_scale(self, delta: float) -> float:
+        return self._set_ui_font_scale(self._current_ui_font_scale() + float(delta))
+
+    def _set_ui_font_scale(self, scale: float) -> float:
+        """Apply and persist one global UI-font scale for every app window."""
+        scale = round(max(0.7, min(1.5, float(scale))), 2)
+        self.ctx.settings.ui_font_scale = scale
+        self.ctx.settings.flush_to_disk()
+
+        from app.config.theme import apply_default_font, apply_theme, set_typography
+
+        set_typography(
+            scale=scale,
+            family=getattr(self.ctx.settings, "ui_font_family", "") or "",
+        )
+        app = QApplication.instance()
+        if app is not None:
+            apply_default_font(app)
+            app.setStyleSheet(apply_theme(self.ctx.settings.current_theme))
+        self.statusBar().showMessage(
+            tr("界面字号：{}%（Ctrl+0 恢复）").format(round(scale * 100)),
+            1800,
+        )
+        return scale
 
     def moveEvent(self, event) -> None:  # noqa: N802 — Qt override
         super().moveEvent(event)
@@ -1130,10 +1195,18 @@ class MainWindow(QMainWindow):
             ui.warn(self, tr("新建项目"), f"创建失败：{exc}")
             return
 
-        # 项目根 = 项目树根。项目根是容器(非工作区), 进不去 —— 落到项目树。
+        # §7 旧: self.ctx.settings.project_tree_root = res["root"]
+        #   —— 把树钉成「单项目」模式, 其余项目全被挡住。用户 2026-07-13 二次报障(截图):
+        #   "新建项目, 之前项目就没了"。根因有两层, 这里是第二层:
+        #     (a) 新项目是**空容器目录**(不是工作区), 从不进 user_projects.json →
+        #         「全部项目」列表里根本没有它 → 只好靠切模式才看得见;
+        #     (b) 切了模式 → 别的项目消失。
+        #   现在: 登记它(见下), 不切模式 —— 树里所有项目并排, 新项目只是被选中。
         try:
-            self.ctx.settings.project_tree_root = res["root"]
-        except Exception:  # noqa: BLE001
+            from app.services.project_service import register_project_root
+
+            register_project_root(res["root"], name=vals["name"])
+        except Exception:  # noqa: BLE001 —— 登记失败不该让「项目已建好」变成报错
             pass
         # §7 旧落点(恢复时反注释): 有采样点则直接进第一个 → 工作台
         # if res["sites"]:
@@ -1389,7 +1462,6 @@ class MainWindow(QMainWindow):
         re-applies both bindings live.
         """
         from app.widgets.screenshot_controller import ScreenshotController
-        from app.utils.global_hotkey import GlobalHotkeyManager
 
         self._shot_ctrl = ScreenshotController(
             self,
@@ -1405,13 +1477,12 @@ class MainWindow(QMainWindow):
         sc.activated.connect(self._shot_ctrl.capture_region)
         self._screenshot_shortcut = sc
 
-        # Global system-wide hotkey (queued → main-thread capture_region).
-        self._global_hotkey = GlobalHotkeyManager(self)
-        self._global_hotkey.triggered.connect(
-            self._shot_ctrl.capture_region, Qt.ConnectionType.QueuedConnection
-        )
-        if self.screenshot_tool_enabled():
-            self._global_hotkey.set_hotkey(seq)
+        # Do not import/start pynput during application startup. The in-app
+        # ApplicationShortcut already covers every app page; the old global
+        # listener loaded keyboard-layout tables and spawned OS-hook threads
+        # before the first window appeared, adding a large cold-start penalty
+        # and causing teardown warnings in short-lived launches.
+        self._global_hotkey = None
         self._apply_screenshot_tool_enabled()
 
     def rebind_screenshot_shortcut(self, seq: str) -> None:
@@ -1428,18 +1499,24 @@ class MainWindow(QMainWindow):
 
     # ── Persistence ───────────────────────────────────────────────────────
 
-    def restore_state(self, *, activate_last_view: bool = True) -> None:
+    def restore_state(
+        self,
+        *,
+        activate_last_view: bool = True,
+        restore_window_layout: bool = True,
+    ) -> None:
         """Restore window geometry and a startup page from QSettings.
 
         Startup uses ``activate_last_view=False`` so a previous heavy page
         (collab/project tree/map) cannot block the first window paint.
         """
-        geom = self.ctx.settings.restore_geometry()
-        if geom:
-            self.restoreGeometry(geom)
-        state = self.ctx.settings.restore_window_state()
-        if state:
-            self.restoreState(state)
+        if restore_window_layout:
+            geom = self.ctx.settings.restore_geometry()
+            if geom:
+                self.restoreGeometry(geom)
+            state = self.ctx.settings.restore_window_state()
+            if state:
+                self.restoreState(state)
         if not self._view_classes:
             return
         if activate_last_view:
@@ -1457,8 +1534,10 @@ class MainWindow(QMainWindow):
             low_mem = is_low_memory_machine()
         except Exception:
             low_mem = bool(getattr(self.ctx.settings, "performance_mode", False))
-        # Next event-loop tick for normal machines; longer defer on low RAM.
-        delay_ms = 800 if low_mem else 0
+        # Let the native window complete one stable first paint before building
+        # the heavy workbench.  A zero-delay callback raced the first maximize
+        # and made the whole window appear frozen or partially painted.
+        delay_ms = 800 if low_mem else 180
         if getattr(self.ctx.settings, "performance_mode", False) and not low_mem:
             delay_ms = max(delay_ms, 250)
         self._show_startup_placeholder()
@@ -1467,7 +1546,10 @@ class MainWindow(QMainWindow):
     def _activate_initial_view(self) -> None:
         if not getattr(self, "_torn_down", False):
             self._activate_index(0, persist=False)
-            self._start_view_prefetch()
+            # Keep the application idle after first paint.  Importing every
+            # remaining page on 150 ms timers still runs on the GUI thread and
+            # creates a train of startup stalls.  Pages remain genuinely lazy
+            # and pay their import cost only when the user opens them.
 
     # ── Idle-time view-module prefetch ────────────────────────────────────
 
@@ -1507,6 +1589,9 @@ class MainWindow(QMainWindow):
             self._prefetch_timer.start(150)
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        app = QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(self)
         self.ctx.settings.save_geometry(self.saveGeometry())
         self.ctx.settings.save_window_state(self.saveState())
         self.ctx.settings.flush_to_disk()

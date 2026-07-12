@@ -60,16 +60,33 @@ def test_new_project_creates_container_only(win, tmp_path, monkeypatch):
     assert not (root / "results").exists()
 
 
-def test_new_project_sets_tree_root_and_does_not_enter_workspace(
+def test_new_project_is_registered_and_does_not_enter_workspace(
     win, tmp_path, monkeypatch
 ):
+    """建完项目 → 它进项目列表, 树里和别的项目并排。
+
+    §7 旧断言: assert win.ctx.settings.project_tree_root == str(root)
+      —— 冻结的是「建完项目把树钉成单项目模式」这个行为, 而它正是用户 2026-07-13
+      两次报障的根因:「新建项目, 之前的项目就没了」。建项目就是建项目, 不该顺手
+      改掉整棵树的浏览模式。
+    """
     _fake_dialog(monkeypatch, tmp_path, "江苏盐城2026")
 
     win._on_new_survey_project()
 
     root = tmp_path / "江苏盐城2026"
-    assert win.ctx.settings.project_tree_root == str(root)
-    # 没有采样点 → 没进任何工作区(项目根不是拍照工作区)
+    assert root.is_dir()
+
+    from app.services.project_service import (
+        default_user_projects_json_path,
+        list_projects,
+    )
+    dirs = [
+        p.get("directory") or p.get("dir") or ""
+        for p in list_projects(default_user_projects_json_path())
+    ]
+    assert any(Path(d).name == "江苏盐城2026" for d in dirs if d), dirs
+    # 没有采样点 → 没进任何工作区(项目根不是拍照的地方)
     assert win.ctx.current_project_dir is None
 
 
