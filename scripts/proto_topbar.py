@@ -89,6 +89,14 @@ def _initials(t: str) -> str:
     return "".join(_PY.get(c, c.lower() if c.isascii() else "") for c in t)
 
 
+def _match_chain(n: Node, q: str) -> bool:
+    if not q:
+        return True
+    q = q.lower().strip()
+    ch = chain_of(n)
+    return q in ch.lower() or q in _initials(ch)
+
+
 def _match(n: Node, q: str) -> bool:
     if not q:
         return True
@@ -149,6 +157,23 @@ def all_shoots(node: Node) -> list[Node]:
     return out
 
 
+def chain_of(node: Node) -> str:
+    """「航次2026 › 子区A」—— 工作区必须带上它属于谁, 不然满屏「断面A」没法认。"""
+    parts = []
+    def walk(cur: Node, trail: list) -> bool:
+        for c in cur.children:
+            if c is node:
+                parts.extend(t.name for t in trail if t.kind != "disk")
+                return True
+            if walk(c, trail + [c]):
+                return True
+        return False
+    for d in DISKS:
+        if walk(d, [d]):
+            break
+    return " › ".join(parts)
+
+
 # ── 通用下拉：搜索 + MRU + 统计 + 死路径 ─────────────────────────────────────
 
 class Picker(QDialog):
@@ -187,25 +212,54 @@ class Picker(QDialog):
 
     def _fill(self, q: str):
         self._list.clear()
-        for n in mru(self._items):
-            if not _match(n, q):
-                continue
-            star = "★ " if n.pinned else ""
-            if not n.alive:
-                text = f"{star}{n.name}        ⚠ 路径不存在 —— 点击可「重新定位…」"
-            elif n.kind == "shoot":
-                text = f"{star}{n.name}        {n.specimens} 标本 · {_ago(n.last_open)}"
-            elif n.kind == "disk":
-                text = f"{n.name}        {len(n.children)} 个项目 · {n.free}"
-            else:
-                text = f"{star}{n.name}        {len(all_shoots(n))} 个工作区 · {_ago(n.last_open)}"
-            it = QListWidgetItem(text)
-            it.setData(Qt.ItemDataRole.UserRole, n)
-            if not n.alive:
-                it.setForeground(QColor("#9aa4a7"))
-            self._list.addItem(it)
-        if self._list.count():
-            self._list.setCurrentRow(0)
+        shoots = [n for n in self._items if n.kind == "shoot"]
+        if shoots and len(shoots) == len(self._items):
+            # 工作区列表 → 按项目分组显示（裸名「断面A」×3 没法认 —— 用户 2026-07-13 截图骂的就是这个）
+            groups: dict[str, list[Node]] = {}
+            for n in shoots:
+                if not _match(n, q) and not _match_chain(n, q):
+                    continue
+                groups.setdefault(chain_of(n) or "未归入项目", []).append(n)
+            # 组按「组内最近」排序; 组内按 MRU
+            ordered = sorted(groups.items(), key=lambda kv: -max(x.last_open for x in kv[1]))
+            for gname, members in ordered:
+                head = QListWidgetItem(f"🗂 {gname}")
+                head.setFlags(Qt.ItemFlag.NoItemFlags)
+                head.setForeground(QColor("#0e9384"))
+                f = head.font(); f.setBold(True); head.setFont(f)
+                self._list.addItem(head)
+                for n in mru(members):
+                    star = "★ " if n.pinned else ""
+                    if not n.alive:
+                        text = f"    {star}📷 {n.name}      ⚠ 路径不存在 → 重新定位…"
+                    else:
+                        text = f"    {star}📷 {n.name}      {n.specimens} 标本 · {_ago(n.last_open)}"
+                    it = QListWidgetItem(text)
+                    it.setData(Qt.ItemDataRole.UserRole, n)
+                    if not n.alive:
+                        it.setForeground(QColor("#9aa4a7"))
+                    self._list.addItem(it)
+        else:
+            for n in mru(self._items):
+                if not _match(n, q):
+                    continue
+                star = "★ " if n.pinned else ""
+                if not n.alive:
+                    text = f"{star}{n.name}        ⚠ 路径不存在 —— 点击可「重新定位…」"
+                elif n.kind == "disk":
+                    text = f"{n.name}        {len(n.children)} 个项目 · {n.free}"
+                else:
+                    text = f"{star}{n.name}        {len(all_shoots(n))} 个工作区 · {_ago(n.last_open)}"
+                it = QListWidgetItem(text)
+                it.setData(Qt.ItemDataRole.UserRole, n)
+                if not n.alive:
+                    it.setForeground(QColor("#9aa4a7"))
+                self._list.addItem(it)
+        # 选中第一个可选行(跳过组头)
+        for i in range(self._list.count()):
+            if self._list.item(i).flags() & Qt.ItemFlag.ItemIsSelectable:
+                self._list.setCurrentRow(i)
+                break
 
     def _pick(self, it: QListWidgetItem):
         self.chosen.emit(it.data(Qt.ItemDataRole.UserRole))
@@ -395,7 +449,9 @@ class LocationPanel(QDialog):
         chips.addWidget(lbl)
         recents = mru([s for d in DISKS for s in all_shoots(d)])[:4]
         for r in recents:
-            c = QPushButton(f"{r.name} · {_ago(r.last_open)}")
+            ch = chain_of(r)
+            label = f"{ch.split(' › ')[0]} › {r.name}" if ch else r.name
+            c = QPushButton(f"{label} · {_ago(r.last_open)}")
             c.setStyleSheet("QPushButton{border:1px solid #dfe6e8;border-radius:14px;padding:3px 11px;"
                             "font-size:12px;background:#fff;}QPushButton:hover{border-color:#0e9384;color:#0e9384;}")
             c.clicked.connect(lambda _c=False, node=r: self._enter(node))
@@ -629,7 +685,12 @@ class TopBar(QWidget):
             parts.append(s["folder"].name)
         self._crumb.setText("  ›  ".join([p for p in parts if p]) + "  ›")
         shoot = s.get("shoot")
-        self._leaf.setText(f"📷 {shoot.name}  ▾" if shoot else "选择工作区 ▾")
+        if shoot:
+            ch = chain_of(shoot)
+            proj = ch.split(" › ")[0] if ch else ""
+            self._leaf.setText(f"📷 {proj} › {shoot.name}  ▾" if proj else f"📷 {shoot.name}  ▾")
+        else:
+            self._leaf.setText("选择工作区 ▾")
         self._back.setEnabled(self._hpos > 0)
         self._fwd.setEnabled(self._hpos < len(self._history) - 1)
 

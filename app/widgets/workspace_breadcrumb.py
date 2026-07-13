@@ -732,7 +732,15 @@ class WorkspaceBreadcrumb(QWidget):
         current = str(Path(getattr(self._ctx, "current_project_dir", "") or "").resolve())
         out: list[dict] = []
         seen: set[str] = set()
-        for item in reversed(projects):
+        # §7 旧: for item in reversed(projects) —— JSON 追加序的倒序, 不是真「最近」。
+        #   现在按 lastOpenedAt 降序(record_recent_workspace 每次进入都会刷新它);
+        #   老条目没有时间戳 → 按 0 处理, 排在有时间戳的后面(保持旧行为兜底)。
+        ordered = sorted(
+            reversed(projects),
+            key=lambda p: p.get("lastOpenedAt") or 0,
+            reverse=True,
+        )
+        for item in ordered:
             path = str(item.get("directory") or item.get("dir") or "")
             if not path:
                 continue

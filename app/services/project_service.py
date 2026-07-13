@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -417,25 +418,36 @@ def record_recent_workspace(
     """
     resolved = normalize_path(path)
     projects = list_projects(user_projects_json_path)
-    if not any(_same_path(p.get("directory") or p.get("dir") or "", resolved) for p in projects):
+    # float 秒: 同一秒内连续进入两个工作区也要分得出先后(int 会打平)
+    now = time.time()
+    # §7 旧: if not any(_same_path(...)): append —— 条目已存在时**什么都不做**。
+    #   后果(用户 2026-07-13 顶栏优化的地基 bug): 「最近使用」实为「首次登记的倒序」,
+    #   天天进的工作区永远排不到前面; 条目无时间戳, 既不能按最近排序也显示不了「昨天用过」。
+    #   现在: 每次进入都刷新 lastOpenedAt —— 这才是「最近」。
+    existing = next(
+        (p for p in projects
+         if _same_path(p.get("directory") or p.get("dir") or "", resolved)),
+        None,
+    )
+    if existing is not None:
+        existing["lastOpenedAt"] = now
+        if root and not existing.get("root"):
+            existing["root"] = normalize_path(root)
+    else:
         entry = {
             "id": str(uuid.uuid4()),
             "name": _workspace_display_name(resolved, root),
             "directory": resolved,
             "dir": resolved,
+            "lastOpenedAt": now,
         }
         if root:
             entry["root"] = normalize_path(root)
         projects.append(entry)
-        out = Path(localize_path(user_projects_json_path))
-        # §7 旧: 直接 write_text, 写半截断丢整表
-        # out.parent.mkdir(parents=True, exist_ok=True)
-        # out.write_text(
-        #     json.dumps({"version": 1, "projects": projects}, ensure_ascii=False, indent=2),
-        #     encoding="utf-8",
-        # )
-        _atomic_write_user_projects(out, projects)
-        clear_project_list_cache(user_projects_json_path)
+    out = Path(localize_path(user_projects_json_path))
+    # §7 旧: 直接 write_text, 写半截断丢整表 —— 保持原子写
+    _atomic_write_user_projects(out, projects)
+    clear_project_list_cache(user_projects_json_path)
     return projects
 
 
