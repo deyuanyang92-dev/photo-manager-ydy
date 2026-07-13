@@ -283,8 +283,8 @@ class NamingPanel(QWidget):
         self._site = _make_compact_line_edit("如 BLW / YGLZ", auto=True)
         self._site.setMinimumWidth(60)
         self._station = _make_compact_line_edit("如 B2", auto=True)
-        self._species_id = _make_compact_line_edit("如 DLC001 / MIX01 / 管号")
-        self._species_id.setMaximumWidth(150)
+        self._species_id = _make_compact_line_edit("如 DLC001")
+        self._species_id.setMinimumWidth(140)
 
         self._geo_group, geo_grid = _section("采集位置", show_title=False)
         geo_grid.setColumnStretch(0, 1)
@@ -292,23 +292,24 @@ class NamingPanel(QWidget):
         geo_grid.setColumnStretch(2, 1)
         geo_grid.addWidget(_field("省/市", self._province, required=True,
                                   key="province",
-                                  help_text="省/市代码，如 GXFCG、FJ；通常由项目自动推导"), 0, 0)
+                                  help_text="省/市，如 GXFCG、FJ"), 0, 0)
         geo_grid.addWidget(_field("地区/样地", self._site, required=True,
                                   key="site",
-                                  help_text="地区/样地代码，如 BLW、YGLZ；通常自动推导"), 0, 1)
+                                  help_text="地区或样地，如 BLW、YGLZ"), 0, 1)
         geo_grid.addWidget(_field("站位", self._station,
                                   key="station",
-                                  help_text="采集站位，如 B2；缺省时唯一编号自动少一段"), 0, 2)
+                                  help_text="采集站位，如 B2；没有可不填"), 0, 2)
         form.addWidget(self._geo_group)
 
         self._identity_group, identity_grid = _section("编号规则", show_title=False)
-        identity_grid.setColumnStretch(0, 0)
-        identity_grid.setColumnStretch(1, 0)
-        identity_grid.setColumnStretch(2, 1)
+        # 物种编号和保存方式承载较长内容，应当等宽扩展；成果序号只有
+        # 1–3 位数字，保持紧凑，避免它挤占两侧输入空间。
+        identity_grid.setColumnStretch(0, 3)
+        identity_grid.setColumnStretch(1, 1)
+        identity_grid.setColumnStretch(2, 3)
         identity_grid.addWidget(_field("物种编号", self._species_id, required=True,
                                        key="species_id",
-                                       help_text="UID 中的一段，如 BZC003、DLC001；"
-                                       "不是完整标本号，也不是保存方式 R"), 0, 0)
+                                       help_text="物种编号，如 BZC003、DLC001"), 0, 0)
 
         # Sequence hint + 填入建议 — inline (no popup), aligned under the field column.
         seq_cell = QWidget()
@@ -335,9 +336,9 @@ class NamingPanel(QWidget):
         self._seq.setMaximum(999)
         self._seq.setValue(1)
         self._seq.setFixedHeight(34)
-        self._seq.setMaximumWidth(78)
+        self._seq.setMaximumWidth(68)
         identity_grid.addWidget(_field("成果序号", self._seq,
-                                       help_text="成果序号（自动递增）"), 0, 1)
+                                       help_text="同一标本的第几张成片，自动递增"), 0, 1)
 
         # ── 保存方式 — hidden free-text proxy + grouped dropdown ──
         # The proxy QLineEdit holds the canonical storage value read by
@@ -362,7 +363,7 @@ class NamingPanel(QWidget):
             QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
         )
         self._storage_combo.setMinimumContentsLength(6)
-        self._storage_combo.setMinimumWidth(170)
+        self._storage_combo.setMinimumWidth(140)
         self._storage_combo.view().setMinimumWidth(360)
         self._build_storage_combo()
         self._storage_combo.activated.connect(self._on_storage_combo)
@@ -371,7 +372,7 @@ class NamingPanel(QWidget):
         )
         identity_grid.addWidget(_field("保存方式", self._storage_combo, required=True,
                                        key="storage",
-                                       help_text="标本保存方式；R 前缀表示已取 RNA（RNAlater）"), 0, 2)
+                                       help_text="选择标本的保存方式"), 0, 2)
         # 保存方式说明灰字 + ✓已取RNA·RNAlater 徽标 (web pres-detail-row, app.js:9309)
         self._pres_detail = QLabel("")
         self._pres_detail.setObjectName("PresDetail")
@@ -394,11 +395,11 @@ class NamingPanel(QWidget):
         self._collection_date = _make_compact_line_edit("采集 YYYYMMDD")
         date_grid.addWidget(_field("采集日期", self._collection_date, required=True,
                                    key="collection_date",
-                                   help_text="采集 YYYYMMDD；只填采集或只填拍摄时视为同一天"), 0, 0)
+                                   help_text="采集日期，格式为 YYYYMMDD"), 0, 0)
         self._photo_date = _make_compact_line_edit("拍摄 YYYYMMDD")
         date_grid.addWidget(_field("拍摄日期", self._photo_date, required=True,
                                    key="photo_date",
-                                   help_text="拍摄 YYYYMMDD；只填其一则采集与拍摄同天"), 0, 1)
+                                   help_text="拍摄日期，格式为 YYYYMMDD"), 0, 1)
         form.addWidget(self._date_group)
 
         self._dynamic_naming_group, self._dynamic_naming_grid = _section(
@@ -444,22 +445,30 @@ class NamingPanel(QWidget):
         # 操作行(4 个文字按钮), 行最小宽 435→~210, 右栏可显著收窄。
         preview_hdr = QHBoxLayout()
         preview_hdr.setContentsMargins(0, 0, 0, 0)
-        preview_lbl = QLabel("标本唯一编号 / voucher number")
+        preview_lbl = QLabel("标本唯一编号")
         preview_lbl.setObjectName("NamingGroupTitle")
         preview_lbl.setWordWrap(True)
         preview_hdr.addWidget(preview_lbl, stretch=1)
         copy_uid = QToolButton()
         copy_uid.setObjectName("CompactIconButton")
-        copy_uid.setToolTip("复制标本唯一编号 / voucher number")
-        copy_uid.setIcon(icons.icon("mdi6.content-copy", color=icons.TONE_MUTED))
+        copy_uid.setToolTip("复制标本唯一编号")
+        # Do not make these actions icon-only.  In lightweight mode (and on
+        # machines where the icon font cannot be loaded) a null QIcon leaves
+        # an unexplained blank square in this narrow header.
+        copy_uid.setText("复制")
+        copy_uid.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        copy_uid.setFixedHeight(26)
+        copy_uid.setMinimumWidth(42)
         copy_uid.clicked.connect(self._copy_uid)
+        self._copy_uid_btn = copy_uid
         preview_hdr.addWidget(copy_uid)
         self._display_fields_btn = QToolButton()
         self._display_fields_btn.setObjectName("CompactIconButton")
         self._display_fields_btn.setToolTip("选择唯一编号下方的展示信息")
-        self._display_fields_btn.setIcon(
-            icons.icon("mdi6.tune-variant", color=icons.TONE_MUTED)
-        )
+        self._display_fields_btn.setText("显示")
+        self._display_fields_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self._display_fields_btn.setFixedHeight(26)
+        self._display_fields_btn.setMinimumWidth(42)
         self._display_fields_btn.clicked.connect(self._open_display_fields_menu)
         preview_hdr.addWidget(self._display_fields_btn)
         # 场景: 「删除」原本和「保存/添加/更新」并排, 四个按钮间距 6px —— 手滑
@@ -470,7 +479,10 @@ class NamingPanel(QWidget):
         self._more_btn = QToolButton()
         self._more_btn.setObjectName("CompactIconButton")
         self._more_btn.setToolTip("更多操作")
-        self._more_btn.setIcon(icons.icon("mdi6.dots-horizontal", color=icons.TONE_MUTED))
+        self._more_btn.setText("更多")
+        self._more_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self._more_btn.setFixedHeight(26)
+        self._more_btn.setMinimumWidth(42)
         self._more_btn.clicked.connect(self._open_more_menu)
         self._more_btn.hide()
         preview_hdr.addWidget(self._more_btn)
@@ -484,6 +496,7 @@ class NamingPanel(QWidget):
         self._preview_save_btn = QPushButton("保存")
         self._preview_save_btn.setObjectName("Outline")
         self._preview_save_btn.setFixedHeight(26)
+        self._preview_save_btn.setMinimumWidth(64)
         self._preview_save_btn.setToolTip("保存当前输入，不改变左侧已选编号")
         icons.set_button_icon(self._preview_save_btn, "mdi6.content-save-outline",
                               color=icons.TONE_MUTED, size=13)
@@ -492,7 +505,8 @@ class NamingPanel(QWidget):
         self._pin_btn = QPushButton("添加")
         self._pin_btn.setObjectName("Primary")
         self._pin_btn.setFixedHeight(26)
-        self._pin_btn.setToolTip("把当前 voucher number 保存并添加到左侧标本列表")
+        self._pin_btn.setMinimumWidth(64)
+        self._pin_btn.setToolTip("保存并添加到左侧标本列表")
         icons.set_button_icon(self._pin_btn, "mdi6.pin-outline",
                               color=icons.TONE_ON_ACCENT, size=13)
         self._pin_btn.clicked.connect(self.add_requested.emit)
@@ -500,7 +514,8 @@ class NamingPanel(QWidget):
         self._update_btn = QPushButton("更新")
         self._update_btn.setObjectName("Outline")
         self._update_btn.setFixedHeight(26)
-        self._update_btn.setToolTip("按当前 voucher number 更新已登记的成果 TIFF/ZIP 文件名")
+        self._update_btn.setMinimumWidth(64)
+        self._update_btn.setToolTip("更新已登记的成片和压缩包文件名")
         icons.set_button_icon(self._update_btn, "mdi6.update",
                               color=icons.TONE_MUTED, size=13)
         self._update_btn.clicked.connect(self.update_requested.emit)
@@ -559,7 +574,7 @@ class NamingPanel(QWidget):
         root.addWidget(self._rna_warning)
 
         # Duplicate-UID warning (naming-dup-warn, hidden by default)  #cursor
-        self._dup_warn = QLabel("⚠ 标本唯一编号重复 — 该 voucher number 已存在")
+        self._dup_warn = QLabel("⚠ 标本唯一编号重复，该编号已存在")
         self._dup_warn.setObjectName("UnattributedWarning")
         self._dup_warn.setWordWrap(True)
         self._dup_warn.hide()
@@ -1429,10 +1444,10 @@ class NamingPanel(QWidget):
 
         if storage.upper().startswith("R"):
             self._storage_combo.setToolTip(
-                "R 前缀表示已取 RNA；需要额外生成 RNAlater 组织管标签"
+                "已取 RNA，需要额外生成组织管标签"
             )
         else:
-            self._storage_combo.setToolTip("标本保存方式；R 前缀表示已取 RNA（RNAlater）")
+            self._storage_combo.setToolTip("选择标本的保存方式")
         self._rna_warning.hide()
 
         if uid:
@@ -1451,7 +1466,7 @@ class NamingPanel(QWidget):
         self._pin_btn.setToolTip(
             "按当前表单添加为左侧编号；不迁移当前载入的旧编号"
             if editing else
-            "把当前 voucher number 保存并添加到左侧标本列表"
+            "保存并添加到左侧标本列表"
         )
         self._preview_save_btn.setVisible(True)
         self._update_btn.setVisible(editing)
@@ -1573,7 +1588,7 @@ class NamingPanel(QWidget):
             from pathlib import Path as _Path
             project_name = _Path(owner).name if owner else "标本库"
             self._dup_warn.setText(
-                f"⚠ 标本唯一编号重复 — 该 voucher number 已存在（项目「{project_name}」），请修改字段后再保存"
+                f"⚠ 标本唯一编号重复，该编号已存在（项目「{project_name}」），请修改后再保存"
             )
             self._dup_warn.show()
         else:

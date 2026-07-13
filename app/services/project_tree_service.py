@@ -289,3 +289,40 @@ def discover_workspace_candidates(
     if use_cache:
         _cache_put(_CANDIDATE_CACHE, key, out)
     return out
+
+
+def discover_project_roots(root_dir: str, max_depth: int = 4) -> list[dict]:
+    """Find project containers created by this app (``_data/region.json``).
+
+    Project roots are intentionally not workspaces, so the legacy workspace
+    scanner cannot find them.  This scanner provides update/reinstall recovery
+    without creating or modifying anything on the scanned disk.
+    """
+    # 用户场景（2026-07-13）：旧版本创建的项目根只有 _data/region.json，
+    # 它不是拍照工作区，不能因没有 project.db 而被扫描功能漏掉。
+    root_path = Path(root_dir)
+    out: list[dict] = []
+
+    def visit(path: Path, depth: int) -> None:
+        if depth > max_depth:
+            return
+        if is_region(str(path)):
+            out.append({"path": str(path), "name": path.name, "isProjectRoot": True})
+            return
+        if depth == max_depth:
+            return
+        try:
+            entries = sorted(os.scandir(path), key=lambda entry: entry.name)
+        except OSError:
+            return
+        for entry in entries:
+            if entry.name.startswith(".") or entry.name in RESERVED_DIR_NAMES:
+                continue
+            try:
+                if entry.is_dir():
+                    visit(Path(entry.path), depth + 1)
+            except OSError:
+                continue
+
+    visit(root_path, 0)
+    return out

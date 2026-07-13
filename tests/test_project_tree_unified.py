@@ -174,6 +174,10 @@ def test_context_menu_has_rename_move_delete(qtbot, tmp_path, ctx, monkeypatch):
         def addSeparator(self):
             pass
 
+        def addMenu(self, text):
+            captured.append(text)
+            return self
+
         def exec(self, *a, **kw):
             return None
 

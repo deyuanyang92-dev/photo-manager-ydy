@@ -10,7 +10,14 @@ Covers:
 """
 import pytest
 from unittest.mock import MagicMock
-from PyQt6.QtWidgets import QApplication, QFrame, QLabel, QLineEdit, QPushButton
+from PyQt6.QtWidgets import (
+    QApplication,
+    QFrame,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QToolButton,
+)
 from PyQt6.QtCore import QSettings, Qt
 
 
@@ -82,6 +89,15 @@ class TestAdaptiveFields:
 
     def test_site_min_width(self, panel):
         assert panel._site.minimumWidth() >= 60
+
+    def test_identity_fields_prioritize_species_and_storage(self, panel):
+        """长文本字段等权扩展，纯数字成果序号保持紧凑。"""
+        grid = panel._identity_group.layout().itemAt(0).layout()
+        assert grid.columnStretch(0) == grid.columnStretch(2)
+        assert grid.columnStretch(0) > grid.columnStretch(1)
+        assert panel._species_id.minimumWidth() >= 140
+        assert panel._storage_combo.minimumWidth() >= 140
+        assert panel._seq.maximumWidth() <= 68
 
 
 # ── Auto-grow notes ────────────────────────────────────────────────────────
@@ -246,6 +262,45 @@ def test_preview_add_state_has_separate_save_button(panel):
     assert panel._preview_save_btn.text() == "保存"
     assert panel._preview_save_btn.isVisible()
     assert panel._update_btn.isHidden()
+
+
+def test_preview_header_actions_never_degrade_to_blank_icon_buttons(panel):
+    """Icon-font failure must not leave two unexplained empty squares."""
+    assert isinstance(panel._copy_uid_btn, QToolButton)
+    assert panel._copy_uid_btn.text() == "复制"
+    assert panel._display_fields_btn.text() == "显示"
+    assert panel._copy_uid_btn.minimumWidth() >= 42
+    assert panel._display_fields_btn.minimumWidth() >= 42
+
+
+def test_preview_action_labels_keep_readable_width_in_narrow_rail(qapp, panel):
+    panel.resize(340, panel.height())
+    qapp.processEvents()
+
+    for button, label in (
+        (panel._preview_save_btn, "保存"),
+        (panel._pin_btn, "添加"),
+        (panel._update_btn, "更新"),
+    ):
+        assert button.text() == label
+        assert button.minimumWidth() >= 64
+
+
+def test_naming_field_help_uses_plain_user_language(panel):
+    assert panel._species_id.placeholderText() == "如 DLC001"
+    assert panel._species_id.toolTip() == "物种编号，如 BZC003、DLC001"
+    assert panel._station.toolTip() == "采集站位，如 B2；没有可不填"
+    assert panel._seq.toolTip() == "同一标本的第几张成片，自动递增"
+
+    user_text = " ".join((
+        panel._species_id.placeholderText(),
+        panel._species_id.toolTip(),
+        panel._pin_btn.toolTip(),
+        panel._update_btn.toolTip(),
+    ))
+    assert "UID" not in user_text
+    assert "voucher" not in user_text
+    assert "MIX" not in user_text
 
 
 def test_preview_save_and_add_buttons_visible_when_editing_existing(panel):

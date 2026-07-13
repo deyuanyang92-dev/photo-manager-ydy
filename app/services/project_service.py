@@ -15,6 +15,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -327,30 +329,38 @@ def _file_signature(path: Path) -> tuple:
 
 
 def default_user_projects_json_path() -> str:
-    """Return the app-local ``data/user_projects.json`` path (the writable
-    recent-workspaces list shared by 项目树 and 项目总览)."""
+    """Return the upgrade-safe per-user project catalogue path.
+
+    Older releases stored this index beside the application.  On first use we
+    copy that legacy catalogue into the OS user-data directory so replacing or
+    reinstalling the portable package cannot make existing projects disappear.
+    """
+    # 用户场景（2026-07-13）：反复更新/替换便携包后，磁盘项目仍在，但安装目录内
+    # 的索引可能被覆盖。项目索引必须放到不会随软件更新而替换的用户数据目录。
     repo_root = Path(__file__).resolve().parents[2]
-    return str(repo_root / "data" / "user_projects.json")
+    legacy = repo_root / "data" / "user_projects.json"
+    if sys.platform == "win32":
+        base = Path(os.environ.get("APPDATA", str(Path.home())))
+        stable = base / "SpecimenPhotoWorkbench" / "user_projects.json"
+    else:
+        base = Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share")))
+        stable = base / "specimen_workbench" / "user_projects.json"
+    if not stable.exists() and legacy.is_file():
+        try:
+            stable.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(legacy, stable)
+        except OSError:
+            # Read/write can still fall back to the protected legacy location.
+            return str(legacy)
+    return str(stable)
 
 
 def resolve_user_projects_json() -> str:
     """Return the ``user_projects.json`` path to READ.
 
-    Priority:
-      1. app-local ``data/user_projects.json`` (writable app data)
-      2. the web-prototype ``data/user_projects.json`` (real working data)
-    Falls back to (1) even if it doesn't exist yet.
+    The default path performs the one-time migration from legacy app-local data.
     """
-    app_local = Path(default_user_projects_json_path())
-    if app_local.exists():
-        return str(app_local)
-    web_proto = (
-        app_local.parents[2]
-        / "photo-platform-ydy" / "prototype-photo-gui" / "data" / "user_projects.json"
-    )
-    if web_proto.exists():
-        return str(web_proto)
-    return str(app_local)
+    return default_user_projects_json_path()
 
 
 def load_user_projects(path: str | Path | None = None) -> list[dict]:
@@ -1039,3 +1049,28 @@ def register_project_root(
             "isProjectRoot": True,
         },
     )
+
+
+def default_project_parent_directory(
+    user_projects_json_path: Optional[str] = None,
+) -> str:
+    """Return a safe parent directory for creating a new top-level project.
+
+    This deliberately uses the global project catalogue, never the active photo
+    workspace.  A workspace such as ``项目/断面/B2`` is a child destination for
+    photos and must not become the parent of the next independent project.
+    """
+    json_path = user_projects_json_path or default_user_projects_json_path()
+    for project in reversed(list_projects(json_path)):
+        raw_root = project.get("root") or ""
+        raw_dir = project.get("directory") or project.get("dir") or ""
+        project_root = raw_root or raw_dir
+        if not project_root:
+            continue
+        try:
+            parent = Path(project_root).expanduser().parent
+            if parent.is_dir():
+                return str(parent)
+        except (OSError, ValueError):
+            continue
+    return ""

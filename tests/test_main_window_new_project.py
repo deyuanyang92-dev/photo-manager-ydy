@@ -99,6 +99,23 @@ def test_new_project_lands_on_project_tree(win, tmp_path, monkeypatch):
     assert getattr(current, "view_id", None) == "project_tree"
 
 
+def test_opening_project_tree_resets_b2_root_filter(win, tmp_path):
+    """项目树是全局入口；当前拍摄目录不能把它锁成 B2 专属页面。"""
+    b2 = tmp_path / "项目A" / "断面A" / "B2"
+    b2.mkdir(parents=True)
+    win.ctx.current_project_dir = str(b2)
+    win.ctx.settings.project_tree_root = str(b2)
+    win.ctx.settings.project_tree_view_mode = "rooted"
+
+    win.navigate_to("project_tree")
+
+    tree = win._stack.currentWidget()
+    assert getattr(tree, "view_id", None) == "project_tree"
+    assert win.ctx.settings.project_tree_view_mode == "all"
+    assert tree._root is None
+    assert str(b2) not in tree._root_lbl.text()
+
+
 def test_topbar_new_child_creates_directly_under_current_project(
     win, tmp_path, monkeypatch
 ):

@@ -10,9 +10,19 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 from app.utils import path_utils
+
+
+@dataclass(frozen=True)
+class OpenDirectoryResult:
+    """Outcome of handing a directory to the platform file manager."""
+
+    opened: bool
+    local_path: str
+    error: str = ""
 
 
 def local_path(path: str) -> str:
@@ -20,32 +30,46 @@ def local_path(path: str) -> str:
     return path_utils.localize_path(path)
 
 
-def open_directory(path: str) -> bool:
-    """Open *path* as a directory in the user's file manager.
-
-    Returns whether a launcher process was started.  The caller is responsible
-    for checking that the directory exists and for showing any user-facing
-    warning.
-    """
+def open_directory_detailed(path: str) -> OpenDirectoryResult:
+    """Open *path* and retain the real local path and launcher error."""
     localized = local_path(path)
     if not localized:
-        return False
+        return OpenDirectoryResult(False, "", "路径为空或无法转换为本机路径")
+    normalized = os.path.normpath(localized)
     try:
         if path_utils.is_wsl_runtime():
             win_path = path_utils.wsl_to_windows(localized)
             if win_path:
                 subprocess.Popen(["explorer.exe", win_path])
-                return True
+                return OpenDirectoryResult(True, win_path)
+            return OpenDirectoryResult(False, localized, "无法把 WSL 路径转换为 Windows 路径")
         if sys.platform == "win32":
-            subprocess.Popen(["explorer", os.path.normpath(localized)])
-            return True
+            # 用户场景（2026-07-13）：右键「打开文件夹」必须真正交给资源管理器；
+            # 失败时要把实际本机路径和系统错误告诉用户，不能只表现为“按键没反应”。
+            try:
+                os.startfile(normalized)  # type: ignore[attr-defined]
+            except (AttributeError, OSError) as start_error:
+                try:
+                    subprocess.Popen(["explorer.exe", normalized])
+                except (OSError, subprocess.SubprocessError) as explorer_error:
+                    return OpenDirectoryResult(
+                        False,
+                        normalized,
+                        f"Windows 打开失败：{start_error}；资源管理器备用方式也失败：{explorer_error}",
+                    )
+            return OpenDirectoryResult(True, normalized)
         if sys.platform == "darwin":
             subprocess.Popen(["open", localized])
-            return True
+            return OpenDirectoryResult(True, normalized)
         subprocess.Popen(["xdg-open", localized])
-        return True
-    except (OSError, subprocess.SubprocessError):
-        return False
+        return OpenDirectoryResult(True, normalized)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return OpenDirectoryResult(False, normalized, str(exc))
+
+
+def open_directory(path: str) -> bool:
+    """Open *path* as a directory in the user's file manager."""
+    return open_directory_detailed(path).opened
 
 
 def reveal_in_directory(path: str) -> bool:

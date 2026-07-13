@@ -4,6 +4,7 @@ Stores: window geometry, last used project directory, UI preferences.
 """
 from __future__ import annotations
 
+import json
 from typing import Optional
 
 from PyQt6.QtCore import QSettings, QByteArray
@@ -90,6 +91,36 @@ class AppSettings:
         if mode not in {"all", "rooted"}:
             mode = "all"
         self._qs.setValue("project/tree_view_mode", mode)
+
+    @property
+    def project_scan_roots(self) -> list[str]:
+        """Directories the user chose as long-term project search locations."""
+        raw = self._qs.value("project/scan_roots", "[]", type=str) or "[]"
+        try:
+            values = json.loads(raw)
+        except (TypeError, ValueError):
+            values = []
+        return [str(value) for value in values if str(value).strip()]
+
+    @project_scan_roots.setter
+    def project_scan_roots(self, values: list[str]) -> None:
+        unique = list(dict.fromkeys(str(value) for value in values if str(value).strip()))
+        self._qs.setValue("project/scan_roots", json.dumps(unique, ensure_ascii=False))
+
+    @property
+    def project_library_dir(self) -> str:
+        """Optional default parent directory for newly created projects."""
+        return str(self._qs.value("project/library_dir", "") or "")
+
+    @project_library_dir.setter
+    def project_library_dir(self, path: str) -> None:
+        # 用户场景（2026-07-13）：用户可指定统一的数据保存目录，但它只是默认值，
+        # 不能限制手动导入或临时选择其他项目位置。
+        value = str(path or "").strip()
+        if value:
+            self._qs.setValue("project/library_dir", value)
+        else:
+            self._qs.remove("project/library_dir")
 
     @property
     def project_tree_layout_mode(self) -> str:

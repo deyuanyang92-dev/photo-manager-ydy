@@ -84,3 +84,21 @@ def test_new_project_does_not_pin_tree_to_single_project_mode(tmp_path, projects
 
     # 建项目这个动作本身不许改视图模式
     assert ctx.settings.project_tree_view_mode == "all"
+
+
+def test_new_project_parent_comes_from_catalogue_not_active_workspace(
+    tmp_path, projects_json
+):
+    from app.services.project_service import (
+        default_project_parent_directory,
+        register_project_root,
+    )
+
+    projects_home = tmp_path / "全部项目"
+    project = projects_home / "项目A"
+    active_b2 = project / "断面A" / "B2"
+    active_b2.mkdir(parents=True)
+    register_project_root(str(project), name="项目A")
+
+    assert default_project_parent_directory() == str(projects_home)
+    assert default_project_parent_directory() != str(active_b2)

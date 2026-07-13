@@ -256,6 +256,29 @@ class ProjectTreeView(BaseView):
         self._btn_new_project.clicked.connect(self._new_region)
         bar.addWidget(self._btn_new_project)
 
+        # 用户场景（2026-07-13）：更新后项目索引可能丢失，找回入口必须直接可见，
+        # 不能只藏在「⋯」菜单，也不能要求用户重新创建磁盘上已经存在的项目。
+        self._btn_import_project = QPushButton("导入已有项目")
+        self._btn_import_project.setObjectName("Outline")
+        self._btn_import_project.setFixedHeight(34)
+        self._btn_import_project.setToolTip("选择磁盘上已经存在的项目文件夹并加入项目树")
+        self._btn_import_project.clicked.connect(self._add_workspace_manual)
+        bar.addWidget(self._btn_import_project)
+
+        self._btn_scan_projects = QPushButton("扫描项目位置")
+        self._btn_scan_projects.setObjectName("Outline")
+        self._btn_scan_projects.setFixedHeight(34)
+        self._btn_scan_projects.setToolTip("指定长期保存项目的磁盘或目录，扫描并找回全部项目")
+        self._btn_scan_projects.clicked.connect(self._scan_disk)
+        bar.addWidget(self._btn_scan_projects)
+
+        self._btn_library_dir = QPushButton("项目库目录")
+        self._btn_library_dir.setObjectName("Outline")
+        self._btn_library_dir.setFixedHeight(34)
+        self._btn_library_dir.setToolTip("设置以后新建项目默认保存到哪个上级目录")
+        self._btn_library_dir.clicked.connect(self._choose_project_library_directory)
+        bar.addWidget(self._btn_library_dir)
+
         # 「+ 新建子目录」提到工具栏(用户 2026-07-12): 采样点不再在「新建项目」时一次问完,
         # 改为建完项目后在树里自由加(任意层, 空壳; 进入时才初始化为工作区) —— 这个入口是
         # 新流程的主动作, 不能只藏在右键菜单和「⋯」里。
@@ -320,6 +343,8 @@ class ProjectTreeView(BaseView):
         self._act_scan.triggered.connect(self._scan_disk)
         self._act_add_ws = self._more_menu.addAction("添加已有文件夹…")
         self._act_add_ws.triggered.connect(self._add_workspace_manual)
+        self._act_clear_library_dir = self._more_menu.addAction("取消默认项目库目录")
+        self._act_clear_library_dir.triggered.connect(self._clear_project_library_directory)
         self._act_refresh_index = self._more_menu.addAction("刷新汇总索引…")
         self._act_refresh_index.setToolTip(
             "更新调查根库中的 workspace_index_cache（加速后续跨断面汇总）"
@@ -372,7 +397,9 @@ class ProjectTreeView(BaseView):
         tl.setSpacing(4)
         tree_head = QHBoxLayout()
         tree_head.setSpacing(6)
-        tree_title = QLabel("目录结构")
+        # 用户场景（2026-07-13，参考 Geneious）：这里是全局资料库树，
+        # 不是当前 B2 的目录浏览器。项目作为顶层，下面保留任意层文件夹结构。
+        tree_title = QLabel("项目库")
         tree_title.setObjectName("Section")
         tree_head.addWidget(tree_title)
         self._tree_count_lbl = QLabel("0 个节点")
@@ -426,7 +453,7 @@ class ProjectTreeView(BaseView):
         self._btn_select_all_ws.hide()
         self._kind_filter_buttons["all"].setChecked(True)
         select_hint = QLabel(
-            "双击进入拍照 · Ctrl/Shift 多选看汇总 · 右键改名/移动/删除"
+            "项目可逐层展开 · 双击最末级进入拍照 · 右键新建/改名/移动"
         )
         select_hint.setObjectName("MutedSmall")
         select_hint.setWordWrap(True)
@@ -438,13 +465,19 @@ class ProjectTreeView(BaseView):
         tl.addWidget(self._scope_status_lbl)
         self._tree = QTreeWidget()
         self._tree.setObjectName("ProjectDirectoryTree")
+        self._tree.setColumnCount(2)
+        self._tree.setHeaderLabels(["名称", "子目录"])
         self._tree.setHeaderHidden(True)
+        self._tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self._tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         self._tree.setAlternatingRowColors(False)
         self._tree.setAnimated(True)
         self._tree.setIndentation(22)
         self._tree.setIconSize(QSize(14, 14))
         self._tree.setUniformRowHeights(True)
-        self._tree.setRootIsDecorated(False)
+        # 用户场景（2026-07-13）：项目树必须直观看出「项目 → 子目录」层级。
+        # 顶层展开箭头不能隐藏，否则 b 即使已有子目录也看起来像一行死条目。
+        self._tree.setRootIsDecorated(True)
         # T5 survey-summary (spec §2): 树改多选,Ctrl/Shift 多选断面做汇总.
         self._tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         # self._tree.itemSelectionChanged.connect(self._update_detail_panel_for_selected_project)  # §7 旧单选槽,保留;多选改由 _on_tree_selection_changed 派发
@@ -1078,9 +1111,10 @@ class ProjectTreeView(BaseView):
     def _apply_ux_profile(self) -> None:
         """按 settings.project_tree_ux_v2 切换精简/旧版控件可见性（可随时退回）."""
         v2 = self._ux_v2()
-        # 顶栏：精简时隐藏「全部/按根」chip 与「选择根目录」按钮（改走 ⋯ 菜单）
+        # 「全部项目 / 按根目录」决定整棵树的数据范围，不能藏进 ⋯ 菜单；
+        # 用户一旦停在按根模式，就会误以为其他项目被删除了。
         if hasattr(self, "_mode_row_host"):
-            self._mode_row_host.setVisible(not v2)
+            self._mode_row_host.setVisible(True)
         if hasattr(self, "_btn_pick"):
             self._btn_pick.setVisible(not v2)
         if hasattr(self, "_act_view_all"):
@@ -1799,6 +1833,7 @@ class ProjectTreeView(BaseView):
             self._uid_grid.bind_settings(self.ctx.settings)
         self._apply_style()
         self._apply_ux_profile()
+        self._sync_library_dir_button()
         self._sync_view_mode_from_settings()
         self._sync_layout_mode_from_settings()
         self._restore_tree_split_state()
@@ -1806,6 +1841,9 @@ class ProjectTreeView(BaseView):
         self._restore_summary_body_split_state()
         mode = ptl.normalize_content_mode(self.ctx.settings.project_tree_content_mode)
         self.ctx.settings.project_tree_content_mode = mode
+        # 用户场景（2026-07-13）：软件更新后项目索引意外为空，但用户之前指定的
+        # 项目磁盘仍然存在。进入项目树时应从固定扫描位置自动恢复，而不是显示空白。
+        self._recover_empty_catalog_from_saved_roots()
         self._reload_project_tree()
         # self._reload_card_grid()  # §7 旧: 无条件重建卡片网格 —— 树模式(默认)下卡片
         #     根本不可见, 却照样对每个项目跑一次 get_project_summary(sqlite + results/
@@ -1893,13 +1931,10 @@ class ProjectTreeView(BaseView):
             item = self._find_item_by_path(self._tree.topLevelItem(i), target)
             if item is not None:
                 break
-        if item is None:  # 新项目还没进 user_projects.json / 不在当前树里 → 退回原行为
-            self.ctx.settings.project_tree_root = target
-            self.ctx.settings.project_tree_view_mode = "rooted"
-            self._root = target
-            self._sync_view_mode_buttons()
-            self._reload_project_tree()
-            item = self._tree.topLevelItem(0)
+        # 找不到节点时也不能偷偷切成「单项目」模式。登记或刷新失败只意味着本次
+        # 无法选中新项目；切模式会让原有项目全部从眼前消失，后果更严重。
+        if item is None:
+            return
         if item is not None:
             self._tree.setCurrentItem(item)
             item.setSelected(True)
@@ -2229,7 +2264,12 @@ class ProjectTreeView(BaseView):
         self._update_tree_metrics(nodes)
         self._empty_state.hide()
         for node in nodes:
-            self._tree.addTopLevelItem(self._build_item(node))
+            project_item = self._build_item(node)
+            self._tree.addTopLevelItem(project_item)
+            # Geneious 式资料库树：进入页面即可看到每个项目的第一层结构；
+            # 更深层仍由用户按箭头逐层展开，避免一次铺满整棵树。
+            if project_item.childCount() > 0:
+                project_item.setExpanded(True)
         self._filter_tree(self._search.text())
         # §7 旧: if len(nodes) >= 1: self._select_all_visible_workspaces()
         #   —— 一进页面就替用户**全选**所有拍摄目录(为了让右侧汇总立刻有数)。后果:
@@ -2604,7 +2644,9 @@ class ProjectTreeView(BaseView):
             glyph = "mdi6.folder-outline"
             tone = icons.TONE_MUTED
             kind = "folder"
-        item = QTreeWidgetItem([label])
+        child_count = len(node.get("children") or [])
+        item = QTreeWidgetItem([label, str(child_count) if child_count else ""])
+        item.setTextAlignment(1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         show_ws_icon = not (kind == "workspace" and self._kind_filter == "workspace")
         if show_ws_icon:
             item.setIcon(0, icons.icon(glyph, color=tone))
@@ -2644,70 +2686,67 @@ class ProjectTreeView(BaseView):
             return
 
         menu = QMenu(self._tree)
-
-        enter_action = menu.addAction("设为当前拍摄目录")
-        enter_action.triggered.connect(self._enter_selected)
-
-        new_child_action = menu.addAction("新建下级目录…")
-        new_child_action.triggered.connect(self._new_subfolder)
-
-        # 项目根(容器)的设置入口 —— 见 _open_node_settings 的说明(用户 2026-07-12)
-        settings_action = menu.addAction("项目设置…")
-        settings_action.triggered.connect(self._open_node_settings)
-
-        # 基本操作(用户 R-009, 2026-07-13: "这种属于基本操作, 我都不应该提")。
-        # 危险动作全部走 project_node_ops 的确认口径: 删除默认回收站, 有 TIFF 母图
-        # 必须手打目录名; 移动先预览再动。
-        menu.addSeparator()
-        rename_action = menu.addAction("重命名…")
-        rename_action.triggered.connect(self._rename_node)
-
-        move_action = menu.addAction("移动到项目…")
-        move_action.triggered.connect(self._move_node)
-
-        delete_action = menu.addAction("删除…")
-        delete_action.triggered.connect(self._delete_node)
-
-        menu.addSeparator()
-        summary_action = menu.addAction("汇总导出…")
-        summary_action.triggered.connect(self._open_summary_export)
-
-        filter_action = menu.addAction("数据筛选…")
-        filter_action.triggered.connect(self._open_data_filter)
-
-        station_action = menu.addAction("导入站位总表…")
-        station_action.triggered.connect(self._open_station_import)
-
-        menu.addSeparator()
-        open_action = menu.addAction("打开文件夹")
-        open_action.triggered.connect(lambda _=False, p=path: self._open_directory(p))
-
-        copy_action = menu.addAction("复制路径")
-        copy_action.triggered.connect(
-            lambda _=False, p=path: QApplication.clipboard().setText(str(p))
-        )
-
+        # 用户场景（2026-07-13）：右键菜单只放当前节点真正能执行的操作；
+        # 汇总/筛选/站位导入和封面能力保留，但收进子菜单，避免十几项平铺成“死按键墙”。
         try:
             path_exists = Path(path).expanduser().exists()
         except OSError:
             path_exists = False
-        if not path_exists:
+        kind = item.data(0, _KIND_ROLE) if item else None
+
+        if path_exists:
+            if kind not in {"region", "unavailable"} and not pts.is_region(str(path)):
+                enter_action = menu.addAction("设为当前拍摄目录")
+                enter_action.triggered.connect(self._enter_selected)
+
+            new_child_action = menu.addAction("新建下级目录…")
+            new_child_action.triggered.connect(self._new_subfolder)
+
+            settings_action = menu.addAction("项目设置…")
+            settings_action.triggered.connect(self._open_node_settings)
+
+            menu.addSeparator()
+            rename_action = menu.addAction("重命名…")
+            rename_action.triggered.connect(self._rename_node)
+            move_action = menu.addAction("移动到项目…")
+            move_action.triggered.connect(self._move_node)
+            delete_action = menu.addAction("删除…")
+            delete_action.triggered.connect(self._delete_node)
+
+            menu.addSeparator()
+            open_action = menu.addAction("打开文件夹")
+            open_action.triggered.connect(lambda _=False, p=path: self._open_directory(p))
+
+            if kind == "candidate":
+                adopt_action = menu.addAction("认领此文件夹…")
+                adopt_action.triggered.connect(self._adopt_selected_candidate)
+
+            data_menu = menu.addMenu("数据工具")
+            summary_action = data_menu.addAction("汇总导出…")
+            summary_action.triggered.connect(self._open_summary_export)
+            filter_action = data_menu.addAction("数据筛选…")
+            filter_action.triggered.connect(self._open_data_filter)
+            station_action = data_menu.addAction("导入站位总表…")
+            station_action.triggered.connect(self._open_station_import)
+
+            cover_menu = menu.addMenu("封面")
+            cover_action = cover_menu.addAction("设置封面…")
+            cover_action.triggered.connect(
+                lambda _=False, p=path: self._set_cover_for_directory(str(p))
+            )
+            clear_cover_action = cover_menu.addAction("恢复自动封面")
+            clear_cover_action.triggered.connect(
+                lambda _=False, p=path: self._clear_cover_for_directory(str(p))
+            )
+        else:
+            unavailable = menu.addAction("磁盘未连接或目录已移动")
+            unavailable.setEnabled(False)
             relocate_action = menu.addAction("指到新位置…")
             relocate_action.triggered.connect(self._relocate_selected_path)
 
-        kind = item.data(0, _KIND_ROLE) if item else None
-        if kind == "candidate":
-            adopt_action = menu.addAction("认领此文件夹…")
-            adopt_action.triggered.connect(self._adopt_selected_candidate)
-
-        menu.addSeparator()
-        cover_action = menu.addAction("设置封面…")
-        cover_action.triggered.connect(
-            lambda _=False, p=path: self._set_cover_for_directory(str(p))
-        )
-        clear_cover_action = menu.addAction("恢复自动封面")
-        clear_cover_action.triggered.connect(
-            lambda _=False, p=path: self._clear_cover_for_directory(str(p))
+        copy_action = menu.addAction("复制路径")
+        copy_action.triggered.connect(
+            lambda _=False, p=path: QApplication.clipboard().setText(str(p))
         )
 
         properties_action = menu.addAction("属性")
@@ -2718,14 +2757,25 @@ class ProjectTreeView(BaseView):
         menu.exec(self._tree.viewport().mapToGlobal(pos))
 
     def _open_directory(self, path: str) -> None:
-        from app.utils.file_manager import local_path, open_directory
+        from app.utils.file_manager import local_path, open_directory_detailed
 
         directory = Path(local_path(path))
         if not directory.exists():
-            ui.warn(self, "打开文件夹", f"目录不存在或磁盘未连接：\n{path}")
+            # 用户场景（2026-07-13）：项目树里的“打开文件夹”不能成为无响应的死按钮；
+            # 原路径已经失效时，明确显示原路径和本机解释后的路径，方便重新定位项目。
+            ui.warn(
+                self,
+                "打开文件夹",
+                f"目录不存在或磁盘未连接。\n\n记录路径：{path}\n本机路径：{directory}",
+            )
             return
-        if not open_directory(str(directory)):
-            ui.warn(self, "打开文件夹", f"无法打开文件夹：\n{directory}")
+        result = open_directory_detailed(path)
+        if not result.opened:
+            ui.warn(
+                self,
+                "打开文件夹",
+                f"无法打开文件夹。\n\n本机路径：{result.local_path}\n系统错误：{result.error or '未知错误'}",
+            )
 
     def _open_selected_directory(self) -> None:
         path = self._selected_path()
@@ -4785,43 +4835,33 @@ class ProjectTreeView(BaseView):
         立刻出现在 flat list + 项目总览. 同步扫 + 模态进度框(大目录可能慢,
         后续可改后台线程).
         """
-        start = self._root or ""
+        saved_roots = list(getattr(self.ctx.settings, "project_scan_roots", []))
+        start = saved_roots[-1] if saved_roots else ""
         path = ui.get_existing_directory(self, "选择要扫描的磁盘或目录", start)
         if not path:
             return
         root = str(Path(path).resolve())
-        progress = QProgressDialog("正在扫描工作区…", "取消", 0, 0, self)
-        progress.setWindowTitle("扫描磁盘")
+        progress = QProgressDialog("正在识别项目和拍照目录…", "取消", 0, 0, self)
+        progress.setWindowTitle("扫描项目位置")
         progress.setWindowModality(Qt.WindowModality.ApplicationModal)
         progress.setMinimumDuration(0)
         progress.show()
         QApplication.processEvents()
         try:
-            candidates = pts.discover_workspace_candidates(root, max_depth=6)
+            project_count, workspace_count, added = self._register_projects_from_scan(
+                root, max_depth=6
+            )
         except OSError:
-            candidates = []
+            project_count = workspace_count = added = 0
         progress.close()
-        if not candidates:
-            ui.info(self, "扫描完成", f"未在该目录发现工作区:\n{root}")
-            return
-        from app.services.project_service import (
-            default_user_projects_json_path,
-            list_projects,
-            record_recent_workspace,
-        )
-        jp = default_user_projects_json_path()
-        before = len(list_projects(jp))
-        for c in candidates:
-            try:
-                record_recent_workspace(jp, c["path"], root=root)
-            except Exception:
-                continue
-        added = len(list_projects(jp)) - before
+        # 用户场景：这个位置是长期项目仓库，保存下来后即使升级丢索引也能自动找回。
+        self.ctx.settings.project_scan_roots = [*saved_roots, root]
         ui.info(
             self,
             "扫描完成",
-            f"在「{Path(root).name}」下发现 {len(candidates)} 个工作区,\n"
-            f"新增 {added} 个到项目列表(已登记的自动去重)。",
+            f"已保存扫描位置：{root}\n\n"
+            f"识别到 {project_count} 个项目、{workspace_count} 个旧拍照目录；"
+            f"新增 {added} 个到项目树。",
         )
         pts.clear_project_tree_cache(root)
         self.ctx.settings.project_tree_view_mode = "all"
@@ -4829,6 +4869,99 @@ class ProjectTreeView(BaseView):
         self.ctx.settings.project_tree_root = None
         self._sync_view_mode_buttons()
         self._reload_project_tree()
+
+    def _sync_library_dir_button(self) -> None:
+        configured = str(getattr(self.ctx.settings, "project_library_dir", "") or "")
+        if not hasattr(self, "_btn_library_dir"):
+            return
+        self._btn_library_dir.setText("项目库目录 ✓" if configured else "项目库目录")
+        self._btn_library_dir.setToolTip(
+            f"新建项目默认保存在：{configured}\n点击可修改"
+            if configured else
+            "设置以后新建项目默认保存到哪个上级目录"
+        )
+        if hasattr(self, "_act_clear_library_dir"):
+            self._act_clear_library_dir.setEnabled(bool(configured))
+
+    def _choose_project_library_directory(self) -> None:
+        """Choose an optional default project home and scan it immediately."""
+        from app.services.project_service import default_project_parent_directory
+
+        current = str(getattr(self.ctx.settings, "project_library_dir", "") or "")
+        start = current or default_project_parent_directory()
+        chosen = ui.get_existing_directory(self, "选择项目库目录", start)
+        if not chosen:
+            return
+        chosen = str(Path(chosen).resolve())
+        # 用户场景（2026-07-13）：统一保存目录同时也是恢复扫描位置；设置后立即
+        # 找回其中已有项目，但不影响从其他磁盘手动导入项目。
+        self.ctx.settings.project_library_dir = chosen
+        roots = list(getattr(self.ctx.settings, "project_scan_roots", []))
+        self.ctx.settings.project_scan_roots = [*roots, chosen]
+        try:
+            project_count, workspace_count, added = self._register_projects_from_scan(
+                chosen, max_depth=6
+            )
+        except (OSError, ValueError):
+            project_count = workspace_count = added = 0
+        self._sync_library_dir_button()
+        pts.clear_project_tree_cache()
+        self._set_view_mode("all")
+        ui.info(
+            self,
+            "项目库目录",
+            f"以后新建项目默认保存在：\n{chosen}\n\n"
+            f"已识别 {project_count} 个项目、{workspace_count} 个旧拍照目录；"
+            f"新增 {added} 个。",
+        )
+
+    def _clear_project_library_directory(self) -> None:
+        """Clear only the creation default; imported projects remain registered."""
+        self.ctx.settings.project_library_dir = ""
+        self._sync_library_dir_button()
+        ui.info(self, "项目库目录", "已取消默认保存目录；现有项目和导入记录不会删除。")
+
+    def _register_projects_from_scan(self, root: str, *, max_depth: int = 6) -> tuple[int, int, int]:
+        """Scan one configured location and append recognisable projects."""
+        from app.services.project_service import (
+            default_user_projects_json_path,
+            list_projects,
+            record_recent_workspace,
+            register_project_root,
+        )
+
+        jp = default_user_projects_json_path()
+        before = len(list_projects(jp))
+        project_roots = pts.discover_project_roots(root, max_depth=max_depth)
+        root_paths = [Path(row["path"]).resolve() for row in project_roots]
+        for row in project_roots:
+            register_project_root(row["path"], name=row["name"], user_projects_json_path=jp)
+
+        candidates = pts.discover_workspace_candidates(root, max_depth=max_depth)
+        standalone: list[dict] = []
+        for candidate in candidates:
+            candidate_path = Path(candidate["path"]).resolve()
+            if any(candidate_path == project_root or project_root in candidate_path.parents
+                   for project_root in root_paths):
+                continue
+            standalone.append(candidate)
+            record_recent_workspace(jp, candidate["path"])
+
+        added = len(list_projects(jp)) - before
+        return len(project_roots), len(standalone), added
+
+    def _recover_empty_catalog_from_saved_roots(self) -> None:
+        """Rebuild an empty catalogue from persistent user-selected locations."""
+        from app.services.project_service import default_user_projects_json_path, list_projects
+
+        if list_projects(default_user_projects_json_path()):
+            return
+        for root in getattr(self.ctx.settings, "project_scan_roots", []):
+            try:
+                if Path(root).is_dir():
+                    self._register_projects_from_scan(root, max_depth=6)
+            except (OSError, ValueError):
+                continue
 
     def _show_all_projects(self) -> None:
         """兼容旧入口：切到「全部项目」视图。"""
@@ -4875,29 +5008,34 @@ class ProjectTreeView(BaseView):
         ui.info(self, "已更新", f"项目路径已更新为：\n{new_path}")
 
     def _add_workspace_manual(self) -> None:
-        """手动选单个目录登记为工作区/子节点(不扫整盘, 用于扫描识别不到的目录)。
+        """手动选择一个已有项目根或旧拍照工作区并登记。
 
         与 ``_scan_disk`` 互补: 扫描是"指定盘/目录深扫找全部"; 这是"我就要这一个"。
         选目录 → record_recent_workspace 去重登记 → 刷新 flat list。
         """
-        start = self._root or ""
-        path = ui.get_existing_directory(self, "选择要添加的工作区或子目录", start)
+        path = ui.get_existing_directory(self, "选择已有项目文件夹")
         if not path:
             return
         from app.services.project_service import (
             default_user_projects_json_path,
             record_recent_workspace,
+            register_project_root,
         )
         try:
-            record_recent_workspace(
-                default_user_projects_json_path(), path, root=self._root
-            )
+            if pts.is_region(path):
+                register_project_root(
+                    path,
+                    name=Path(path).name,
+                    user_projects_json_path=default_user_projects_json_path(),
+                )
+            else:
+                record_recent_workspace(default_user_projects_json_path(), path)
         except Exception as exc:
-            ui.warn(self, "添加失败", f"登记工作区失败:\n{exc}")
+            ui.warn(self, "导入失败", f"登记已有项目失败:\n{exc}")
             return
         pts.clear_project_tree_cache(self._root or path)
         self._reload_project_tree()
-        ui.info(self, "已添加", f"已登记到项目列表:\n{path}")
+        ui.info(self, "导入完成", f"已加入项目树:\n{path}")
 
     def _new_region(self) -> None:
         """新建项目: 只建**一个空项目目录**(容器), 断面/采样点之后在树里自由加。
@@ -4917,9 +5055,16 @@ class ProjectTreeView(BaseView):
         """
         from app.widgets.new_survey_project_dialog import NewSurveyProjectDialog
 
-        default_parent = ""
-        if self._root:
-            default_parent = str(Path(self._root).parent)
+        # 「＋项目」创建的是全局顶层项目，不能继承当前选中的 B2/断面或
+        # 当前拍摄工作区。默认位置只从全局项目目录推导。
+        from app.services.project_service import default_project_parent_directory
+
+        # 用户场景：优先使用可选的统一项目库目录；未设置/磁盘断开时才从旧项目推导。
+        configured = str(getattr(self.ctx.settings, "project_library_dir", "") or "")
+        default_parent = (
+            configured if configured and Path(configured).is_dir()
+            else default_project_parent_directory()
+        )
         dlg = NewSurveyProjectDialog(self, default_parent_dir=default_parent)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
@@ -4960,8 +5105,22 @@ class ProjectTreeView(BaseView):
             ui.warn(self, "新建项目", f"创建失败：{exc}")
             return
 
-        # 焦点钉到新项目(切「按根目录」+ 选中它) —— 否则树可能停在「全部项目」模式、
-        # 选中的还是上一个项目, 接着点「新建子目录」就建到别人家去了(GUI 实测抓到)。
+        # 空项目根不是照片工作区，也必须追加登记到项目列表；否则「全部项目」模式
+        # 刷新后找不到它，旧实现便退回单项目模式，造成其他项目看似全部消失。
+        try:
+            from app.services.project_service import register_project_root
+
+            register_project_root(res["root"], name=vals["name"])
+        except Exception as exc:  # noqa: BLE001
+            ui.warn(
+                self,
+                "新建项目",
+                f"项目已创建，但添加到项目列表失败：\n{exc}",
+            )
+
+        # 新建项目属于跨项目操作。无论此前浏览的是哪个根，都回到全部项目，
+        # 否则新项目已登记却仍被旧根过滤，看起来就像“创建了但没有显示”。
+        self._set_view_mode("all")
         self.focus_project(res["root"])
 
         # §7 旧提示(含 N 个采样点), 恢复时反注释:
@@ -4977,9 +5136,10 @@ class ProjectTreeView(BaseView):
             "· 照片只会落在采样点里，不会堆在项目根",
         )
 
-    def prompt_new_child_under_root(self) -> None:
-        """Public top-bar entry: always create directly under this project."""
-        self._new_subfolder(parent_override=self._root)
+    def prompt_new_child_under_root(self, root_path: Optional[str] = None) -> None:
+        """Public top-bar entry: create under the explicitly targeted project."""
+        # 用户场景：全局项目树没有专属 root；新增下级目录的归属由调用动作明确传入。
+        self._new_subfolder(parent_override=root_path or self._root)
 
     def _new_subfolder(self, parent_override: Optional[str] = None) -> None:
         parent = parent_override or self._selected_path() or self._root
@@ -5005,13 +5165,18 @@ class ProjectTreeView(BaseView):
         if any(c in name for c in ("/", "\\", "..")):
             ui.warn(self, "项目树", "名称不合法（不能含 / \\ ..）。")
             return
+        new_path = Path(parent) / name
         try:
-            (Path(parent) / name).mkdir(parents=True, exist_ok=True)
+            new_path.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
             ui.warn(self, "项目树", f"无法创建：{exc}")
             return
-        pts.clear_project_tree_cache(self._root or parent)
+        # 用户场景（2026-07-13）：在项目 b 下新建子目录后，必须立即在 b 下显示，
+        # 自动展开并选中，用户随后可双击或设为拍摄目录。局部缓存键可能因
+        # Windows/WSL 路径写法不同而漏清，因此这里清整棵树缓存保证界面与磁盘一致。
+        pts.clear_project_tree_cache()
         self._reload_project_tree()
+        self._select_tree_path(str(new_path))
 
     # ── 基本操作: 重命名 / 移动 / 删除 (用户 R-009, 2026-07-13) ─────────────────
     #

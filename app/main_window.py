@@ -1041,6 +1041,12 @@ class MainWindow(QMainWindow):
         with ui.busy_cursor():
             view = self._ensure_view(view_cls)
             if view:
+                # 项目树是全局项目总览，不属于当前拍摄目录。每次从主导航进入
+                # 都先恢复「全部项目」范围；当前 B2 只保留在顶栏作为拍摄上下文。
+                if self._view_ref_id(view_cls) == "project_tree":
+                    self.ctx.settings.project_tree_view_mode = "all"
+                    if hasattr(view, "_root"):
+                        view._root = None
                 self._hide_startup_placeholder()
                 # 生命周期对称: 切页前先让旧页 on_deactivate(停定时器/watcher/
                 # 预热线程, 策略=「暂停+回来重扫」)。守护调用 —— 清理失败绝不
@@ -1154,11 +1160,15 @@ class MainWindow(QMainWindow):
         from app.utils import ui
         from PyQt6.QtWidgets import QDialog
 
-        current_root = (
-            getattr(self.ctx, "current_project_root", None)
-            or getattr(self.ctx.settings, "project_tree_root", None)
+        from app.services.project_service import default_project_parent_directory
+
+        # 新项目是全局顶层项目；当前拍摄目录（例如 B2）绝不是它的父目录。
+        # 用户场景：项目库目录只是新建位置的默认值，用户仍可在对话框里自由修改。
+        configured = str(getattr(self.ctx.settings, "project_library_dir", "") or "")
+        default_parent = (
+            configured if configured and Path(configured).is_dir()
+            else default_project_parent_directory()
         )
-        default_parent = str(Path(current_root).parent) if current_root else ""
         dlg = NewSurveyProjectDialog(self, default_parent_dir=default_parent)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
@@ -1225,6 +1235,8 @@ class MainWindow(QMainWindow):
         tree = self._stack.currentWidget()
         if getattr(tree, "view_id", None) == "project_tree" and hasattr(tree, "focus_project"):
             try:
+                if hasattr(tree, "_set_view_mode"):
+                    tree._set_view_mode("all")
                 tree.focus_project(res["root"])
             except Exception:  # noqa: BLE001 —— 聚焦失败不该让「项目已建好」变成报错
                 pass
@@ -1258,7 +1270,9 @@ class MainWindow(QMainWindow):
         self.navigate_to("project_tree")
         tree = self._stack.currentWidget()
         if hasattr(tree, "prompt_new_child_under_root"):
-            tree.prompt_new_child_under_root()
+            # 用户场景（2026-07-13）：项目树本身始终是全局汇总，但顶栏明确点
+            # 「＋下级目录」时，必须把目标项目显式传入，不能依赖全局树的筛选根。
+            tree.prompt_new_child_under_root(root)
 
     def _on_open_workspace(self) -> None:
         """Folder menu: open an existing folder as a photo workspace."""

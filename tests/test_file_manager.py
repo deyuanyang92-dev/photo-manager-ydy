@@ -26,14 +26,58 @@ def test_open_directory_localizes_wsl_path_on_windows(monkeypatch):
     monkeypatch.setattr(path_utils.sys, "platform", "win32")
     monkeypatch.setattr(file_manager.sys, "platform", "win32")
     monkeypatch.delenv("WSL_DISTRO_NAME", raising=False)
+    monkeypatch.setattr(file_manager.os, "startfile", lambda path: calls.append(path))
+
+    assert file_manager.open_directory("/mnt/n/claude/zhengli") is True
+    assert calls == ["N:\\claude\\zhengli"]
+
+
+def test_open_directory_windows_falls_back_to_explorer_and_reports_local_path(monkeypatch):
+    from app.utils import file_manager
+    from app.utils import path_utils
+
+    calls = []
+    monkeypatch.setattr(path_utils.sys, "platform", "win32")
+    monkeypatch.setattr(file_manager.sys, "platform", "win32")
+    monkeypatch.delenv("WSL_DISTRO_NAME", raising=False)
+    monkeypatch.setattr(
+        file_manager.os,
+        "startfile",
+        lambda _path: (_ for _ in ()).throw(OSError("startfile failed")),
+    )
+    monkeypatch.setattr(file_manager.subprocess, "Popen", lambda argv: calls.append(argv))
+
+    result = file_manager.open_directory_detailed("/mnt/n/claude/zhengli")
+
+    assert result.opened is True
+    assert result.local_path == "N:\\claude\\zhengli"
+    assert calls == [["explorer.exe", "N:\\claude\\zhengli"]]
+
+
+def test_open_directory_reports_both_windows_launcher_errors(monkeypatch):
+    from app.utils import file_manager
+    from app.utils import path_utils
+
+    monkeypatch.setattr(path_utils.sys, "platform", "win32")
+    monkeypatch.setattr(file_manager.sys, "platform", "win32")
+    monkeypatch.delenv("WSL_DISTRO_NAME", raising=False)
+    monkeypatch.setattr(
+        file_manager.os,
+        "startfile",
+        lambda _path: (_ for _ in ()).throw(OSError("startfile failed")),
+    )
     monkeypatch.setattr(
         file_manager.subprocess,
         "Popen",
-        lambda argv: calls.append(argv),
+        lambda _argv: (_ for _ in ()).throw(OSError("explorer failed")),
     )
 
-    assert file_manager.open_directory("/mnt/n/claude/zhengli") is True
-    assert calls == [["explorer", "N:\\claude\\zhengli"]]
+    result = file_manager.open_directory_detailed("C:/missing/project")
+
+    assert result.opened is False
+    assert result.local_path == "C:\\missing\\project"
+    assert "startfile failed" in result.error
+    assert "explorer failed" in result.error
 
 
 def test_reveal_file_selects_windows_path_from_wsl(monkeypatch):

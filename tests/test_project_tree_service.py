@@ -6,6 +6,7 @@ import sqlite3
 from pathlib import Path
 
 from app.services.project_tree_service import (
+    discover_project_roots,
     scan_tree,
     is_workspace,
     is_workspace_candidate,
@@ -15,6 +16,19 @@ from app.services.project_tree_service import (
     clear_project_tree_cache,
     RESERVED_DIR_NAMES,
 )
+
+
+def test_discovers_app_created_project_roots_not_just_workspaces(tmp_path):
+    """更新后重建索引时，必须识别 _data/region.json 项目根。"""
+    project = tmp_path / "项目仓库" / "航次2026"
+    marker = project / "_data" / "region.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text('{"name": "航次2026"}', encoding="utf-8")
+    (project / "断面A").mkdir()
+
+    found = discover_project_roots(str(tmp_path / "项目仓库"), max_depth=3)
+
+    assert [Path(row["path"]).name for row in found] == ["航次2026"]
 
 
 def _make_workspace(dir_path: Path) -> None:

@@ -10,7 +10,7 @@ pytest.importorskip("PyQt6")
 
 from PyQt6.QtCore import QItemSelectionModel, Qt
 from PyQt6.QtGui import QColor, QPixmap
-from PyQt6.QtWidgets import QAbstractItemView, QHBoxLayout, QLabel
+from PyQt6.QtWidgets import QAbstractItemView, QDialog, QHBoxLayout, QLabel
 
 from app.views.project_tree_view import ProjectTreeView, _KIND_ROLE
 
@@ -231,20 +231,74 @@ def test_tree_has_context_menu(qtbot, tmp_path, ctx):
     view.on_activate()
 
     assert view._tree.contextMenuPolicy() == Qt.ContextMenuPolicy.CustomContextMenu
+    assert view._tree.rootIsDecorated(), "顶层项目必须显示展开箭头，才能进入子目录层级"
+
+
+def test_unavailable_project_context_menu_only_offers_recovery_actions(
+    qtbot, tmp_path, ctx, monkeypatch
+):
+    """磁盘未连接时不展示重命名、封面、汇总等必然失败的假操作。"""
+    from PyQt6.QtWidgets import QMenu
+    from app.services import project_service as ps
+
+    jp = _patch_recent_json(monkeypatch, tmp_path)
+    missing = tmp_path / "已拔出的移动硬盘" / "项目A"
+    _seed_projects_json(jp, [{"name": "项目A", "directory": str(missing)}])
+    ctx.settings.project_tree_view_mode = "all"
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    view.on_activate()
+    item = view._tree.topLevelItem(0)
+    captured = []
+    monkeypatch.setattr(QMenu, "exec", lambda menu, *args: captured.extend(
+        action.text() for action in menu.actions() if not action.isSeparator()
+    ))
+
+    view._show_tree_context_menu(view._tree.visualItemRect(item).center())
+
+    assert "指到新位置…" in captured
+    assert "复制路径" in captured
+    assert "属性" in captured
+    assert "打开文件夹" not in captured
+    assert "重命名…" not in captured
+    assert "汇总导出…" not in captured
 
 
 def test_open_directory_uses_shared_file_manager(qtbot, tmp_path, ctx, monkeypatch):
+    from app.utils.file_manager import OpenDirectoryResult
+
     view = ProjectTreeView(ctx)
     qtbot.addWidget(view)
     opened = []
     monkeypatch.setattr(
-        "app.utils.file_manager.open_directory",
-        lambda path: opened.append(path) or True,
+        "app.utils.file_manager.open_directory_detailed",
+        lambda path: opened.append(path) or OpenDirectoryResult(True, path),
     )
 
     view._open_directory(str(tmp_path))
 
     assert opened == [str(tmp_path)]
+
+
+def test_open_directory_displays_the_system_error(qtbot, tmp_path, ctx, monkeypatch):
+    from app.utils.file_manager import OpenDirectoryResult
+
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    warnings = []
+    monkeypatch.setattr(
+        "app.utils.file_manager.open_directory_detailed",
+        lambda path: OpenDirectoryResult(False, path, "ShellExecute access denied"),
+    )
+    monkeypatch.setattr(
+        "app.views.project_tree_view.ui.warn",
+        lambda _parent, title, text: warnings.append((title, text)),
+    )
+
+    view._open_directory(str(tmp_path))
+
+    assert warnings
+    assert "ShellExecute access denied" in warnings[0][1]
 
 
 def test_rooted_tree_auto_selects_first_item(qtbot, tmp_path, ctx):
@@ -875,6 +929,105 @@ def test_scan_disk_registers_discovered_workspaces(qtbot, tmp_path, ctx, monkeyp
     assert any("old1" in (d or "") for d in dirs), "old1 工作区应被登记"
     assert any("old2" in (d or "") for d in dirs), "old2 工作区应被登记"
     assert not any("not_a_workspace" in (d or "") for d in dirs), "非工作区目录不应登记"
+    assert str(scan_root.resolve()) in ctx.settings.project_scan_roots
+
+
+def test_scan_disk_registers_project_root_without_duplicate_children(
+    qtbot, tmp_path, ctx, monkeypatch
+):
+    """扫描软件创建的项目时登记项目根，不把内部断面重复列成顶层项目。"""
+    import json as _json
+    from app.services import project_service as ps
+    from app.utils import ui as _ui
+
+    scan_root = tmp_path / "固定项目位置"
+    project = scan_root / "航次2026"
+    (project / "_data").mkdir(parents=True)
+    (project / "_data" / "region.json").write_text("{}", encoding="utf-8")
+    _make_workspace(project / "断面A")
+
+    jp = tmp_path / "user_projects.json"
+    jp.write_text(_json.dumps({"version": 1, "projects": []}), encoding="utf-8")
+    monkeypatch.setattr(ps, "default_user_projects_json_path", lambda: str(jp))
+    monkeypatch.setattr(_ui, "get_existing_directory", lambda *a, **k: str(scan_root))
+    monkeypatch.setattr(_ui, "info", lambda *a, **k: None)
+
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    view._scan_disk()
+
+    projects = ps.list_projects(str(jp))
+    assert len(projects) == 1
+    assert projects[0]["name"] == "航次2026"
+    assert projects[0]["isProjectRoot"] is True
+
+
+def test_empty_catalog_recovers_from_saved_scan_location(
+    qtbot, tmp_path, ctx, monkeypatch
+):
+    """升级后索引为空时，进入项目树应从用户保存的固定位置自动恢复。"""
+    from app.services import project_service as ps
+
+    scan_root = tmp_path / "固定项目位置"
+    project = scan_root / "历史项目"
+    (project / "_data").mkdir(parents=True)
+    (project / "_data" / "region.json").write_text("{}", encoding="utf-8")
+    jp = tmp_path / "user_projects.json"
+    jp.write_text('{"version": 1, "projects": []}', encoding="utf-8")
+    monkeypatch.setattr(ps, "default_user_projects_json_path", lambda: str(jp))
+    ctx.settings.project_scan_roots = [str(scan_root)]
+    ctx.settings.project_tree_view_mode = "all"
+
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    view.on_activate()
+
+    projects = ps.list_projects(str(jp))
+    assert len(projects) == 1
+    assert projects[0]["name"] == "历史项目"
+
+
+def test_optional_project_library_directory_is_saved_scanned_and_used_for_new_project(
+    qtbot, tmp_path, ctx, monkeypatch
+):
+    """统一保存目录是可选默认值，同时不替代扫描/导入能力。"""
+    from app.services import project_service as ps
+    from app.utils import ui as _ui
+
+    library = tmp_path / "标本项目库"
+    existing = library / "已有项目"
+    (existing / "_data").mkdir(parents=True)
+    (existing / "_data" / "region.json").write_text("{}", encoding="utf-8")
+    jp = tmp_path / "user_projects.json"
+    jp.write_text('{"version": 1, "projects": []}', encoding="utf-8")
+    monkeypatch.setattr(ps, "default_user_projects_json_path", lambda: str(jp))
+    monkeypatch.setattr(_ui, "get_existing_directory", lambda *a, **k: str(library))
+    monkeypatch.setattr(_ui, "info", lambda *a, **k: None)
+
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    view._choose_project_library_directory()
+
+    assert ctx.settings.project_library_dir == str(library.resolve())
+    assert str(library.resolve()) in ctx.settings.project_scan_roots
+    assert view._btn_library_dir.text() == "项目库目录 ✓"
+    assert [p["name"] for p in ps.list_projects(str(jp))] == ["已有项目"]
+
+    captured = {}
+
+    class _CancelledDialog:
+        def __init__(self, *args, **kwargs):
+            captured.update(kwargs)
+
+        def exec(self):
+            return QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(
+        "app.widgets.new_survey_project_dialog.NewSurveyProjectDialog",
+        _CancelledDialog,
+    )
+    view._new_region()
+    assert captured["default_parent_dir"] == str(library.resolve())
 
 
 def test_add_workspace_manual_registers(qtbot, tmp_path, ctx, monkeypatch):
@@ -899,6 +1052,28 @@ def test_add_workspace_manual_registers(qtbot, tmp_path, ctx, monkeypatch):
 
     dirs = {p.get("directory") for p in ps.list_projects(str(jp))}
     assert any("手动工作区" in (d or "") for d in dirs), "手动选的目录应被登记"
+
+
+def test_manual_import_recognizes_existing_project_root(qtbot, tmp_path, ctx, monkeypatch):
+    from app.services import project_service as ps
+    from app.utils import ui as _ui
+
+    project = tmp_path / "旧版本项目"
+    (project / "_data").mkdir(parents=True)
+    (project / "_data" / "region.json").write_text("{}", encoding="utf-8")
+    jp = tmp_path / "user_projects.json"
+    jp.write_text('{"version": 1, "projects": []}', encoding="utf-8")
+    monkeypatch.setattr(ps, "default_user_projects_json_path", lambda: str(jp))
+    monkeypatch.setattr(_ui, "get_existing_directory", lambda *a, **k: str(project))
+    monkeypatch.setattr(_ui, "info", lambda *a, **k: None)
+
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    view._add_workspace_manual()
+
+    projects = ps.list_projects(str(jp))
+    assert len(projects) == 1
+    assert projects[0].get("isProjectRoot") is True
 
 
 def test_show_all_projects_clears_root(qtbot, tmp_path, ctx) -> None:
@@ -1235,14 +1410,14 @@ def test_order_specimen_rows_respects_manual_uid_order(qtbot, ctx):
         view.stop_background_work()
 
 
-def test_ux_v2_hides_legacy_header_chips(qtbot, ctx):
-    """精简模式：顶栏隐藏「全部/按根」chip，退回后恢复."""
+def test_ux_v2_keeps_project_scope_switch_visible(qtbot, ctx):
+    """精简模式仍保留「全部/按根」，避免用户误以为其他项目消失。"""
     view = ProjectTreeView(ctx)
     qtbot.addWidget(view)
     view.show()
     try:
         assert ctx.settings.project_tree_ux_v2 is True
-        assert view._mode_row_host.isHidden() is True
+        assert view._mode_row_host.isHidden() is False
         assert view._btn_pick.isHidden() is True
         assert view._btn_display.isHidden() is False
         assert view._thumb_row_host.isHidden() is True
@@ -1504,6 +1679,77 @@ def test_new_subfolder_button_creates_plain_dir_not_workspace(
     assert not (child / "_data").exists()
 
 
+def test_new_child_appears_under_project_and_is_selected_in_all_projects(
+    qtbot, tmp_path, ctx, monkeypatch
+):
+    """全局项目树中创建子目录后，要立即显示层级并允许下一步进入。"""
+    from app.services import project_service as ps
+    from app.views.project_tree_view import _PATH_ROLE
+
+    project = tmp_path / "b"
+    (project / "_data").mkdir(parents=True)
+    (project / "_data" / "region.json").write_text("{}", encoding="utf-8")
+    jp = _patch_recent_json(monkeypatch, tmp_path)
+    _seed_projects_json(jp, [
+        {"name": "b", "directory": str(project), "isProjectRoot": True},
+    ])
+    ctx.settings.project_tree_view_mode = "all"
+    ctx.settings.project_tree_root = None
+    monkeypatch.setattr(
+        "app.views.project_tree_view.QInputDialog.getText",
+        lambda *args, **kwargs: ("子目录1", True),
+    )
+
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    view.on_activate()
+    root_item = view._tree.topLevelItem(0)
+    view._select_tree_item(root_item)
+    view._new_subfolder()
+
+    root_item = view._tree.topLevelItem(0)
+    assert root_item.childCount() == 1
+    assert root_item.text(1) == "1"
+    child_item = root_item.child(0)
+    assert child_item.text(0) == "子目录1"
+    assert root_item.isExpanded()
+    assert view._tree.currentItem() is child_item
+    assert Path(child_item.data(0, _PATH_ROLE)) == project / "子目录1"
+    assert view._btn_enter.isEnabled()
+
+
+def test_geneious_style_project_library_keeps_arbitrary_folder_hierarchy(
+    qtbot, tmp_path, ctx, monkeypatch
+):
+    """项目库按 项目→断面→采样点 展示，不压平成当前工作区列表。"""
+    project = tmp_path / "项目b"
+    leaf = project / "断面A" / "采样点1"
+    leaf.mkdir(parents=True)
+    (project / "_data").mkdir()
+    (project / "_data" / "region.json").write_text("{}", encoding="utf-8")
+    jp = _patch_recent_json(monkeypatch, tmp_path)
+    _seed_projects_json(jp, [
+        {"name": "项目b", "directory": str(project), "isProjectRoot": True},
+    ])
+    ctx.settings.project_tree_view_mode = "all"
+    ctx.settings.project_tree_root = None
+
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    view.on_activate()
+
+    titles = [label.text() for label in view.findChildren(QLabel)]
+    assert "项目库" in titles
+    project_item = view._tree.topLevelItem(0)
+    assert project_item.text(0) == "项目b"
+    assert project_item.text(1) == "1"
+    assert project_item.isExpanded()
+    section_item = project_item.child(0)
+    assert section_item.text(0) == "断面A"
+    assert section_item.text(1) == "1"
+    assert section_item.child(0).text(0) == "采样点1"
+
+
 def test_project_settings_action_opens_dialog_on_selected_node(
     qtbot, tmp_path, ctx, monkeypatch
 ):
@@ -1530,18 +1776,21 @@ def test_project_settings_action_opens_dialog_on_selected_node(
     assert captured.get("project_dir")
 
 
-def test_focus_project_selects_new_project_and_switches_to_rooted(qtbot, tmp_path, ctx):
-    """建完项目必须把树焦点钉到新项目上(GUI 实测 2026-07-12 抓到的 bug)。
-
-    否则树停在「全部项目」模式、选中的还是**上一个项目**, 用户接着点「新建子目录」,
-    目录就静默建到别的项目下面(实测报 Permission denied: '/mnt/n' —— 另一台机器的旧项目)。
-    """
+def test_focus_project_selects_new_project_without_hiding_others(
+    qtbot, tmp_path, ctx, monkeypatch
+):
+    """聚焦新项目只能改变选中项，不能把全部项目切成单项目模式。"""
     old = tmp_path / "旧项目"
-    _make_workspace(old)
+    old.mkdir()
     new_root = tmp_path / "江苏盐城2026"
     new_root.mkdir()
+    recent_json = _patch_recent_json(monkeypatch, tmp_path)
+    _seed_projects_json(recent_json, [
+        {"name": "旧项目", "directory": str(old), "isProjectRoot": True},
+        {"name": "江苏盐城2026", "directory": str(new_root), "isProjectRoot": True},
+    ])
     ctx.settings.project_tree_view_mode = "all"
-    ctx.settings.project_tree_root = str(old)
+    ctx.settings.project_tree_root = None
 
     view = ProjectTreeView(ctx)
     qtbot.addWidget(view)
@@ -1549,10 +1798,71 @@ def test_focus_project_selects_new_project_and_switches_to_rooted(qtbot, tmp_pat
 
     view.focus_project(str(new_root))
 
-    assert ctx.settings.project_tree_view_mode == "rooted"
-    assert view._root == str(new_root.resolve())
+    assert ctx.settings.project_tree_view_mode == "all"
+    assert view._root is None
+    top_names = [
+        view._tree.topLevelItem(i).text(0)
+        for i in range(view._tree.topLevelItemCount())
+    ]
+    assert any("旧项目" in name for name in top_names), top_names
+    assert any("江苏盐城2026" in name for name in top_names), top_names
     cur = view._tree.currentItem()
     assert cur is not None and "江苏盐城2026" in cur.text(0)
+
+
+def test_project_tree_plus_project_keeps_existing_projects(
+    qtbot, tmp_path, ctx, monkeypatch
+):
+    """截图中的「＋项目」入口创建新项目后，旧项目必须仍在全部项目树中。"""
+    old = tmp_path / "旧项目"
+    old.mkdir()
+    recent_json = _patch_recent_json(monkeypatch, tmp_path)
+    _seed_projects_json(recent_json, [
+        {"name": "旧项目", "directory": str(old), "isProjectRoot": True},
+    ])
+    # 模拟用户此前只浏览旧项目根；新建项目必须自动回到全部项目。
+    ctx.settings.project_tree_view_mode = "rooted"
+    ctx.settings.project_tree_root = str(old)
+
+    class _FakeDialog:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+        def values(self):
+            return {"parent_dir": str(tmp_path), "name": "新项目"}
+
+    monkeypatch.setattr(
+        "app.widgets.new_survey_project_dialog.NewSurveyProjectDialog", _FakeDialog
+    )
+    monkeypatch.setattr("app.utils.ui.info", lambda *args, **kwargs: None)
+
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    view.on_activate()
+    view._new_region()
+
+    top_names = [
+        view._tree.topLevelItem(i).text(0)
+        for i in range(view._tree.topLevelItemCount())
+    ]
+    assert ctx.settings.project_tree_view_mode == "all"
+    assert any("旧项目" in name for name in top_names), top_names
+    assert any("新项目" in name for name in top_names), top_names
+
+
+def test_all_projects_switch_is_visible_in_compact_ui(qtbot, ctx):
+    """数据范围开关不能藏在省略号里，否则用户无法发现怎样恢复全部项目。"""
+    ctx.settings.project_tree_ux_v2 = True
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    view.show()
+    view._apply_ux_profile()
+
+    assert view._mode_row_host.isVisible()
+    assert view._btn_mode_all.isVisible()
 
 
 def test_new_subfolder_never_builds_outside_current_root(qtbot, tmp_path, ctx, monkeypatch):
