@@ -216,6 +216,159 @@ class Picker(QDialog):
         self.accept()
 
 
+
+
+# ── 新建：完整流水线（用户 2026-07-13: "考虑历史项目，没有考虑如何新建项目"）──
+
+class CreateDialog(QDialog):
+    """新建项目 / 拍摄目录 —— 一条龙建到能开拍。
+
+    项目:   名字(实时路径预览+撞名拦截) + 资料(时间/目的/负责人/区域, 可跳过但下级继承)
+            + 「顺便建一批拍摄目录」(断面A 断面B 断面C 一行写完) + 创建并进入第一个
+    拍摄目录: 名字 + 拍摄日期/拍摄人(灰字=继承自项目, 改了才是自己的) + 创建并进入
+    """
+
+    created = pyqtSignal(object)          # 最终要进入的节点(可为 None=仅创建)
+
+    def __init__(self, parent, kind: str, container: Node):
+        super().__init__(parent)
+        self._kind = kind                  # "project" | "shoot"
+        self._container = container
+        title = "新建项目" if kind == "project" else "新建拍摄目录"
+        self.setWindowTitle(title)
+        self.setFixedWidth(520)
+        self.setStyleSheet(
+            "QDialog{background:#fff;}"
+            "QLineEdit{border:1.5px solid #cfd9db;border-radius:7px;padding:8px 11px;}"
+            "QLineEdit:focus{border-color:#0e9384;}"
+            "QLabel{border:none;}"
+        )
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(18, 16, 18, 14)
+        lay.setSpacing(9)
+
+        t = QLabel(title)
+        t.setStyleSheet("font-weight:800;font-size:16px;")
+        lay.addWidget(t)
+
+        self._name = QLineEdit()
+        self._name.setPlaceholderText("名称（如：北方多样性调查）" if kind == "project" else "名称（如：断面C / B3）")
+        self._name.textChanged.connect(self._sync)
+        lay.addWidget(self._name)
+
+        # 实时路径预览 + 撞名提示
+        self._preview = QLabel("")
+        self._preview.setStyleSheet("color:#66777b;font-size:12px;font-family:monospace;"
+                                    "background:#f3f8f7;border-radius:6px;padding:7px 10px;")
+        lay.addWidget(self._preview)
+        self._clash = QLabel("")
+        self._clash.setStyleSheet("color:#8a5a00;background:#fff8e6;border-radius:6px;"
+                                  "padding:6px 10px;font-size:12.5px;")
+        self._clash.hide()
+        lay.addWidget(self._clash)
+
+        # 资料区（项目=项目资料; 拍摄目录=拍摄资料, 灰字提示继承）
+        meta_lbl = QLabel("资料（可跳过" + ("，下级自动继承）" if kind == "project" else "，灰字=继承自项目）"))
+        meta_lbl.setStyleSheet("color:#94a3a7;font-size:11.5px;letter-spacing:1px;")
+        lay.addWidget(meta_lbl)
+        self._meta: dict[str, QLineEdit] = {}
+        fields = (
+            [("时间范围", "2026-03-01 → 2026-11-30"), ("调查目的", ""), ("负责人", ""), ("区域", "")]
+            if kind == "project" else
+            [("拍摄日期", time.strftime("%Y-%m-%d")), ("拍摄人", "（继承自项目）"), ("采集人", "（继承自项目）")]
+        )
+        for label, ph in fields:
+            row = QHBoxLayout()
+            lb = QLabel(label)
+            lb.setFixedWidth(64)
+            lb.setStyleSheet("color:#66777b;font-size:12.5px;")
+            row.addWidget(lb)
+            ed = QLineEdit()
+            ed.setPlaceholderText(ph)
+            row.addWidget(ed, 1)
+            lay.addLayout(row)
+            self._meta[label] = ed
+
+        # 项目：顺便建一批拍摄目录
+        self._sites: QLineEdit | None = None
+        if kind == "project":
+            sub = QLabel("顺便建好拍摄目录（空格/逗号分开，可不填）")
+            sub.setStyleSheet("color:#94a3a7;font-size:11.5px;letter-spacing:1px;")
+            lay.addWidget(sub)
+            self._sites = QLineEdit()
+            self._sites.setPlaceholderText("断面A 断面B 断面C")
+            self._sites.textChanged.connect(self._sync)
+            lay.addWidget(self._sites)
+
+        foot = QHBoxLayout()
+        cancel = QPushButton("取消")
+        cancel.setStyleSheet("QPushButton{border:1px solid #dfe6e8;border-radius:7px;padding:9px 18px;}")
+        cancel.clicked.connect(self.reject)
+        foot.addWidget(cancel)
+        self._only = QPushButton("仅创建")
+        self._only.setStyleSheet("QPushButton{border:1.5px solid #0e9384;color:#0e9384;font-weight:700;"
+                                 "border-radius:7px;padding:9px 16px;}")
+        self._only.clicked.connect(lambda: self._create(enter=False))
+        foot.addWidget(self._only)
+        self._go = QPushButton("创建并进入")
+        self._go.setStyleSheet("QPushButton{background:#0e9384;color:#fff;font-weight:800;"
+                               "border-radius:7px;padding:9px 20px;}")
+        self._go.clicked.connect(lambda: self._create(enter=True))
+        foot.addWidget(self._go, 1)
+        lay.addLayout(foot)
+
+        self._name.setFocus()
+        self._sync()
+
+    def _existing(self, name: str):
+        for c in self._container.children:
+            if c.name == name:
+                return c
+        return None
+
+    def _sync(self):
+        name = self._name.text().strip() or "〈名称〉"
+        self._preview.setText(f"将创建：{self._container.path}/{name}")
+        clash = self._existing(self._name.text().strip()) if self._name.text().strip() else None
+        if clash:
+            self._clash.setText(f"⚠ 「{clash.name}」已存在 —— 点「创建并进入」将直接进入它，不会重复创建")
+            self._clash.show()
+        else:
+            self._clash.hide()
+        sites = [x for x in (self._sites.text().replace("，", " ").replace(",", " ").split() if self._sites else []) if x]
+        if self._kind == "project":
+            self._go.setText(f"创建并进入「{sites[0]}」" if sites else "创建并进入")
+        ok = bool(self._name.text().strip())
+        self._go.setEnabled(ok)
+        self._only.setEnabled(ok)
+
+    def _create(self, enter: bool):
+        name = self._name.text().strip()
+        if not name:
+            return
+        exist = self._existing(name)
+        if exist is not None:
+            self.created.emit(exist if enter else None)   # 撞名 → 直接进已有的
+            self.accept()
+            return
+        now = time.time()
+        if self._kind == "project":
+            node = Node(name, "project", f"{self._container.path}/{name}", last_open=now)
+            self._container.children.append(node)
+            first_shoot = None
+            sites = [x for x in self._sites.text().replace("，", " ").replace(",", " ").split() if x] if self._sites else []
+            for s in sites:
+                sh = Node(s, "shoot", f"{node.path}/{s}", last_open=now)
+                node.children.append(sh)
+                first_shoot = first_shoot or sh
+            self.created.emit((first_shoot or node) if enter else None)
+        else:
+            node = Node(name, "shoot", f"{self._container.path}/{name}", last_open=now)
+            self._container.children.append(node)
+            self.created.emit(node if enter else None)
+        self.accept()
+
+
 # ── 四层选位面板 ─────────────────────────────────────────────────────────────
 
 class LocationPanel(QDialog):
@@ -339,19 +492,33 @@ class LocationPanel(QDialog):
         self._set(key, opts[(idx + delta) % len(opts)])
 
     def _new(self, key: str):
-        self._set(key, None)
+        """＋ —— 真正的新建流水线, 不再随机生成名字。"""
+        if key == "子目录":
+            # 原型简化: 子目录用同一个对话框按项目建(落地时字段不同)
+            key = "项目"
+        kind = "project" if key == "项目" else "shoot"
+        container = (self._s.get("disk") if key == "项目"
+                     else (self._s.get("folder") or self._s.get("project")))
+        if container is None:
+            return
+        dlg = CreateDialog(self, kind, container)
+        dlg.created.connect(lambda node: self._after_create(node))
+        dlg.exec()
+
+    def _after_create(self, node):
+        if node is None:      # 仅创建, 不进入
+            self._sync()
+            return
+        if node.kind == "shoot":
+            self._enter(node)
+        else:                  # 建了空项目 → 选中它, 等着建拍摄目录
+            self._set("项目", node)
 
     def _set(self, key: str, node):
+        if node is None:                       # Picker 里点了「＋ 新建」→ 走完整流水线
+            self._new(key)
+            return
         slot = self._KEYMAP[key]
-        if node is None:                       # 新建
-            name = f"新{key}{random.randint(10,99)}"
-            parent = {"项目": self._s.get("disk"),
-                      "子目录": self._s.get("project"),
-                      "工作区": self._s.get("folder") or self._s.get("project")}.get(key)
-            kind = {"项目": "project", "子目录": "folder", "工作区": "shoot"}[key]
-            node = Node(name, kind, f"{parent.path}/{name}" if parent else name, last_open=time.time())
-            if parent:
-                parent.children.append(node)
         self._s[slot] = node
         # 下层重置
         order = ["disk", "project", "folder", "shoot"]
@@ -469,8 +636,18 @@ class TopBar(QWidget):
     def _quick_switch(self):
         """▾ / ▼ / Ctrl+K —— 纯切换：全部工作区，最近优先，可搜索。"""
         shoots = [s for d in DISKS for s in all_shoots(d)]
-        dlg = Picker(self._leaf, shoots, "工作区", allow_new=False)
-        dlg.chosen.connect(self._enter)
+        dlg = Picker(self._leaf, shoots, "工作区", allow_new=True)   # ＋ = 随手开拍
+        dlg.chosen.connect(self._quick_new_or_enter)
+        dlg.exec()
+
+    def _quick_new_or_enter(self, node):
+        if node is not None:
+            self._enter(node)
+            return
+        # 「＋ 新建工作区」= 随手开拍: 建在当前项目下(没有就建在磁盘根), 建完直接进
+        container = self._state.get("folder") or self._state.get("project") or self._state.get("disk")
+        dlg = CreateDialog(self, "shoot", container)
+        dlg.created.connect(lambda n: self._enter(n) if n is not None else None)
         dlg.exec()
 
     def _open_panel(self):
