@@ -185,9 +185,13 @@ def test_topbar_location_panel_shows_project_and_save_folder(tmp_path):
     buttons = [b.text() for b in panel.findChildren(QPushButton)]
     labels = [x.text() for x in panel.findChildren(QLabel)]
 
-    assert buttons == ["＋ 项目", "＋ 下级目录"]
-    assert "江苏盐城2026" in labels
-    assert "断面A" in labels
+    # §7 旧断言: buttons == ["＋ 项目", "＋ 下级目录"] 且项目/目录是 QLabel。
+    #   2026-07-13 面板 v2: 项目/保存目录改成**可点下拉**(切换用, 用户: 死按键都要能用),
+    #   顶部还可能有「最近」chips —— 按钮集合变成超集, 断言改为包含式。
+    assert "＋ 项目" in buttons
+    assert "＋ 下级目录" in buttons
+    assert any("江苏盐城2026" in b for b in buttons), buttons
+    assert any("断面A" in b for b in buttons), buttons
 
 
 def test_placeholder_menu_lists_recent_workspaces(tmp_path, monkeypatch):

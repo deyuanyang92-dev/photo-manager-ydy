@@ -20,7 +20,7 @@ import os
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from PyQt6.QtCore import QSize, Qt, pyqtSignal
+from PyQt6.QtCore import QPoint, QSize, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
@@ -458,26 +458,60 @@ class WorkspaceBreadcrumb(QWidget):
         else:
             folder_value = tr("未选择保存目录")
 
+        # ── 最近 chips（用户 2026-07-13: 切换要一步到位, 90% 的时候点这排就完事）──
+        # 真数据: user_projects.json 按 lastOpenedAt 降序(见 record_recent_workspace),
+        # 剔除当前工作区; 每个 chip 带项目上下文 —— 满屏裸「断面A」没法认(用户截图)。
+        recents = [r for r in self._recent_workspaces(limit=8)
+                   if Path(r["directory"]).exists()][:4]
+        if recents:
+            chips_host = QWidget(panel)
+            chips_row = QHBoxLayout(chips_host)
+            chips_row.setContentsMargins(0, 0, 0, 0)
+            chips_row.setSpacing(6)
+            recent_lbl = QLabel(tr("最近"))
+            recent_lbl.setObjectName("MutedSmall")
+            chips_row.addWidget(recent_lbl)
+            for r in recents:
+                ctx_name = Path(r["root"]).name if r.get("root") else Path(r["directory"]).parent.name
+                label = f"{ctx_name} › {r['name']}" if ctx_name and ctx_name != r["name"] else r["name"]
+                chip = QPushButton(label)
+                chip.setObjectName("WorkspaceRecentChip")
+                chip.setCursor(Qt.CursorShape.PointingHandCursor)
+                chip.setToolTip(str(r["directory"]))
+                chip.clicked.connect(
+                    lambda _c=False, path=r["directory"], rt=r.get("root"): (
+                        menu.close(), self._switch_to_recent(path, rt)
+                    )
+                )
+                chips_row.addWidget(chip)
+            chips_row.addStretch(1)
+            grid.addWidget(chips_host, 1, 0, 1, 2)
+
+        # ── 项目 / 保存目录: 可点下拉（切换）, 不再是死 QLabel（用户: 死按键）──
         project_label = QLabel(tr("项目"))
         project_label.setObjectName("MutedSmall")
-        project_path = QLabel(project_value)
-        project_path.setObjectName("WorkspaceLocationValue")
-        project_path.setToolTip(str(root or ""))
-        grid.addWidget(project_label, 1, 0)
-        grid.addWidget(project_path, 1, 1)
+        project_btn = QPushButton(f"🗂 {project_value}  ▾")
+        project_btn.setObjectName("WorkspaceLocationProject")
+        project_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        project_btn.setToolTip(str(root or "") + tr("\n点击切换到磁盘上的其他项目"))
+        project_btn.clicked.connect(lambda: self._popup_projects_menu(project_btn, menu))
+        grid.addWidget(project_label, 2, 0)
+        grid.addWidget(project_btn, 2, 1)
 
         folder_label = QLabel(tr("保存目录"))
         folder_label.setObjectName("MutedSmall")
-        folder_path = QLabel(folder_value)
-        folder_path.setObjectName("WorkspaceLocationValue")
-        folder_path.setToolTip(str(workspace or ""))
-        grid.addWidget(folder_label, 2, 0)
-        grid.addWidget(folder_path, 2, 1)
+        folder_btn = QPushButton(f"📷 {folder_value}  ▾")
+        folder_btn.setObjectName("WorkspaceLocationFolder")
+        folder_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        folder_btn.setToolTip(str(workspace or "") + tr("\n点击切换到本项目内的其他目录"))
+        folder_btn.clicked.connect(lambda: self._popup_folders_menu(folder_btn, menu))
+        grid.addWidget(folder_label, 3, 0)
+        grid.addWidget(folder_btn, 3, 1)
 
         hint = QLabel(tr("项目负责汇总；照片保存在进入拍照的下级目录中。"))
         hint.setObjectName("MutedSmall")
         hint.setWordWrap(True)
-        grid.addWidget(hint, 3, 0, 1, 2)
+        grid.addWidget(hint, 4, 0, 1, 2)
 
         new_project = QPushButton(tr("＋ 项目"))
         new_project.setObjectName("Primary")
@@ -486,8 +520,8 @@ class WorkspaceBreadcrumb(QWidget):
         new_child.setObjectName("Outline")
         new_child.setEnabled(bool(root))
         new_child.setToolTip(tr("在当前项目下面增加断面、采样点或其他保存目录"))
-        grid.addWidget(new_project, 4, 0)
-        grid.addWidget(new_child, 4, 1)
+        grid.addWidget(new_project, 5, 0)
+        grid.addWidget(new_child, 5, 1)
 
         def create_project() -> None:
             menu.close()
@@ -504,6 +538,48 @@ class WorkspaceBreadcrumb(QWidget):
         action.setDefaultWidget(panel)
         menu.addAction(action)
         return panel
+
+    def _popup_projects_menu(self, anchor_btn: QWidget, host_menu: QMenu) -> None:
+        """「项目」行下拉: 磁盘上的其他项目, 点了切换（复用 _switch_to_peer_root）。"""
+        root = self._project_root_for_child()
+        workspace = getattr(self._ctx, "current_project_dir", None) or root
+        if not workspace:
+            return
+        sub = QMenu(anchor_btn)
+        for path in sibling_project_dirs(root, workspace):
+            act = sub.addAction(icons.icon("mdi6.folder-outline"), Path(path).name)
+            is_current = root and Path(path) == Path(root)
+            if is_current:
+                act.setCheckable(True)
+                act.setChecked(True)
+            act.triggered.connect(
+                lambda _c=False, p=path: (host_menu.close(), self._switch_to_peer_root(p))
+            )
+        sub.exec(anchor_btn.mapToGlobal(QPoint(0, anchor_btn.height())))
+
+    def _popup_folders_menu(self, anchor_btn: QWidget, host_menu: QMenu) -> None:
+        """「保存目录」行下拉: 本项目内全部目录, 点了切换（复用 _switch_to）。"""
+        root = self._project_root_for_child()
+        workspace = getattr(self._ctx, "current_project_dir", None)
+        if not workspace and not root:
+            return
+        sub = QMenu(anchor_btn)
+        base = root or (str(Path(workspace).parent) if workspace else None)
+        current = str(Path(workspace).resolve()) if workspace else ""
+        for path in project_tree_dirs(root, workspace or root):
+            try:
+                rel = str(Path(path).resolve().relative_to(Path(base).resolve())) if base else Path(path).name
+            except (ValueError, OSError):
+                rel = Path(path).name
+            label = rel if rel != "." else tr("（项目根）")
+            act = sub.addAction(icons.icon("mdi6.folder-outline"), label)
+            if current and str(Path(path)) == str(Path(current)):
+                act.setCheckable(True)
+                act.setChecked(True)
+            act.triggered.connect(
+                lambda _c=False, p=path: (host_menu.close(), self._switch_to(p))
+            )
+        sub.exec(anchor_btn.mapToGlobal(QPoint(0, anchor_btn.height())))
 
     def _project_root_for_child(self) -> Optional[str]:
         """Current project container used by the top-bar child action."""
