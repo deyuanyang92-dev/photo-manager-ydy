@@ -1,5 +1,10 @@
 # Repository Guidelines
 
+## Mandatory Grilling Before Changes
+
+- For every requirement, design, feature, bug-fix, or code-change request, use the installed `grill-with-docs` skill with its `grilling` and `domain-modeling` workflows before acting. Explore facts from the repository instead of asking the user questions that the code can answer. Ask only one unresolved decision question at a time, include a recommended answer, and do not implement until shared understanding is confirmed. Keep `CONTEXT.md` limited to stable domain terminology, and create ADRs only for hard-to-reverse decisions with real trade-offs.
+- Direct operational commands such as continue, restart, close, run tests, or report status should be executed directly without unnecessary questioning.
+
 ## Project Structure & Module Organization
 
 This is a Python/PyQt6 desktop app for specimen photo workflow management.
@@ -50,3 +55,5 @@ PRs should describe user-visible changes, list verification commands, link issue
 Never auto-delete TIFF originals. Delete JPGs only after archive integrity checks pass. Avoid committing large generated outputs unless updating a release package.
 
 Before changing core workflow behavior, read `docs/PROJECT_MEMORY.md`. Selected JPG compose/organise is manual and must not require an active specimen number. With an active UID, compose under it and auto-name the next result sequence. Without one, prompt for a target UID or free output stem. Do not reintroduce "请先激活编号" for selected-JPG `合成` or `合成+整理`; see `docs/specs/photo-grouping-workflow.md`.
+
+## Imported Claude Cowork project instructions

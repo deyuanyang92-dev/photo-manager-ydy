@@ -124,6 +124,20 @@ def test_register_view_adds_segment_and_page():
     assert win._views["dummy"] is win._stack.currentWidget()
 
 
+def test_navigation_never_installs_a_global_wait_cursor(monkeypatch):
+    win = _fresh_window()
+    win.register_view(_DummyView)
+
+    def fail_busy_cursor():
+        raise AssertionError("navigation must not replace the system cursor")
+
+    monkeypatch.setattr("app.main_window.ui.busy_cursor", fail_busy_cursor)
+
+    win.navigate_to("dummy")
+
+    assert win._views["dummy"].activated == 1
+
+
 def test_nav_segments_are_exclusive():
     win = _fresh_window()
     win.register_view(_DummyView)
@@ -232,18 +246,22 @@ def test_workspace_actions_are_integrated_into_breadcrumb(tmp_path):
     win = MainWindow(ctx)
     win.refresh_context_bar()
     folder_btn = win._project_switcher._btn_folder
+    win._project_switcher._populate_workspace_menu(folder_btn.menu())
     panel = folder_btn.menu().findChild(QWidget, "WorkspaceLocationPanel")
 
     assert not hasattr(win, "_project_actions_btn")
-    assert folder_btn.objectName() == "WorkspaceFolderButton"
-    assert folder_btn.accessibleName() == "照片保存位置"
-    # §7 旧: ["新建工作区…", "打开文件夹…"] —— 后来多了一次建好「项目+采样点」的入口
-    # §7 旧: ["新建项目（含采样点）…", ...] —— 2026-07-12 起「新建项目」只建一个空项目
-    #        目录(容器, 非工作区), 采样点在项目树里加, 故文案回落为「新建项目…」。
+    assert folder_btn is win._project_switcher._leaf_btn
+    assert folder_btn is win._project_switcher._btn_menu
+    assert folder_btn.objectName() == "WorkspaceLocationSwitcher"
+    assert not hasattr(win._project_switcher, "_settings_btn")
+    assert folder_btn.accessibleName() == "当前项目与拍摄目录"
     assert panel is not None
-    assert [b.text() for b in panel.findChildren(QPushButton)] == [
-        "＋ 项目", "＋ 下级目录"
-    ]
+    button_texts = [b.text() for b in panel.findChildren(QPushButton)]
+    assert "＋ 新建调查项目" in button_texts
+    assert "＋ 独立工作区" in button_texts
+    assert "＋ 追加到当前项目…" in button_texts
+    assert "打开已有项目或工作区" in button_texts
+    assert "管理全部项目" in button_texts
 
 
 def test_global_font_zoom_keyboard_and_ctrl_wheel(qapp):
@@ -321,13 +339,12 @@ def test_navigate_to_shows_page_and_activates():
 
 def test_context_bar_no_project():
     win = _fresh_window()
-    # 「完全没有项目」= 既没进工作区, 也没有项目根。开发机 QSettings 里可能残留
-    # project_tree_root(面包屑会据此显示「项目名（未选采样点）」, 见
-    # workspace_breadcrumb._project_root_only), 会污染这条纯空态断言 —— 显式清掉。
+    # 「完全没有项目」= 既没进工作区, 也没有项目根。
     win.ctx.settings.project_tree_root = ""
     win.refresh_context_bar()
-    assert "选择项目或拍摄目录" in win._project_switcher.text()
-    assert win._project_switcher._btn_folder is None
+    assert "新建或打开项目" in win._project_switcher.text()
+    assert win._project_switcher._btn_folder is win._project_switcher._placeholder_btn
+    assert win._project_switcher._btn_menu is win._project_switcher._placeholder_btn
     assert win._active_badge.objectName() == "ActiveBadgeOff"
     # Quick actions (智能压缩 / 🎬Helicon) disabled without a project.
     assert not win._btn_compress.isEnabled()
@@ -554,6 +571,63 @@ def test_restore_state_can_skip_native_window_layout(monkeypatch):
     win.restore_state(activate_last_view=False, restore_window_layout=False)
 
     assert win._nav_buttons[0].isChecked()
+
+
+def test_restore_state_marks_invalid_window_geometry_as_not_restored():
+    from PyQt6.QtCore import QByteArray
+
+    win = _fresh_window()
+    win.ctx.settings.restore_geometry = lambda: QByteArray(
+        b"not-a-valid-qt-window-geometry"
+    )
+    win.ctx.settings.restore_window_state = lambda: None
+
+    win.restore_state(
+        activate_last_view=False,
+        restore_window_layout=True,
+        defer_initial_view=True,
+    )
+
+    assert win._window_geometry_restored is False
+
+
+def test_restore_state_can_build_initial_view_before_first_show():
+    win = _fresh_window()
+    win.register_view(_DummyView)
+
+    win.restore_state(
+        activate_last_view=False,
+        restore_window_layout=False,
+        defer_initial_view=False,
+    )
+
+    assert "dummy" in win._views
+    assert win._stack.currentWidget() is win._views["dummy"]
+    assert win._views["dummy"].activated == 1
+    assert not win._startup_activation_timer.isActive()
+    assert not win._startup_placeholder.isVisible()
+
+
+def test_restore_state_can_build_last_view_before_first_show():
+    win = _fresh_window()
+
+    class _Second(_DummyView):
+        view_id = "dummy2"
+        nav_title = "第二页"
+
+    win.register_view(_DummyView)
+    win.register_view(_Second)
+    win.ctx.settings.last_nav_index = 1
+
+    win.restore_state(
+        activate_last_view=True,
+        restore_window_layout=False,
+        defer_initial_view=False,
+    )
+
+    assert "dummy" not in win._views
+    assert win._stack.currentWidget() is win._views["dummy2"]
+    assert win._views["dummy2"].activated == 1
 
 
 def test_close_cancels_deferred_startup_activation(qtbot):

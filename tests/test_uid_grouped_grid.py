@@ -154,6 +154,39 @@ def test_set_groups_creates_sections_with_counts_and_summary(tmp_path):
         grid.teardown()
 
 
+def test_loading_cover_tracks_nonempty_first_viewport(tmp_path):
+    from app.widgets.uid_grouped_grid import UidGroupedGrid
+
+    grid = UidGroupedGrid()
+    try:
+        grid.set_groups(_make_groups(1, 2, tmp_path, prefix="cover"))
+        assert grid._loading_cover_active is True
+        assert not grid._loading_cover.isHidden()
+
+        grid.set_groups([])
+        assert grid._loading_cover_active is False
+        assert grid._loading_cover.isHidden()
+    finally:
+        grid.teardown()
+
+
+def test_loading_cover_timeout_does_not_reveal_pending_cells():
+    from app.widgets.uid_grouped_grid import UidGroupedGrid
+
+    grid = UidGroupedGrid()
+    try:
+        grid._show_loading_cover()
+        grid._loading_cover_pending = {"slow.jpg"}
+
+        grid._on_loading_cover_timeout()
+
+        assert grid._loading_cover_active is True
+        assert not grid._loading_cover.isHidden()
+        assert grid._loading_cover_timer.isActive()
+    finally:
+        grid.teardown()
+
+
 def test_set_groups_model_data_roles(tmp_path):
     from app.widgets.uid_grouped_grid import UidGroupedGrid, UidSectionModel
     grid = UidGroupedGrid()
@@ -948,3 +981,127 @@ def test_unified_caption_mode_core_only(qtbot):
     m = grid.section(0).model
     assert "· #10" in m.data(m.index(1))
     grid.teardown()
+
+
+# ---------------------------------------------------------------------------
+# Loading-cover robustness (BUG 1 / BUG 2 — code-review 2026-07-14)
+# ---------------------------------------------------------------------------
+
+def test_prefetch_budget_never_skips_strictly_visible_rows(monkeypatch):
+    """BUG 1: the ``_PREFETCH_BUDGET`` cutoff must apply only to the extra
+    ±1-screen prefetch band, never to strictly-visible viewport rows. Every
+    strictly-visible cell must be requested regardless of budget, otherwise
+    the first-screen loading cover can hide while genuinely-visible cells are
+    still unrequested (their paths never entered ``_loading_cover_pending``).
+    """
+    import app.widgets.uid_grouped_grid as ug
+    from app.widgets.uid_grouped_grid import UidGroupedGrid
+
+    n = 40
+    # Budget far smaller than the strictly-visible span — with the old early
+    # ``return`` this stops after ``budget`` rows and skips the rest + cover.
+    monkeypatch.setattr(ug, "_PREFETCH_BUDGET", 5)
+
+    grid = UidGroupedGrid()
+    try:
+        items = [
+            {"path": f"/nonexistent/vis{i}.tif", "name": f"vis{i}.tif", "seq": i + 1}
+            for i in range(n)
+        ]
+        grid.set_groups([{"uid": "P-S-ST-001-A1-2024", "items": items}])
+
+        # Every row is strictly visible (prefetch band == strict span == all).
+        def _fake_span(sec, prefetch=True):
+            return (0, n - 1)
+
+        monkeypatch.setattr(grid, "_visible_row_span", _fake_span)
+
+        grid._prefetch_visible_thumbnails()
+
+        # All strictly-visible rows requested, not just the first ``budget``.
+        assert len(grid._pending_paths) == n, (
+            f"budget cutoff skipped strictly-visible rows: only "
+            f"{len(grid._pending_paths)}/{n} requested"
+        )
+        # A late row (well past the budget) must have been requested.
+        assert "/nonexistent/vis39.tif" in grid._pending_paths
+    finally:
+        grid.teardown()
+
+
+def test_visible_prefetch_bursts_are_bounded_then_drain(qtbot, monkeypatch):
+    """codex 回归发现: BUG1 的"严格可见行无视预算"修法在小缩略图/大视口场景下,
+    单次 ``_prefetch_visible_thumbnails`` 调用可能一口气派发几百个解码请求,
+    全堆给单一 worker 线程的消息队列(2000 张照片测出 424 条 vs 预算 96)。
+
+    修复后契约: 单次调用只发 ``_VISIBLE_PREFETCH_BUDGET`` 条(有界爆发),剩下的
+    严格可见格子不放弃(不能回到 BUG1),靠短延时的自续 tick 分批排空,最终全部
+    请求到——不是"发一次就完事"，也不是"发到底"，是"分批、但保证不漏"。
+    """
+    import app.widgets.uid_grouped_grid as ug
+    from app.widgets.uid_grouped_grid import UidGroupedGrid
+
+    n = 300
+    monkeypatch.setattr(ug, "_VISIBLE_PREFETCH_BUDGET", 50)
+    monkeypatch.setattr(ug, "_PREFETCH_CONTINUATION_MS", 5)
+
+    grid = UidGroupedGrid()
+    qtbot.addWidget(grid)
+    try:
+        items = [
+            {"path": f"/nonexistent/vis{i}.tif", "name": f"vis{i}.tif", "seq": i + 1}
+            for i in range(n)
+        ]
+        grid.set_groups([{"uid": "P-S-ST-001-A1-2024", "items": items}])
+
+        def _fake_span(sec, prefetch=True):
+            return (0, n - 1)
+
+        monkeypatch.setattr(grid, "_visible_row_span", _fake_span)
+
+        # Count distinct decode dispatches directly (robust against the real
+        # worker thread racing in and moving paths pending -> failed while we
+        # wait, which would otherwise make a raw len(_pending_paths) check racy).
+        requested = set()
+        orig_request_decode = grid._request_decode
+
+        def _counting_request_decode(section_idx, row, path):
+            requested.add(path)
+            return orig_request_decode(section_idx, row, path)
+
+        monkeypatch.setattr(grid, "_request_decode", _counting_request_decode)
+
+        grid._prefetch_visible_thumbnails()
+
+        # Bounded burst: this single call must not have dispatched all 300 at once.
+        assert len(requested) == 50, (
+            f"expected a single call to be capped at 50, got {len(requested)}"
+        )
+
+        # But it must not be abandoned either — the continuation timer drains
+        # the rest within a few ticks, and every row is eventually requested.
+        qtbot.waitUntil(lambda: len(requested) == n, timeout=2000)
+    finally:
+        grid.teardown()
+
+
+def test_clear_sections_empties_loading_cover_pending():
+    """BUG 2: ``_clear_sections()`` must drop ``_loading_cover_pending`` along
+    with ``_pending``/``_pending_paths``. Otherwise stale in-flight paths keep
+    the pending set non-empty forever (their replies land stale and never
+    discard), permanently blocking the cover from ever hiding again.
+    """
+    from app.widgets.uid_grouped_grid import UidGroupedGrid
+
+    grid = UidGroupedGrid()
+    try:
+        grid._show_loading_cover()
+        grid._loading_cover_pending = {"stale1.jpg", "stale2.jpg"}
+
+        grid._clear_sections()
+
+        assert grid._loading_cover_pending == set(), (
+            "_clear_sections left stale paths in _loading_cover_pending"
+        )
+    finally:
+        grid.teardown()

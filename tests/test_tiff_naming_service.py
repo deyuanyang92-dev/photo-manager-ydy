@@ -63,6 +63,143 @@ def test_tiff_naming_audit_dialog_marks_invalid_row(qtbot, tmp_path):
     assert dialog._table.item(0, 4).text().endswith(".tif")
 
 
+def test_tiff_naming_audit_dialog_only_applies_selected_valid_tiff(qtbot, tmp_path):
+    """Only a recognized result can be sent to the editable right rail."""
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtWidgets import QDialog
+
+    from app.services.tiff_naming_service import inspect_tiff_names
+    from app.widgets.tiff_naming_audit_dialog import TiffNamingAuditDialog
+
+    invalid = tmp_path / "HeliconFocus.tif"
+    valid = tmp_path / "GXFCG-BLW-SC003-2-R-20260618.tif"
+    invalid.write_bytes(b"tif")
+    valid.write_bytes(b"tif")
+    os.utime(invalid, ns=(1_700_000_000_000_000_000,) * 2)
+    os.utime(valid, ns=(1_700_000_001_000_000_000,) * 2)
+    dialog = TiffNamingAuditDialog(inspect_tiff_names(str(tmp_path)))
+    qtbot.addWidget(dialog)
+
+    dialog._table.selectRow(0)
+    assert dialog._apply_btn.isEnabled() is False
+
+    dialog._table.selectRow(1)
+    assert dialog._apply_btn.isEnabled() is True
+    qtbot.mouseClick(dialog._apply_btn, Qt.MouseButton.LeftButton)
+
+    assert dialog.result() == QDialog.DialogCode.Accepted
+    assert dialog.selected_tiff_path() == str(valid.resolve())
+
+
+def test_tiff_naming_check_auto_applies_one_valid_result(tmp_path, monkeypatch):
+    """A single recognized TIFF pre-fills the right rail without another click."""
+    from PyQt6.QtWidgets import QDialog
+
+    from app.views.workbench_monitor_workflow import WorkbenchMonitorWorkflowMixin
+
+    tiff = tmp_path / "GXFCG-BLW-SC003-2-R-20260618.tif"
+    tiff.write_bytes(b"tif")
+    captured = {}
+
+    class FakeDialog:
+        def __init__(self, audit, parent=None):
+            captured["audit"] = audit
+
+        def mark_auto_applied(self, path):
+            captured["auto_applied_path"] = path
+
+        def exec(self):
+            return QDialog.DialogCode.Rejected
+
+        def selected_tiff_path(self):
+            return None
+
+    monkeypatch.setattr(
+        "app.widgets.tiff_naming_audit_dialog.TiffNamingAuditDialog",
+        FakeDialog,
+    )
+
+    class Context:
+        current_project_dir = str(tmp_path)
+
+        @staticmethod
+        def get_db():
+            return None
+
+    class Grouping:
+        _uid = None
+
+    class Harness(WorkbenchMonitorWorkflowMixin):
+        ctx = Context()
+        _grouping = Grouping()
+
+        def __init__(self):
+            self.applied = []
+
+        def _apply_tiff_filename_recognition(self, path, *, overwrite=False):
+            self.applied.append((path, overwrite))
+
+    harness = Harness()
+    harness._run_tiff_naming_check(paths=[str(tiff)])
+
+    expected = str(tiff.resolve())
+    assert harness.applied == [(expected, False)]
+    assert captured["auto_applied_path"] == expected
+
+
+def test_tiff_naming_check_applies_selected_result_from_many(tmp_path, monkeypatch):
+    """Multiple recognized TIFFs require an explicit row choice."""
+    from PyQt6.QtWidgets import QDialog
+
+    from app.views.workbench_monitor_workflow import WorkbenchMonitorWorkflowMixin
+
+    first = tmp_path / "GXFCG-BLW-SC003-1-R-20260618.tif"
+    second = tmp_path / "GXFCG-BLW-SC004-1-R-20260618.tif"
+    first.write_bytes(b"tif")
+    second.write_bytes(b"tif")
+    selected = str(second.resolve())
+
+    class FakeDialog:
+        def __init__(self, audit, parent=None):
+            assert audit.valid_count == 2
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+        def selected_tiff_path(self):
+            return selected
+
+    monkeypatch.setattr(
+        "app.widgets.tiff_naming_audit_dialog.TiffNamingAuditDialog",
+        FakeDialog,
+    )
+
+    class Context:
+        current_project_dir = str(tmp_path)
+
+        @staticmethod
+        def get_db():
+            return None
+
+    class Grouping:
+        _uid = None
+
+    class Harness(WorkbenchMonitorWorkflowMixin):
+        ctx = Context()
+        _grouping = Grouping()
+
+        def __init__(self):
+            self.applied = []
+
+        def _apply_tiff_filename_recognition(self, path, *, overwrite=False):
+            self.applied.append((path, overwrite))
+
+    harness = Harness()
+    harness._run_tiff_naming_check(paths=[str(first), str(second)])
+
+    assert harness.applied == [(selected, False)]
+
+
 def test_inspect_tiff_names_honors_custom_naming_components(tmp_path):
     """Custom project naming rules accept stems built without station."""
     from app.services.tiff_naming_service import inspect_tiff_names
@@ -332,6 +469,31 @@ def test_apply_recognized_fields_single_date_fills_both(qtbot):
     assert panel._collection_date.text() == "20260618"
     assert panel._photo_date.text() == "20260618"
     assert panel._photo_notes.toPlainText() == "广西防城港-白龙尾-独齿沙蚕-20260618"
+
+
+def test_apply_recognized_fields_preserves_manual_values_and_stays_editable(qtbot):
+    """Recognition is an editable suggestion and never locks or replaces input."""
+    from unittest.mock import MagicMock
+
+    from app.widgets.naming_panel import NamingPanel
+
+    panel = NamingPanel(MagicMock())
+    qtbot.addWidget(panel)
+    panel._province.setText("MANUAL")
+
+    panel.apply_recognized_fields(
+        {"province": "GXFCG", "site": "BLW", "species_id": "SC001", "storage": "R"},
+        collection_date="20260618",
+        photo_date="20260618",
+        sequence=1,
+        source_filename="demo.tif",
+    )
+
+    assert panel._province.text() == "MANUAL"
+    assert panel._site.text() == "BLW"
+    panel._site.setText("CORRECTED")
+    assert panel._site.text() == "CORRECTED"
+    assert panel._site.isReadOnly() is False
 
 
 def test_parse_tiff_result_detail_accepts_dual_date_segment(tmp_path):

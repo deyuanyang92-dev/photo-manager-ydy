@@ -92,6 +92,51 @@ def test_thumbnail_is_decoded_off_the_gui_thread(panel, qtbot, tmp_path, monkeyp
     )
 
 
+def test_initial_thumbnails_are_revealed_as_one_batch(panel, qtbot):
+    """One ready card must not appear before the rest of the first batch."""
+    first = MagicMock()
+    second = MagicMock()
+    panel._card_by_key = {"a.jpg": first, "b.jpg": second}
+
+    panel._begin_silent_thumbnail_load(["a.jpg", "b.jpg"])
+    panel._mark_silent_thumbnail_ready("a.jpg")
+    panel._on_silent_thumbnail_timeout()
+
+    first.load_thumbnail_now.assert_not_called()
+    second.load_thumbnail_now.assert_not_called()
+    assert not panel._thumb_loading_cover.isHidden()
+
+    panel._mark_silent_thumbnail_ready("b.jpg")
+    qtbot.waitUntil(lambda: first.load_thumbnail_now.call_count == 1, timeout=1000)
+
+    second.load_thumbnail_now.assert_called_once_with()
+    assert panel._thumb_loading_cover.isHidden()
+
+
+def test_recycled_card_skip_does_not_hang_the_loading_cover(panel, qtbot):
+    """回收卡片被派发循环跳过时, 也必须清出 silent pending —— 否则 pending 永不归零,
+    加载遮罩(_thumb_loading_cover)挂死, 实况监控网格被永久遮住(BUG 2026-07-14)。"""
+    path = "recycled.jpg"
+
+    # 一张「已被回收」的卡片: parent() is None, 但 _entry.path 仍是本批次里的路径。
+    dead = MagicMock()
+    dead.parent.return_value = None
+    dead._entry.path = path
+
+    panel._card_by_key = {path: dead}
+    panel._begin_silent_thumbnail_load([path])
+    assert not panel._thumb_loading_cover.isHidden()
+    assert panel._silent_thumb_pending == {path}
+
+    # 卡片进解码队列, 派发循环因回收而跳过它。
+    panel._queue_thumbnail(dead)
+    panel._load_next_thumbnail_batch()
+
+    # pending 必须能归零 → finish 被调度 → 遮罩隐藏(否则永久遮住网格)。
+    qtbot.waitUntil(lambda: panel._thumb_loading_cover.isHidden(), timeout=1500)
+    assert panel._silent_thumb_pending == set()
+
+
 def test_file_thumb_pixmap_uses_the_disk_cache(monkeypatch, tmp_path):
     """§7 旧代码写死 use_cache=False, 磁盘缩略图缓存形同虚设。"""
     jpg = _real_jpg(tmp_path, "cached.jpg")

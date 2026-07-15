@@ -1484,7 +1484,7 @@ QPushButton#ProjectSwitcher:hover {{
     border-color: {t["accent"]};
     background-color: {t["modal_surface"]};
 }}
-/* 工作区面包屑（EOS Utility 式）：祖先段扁平、叶子似旧 switcher、◀▶ 紧凑 */
+/* 顶栏项目 / 照片保存位置：一个主控件，弹层中再展开场景 */
 QPushButton#CrumbSeg {{
     background: transparent;
     border: none;
@@ -1501,54 +1501,223 @@ QLabel#CrumbSep {{
     font-size: {t["font_sm"]};
     padding: 0 1px;
 }}
-QPushButton#CrumbLeaf {{
+QToolButton#WorkspaceLocationSwitcher {{
     background-color: {t["panel"]};
     border: 1px solid {t["border_medium"]};
     border-radius: {t["radius"]};
-    padding: 7px 11px;
+    padding: 0 27px 0 11px;
     color: {t["text"]};
     font-size: {t["font_sm"]};
     font-weight: 600;
     text-align: left;
 }}
-QPushButton#CrumbLeaf:hover {{
-    border-color: {t["accent"]};
-    background-color: {t["modal_surface"]};
-}}
-QToolButton#CrumbArrow {{
-    background: transparent;
-    border: 1px solid transparent;
-    border-radius: {t["radius_sm"]};
-    padding: 5px 3px;
-    color: {t["muted"]};
-    font-size: {t["font_xs"]};
-}}
-QToolButton#CrumbArrow:hover {{
-    color: {t["accent"]};
-    border-color: {t["border"]};
-}}
-QToolButton#CrumbArrow:disabled {{
-    color: {t["muted_dim"]};
-}}
-QToolButton#WorkspaceMenuButton,
-QToolButton#WorkspaceFolderButton {{
-    background-color: {t["panel"]};
-    border: 1px solid {t["border_medium"]};
-    border-radius: {t["radius"]};
-    padding: 0;
-    color: {t["muted"]};
-    font-size: {t["font_sm"]};
-    font-weight: 600;
-}}
-QToolButton#WorkspaceMenuButton:hover,
-QToolButton#WorkspaceFolderButton:hover {{
-    color: {t["accent"]};
+QToolButton#WorkspaceLocationSwitcher:hover,
+QToolButton#WorkspaceLocationSwitcher:open {{
     border-color: {t["accent"]};
     background-color: {t["accent_softer"]};
 }}
-QToolButton#WorkspaceFolderButton::menu-button {{
+QToolButton#WorkspaceLocationSwitcher::menu-indicator {{
+    subcontrol-origin: padding;
+    subcontrol-position: right center;
+    right: 9px;
+    width: 10px;
+}}
+QToolButton#WorkspaceLocatorSwitcher,
+QToolButton#WorkspaceNavigatorSwitcher {{
+    background-color: {t["panel"]};
+    border: 1px solid {t["border_medium"]};
+    border-radius: {t["radius"]};
+    padding: 0 27px 0 11px;
+    color: {t["text"]};
+    font-size: {t["font_sm"]};
+    font-weight: 600;
+    text-align: left;
+}}
+QToolButton#WorkspaceLocatorSwitcher:hover,
+QToolButton#WorkspaceLocatorSwitcher:open,
+QToolButton#WorkspaceNavigatorSwitcher:hover,
+QToolButton#WorkspaceNavigatorSwitcher:open {{
+    border-color: {t["accent"]};
+    background-color: {t["accent_softer"]};
+}}
+QToolButton#WorkspaceLocatorSwitcher::menu-indicator,
+QToolButton#WorkspaceNavigatorSwitcher::menu-indicator {{
+    subcontrol-origin: padding;
+    subcontrol-position: right center;
+    right: 9px;
+    width: 10px;
+}}
+QWidget#WorkspaceLocatorPanel,
+QWidget#WorkspaceNavigatorPanel {{
+    background-color: {t["panel"]};
     border: none;
-    width: 0;
+}}
+QLabel#WorkspaceLocatorTitle,
+QLabel#WorkspaceNavigatorTitle {{
+    color: {t["text"]};
+    /* font-size: 15px; */ /* polish: hardcoded value replaced by font_md token to match sibling WorkspaceLocationTitle rule (Sonnet 5 multi-agent review) */
+    font-size: {t["font_md"]};
+    font-weight: 600;
+}}
+QLabel#WorkspaceLocatorSubtitle,
+QLabel#WorkspaceNavigatorSubtitle,
+QLabel#WorkspaceLocatorEmpty,
+QLabel#WorkspaceNavigatorEmpty {{
+    color: {t["muted_dim"]};
+    font-size: {t["font_sm"]};
+}}
+QLabel#WorkspaceLocatorSection,
+QLabel#WorkspaceNavigatorSection {{
+    color: {t["muted"]};
+    /* font-size: 11px; */ /* polish: hardcoded value replaced by font_xs token to match sibling WorkspaceLocationSection rule (Sonnet 5 multi-agent review) */
+    font-size: {t["font_xs"]};
+    font-weight: 700;
+    padding-top: 4px;
+}}
+QWidget#WorkspaceLocatorCurrent,
+QWidget#WorkspaceNavigatorCurrent {{
+    background-color: {t["accent_softer"]};
+    border: 1px solid {t["border_medium"]};
+    border-radius: {t["radius"]};
+}}
+QLabel#WorkspaceLocatorProject,
+QLabel#WorkspaceNavigatorProject {{
+    color: {t["text"]};
+    font-size: {t["font_sm"]};
+    font-weight: 600;
+}}
+QLabel#WorkspaceLocatorShoot,
+QLabel#WorkspaceNavigatorWorkspace {{
+    color: {t["accent"]};
+    font-size: {t["font_sm"]};
+}}
+QPushButton#WorkspaceLocatorRecent,
+QPushButton#WorkspaceNavigatorRecent,
+QPushButton#WorkspaceLocatorPeer {{
+    background-color: {t["panel"]};
+    border: 1px solid {t["border_medium"]};
+    /* border-radius: 6px; */ /* polish: hardcoded value replaced by radius_sm token to match WorkspaceLocationProject/Folder and WorkspaceRecentChip rules (Sonnet 5 multi-agent review) */
+    border-radius: {t["radius_sm"]};
+    padding: 6px 10px;
+    text-align: left;
+    color: {t["text"]};
+}}
+QPushButton#WorkspaceLocatorRecent:hover,
+QPushButton#WorkspaceNavigatorRecent:hover,
+QPushButton#WorkspaceLocatorPeer:hover {{
+    border-color: {t["accent"]};
+    background-color: {t["accent_softer"]};
+}}
+QPushButton#WorkspaceLocatorManageAll {{
+    color: {t["accent"]};
+    font-weight: 600;
+    text-align: left;
+    padding: 4px 2px;
+}}
+/* polish: add missing :hover state, mirroring WorkspaceRecentChip:hover / sibling WorkspaceManageAll:hover, Sonnet 5 multi-agent review round 3 */
+QPushButton#WorkspaceLocatorManageAll:hover {{
+    color: {t["accent_hover"]};
+    background-color: {t["accent_softer"]};
+}}
+QMenu#WorkspaceLocationMenu {{
+    background-color: {t["panel"]};
+    border: 1px solid {t["border_medium"]};
+    padding: 0;
+}}
+QWidget#WorkspaceLocationPanel {{
+    background-color: {t["panel"]};
+    border: none;
+}}
+QLabel#WorkspaceLocationTitle {{
+    color: {t["text"]};
+    font-size: {t["font_md"]};
+    font-weight: 600;
+}}
+QLabel#WorkspaceLocationSubtitle,
+QLabel#WorkspaceLocationHint {{
+    color: {t["muted_dim"]};
+    font-size: {t["font_xs"]};
+}}
+QLabel#WorkspaceLocationFieldLabel {{
+    color: {t["muted"]};
+    font-size: {t["font_xs"]};
+    font-weight: 600;
+}}
+QLabel#WorkspaceLocationSection {{
+    color: {t["text_soft"]};
+    font-size: {t["font_xs"]};
+    font-weight: 600;
+    padding-top: 5px;
+}}
+QPushButton#WorkspaceLocationProject,
+QPushButton#WorkspaceLocationFolder {{
+    min-height: 20px;
+    background-color: {t["panel_inset"]};
+    color: {t["text"]};
+    border: 1px solid {t["border"]};
+    border-radius: {t["radius_sm"]};
+    padding: 6px 9px;
+    text-align: left;
+    font-size: {t["font_sm"]};
+    font-weight: 600;
+}}
+QLineEdit#WorkspaceLocationSearch {{
+    min-height: 24px;
+}}
+QPushButton#WorkspaceLocationSearchButton {{
+    min-height: 24px;
+    padding: 5px 10px;
+}}
+QPushButton#WorkspaceLocationProject:hover,
+QPushButton#WorkspaceLocationFolder:hover {{
+    background-color: {t["accent_softer"]};
+    border-color: {t["accent"]};
+}}
+QPushButton#WorkspaceRecentChip {{
+    min-height: 18px;
+    background-color: {t["panel_inset"]};
+    color: {t["text_soft"]};
+    border: 1px solid {t["border"]};
+    border-radius: {t["radius_sm"]};
+    padding: 5px 8px;
+    text-align: left;
+    font-size: {t["font_xs"]};
+}}
+QPushButton#WorkspaceRecentChip:hover {{
+    color: {t["accent_hover"]};
+    border-color: {t["accent"]};
+    background-color: {t["accent_softer"]};
+}}
+QPushButton#WorkspaceNewSurveyProject,
+QPushButton#WorkspaceNewStandalone,
+QPushButton#WorkspaceAppendCurrent,
+QPushButton#WorkspaceOpenExisting,
+QPushButton#WorkspaceManageAll {{
+    min-height: 21px;
+    background-color: {t["panel"]};
+    color: {t["text_soft"]};
+    border: 1px solid {t["border_medium"]};
+    border-radius: {t["radius_sm"]};
+    padding: 6px 9px;
+    text-align: left;
+    font-size: {t["font_sm"]};
+    font-weight: 500;
+}}
+QPushButton#WorkspaceNewSurveyProject,
+QPushButton#WorkspaceNewStandalone,
+QPushButton#WorkspaceAppendCurrent {{
+    color: {t["accent_hover"]};
+    border-color: {t["accent_soft"]};
+    background-color: {t["accent_softer"]};
+}}
+QPushButton#WorkspaceNewSurveyProject:hover,
+QPushButton#WorkspaceNewStandalone:hover,
+QPushButton#WorkspaceAppendCurrent:hover,
+QPushButton#WorkspaceOpenExisting:hover,
+QPushButton#WorkspaceManageAll:hover {{
+    color: {t["text"]};
+    border-color: {t["accent"]};
+    background-color: {t["accent_soft"]};
 }}
 QLabel#ActiveBadgeOn {{
     background: {accent_grad};
@@ -1732,6 +1901,63 @@ QLabel#WorkbenchSelectionText {{
     font-weight: 500;
 }}
 QFrame#Divider {{ background-color: {t["border"]}; max-height: 1px; min-height: 1px; border: none; }}
+
+/* ── New / append project hierarchy dialog ───────────────────────── */
+QDialog#NewSurveyProjectDialog {{
+    background-color: {t["bg"]};
+}}
+QLabel#ProjectBuilderHeading {{
+    color: {t["text"]};
+    font-size: {t["font_md"]};
+    font-weight: 600;
+}}
+QLabel#ProjectBuilderIntro, QLabel#ProjectBuilderHint {{
+    color: {t["muted"]};
+    font-size: {t["font_sm"]};
+}}
+QLabel#ProjectBuilderSection {{
+    color: {t["text_soft"]};
+    font-size: {t["font_sm"]};
+    font-weight: 600;
+}}
+QTreeWidget#ProjectHierarchyTree {{
+    background-color: {t["panel"]};
+    border: 1px solid {t["border_medium"]};
+    border-radius: {t["radius"]};
+    outline: 0;
+}}
+QTreeWidget#ProjectHierarchyTree::item {{
+    min-height: 38px;
+    border-bottom: 1px solid {t["border"]};
+}}
+/* polish: add missing ::item:hover, mirroring QTreeWidget#ProjectDirectoryTree::item:hover (app/views/project_tree_view.py), Sonnet 5 multi-agent review round 3 */
+QTreeWidget#ProjectHierarchyTree::item:hover {{
+    background-color: {t["accent_softer"]};
+}}
+QTreeWidget#ProjectHierarchyTree::item:selected {{
+    background-color: {t["accent_softer"]};
+    color: {t["text"]};
+}}
+QLineEdit#ProjectHierarchyName {{
+    background-color: {t["panel"]};
+    border: 1px solid transparent;
+    border-radius: {t["radius_sm"]};
+    padding: 4px 8px;
+}}
+QLineEdit#ProjectHierarchyName:hover {{
+    border-color: {t["border_medium"]};
+}}
+QLineEdit#ProjectHierarchyName:focus {{
+    background-color: {t["panel_inset"]};
+    border-color: {t["accent"]};
+}}
+QLabel#ProjectHierarchyPreview {{
+    color: {t["muted"]};
+    background-color: {t["panel_inset"]};
+    border: 1px solid {t["border"]};
+    border-radius: {t["radius_sm"]};
+    padding: 7px 10px;
+}}
 
 /* ── Grouping tool popup (分组工具) ─────────────────────────────────── */
 /* Soft-gray dialog bg lets the inner WorkbenchSection card's shadow breathe

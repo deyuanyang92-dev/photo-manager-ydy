@@ -2,6 +2,10 @@
 
 This file records durable project decisions that the user has had to repeat many times. Future Codex / Claude Code sessions must read this before changing core workflow logic.
 
+The scale and rendering contract is mandatory: read
+[`architecture-scale-contract.md`](architecture-scale-contract.md) before changing
+project discovery, summary queries, photo grids, thumbnail loading, or caching.
+
 ## Regression discipline for core workflow changes
 
 The user is a beginner and relies on agents to keep the application coherent. Do not fix one visible bug by casually changing a shared workflow and leaving adjacent features unverified.

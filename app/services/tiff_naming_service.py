@@ -50,6 +50,25 @@ class TiffNamingAudit:
         return self.total - self.valid_count
 
 
+def annotate_tiff_entries(
+    entries: list,
+    *,
+    naming_components: Optional[list[str]] = None,
+) -> list:
+    """Attach filename-recognition state to monitor TIFF entries in place."""
+    components = normalize_naming_components(
+        naming_components or DEFAULT_NAMING_RULES["components"]
+    )
+    for entry in entries:
+        name = str(getattr(entry, "name", "") or Path(
+            str(getattr(entry, "path", "") or "")
+        ).name)
+        detail = parse_tiff_result_detail(Path(name).stem, components)
+        entry.naming_ok = detail is not None
+        entry.attributed_specimen_id = detail.uid if detail is not None else None
+    return entries
+
+
 def inspect_tiff_names(
     folder: str,
     *,

@@ -1,14 +1,11 @@
-"""照片保存设置面板 v2 —— 用户 2026-07-13 拍板的四件事全要:
+"""顶栏项目与照片保存位置面板契约.
 
-    "我要不要新建项目? 要! 要不要新建工作区? 要! 要不要切换工作区? 要!
-     然后要不要用户便捷? 要!"
-
-契约（都在顶栏 📁▾ 的「照片保存设置」面板里，一步到位）:
+契约（都在一个顶栏位置弹层里）:
 1. 面板顶部有「最近」chips（来自真实 user_projects.json, 按 lastOpenedAt 降序,
    带项目上下文, 点一下 = 直接进入）;
-2. 「项目」行是**可点的下拉**（列出磁盘上的其他项目, 点了切换）, 不再是死的 QLabel;
-3. 「保存目录」行同理（列出本项目内全部目录）;
-4. ＋项目 / ＋下级目录 两个新建按钮保留（信号不变）。
+2. 「项目 / 拍摄位置」行显示当前目标，点击进入唯一的完整项目树;
+3. 明确提供新建调查项目、独立工作区、打开已有项目/工作区三种场景;
+4. 顶栏不递归展开全量目录，兼容大项目库。
 """
 from __future__ import annotations
 
@@ -89,7 +86,7 @@ def test_recent_chip_click_switches_workspace(qtbot, env, monkeypatch):
     assert entered and str(other) in entered[0]
 
 
-def test_project_and_folder_rows_are_clickable_dropdowns(qtbot, env):
+def test_project_and_folder_rows_open_the_complete_project_tree(qtbot, env):
     ctx, ws, other = env
     bc = WorkspaceBreadcrumb(ctx)
     qtbot.addWidget(bc)
@@ -97,23 +94,33 @@ def test_project_and_folder_rows_are_clickable_dropdowns(qtbot, env):
     panel, _menu = _panel(bc)
     proj_btn = panel.findChild(QPushButton, "WorkspaceLocationProject")
     folder_btn = panel.findChild(QPushButton, "WorkspaceLocationFolder")
-    assert proj_btn is not None, "「项目」行必须是可点的下拉(切换项目), 不能是死 QLabel"
-    assert folder_btn is not None, "「保存目录」行必须是可点的下拉(切换目录)"
+    assert proj_btn is not None
+    assert folder_btn is not None
     assert "航次2026" in proj_btn.text()
+    assert "断面A" in folder_btn.text()
+
+    got: list[str] = []
+    bc.navigate_requested.connect(got.append)
+    proj_btn.click()
+    folder_btn.click()
+    assert got == ["project_tree", "project_tree"]
 
 
-def test_create_buttons_keep_their_signals(qtbot, env):
+def test_three_start_scenarios_and_project_tree_entry(qtbot, env):
     ctx, ws, other = env
     bc = WorkspaceBreadcrumb(ctx)
     qtbot.addWidget(bc)
 
     got: list = []
-    bc.new_survey_project_requested.connect(lambda: got.append("project"))
-    bc.new_project_child_requested.connect(lambda: got.append("child"))
+    bc.new_survey_project_requested.connect(lambda: got.append("survey"))
+    bc.new_workspace_requested.connect(lambda: got.append("standalone"))
+    bc.open_workspace_requested.connect(lambda: got.append("open"))
+    bc.navigate_requested.connect(lambda target: got.append(target))
 
     panel, _menu = _panel(bc)
     texts = {b.text(): b for b in panel.findChildren(QPushButton)}
-    assert any("项目" in t and "＋" in t for t in texts), texts.keys()
-    next(b for t, b in texts.items() if "＋" in t and "项目" in t and "下级" not in t).click()
-    next(b for t, b in texts.items() if "下级目录" in t).click()
-    assert got == ["project", "child"]
+    texts["＋ 新建调查项目"].click()
+    texts["＋ 独立工作区"].click()
+    texts["打开已有项目或工作区"].click()
+    texts["管理全部项目"].click()
+    assert got == ["survey", "standalone", "open", "project_tree"]

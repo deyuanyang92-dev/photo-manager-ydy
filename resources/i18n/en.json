@@ -189,5 +189,6 @@
   "点击列出同级站位": "Click to list sibling stations",
   "盘未连接": "Drive not connected",
   "该目录所在磁盘未挂载或路径不可用：": "The disk for this folder is not mounted or the path is unavailable:",
-  "已切换工作区: {}": "Switched workspace: {}"
+  "已切换工作区: {}": "Switched workspace: {}",
+  "正在静默准备首屏照片…": "Preparing first-screen photos in the background…"
 }

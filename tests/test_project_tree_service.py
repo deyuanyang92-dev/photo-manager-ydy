@@ -57,6 +57,19 @@ def test_skips_reserved_and_dotfiles(tmp_path):
     assert names == ["断面a"]
 
 
+def test_legacy_retired_zip_is_hidden_without_deleting_it(tmp_path):
+    root = tmp_path / "proj"
+    retired = root / "_retired-zip"
+    retired.mkdir(parents=True)
+    archive = retired / "legacy-backup.zip"
+    archive.write_bytes(b"kept")
+
+    tree = scan_tree(str(root))
+
+    assert "_retired-zip" not in [child["name"] for child in tree["children"]]
+    assert archive.read_bytes() == b"kept"
+
+
 def test_has_data_flag_marks_adopted_workspaces(tmp_path):
     root = tmp_path / "proj"
     leaf = root / "断面a"

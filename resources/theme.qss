@@ -145,7 +145,7 @@ QPushButton#ProjectSwitcher:hover {
     border-color: #0f766e;
     background-color: #ffffff;
 }
-/* 工作区面包屑（EOS Utility 式）：祖先段扁平、叶子似旧 switcher、◀▶ 紧凑 */
+/* 顶栏项目 / 照片保存位置：一个主控件，弹层中再展开场景 */
 QPushButton#CrumbSeg {
     background: transparent;
     border: none;
@@ -162,54 +162,223 @@ QLabel#CrumbSep {
     font-size: 12px;
     padding: 0 1px;
 }
-QPushButton#CrumbLeaf {
+QToolButton#WorkspaceLocationSwitcher {
     background-color: #ffffff;
     border: 1px solid rgba(15,23,42,0.13);
     border-radius: 8px;
-    padding: 7px 11px;
+    padding: 0 27px 0 11px;
     color: #17212b;
     font-size: 12px;
     font-weight: 600;
     text-align: left;
 }
-QPushButton#CrumbLeaf:hover {
-    border-color: #0f766e;
-    background-color: #ffffff;
-}
-QToolButton#CrumbArrow {
-    background: transparent;
-    border: 1px solid transparent;
-    border-radius: 6px;
-    padding: 5px 3px;
-    color: #64748b;
-    font-size: 11px;
-}
-QToolButton#CrumbArrow:hover {
-    color: #0f766e;
-    border-color: rgba(15,23,42,0.08);
-}
-QToolButton#CrumbArrow:disabled {
-    color: #94a3b8;
-}
-QToolButton#WorkspaceMenuButton,
-QToolButton#WorkspaceFolderButton {
-    background-color: #ffffff;
-    border: 1px solid rgba(15,23,42,0.13);
-    border-radius: 8px;
-    padding: 0;
-    color: #64748b;
-    font-size: 12px;
-    font-weight: 600;
-}
-QToolButton#WorkspaceMenuButton:hover,
-QToolButton#WorkspaceFolderButton:hover {
-    color: #0f766e;
+QToolButton#WorkspaceLocationSwitcher:hover,
+QToolButton#WorkspaceLocationSwitcher:open {
     border-color: #0f766e;
     background-color: rgba(15,118,110,0.06);
 }
-QToolButton#WorkspaceFolderButton::menu-button {
+QToolButton#WorkspaceLocationSwitcher::menu-indicator {
+    subcontrol-origin: padding;
+    subcontrol-position: right center;
+    right: 9px;
+    width: 10px;
+}
+QToolButton#WorkspaceLocatorSwitcher,
+QToolButton#WorkspaceNavigatorSwitcher {
+    background-color: #ffffff;
+    border: 1px solid rgba(15,23,42,0.13);
+    border-radius: 8px;
+    padding: 0 27px 0 11px;
+    color: #17212b;
+    font-size: 12px;
+    font-weight: 600;
+    text-align: left;
+}
+QToolButton#WorkspaceLocatorSwitcher:hover,
+QToolButton#WorkspaceLocatorSwitcher:open,
+QToolButton#WorkspaceNavigatorSwitcher:hover,
+QToolButton#WorkspaceNavigatorSwitcher:open {
+    border-color: #0f766e;
+    background-color: rgba(15,118,110,0.06);
+}
+QToolButton#WorkspaceLocatorSwitcher::menu-indicator,
+QToolButton#WorkspaceNavigatorSwitcher::menu-indicator {
+    subcontrol-origin: padding;
+    subcontrol-position: right center;
+    right: 9px;
+    width: 10px;
+}
+QWidget#WorkspaceLocatorPanel,
+QWidget#WorkspaceNavigatorPanel {
+    background-color: #ffffff;
     border: none;
-    width: 0;
+}
+QLabel#WorkspaceLocatorTitle,
+QLabel#WorkspaceNavigatorTitle {
+    color: #17212b;
+    /* font-size: 15px; */ /* polish: hardcoded value replaced by font_md token to match sibling WorkspaceLocationTitle rule (Sonnet 5 multi-agent review) */
+    font-size: 15px;
+    font-weight: 600;
+}
+QLabel#WorkspaceLocatorSubtitle,
+QLabel#WorkspaceNavigatorSubtitle,
+QLabel#WorkspaceLocatorEmpty,
+QLabel#WorkspaceNavigatorEmpty {
+    color: #94a3b8;
+    font-size: 12px;
+}
+QLabel#WorkspaceLocatorSection,
+QLabel#WorkspaceNavigatorSection {
+    color: #64748b;
+    /* font-size: 11px; */ /* polish: hardcoded value replaced by font_xs token to match sibling WorkspaceLocationSection rule (Sonnet 5 multi-agent review) */
+    font-size: 11px;
+    font-weight: 700;
+    padding-top: 4px;
+}
+QWidget#WorkspaceLocatorCurrent,
+QWidget#WorkspaceNavigatorCurrent {
+    background-color: rgba(15,118,110,0.06);
+    border: 1px solid rgba(15,23,42,0.13);
+    border-radius: 8px;
+}
+QLabel#WorkspaceLocatorProject,
+QLabel#WorkspaceNavigatorProject {
+    color: #17212b;
+    font-size: 12px;
+    font-weight: 600;
+}
+QLabel#WorkspaceLocatorShoot,
+QLabel#WorkspaceNavigatorWorkspace {
+    color: #0f766e;
+    font-size: 12px;
+}
+QPushButton#WorkspaceLocatorRecent,
+QPushButton#WorkspaceNavigatorRecent,
+QPushButton#WorkspaceLocatorPeer {
+    background-color: #ffffff;
+    border: 1px solid rgba(15,23,42,0.13);
+    /* border-radius: 6px; */ /* polish: hardcoded value replaced by radius_sm token to match WorkspaceLocationProject/Folder and WorkspaceRecentChip rules (Sonnet 5 multi-agent review) */
+    border-radius: 6px;
+    padding: 6px 10px;
+    text-align: left;
+    color: #17212b;
+}
+QPushButton#WorkspaceLocatorRecent:hover,
+QPushButton#WorkspaceNavigatorRecent:hover,
+QPushButton#WorkspaceLocatorPeer:hover {
+    border-color: #0f766e;
+    background-color: rgba(15,118,110,0.06);
+}
+QPushButton#WorkspaceLocatorManageAll {
+    color: #0f766e;
+    font-weight: 600;
+    text-align: left;
+    padding: 4px 2px;
+}
+/* polish: add missing :hover state, mirroring WorkspaceRecentChip:hover / sibling WorkspaceManageAll:hover, Sonnet 5 multi-agent review round 3 */
+QPushButton#WorkspaceLocatorManageAll:hover {
+    color: #0d9488;
+    background-color: rgba(15,118,110,0.06);
+}
+QMenu#WorkspaceLocationMenu {
+    background-color: #ffffff;
+    border: 1px solid rgba(15,23,42,0.13);
+    padding: 0;
+}
+QWidget#WorkspaceLocationPanel {
+    background-color: #ffffff;
+    border: none;
+}
+QLabel#WorkspaceLocationTitle {
+    color: #17212b;
+    font-size: 15px;
+    font-weight: 600;
+}
+QLabel#WorkspaceLocationSubtitle,
+QLabel#WorkspaceLocationHint {
+    color: #94a3b8;
+    font-size: 11px;
+}
+QLabel#WorkspaceLocationFieldLabel {
+    color: #64748b;
+    font-size: 11px;
+    font-weight: 600;
+}
+QLabel#WorkspaceLocationSection {
+    color: #334155;
+    font-size: 11px;
+    font-weight: 600;
+    padding-top: 5px;
+}
+QPushButton#WorkspaceLocationProject,
+QPushButton#WorkspaceLocationFolder {
+    min-height: 20px;
+    background-color: #eef2f6;
+    color: #17212b;
+    border: 1px solid rgba(15,23,42,0.08);
+    border-radius: 6px;
+    padding: 6px 9px;
+    text-align: left;
+    font-size: 12px;
+    font-weight: 600;
+}
+QLineEdit#WorkspaceLocationSearch {
+    min-height: 24px;
+}
+QPushButton#WorkspaceLocationSearchButton {
+    min-height: 24px;
+    padding: 5px 10px;
+}
+QPushButton#WorkspaceLocationProject:hover,
+QPushButton#WorkspaceLocationFolder:hover {
+    background-color: rgba(15,118,110,0.06);
+    border-color: #0f766e;
+}
+QPushButton#WorkspaceRecentChip {
+    min-height: 18px;
+    background-color: #eef2f6;
+    color: #334155;
+    border: 1px solid rgba(15,23,42,0.08);
+    border-radius: 6px;
+    padding: 5px 8px;
+    text-align: left;
+    font-size: 11px;
+}
+QPushButton#WorkspaceRecentChip:hover {
+    color: #0d9488;
+    border-color: #0f766e;
+    background-color: rgba(15,118,110,0.06);
+}
+QPushButton#WorkspaceNewSurveyProject,
+QPushButton#WorkspaceNewStandalone,
+QPushButton#WorkspaceAppendCurrent,
+QPushButton#WorkspaceOpenExisting,
+QPushButton#WorkspaceManageAll {
+    min-height: 21px;
+    background-color: #ffffff;
+    color: #334155;
+    border: 1px solid rgba(15,23,42,0.13);
+    border-radius: 6px;
+    padding: 6px 9px;
+    text-align: left;
+    font-size: 12px;
+    font-weight: 500;
+}
+QPushButton#WorkspaceNewSurveyProject,
+QPushButton#WorkspaceNewStandalone,
+QPushButton#WorkspaceAppendCurrent {
+    color: #0d9488;
+    border-color: rgba(15,118,110,0.11);
+    background-color: rgba(15,118,110,0.06);
+}
+QPushButton#WorkspaceNewSurveyProject:hover,
+QPushButton#WorkspaceNewStandalone:hover,
+QPushButton#WorkspaceAppendCurrent:hover,
+QPushButton#WorkspaceOpenExisting:hover,
+QPushButton#WorkspaceManageAll:hover {
+    color: #17212b;
+    border-color: #0f766e;
+    background-color: rgba(15,118,110,0.11);
 }
 QLabel#ActiveBadgeOn {
     background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #14b8a6, stop:1 #0f766e);
@@ -625,6 +794,63 @@ QLabel#WorkbenchSelectionText {
     font-weight: 500;
 }
 QFrame#Divider { background-color: rgba(15,23,42,0.08); max-height: 1px; min-height: 1px; border: none; }
+
+/* ── New / append project hierarchy dialog ───────────────────────── */
+QDialog#NewSurveyProjectDialog {
+    background-color: #f4f6f8;
+}
+QLabel#ProjectBuilderHeading {
+    color: #17212b;
+    font-size: 15px;
+    font-weight: 600;
+}
+QLabel#ProjectBuilderIntro, QLabel#ProjectBuilderHint {
+    color: #64748b;
+    font-size: 12px;
+}
+QLabel#ProjectBuilderSection {
+    color: #334155;
+    font-size: 12px;
+    font-weight: 600;
+}
+QTreeWidget#ProjectHierarchyTree {
+    background-color: #ffffff;
+    border: 1px solid rgba(15,23,42,0.13);
+    border-radius: 8px;
+    outline: 0;
+}
+QTreeWidget#ProjectHierarchyTree::item {
+    min-height: 38px;
+    border-bottom: 1px solid rgba(15,23,42,0.08);
+}
+/* polish: add missing ::item:hover, mirroring QTreeWidget#ProjectDirectoryTree::item:hover (app/views/project_tree_view.py), Sonnet 5 multi-agent review round 3 */
+QTreeWidget#ProjectHierarchyTree::item:hover {
+    background-color: rgba(15,118,110,0.06);
+}
+QTreeWidget#ProjectHierarchyTree::item:selected {
+    background-color: rgba(15,118,110,0.06);
+    color: #17212b;
+}
+QLineEdit#ProjectHierarchyName {
+    background-color: #ffffff;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    padding: 4px 8px;
+}
+QLineEdit#ProjectHierarchyName:hover {
+    border-color: rgba(15,23,42,0.13);
+}
+QLineEdit#ProjectHierarchyName:focus {
+    background-color: #eef2f6;
+    border-color: #0f766e;
+}
+QLabel#ProjectHierarchyPreview {
+    color: #64748b;
+    background-color: #eef2f6;
+    border: 1px solid rgba(15,23,42,0.08);
+    border-radius: 6px;
+    padding: 7px 10px;
+}
 
 /* ── Grouping tool popup (分组工具) ─────────────────────────────────── */
 /* Soft-gray dialog bg lets the inner WorkbenchSection card's shadow breathe

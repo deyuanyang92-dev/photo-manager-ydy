@@ -330,6 +330,151 @@ class TestTeamCodeUpdate:
         assert not svc.stop.called, "码没变不应重启服务"
 
 
+class TestTeamSetupClosedLoop:
+    @staticmethod
+    def _running_ctx():
+        ctx = MagicMock()
+        ctx.settings = MagicMock()
+        ctx.settings.team_code = "TEAM-SAVED-001"
+        ctx.settings.operator_name = "小王"
+        ctx.settings.collab_enabled = True
+        ctx.current_project_dir = ""
+        svc = MagicMock()
+        running = [True]
+        svc.group_code = "TEAM-SAVED-001"
+        svc.is_running.side_effect = lambda: running[0]
+        svc.stop.side_effect = lambda: running.__setitem__(0, False)
+        svc.local_address.return_value = "192.168.1.10:5050"
+        svc.peers.return_value = []
+        svc.store.all.return_value = []
+        ctx.collab_service = svc
+        ctx.ensure_collab_service.return_value = svc
+        return ctx, svc
+
+    def test_saved_running_state_is_read_only_with_edit_action(self, qtbot):
+        from app.views.collab_view import CollabView
+
+        ctx, _svc = self._running_ctx()
+        view = CollabView(ctx)
+        qtbot.addWidget(view)
+
+        assert view._team_code_edit.isReadOnly()
+        assert view._team_operator_edit.isReadOnly()
+        assert view._team_save_btn.isHidden()
+        assert not view._setup_btn.isHidden()
+        assert view._setup_btn.text() == "修改永久码"
+
+    def test_cancel_edit_restores_saved_values(self, qtbot):
+        from app.views.collab_view import CollabView
+
+        ctx, _svc = self._running_ctx()
+        view = CollabView(ctx)
+        qtbot.addWidget(view)
+
+        view._begin_team_edit()
+        assert not view._team_code_edit.isReadOnly()
+        assert view._team_save_btn.text() == "保存修改"
+        assert not view._team_cancel_btn.isHidden()
+        view._team_code_edit.setText("TEAM-NOT-SAVED")
+        view._team_operator_edit.setText("未保存名字")
+
+        view._cancel_team_edit()
+
+        assert view._team_code_edit.text() == "TEAM-SAVED-001"
+        assert view._team_operator_edit.text() == "小王"
+        assert view._team_code_edit.isReadOnly()
+        assert "未保存任何更改" in view._team_setup_status.text()
+
+    def test_successful_edit_returns_to_read_only_state(self, qtbot):
+        from app.views.collab_view import CollabView
+
+        ctx, svc = self._running_ctx()
+        view = CollabView(ctx)
+        qtbot.addWidget(view)
+        view._begin_team_edit()
+        view._team_operator_edit.setText("小李")
+
+        view._save_team_setup_inline()
+
+        assert view._team_code_edit.isReadOnly()
+        assert view._team_save_btn.isHidden()
+        assert not view._setup_btn.isHidden()
+        assert view._team_setup_status.text() == "修改已保存。"
+        assert not svc.stop.called
+
+    def test_background_refresh_preserves_midedit_input(self, qtbot):
+        # BUG 1: 用户点“修改永久码”进入编辑态后，一次后台刷新
+        # (_refresh_team_setup_panel，如 on_activate / 设备刷新触发) 不得用
+        # 已保存值回填、冲掉用户尚未保存的输入。
+        from app.views.collab_view import CollabView
+
+        ctx, _svc = self._running_ctx()
+        view = CollabView(ctx)
+        qtbot.addWidget(view)
+
+        view._begin_team_edit()
+        assert view._team_editing is True
+        view._team_code_edit.setText("TEAM-EDITING-XYZ")
+        view._team_operator_edit.setText("编辑中的名字")
+
+        # 模拟后台刷新
+        view._refresh_team_setup_panel()
+
+        assert view._team_code_edit.text() == "TEAM-EDITING-XYZ"
+        assert view._team_operator_edit.text() == "编辑中的名字"
+
+
+class TestCollabPageNavigationAndResponsiveLayout:
+    def test_page_activation_does_not_start_network_service(
+        self, qtbot, mock_ctx_with_service
+    ):
+        from app.views.collab_view import CollabView
+
+        svc = mock_ctx_with_service.collab_service
+        svc.store.list_tasks.return_value = []
+        view = CollabView(mock_ctx_with_service)
+        qtbot.addWidget(view)
+
+        view.on_activate()
+
+        svc.ensure_running.assert_not_called()
+
+    def test_short_window_scrolls_instead_of_clipping_page(self, qtbot, mock_ctx):
+        from PyQt6.QtCore import Qt
+        from app.views.collab_view import CollabView
+
+        view = CollabView(mock_ctx)
+        qtbot.addWidget(view)
+        view.resize(940, 480)
+        view.show()
+        qtbot.wait(10)
+
+        assert view._page_scroll.widgetResizable()
+        assert (
+            view._page_scroll.horizontalScrollBarPolicy()
+            == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        assert view._page_scroll.verticalScrollBar().maximum() > 0
+
+    def test_narrow_window_reflows_header_and_method_cards(self, qtbot, mock_ctx):
+        from PyQt6.QtWidgets import QBoxLayout
+        from app.views.collab_view import CollabView
+
+        view = CollabView(mock_ctx)
+        qtbot.addWidget(view)
+        view.show()
+
+        view.resize(1400, 900)
+        qtbot.wait(10)
+        assert view._header_layout.direction() == QBoxLayout.Direction.LeftToRight
+        assert view._method_layout.direction() == QBoxLayout.Direction.LeftToRight
+
+        view.resize(940, 700)
+        qtbot.wait(10)
+        assert view._header_layout.direction() == QBoxLayout.Direction.TopToBottom
+        assert view._method_layout.direction() == QBoxLayout.Direction.TopToBottom
+
+
 class TestGuidePulse:
     """v0.56 醒目引导: 未完成时呼吸脉冲, 切走页面必停(项目 QTimer 泄漏红线)。"""
 

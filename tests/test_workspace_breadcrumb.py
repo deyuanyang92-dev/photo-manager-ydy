@@ -1,16 +1,13 @@
-"""test_workspace_breadcrumb.py — 顶栏工作区面包屑（OM 路径条式）.
+"""test_workspace_breadcrumb.py — 顶栏项目与照片保存位置入口.
 
 契约：
   - breadcrumb_chain(root, ws)：根→当前工作区的 (name, path) 链；不在根下→只剩叶子；
     无工作区→空链。
   - sibling_dirs(ws)：同级目录（含自身），过滤文件/点号目录/RESERVED_DIR_NAMES，排序。
   - WorkspaceBreadcrumb：
-      * 无项目 → text() 含「选择工作区」，点击 → 打开工作区菜单（含项目总览）。
+      * 无项目 → text() 含「新建或打开项目」，点击 → 打开场景化入口。
       * 有链   → text() = "根 / 断面A / B2"（>3 级折叠中间为 …）。
-      * ◀ ▶   → 访问历史后退/前进（浏览器式），走 project_service.enter_workspace
-                （唯一入口），成功后发 workspace_changed；首/末端禁用，不回绕。
-                中途回退后再切新工作区 → 截断前向分支。同级切换改走 ▾ 下拉。
-      * 根即工作区（chain==1）只要有历史也能 ◀▶（修复「光秃秃无箭头」）。
+      * 访问历史保留为内部能力，不在顶栏显示一组含义不清的小箭头。
       * 叶子下拉 → 本项目内 / 磁盘上的其他项目 / 最近使用 / 新建文件夹分组；
                 已是工作区的标「· 工作区」；新建在当前工作区父目录下建新文件夹并进入；
                 拒 / \\ .. 空。
@@ -27,7 +24,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 
-from PyQt6.QtWidgets import QApplication, QLabel, QPushButton, QWidget
+from PyQt6.QtWidgets import QApplication, QLabel, QLineEdit, QPushButton, QWidget
 
 from app.widgets.workspace_breadcrumb import (
     WorkspaceBreadcrumb,
@@ -153,23 +150,22 @@ def test_sibling_project_dirs_lists_project_root_peers(tmp_path):
 def test_widget_no_project_placeholder():
     w = WorkspaceBreadcrumb(_Ctx())
     w.refresh()
-    assert "选择项目或拍摄目录" in w.text()
-    assert w._btn_folder is None
+    assert "新建或打开项目" in w.text()
+    assert w._btn_folder is w._placeholder_btn
+    assert w._btn_menu is w._placeholder_btn
+    assert w._placeholder_btn.objectName() == "WorkspaceLocationSwitcher"
     got = []
     w.navigate_requested.connect(got.append)
     menu = w._build_placeholder_menu()
-    labels = [a.text() for a in menu.actions() if not a.isSeparator()]
-    assert any("最近使用" in s for s in labels)
-    assert any("选择已有文件夹" in s for s in labels)
-    # 用户 2026-07-12: 顶栏「选择工作区 ▾」里也要能一次建好「项目 + 采样点」
-    # §7 旧: assert any("新建工作区" in s for s in labels)
     panel = menu.findChild(QWidget, "WorkspaceLocationPanel")
     assert panel is not None
-    buttons = [b.text() for b in panel.findChildren(QPushButton)]
-    assert "＋ 项目" in buttons
-    assert "＋ 下级目录" in buttons
-    tree = next(a for a in menu.actions() if "打开项目树" in a.text())
-    tree.trigger()
+    buttons = {b.text(): b for b in panel.findChildren(QPushButton)}
+    assert "＋ 新建调查项目" in buttons
+    assert "＋ 独立工作区" in buttons
+    assert "＋ 追加到当前项目…" in buttons
+    assert "打开已有项目或工作区" in buttons
+    assert "管理全部项目" in buttons
+    buttons["管理全部项目"].click()
     assert got == ["project_tree"]
 
 
@@ -180,18 +176,50 @@ def test_topbar_location_panel_shows_project_and_save_folder(tmp_path):
     w = WorkspaceBreadcrumb(_Ctx(str(workspace), str(root)))
 
     menu = w._btn_folder.menu()
+    w._populate_workspace_menu(menu)
     panel = menu.findChild(QWidget, "WorkspaceLocationPanel")
     assert panel is not None
     buttons = [b.text() for b in panel.findChildren(QPushButton)]
     labels = [x.text() for x in panel.findChildren(QLabel)]
 
-    # §7 旧断言: buttons == ["＋ 项目", "＋ 下级目录"] 且项目/目录是 QLabel。
-    #   2026-07-13 面板 v2: 项目/保存目录改成**可点下拉**(切换用, 用户: 死按键都要能用),
-    #   顶部还可能有「最近」chips —— 按钮集合变成超集, 断言改为包含式。
-    assert "＋ 项目" in buttons
-    assert "＋ 下级目录" in buttons
+    assert "＋ 新建调查项目" in buttons
+    assert "＋ 独立工作区" in buttons
     assert any("江苏盐城2026" in b for b in buttons), buttons
     assert any("断面A" in b for b in buttons), buttons
+    assert "项目" in labels
+    assert "拍摄位置" in labels
+
+
+def test_unified_location_panel_searches_the_global_project_tree(tmp_path):
+    root, sect = _make_tree(tmp_path)
+    w = WorkspaceBreadcrumb(_Ctx(str(sect / "B2"), str(root)))
+    menu = w._btn_folder.menu()
+    w._populate_workspace_menu(menu)
+    panel = menu.findChild(QWidget, "WorkspaceLocationPanel")
+    search = panel.findChild(QLineEdit, "WorkspaceLocationSearch")
+    got = []
+    w.project_search_requested.connect(got.append)
+
+    search.setText("断面A")
+    search.returnPressed.emit()
+
+    assert got == ["断面A"]
+
+
+def test_location_panel_append_action_uses_current_project(tmp_path):
+    root, sect = _make_tree(tmp_path)
+    w = WorkspaceBreadcrumb(_Ctx(str(sect / "B2"), str(root)))
+    menu = w._btn_folder.menu()
+    w._populate_workspace_menu(menu)
+    panel = menu.findChild(QWidget, "WorkspaceLocationPanel")
+    append = panel.findChild(QPushButton, "WorkspaceAppendCurrent")
+    got = []
+    w.new_project_child_requested.connect(lambda: got.append(True))
+
+    assert append.isEnabled()
+    append.click()
+
+    assert got == [True]
 
 
 def test_placeholder_menu_lists_recent_workspaces(tmp_path, monkeypatch):
@@ -217,10 +245,14 @@ def test_placeholder_menu_lists_recent_workspaces(tmp_path, monkeypatch):
     w.refresh()
 
     menu = w._build_placeholder_menu()
-    recent_menu = next(a.menu() for a in menu.actions() if a.menu() and "最近使用" in a.text())
-    labels = [a.text() for a in recent_menu.actions()]
+    panel = menu.findChild(QWidget, "WorkspaceLocationPanel")
+    labels = [
+        button.text()
+        for button in panel.findChildren(QPushButton)
+        if button.objectName() == "WorkspaceRecentChip"
+    ]
 
-    assert any("航次2026 / 断面A" in s for s in labels)
+    assert any("航次2026" in label and "断面A" in label for label in labels)
 
 
 def test_widget_shows_chain(tmp_path):
@@ -264,14 +296,54 @@ def test_widget_collapses_deep_chain(tmp_path):
     assert "a" not in t.split("…")[1]  # 中间层被折叠
 
 
-def test_ancestor_click_jumps_to_tree(tmp_path):
+def test_location_switcher_consolidates_chain_and_keeps_tree_entry(tmp_path):
     root, sect = _make_tree(tmp_path)
     w = WorkspaceBreadcrumb(_Ctx(str(sect / "B2"), str(root)))
     w.refresh()
     got = []
     w.navigate_requested.connect(got.append)
-    w._segment_btns[0].click()  # 根段
+
+    assert w._segment_btns == []
+    assert w._btn_menu is w._leaf_btn
+    assert w._btn_folder is w._leaf_btn
+    assert "航次2026 › 断面A › B2" == w._leaf_btn.text()
+    assert w._leaf_btn.menu().parent() is w._leaf_btn
+    menu = w._leaf_btn.menu()
+    w._populate_workspace_menu(menu)
+    panel = menu.findChild(QWidget, "WorkspaceLocationPanel")
+    tree = panel.findChild(QPushButton, "WorkspaceManageAll")
+    tree.click()
     assert got == ["project_tree"]
+
+
+def test_topbar_does_not_render_history_arrow_group(tmp_path):
+    root, sect = _make_tree(tmp_path)
+    w = WorkspaceBreadcrumb(_Ctx(str(sect / "B2"), str(root)))
+
+    assert w._btn_prev is None
+    assert w._btn_next is None
+    assert w.findChild(QWidget, "WorkspaceHistoryNav") is None
+
+
+def test_topbar_stays_a_single_location_control(tmp_path):
+    root, sect = _make_tree(tmp_path)
+    ctx = _Ctx(str(sect / "B2"), str(root))
+    w = WorkspaceBreadcrumb(ctx)
+
+    assert w.text() == "航次2026 › 断面A › B2"
+    assert w._segment_btns == []
+    assert not hasattr(w, "_settings_btn")
+    assert w._leaf_btn.objectName() == "WorkspaceLocationSwitcher"
+
+
+def test_refresh_preserves_parent_update_suppression(tmp_path):
+    root, sect = _make_tree(tmp_path)
+    w = WorkspaceBreadcrumb(_Ctx(str(sect / "B2"), str(root)))
+    w.setUpdatesEnabled(False)
+
+    w.refresh()
+
+    assert not w.updatesEnabled()
 
 
 def _patch_enter(monkeypatch, calls):
@@ -292,10 +364,10 @@ def test_history_seeds_on_refresh(tmp_path):
     w.refresh()
     assert w._history == [str((sect / "B2").resolve())]
     assert w._history_pos == 0
-    assert not w._btn_prev.isEnabled() and not w._btn_next.isEnabled()
+    assert w._btn_prev is None and w._btn_next is None
 
 
-def test_arrow_back_forward_navigates_history(tmp_path, monkeypatch):
+def test_internal_back_forward_navigates_history(tmp_path, monkeypatch):
     root, sect = _make_tree(tmp_path)
     ctx = _Ctx(str(sect / "B2"), str(root))
     w = WorkspaceBreadcrumb(ctx)
@@ -308,14 +380,12 @@ def test_arrow_back_forward_navigates_history(tmp_path, monkeypatch):
     assert w._history == [str((sect / "B2").resolve()),
                           str((sect / "B3").resolve())]
     assert w._history_pos == 1
-    assert w._btn_prev.isEnabled() and not w._btn_next.isEnabled()
-    # ◀ 回 B2
-    w._btn_prev.click()
+    # 内部历史回到 B2
+    w._history_step(-1)
     assert os.path.basename(calls[-1][0]) == "B2"
     assert w._history_pos == 0
-    assert not w._btn_prev.isEnabled() and w._btn_next.isEnabled()
-    # ▶ 前 B3
-    w._btn_next.click()
+    # 再前进到 B3
+    w._history_step(+1)
     assert os.path.basename(calls[-1][0]) == "B3"
     assert w._history_pos == 1
     assert changed  # 每次切换都发 workspace_changed
@@ -327,14 +397,16 @@ def test_history_branch_truncates(tmp_path, monkeypatch):
     w = WorkspaceBreadcrumb(ctx)
     w.refresh()
     _patch_enter(monkeypatch, [])
-    # B2 → B3 → ◀回B2 → 切B1：B3 应被截断
+    # B2 → B3 → 回B2 → 切B1：B3 应被截断
     w._switch_to(str(sect / "B3"))
-    w._btn_prev.click()                      # 回 B2 (pos0)
+    w._history_step(-1)                      # 回 B2 (pos0)
     w._switch_to(str(sect / "B1"))           # 新分支
     assert w._history == [str((sect / "B2").resolve()),
                           str((sect / "B1").resolve())]
     assert w._history_pos == 1
-    assert not w._btn_next.isEnabled()       # B3 已丢，无前进
+    before = w._history_pos
+    w._history_step(+1)
+    assert w._history_pos == before          # B3 已丢，无前进
 
 
 def test_history_no_wraparound(tmp_path, monkeypatch):
@@ -345,9 +417,9 @@ def test_history_no_wraparound(tmp_path, monkeypatch):
     calls = []
     _patch_enter(monkeypatch, calls)
     n_before = len(calls)
-    # 只有一条历史时 ◀▶ 都不动作
-    w._btn_prev.click()
-    w._btn_next.click()
+    # 只有一条历史时前后移动都不动作
+    w._history_step(-1)
+    w._history_step(+1)
     assert len(calls) == n_before
 
 
@@ -365,19 +437,21 @@ def test_external_switch_recorded(tmp_path, monkeypatch):
     assert w._history[-1] == str((sect / "B1").resolve())
 
 
-def test_root_workspace_navigates_when_history(tmp_path, monkeypatch):
-    """根即工作区（chain==1）只要有历史也能 ◀▶ —— 修复光秃秃无箭头."""
+def test_root_workspace_keeps_internal_history(tmp_path, monkeypatch):
+    """根即工作区时访问历史仍有效，但顶栏不显示箭头."""
     root, _ = _make_tree(tmp_path)
     other = tmp_path / "另一航次"
     other.mkdir()
     ctx = _Ctx(str(root), str(root))
     w = WorkspaceBreadcrumb(ctx)
     w.refresh()
-    assert not w._btn_prev.isEnabled()       # 单条历史，两箭头禁
+    assert w._btn_prev is None and w._btn_next is None
     _patch_enter(monkeypatch, [])
     w._switch_to(str(other))                 # 切别处建历史
-    w._btn_prev.click()                      # 回 root
-    assert w._btn_next.isEnabled()           # 有前进
+    w._history_step(-1)                      # 回 root
+    assert w._history_pos == 0
+    w._history_step(+1)                      # 可再次前进
+    assert w._history_pos == 1
 
 
 # ── ▾ + 新建文件夹 ──────────────────────────────────────────────────────
@@ -585,11 +659,66 @@ def test_recent_workspace_switch_uses_recorded_root(tmp_path, monkeypatch):
     assert str(other.resolve()) in w._history
 
 
+def test_recent_workspaces_excludes_project_only_records(tmp_path, monkeypatch):
+    import json
+    from app.services import project_service
+
+    root = tmp_path / "广西调查2026"
+    workspace = root / "北海区域" / "断面A"
+    workspace.mkdir(parents=True)
+    recent_json = tmp_path / "user_projects.json"
+    recent_json.write_text(json.dumps({
+        "version": 1,
+        "projects": [
+            {"name": root.name, "directory": str(root), "isProjectRoot": True},
+            {"name": workspace.name, "directory": str(workspace), "root": str(root)},
+        ],
+    }, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(
+        project_service, "default_user_projects_json_path", lambda: str(recent_json)
+    )
+
+    w = WorkspaceBreadcrumb(_Ctx())
+    recent = w._recent_workspaces()
+
+    assert [item["directory"] for item in recent] == [str(workspace.resolve())]
+
+
 def test_recent_label_adds_parent_for_short_names():
     item = {"name": "ce", "directory": "/tmp/survey/ce"}
     assert WorkspaceBreadcrumb._recent_label(item) == "survey / ce"
     item2 = {"name": "survey / ce", "directory": "/tmp/survey/ce"}
     assert WorkspaceBreadcrumb._recent_label(item2) == "survey / ce"
+
+
+# ── 定位台变体：主按钮真的进入工作台 ──────────────────────────────────────
+
+
+def test_locator_enter_button_navigates_to_workbench(tmp_path):
+    """定位台(第11种)「进入照片工作台」主按钮必须真进入工作台，而非仅关闭菜单.
+
+    回归：该按钮曾只连 menu.close()，点了没反应（与 om_capture 变体死按钮同类）。
+    """
+    from PyQt6.QtWidgets import QMenu
+
+    root, sect = _make_tree(tmp_path)
+    w = WorkspaceBreadcrumb(_Ctx(str(sect / "B2"), str(root)))
+    w._mode_override = "locator"
+    w.refresh()
+    got = []
+    w.navigate_requested.connect(got.append)
+
+    menu = QMenu()
+    panel = w._add_locator_panel(menu)
+    enter_btn = next(
+        b for b in panel.findChildren(QPushButton)
+        if b.text() == "进入照片工作台"
+    )
+    assert enter_btn.isEnabled()  # 有工作区 → 主按钮应可点
+
+    enter_btn.click()
+
+    assert got == ["workbench"]
 
 
 # ── MainWindow 集成 ──────────────────────────────────────────────────────
@@ -626,7 +755,7 @@ def test_shows_project_name_when_root_set_but_no_workspace(qtbot, tmp_path):
 
     text = w.text()
     assert "江苏盐城2026" in text
-    assert "未选拍摄目录" in text
+    assert "尚未选择拍摄位置" in text
 
 
 def test_still_plain_placeholder_when_no_root(qtbot):
@@ -636,4 +765,4 @@ def test_still_plain_placeholder_when_no_root(qtbot):
 
     w.refresh()
 
-    assert "选择项目或拍摄目录" in w.text()
+    assert "新建或打开项目" in w.text()

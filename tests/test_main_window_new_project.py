@@ -30,7 +30,9 @@ def win(qtbot):
     return w
 
 
-def _fake_dialog(monkeypatch, parent_dir: Path, name: str) -> None:
+def _fake_dialog(
+    monkeypatch, parent_dir: Path, name: str, structure: list[dict] | None = None
+) -> None:
     class _FakeDlg:
         def __init__(self, *a, **kw):
             pass
@@ -39,7 +41,10 @@ def _fake_dialog(monkeypatch, parent_dir: Path, name: str) -> None:
             return QDialog.DialogCode.Accepted
 
         def values(self):
-            return {"parent_dir": str(parent_dir), "name": name}
+            values = {"parent_dir": str(parent_dir), "name": name}
+            if structure is not None:
+                values["structure"] = structure
+            return values
 
     monkeypatch.setattr(
         "app.widgets.new_survey_project_dialog.NewSurveyProjectDialog", _FakeDlg
@@ -99,12 +104,45 @@ def test_new_project_lands_on_project_tree(win, tmp_path, monkeypatch):
     assert getattr(current, "view_id", None) == "project_tree"
 
 
-def test_opening_project_tree_resets_b2_root_filter(win, tmp_path):
-    """项目树是全局入口；当前拍摄目录不能把它锁成 B2 专属页面。"""
-    b2 = tmp_path / "项目A" / "断面A" / "B2"
+def test_new_project_can_create_full_hierarchy_and_enter_first_workspace(
+    win, tmp_path, monkeypatch
+):
+    structure = [{
+        "name": "北海区域",
+        "type": "区域",
+        "is_workspace": False,
+        "children": [{
+            "name": "断面A",
+            "type": "断面",
+            "is_workspace": True,
+            "children": [],
+        }],
+    }]
+    _fake_dialog(monkeypatch, tmp_path, "广西调查2026", structure)
+
+    win._on_new_survey_project()
+
+    workspace = tmp_path / "广西调查2026" / "北海区域" / "断面A"
+    assert win.ctx.current_project_dir == str(workspace.resolve())
+    assert win.ctx.current_project_root == str((tmp_path / "广西调查2026").resolve())
+    assert getattr(win._stack.currentWidget(), "view_id", None) == "workbench"
+    assert (workspace / "incoming-jpg").is_dir()
+
+
+def test_opening_project_tree_keeps_global_scope_and_selects_workspace(win, tmp_path):
+    """顶栏工作区只负责定位；项目树仍须显示全部已登记项目。"""
+    from app.services.project_service import register_project_root
+
+    root = tmp_path / "项目A"
+    b2 = root / "断面A" / "B2"
     b2.mkdir(parents=True)
+    other = tmp_path / "项目B"
+    other.mkdir()
+    register_project_root(str(root), name="项目A")
+    register_project_root(str(other), name="项目B")
     win.ctx.current_project_dir = str(b2)
-    win.ctx.settings.project_tree_root = str(b2)
+    win.ctx.current_project_root = str(root)
+    win.ctx.settings.project_tree_root = str(root)
     win.ctx.settings.project_tree_view_mode = "rooted"
 
     win.navigate_to("project_tree")
@@ -113,23 +151,53 @@ def test_opening_project_tree_resets_b2_root_filter(win, tmp_path):
     assert getattr(tree, "view_id", None) == "project_tree"
     assert win.ctx.settings.project_tree_view_mode == "all"
     assert tree._root is None
-    assert str(b2) not in tree._root_lbl.text()
+    top_names = [
+        tree._tree.topLevelItem(i).text(0)
+        for i in range(tree._tree.topLevelItemCount())
+    ]
+    assert any("项目A" in name for name in top_names)
+    assert any("项目B" in name for name in top_names)
+    assert tree._detail_path.text() == str(b2.resolve())
+    assert tree._tree.currentItem().text(0) == "B2"
 
 
 def test_topbar_new_child_creates_directly_under_current_project(
     win, tmp_path, monkeypatch
 ):
-    """OM-style top-bar entry must target the project container, not a stale node."""
+    """Top-bar append targets the current project and may create a workspace."""
     root = tmp_path / "江苏盐城2026"
     root.mkdir()
     win.ctx.settings.project_tree_root = str(root)
     win.ctx.current_project_root = str(root)
+
+    class _FakeAppendDialog:
+        def __init__(self, *args, **kwargs):
+            assert kwargs["append_target_dir"] == str(root)
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+        def values(self):
+            return {
+                "mode": "append",
+                "target_dir": str(root),
+                "project_root": "",
+                "structure": [{
+                    "name": "断面A",
+                    "type": "断面",
+                    "is_workspace": True,
+                    "children": [],
+                }],
+            }
+
     monkeypatch.setattr(
-        "app.views.project_tree_view.QInputDialog.getText",
-        lambda *a, **kw: ("断面A", True),
+        "app.widgets.new_survey_project_dialog.NewSurveyProjectDialog",
+        _FakeAppendDialog,
     )
+    monkeypatch.setattr("app.utils.ui.info", lambda *a, **kw: None)
 
     win._on_new_project_child()
 
     assert (root / "断面A").is_dir()
-    assert not (root / "断面A" / "_data").exists()
+    assert (root / "断面A" / "_data" / "project.db").is_file()
+    assert (root / "断面A" / "incoming-jpg").is_dir()
