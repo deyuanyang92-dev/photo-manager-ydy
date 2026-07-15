@@ -101,6 +101,9 @@ class ResultsColumn(QWidget):
     tiff_naming_check_requested = pyqtSignal(str)  # tiff_path
     tiff_naming_check_many_requested = pyqtSignal(list)  # selected TIFF paths
     tiff_delete_requested = pyqtSignal(str)  # tiff_path
+    # Claude Code 修改 2026-07-15 — 手动删除 ZIP 入口新增(用户 2026-07-12 裁定:
+    # 断电残留的孤儿 ZIP 之前删不掉, 右键菜单没有这一项)。
+    zip_delete_requested = pyqtSignal(str)  # zip_path
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -332,6 +335,7 @@ class ResultsColumn(QWidget):
                     self._display_info(zinfo), open_fn=self._open_in_explorer,
                     restore_fn=lambda p: self.restore_requested.emit(p),
                     link_fn=self._emit_link_result,
+                    delete_fn=self._emit_zip_delete,
                     paired_tiff=(tinfo or {}).get("path", "") if tinfo else "",
                     select_fn=self._toggle_result_selection,
                     selected=self._is_result_selected(zinfo.get("path", "")),
@@ -436,6 +440,7 @@ class ResultsColumn(QWidget):
                         self._display_info(zinfo), open_fn=self._open_in_explorer,
                         restore_fn=lambda p: self.restore_requested.emit(p),
                         link_fn=self._emit_link_result,
+                        delete_fn=self._emit_zip_delete,
                         paired_tiff=(tinfo or {}).get("path", "") if tinfo else "",
                         select_fn=self._toggle_result_selection,
                         selected=self._is_result_selected(zinfo.get("path", "")),
@@ -483,6 +488,9 @@ class ResultsColumn(QWidget):
 
     def _emit_tiff_delete(self, tiff_path: str) -> None:
         self.tiff_delete_requested.emit(tiff_path or "")
+
+    def _emit_zip_delete(self, zip_path: str) -> None:
+        self.zip_delete_requested.emit(zip_path or "")
 
     def selected_result_paths(self) -> list[str]:
         return sorted(self._selected_result_paths)

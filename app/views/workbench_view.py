@@ -399,6 +399,12 @@ class WorkbenchView(WorkbenchSpecimenIdentityMixin, WorkbenchMediaWorkflowMixin,
         self._monitor.assign_requested.connect(self._on_assign_jpg)
         self._monitor.unassign_requested.connect(self._on_unassign_jpg)
         self._monitor.add_jpg_requested.connect(self._on_add_jpg_files)
+        self._monitor.tiff_recognition_requested.connect(
+            self._on_monitor_tiff_recognition
+        )
+        self._monitor.incoming_tiff_recognition_requested.connect(
+            self._on_incoming_tiff_recognition
+        )
         self._monitor.external_jpgs_dropped.connect(self._on_external_jpgs_dropped)
         self._monitor.clear_pending_requested.connect(self._on_clear_pending_queue)
         self._monitor.grouping_requested.connect(self._on_open_grouping)
@@ -486,6 +492,8 @@ class WorkbenchView(WorkbenchSpecimenIdentityMixin, WorkbenchMediaWorkflowMixin,
             lambda paths: self._run_tiff_naming_check(paths=list(paths or []))
         )
         self._results.tiff_delete_requested.connect(self._on_delete_result_tiff_path)
+        # Claude Code 修改 2026-07-15 — 手动删除 ZIP 入口新增(用户 2026-07-12 裁定)
+        self._results.zip_delete_requested.connect(self._on_delete_result_zip_path)
         centre.addWidget(self._results)
 
         centre.setStretchFactor(0, 3)
@@ -856,16 +864,9 @@ class WorkbenchView(WorkbenchSpecimenIdentityMixin, WorkbenchMediaWorkflowMixin,
         self._fs_watcher.removePaths(self._fs_watcher.directories())
         self._monitor_scan_pending = False
         self._monitor_scan_request_id += 1
-        try:
-            from PyQt6.QtGui import QPixmapCache
-            from app.utils.image_thumbnail import clear_thumbnail_cache
-            from app.widgets.monitor_panel import clear_file_thumb_cache
-
-            clear_thumbnail_cache()
-            clear_file_thumb_cache()
-            QPixmapCache.clear()
-        except Exception:  # noqa: BLE001
-            pass
+        # Navigation is not a cache-invalidation event. Clearing the bounded
+        # memory and disk caches here forced the same thumbnails to be decoded
+        # and painted card by card every time the user returned.
 
     def stop_background_work(self) -> None:
         """Cancel an in-flight Helicon compose so its subprocess + QThread

@@ -49,7 +49,23 @@ jobs:
 
       - name: Build portable Windows package
         shell: pwsh
-        run: powershell -ExecutionPolicy Bypass -File .\scripts\build_windows.ps1
+        # Claude Code 修改 2026-07-15 — codex 回归指出: release.yml 从未把签名私钥
+        # 传给 build_windows.ps1, 该脚本私钥缺失时只警告不报错(这对本地/日常CI
+        # 打包烟测是对的, 不该改), 但对"正式发布"来说必须签名, 否则应用端已强制
+        # 验签却收到无签名官方包, 内置更新器会拒绝安装自己的新版本。这里通过
+        # SPECIMEN_UPDATE_PRIVATE_KEY 注入密钥(来自仓库 Secret), 下一步再硬性校验
+        # .sig 确实产出。
+        env:
+          SPECIMEN_UPDATE_PRIVATE_KEY_CONTENT: ${{ secrets.UPDATE_SIGNING_PRIVATE_KEY }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:SPECIMEN_UPDATE_PRIVATE_KEY_CONTENT)) {
+            throw "Secret UPDATE_SIGNING_PRIVATE_KEY is not configured. A tagged release must be signed — add the private key PEM (secrets/update_private_key.pem) as a repository secret named UPDATE_SIGNING_PRIVATE_KEY before releasing."
+          }
+          $keyPath = Join-Path $env:RUNNER_TEMP "update_private_key.pem"
+          Set-Content -Path $keyPath -Value $env:SPECIMEN_UPDATE_PRIVATE_KEY_CONTENT -NoNewline
+          $env:SPECIMEN_UPDATE_PRIVATE_KEY = $keyPath
+          powershell -ExecutionPolicy Bypass -File .\scripts\build_windows.ps1
+          Remove-Item -Path $keyPath -Force -ErrorAction SilentlyContinue
 
       - name: Resolve package path
         id: package
@@ -57,8 +73,16 @@ jobs:
         run: |
           $zip = Get-ChildItem dist -Filter 'SpecimenPhotoWorkbench-*-win64.zip' | Select-Object -First 1
           if (-not $zip) { throw 'Windows ZIP was not produced' }
+          $sig = "$($zip.FullName).sig"
+          # Claude Code 修改 2026-07-15 — 正式发布硬性要求 .sig 必须产出, 否则宁可
+          # 让本次发布失败, 也不能放一个应用端会拒绝安装的未签名包出去。
+          if (-not (Test-Path -LiteralPath $sig)) {
+            throw "Release ZIP was built but not signed (.sig missing) — refusing to publish an unsigned official release."
+          }
           "zip=$($zip.FullName)" >> $env:GITHUB_OUTPUT
           "name=$($zip.Name)" >> $env:GITHUB_OUTPUT
+          "sig=$sig" >> $env:GITHUB_OUTPUT
+          "signame=$($zip.Name).sig" >> $env:GITHUB_OUTPUT
 
       - name: Upload package artifact
         uses: actions/upload-artifact@v4
@@ -67,15 +91,23 @@ jobs:
           path: ${{ steps.package.outputs.zip }}
           if-no-files-found: error
 
+      - name: Upload signature artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.signame }}
+          path: ${{ steps.package.outputs.sig }}
+          if-no-files-found: error
+
       - name: Create or update GitHub Release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
           ZIP_PATH: ${{ steps.package.outputs.zip }}
+          SIG_PATH: ${{ steps.package.outputs.sig }}
         run: |
           if (gh release view $env:RELEASE_TAG 2>$null) {
-            gh release upload $env:RELEASE_TAG $env:ZIP_PATH --clobber
+            gh release upload $env:RELEASE_TAG $env:ZIP_PATH $env:SIG_PATH --clobber
           } else {
-            gh release create $env:RELEASE_TAG $env:ZIP_PATH --title $env:RELEASE_TAG --notes "Automated Windows portable build."
+            gh release create $env:RELEASE_TAG $env:ZIP_PATH $env:SIG_PATH --title $env:RELEASE_TAG --notes "Automated Windows portable build."
           }

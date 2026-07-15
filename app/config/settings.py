@@ -9,12 +9,21 @@ from typing import Optional
 
 from PyQt6.QtCore import QSettings, QByteArray
 
+from app.config.window_layout import (
+    WINDOW_GEOMETRY_POLICY_KEY,
+    WINDOW_GEOMETRY_POLICY_VERSION,
+)
+
 
 _ORG = "SpecimenPhotoWorkbench"
 _APP = "标本照片工作台"
 _DELETE_JPG_DEFAULT_MIGRATION_KEY = "archive/delete_jpg_default_v2_applied"
 _ARCHIVE_MODE_V2_MIGRATION_KEY = "archive/mode_v2_fast_default_applied"
-
+_WORKSPACE_SWITCHER_MODES = {
+    "classic", "navigator", "triple", "om_capture", "dual",
+    "breadcrumb", "omnibox", "history", "scenes", "instrument",
+    "locator",
+}
 
 class AppSettings:
     """Thin wrapper around QSettings using IniFormat for portability."""
@@ -42,8 +51,17 @@ class AppSettings:
 
     def save_geometry(self, geometry: QByteArray) -> None:
         self._qs.setValue("window/geometry", geometry)
+        self._qs.setValue(
+            WINDOW_GEOMETRY_POLICY_KEY, WINDOW_GEOMETRY_POLICY_VERSION
+        )
 
     def restore_geometry(self) -> Optional[QByteArray]:
+        try:
+            policy_version = int(self._qs.value(WINDOW_GEOMETRY_POLICY_KEY, 0))
+        except (TypeError, ValueError):
+            policy_version = 0
+        if policy_version != WINDOW_GEOMETRY_POLICY_VERSION:
+            return None
         v = self._qs.value("window/geometry")
         return v if isinstance(v, QByteArray) else None
 
@@ -91,6 +109,18 @@ class AppSettings:
         if mode not in {"all", "rooted"}:
             mode = "all"
         self._qs.setValue("project/tree_view_mode", mode)
+
+    @property
+    def workspace_switcher_mode(self) -> str:
+        mode = str(self._qs.value("ui/workspace_switcher_mode", "classic") or "classic")
+        return mode if mode in _WORKSPACE_SWITCHER_MODES else "classic"
+
+    @workspace_switcher_mode.setter
+    def workspace_switcher_mode(self, mode: str) -> None:
+        value = str(mode or "classic")
+        if value not in _WORKSPACE_SWITCHER_MODES:
+            value = "classic"
+        self._qs.setValue("ui/workspace_switcher_mode", value)
 
     @property
     def project_scan_roots(self) -> list[str]:
@@ -462,6 +492,55 @@ class AppSettings:
     @performance_mode.setter
     def performance_mode(self, val: bool) -> None:
         self._qs.setValue("appearance/performance_mode", bool(val))
+
+    # ── 项目树扫描 / 缓存 (设置→界面) ─────────────────────────────────
+    # Claude Code 修改 2026-07-15 — 大规模性能: 用户要求"扫描一次后不要一直扫描,
+    # 加缓存机制, 且这些参数在设置里可自由调"(2026-07-14 grill-me 拍板)。三个参数:
+    # 缓存有效期 / 扫描深度 / 自动扫描开关。idiom 照抄 jxl_concurrency(int-clamp) 与
+    # performance_mode(bool)。
+
+    @property
+    def project_scan_cache_ttl_seconds(self) -> int:
+        """项目树扫描结果缓存多久(秒)内不重扫。0 = 每次都重新扫描。默认 300。"""
+        try:
+            value = int(self._qs.value("project/scan_cache_ttl_seconds", 300))
+        except (TypeError, ValueError):
+            value = 300
+        return max(0, min(86400, value))
+
+    @project_scan_cache_ttl_seconds.setter
+    def project_scan_cache_ttl_seconds(self, val: int) -> None:
+        try:
+            v = int(val)
+        except (TypeError, ValueError):
+            v = 300
+        self._qs.setValue("project/scan_cache_ttl_seconds", max(0, min(86400, v)))
+
+    @property
+    def project_scan_max_depth(self) -> int:
+        """项目树/磁盘扫描最多往下钻几层。默认 6, 范围 [1, 12]。"""
+        try:
+            value = int(self._qs.value("project/scan_max_depth", 6))
+        except (TypeError, ValueError):
+            value = 6
+        return max(1, min(12, value))
+
+    @project_scan_max_depth.setter
+    def project_scan_max_depth(self, val: int) -> None:
+        try:
+            v = int(val)
+        except (TypeError, ValueError):
+            v = 6
+        self._qs.setValue("project/scan_max_depth", max(1, min(12, v)))
+
+    @property
+    def project_tree_auto_scan_enabled(self) -> bool:
+        """打开软件时是否自动做后台扫描/找回。默认 True。关掉则只手动扫描。"""
+        return self._qs.value("project/tree_auto_scan_enabled", True, type=bool)
+
+    @project_tree_auto_scan_enabled.setter
+    def project_tree_auto_scan_enabled(self, val: bool) -> None:
+        self._qs.setValue("project/tree_auto_scan_enabled", bool(val))
 
     # ── Typography (字体 / 字体大小, 设置→界面) ────────────────────────
     @property

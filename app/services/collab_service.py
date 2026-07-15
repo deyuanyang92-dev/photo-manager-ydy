@@ -59,6 +59,16 @@ from app.models.activity_log import ActivityEntry, ActivityLog
 logger = logging.getLogger(__name__)
 
 
+def _default_tasks_persist_path() -> "Optional[str]":
+    """Claude Code 2026-07-15 — 团队协作任务清单的磁盘落点(app 级, 团队跨项目共用)。
+    抽成模块函数, 便于测试 monkeypatch 到 tmp(隔离, 不污染真 data/collab_tasks.json)。
+    """
+    try:
+        return str(Path(__file__).resolve().parents[2] / "data" / "collab_tasks.json")
+    except Exception:  # noqa: BLE001
+        return None
+
+
 # ── Split modules (re-exported for backward compatibility) ────────────────────
 # Datatypes / helpers   → app.services.collab_types
 # In-memory task store  → app.services.collab_store
@@ -137,7 +147,13 @@ class CollabService(QObject):
 
     def __init__(self, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
-        self.store = TaskStore()
+        # Claude Code 修改 2026-07-15 — codex 验证指出任务只在内存, 全部电脑重启后
+        # 任务目录变空。任务是**团队级**(跨项目, 按团队码), 所以落 app 级路径
+        # (data/collab_tasks.json, 仿 edit_lock 的 app_config.json), 不是 per-project。
+        # 启动时 TaskStore 自动载入, 每次改动自动落盘 -> 重启后完整协作编号清单仍在。
+        # 路径抽成模块函数 _default_tasks_persist_path(), 让 conftest 能 monkeypatch 到
+        # tmp(同 user_projects.json 的隔离方式), 避免测试污染真文件 / 跨测试泄漏。
+        self.store = TaskStore(persist_path=_default_tasks_persist_path())
         self.activity_log = ActivityLog()
         self._peers: dict[str, PeerInfo] = {}   # key = "ip:port"
         self._peers_lock = threading.Lock()
@@ -1427,6 +1443,11 @@ class CollabService(QObject):
                 self._spec_sync_counter = 0
                 for peer in peers_snapshot:
                     self._sync_specimens_from_peer(peer)
+                    # Claude Code 修改 2026-07-15 — 删除墓碑同步搭 specimen 的低频档
+                    # (~30s, 不进每 5s 任务同步热路径): 删除很少, 不需 5s 传播; 也让
+                    # 墓碑 GET 不落在被大量测试 mock 的每周期任务同步里。墓碑让离线
+                    # 重连不复活已删编号。
+                    self._sync_tombstones_from_peer(peer)
 
             # Same-name / different-ID projects: suggest binding (confirm in UI)
             self._check_project_bind_suggestions(peers_snapshot)
@@ -1541,9 +1562,18 @@ class CollabService(QObject):
                 pass
 
         # 2. Create locally first — this device is the source of truth.
+        # Claude Code 修改 2026-07-15 — 带上稳定 workspace_id / project_id: 重名工作区
+        # (两个都叫"断面1")不再混淆; workspace_id 从工作区自己的 meta 取(缺则回退
+        # 解析路径), project_id 用当前 self._project_id。
+        try:
+            from app.services.collab_specimen_sync import workspace_sync_id
+            _ws_id = workspace_sync_id(self._project_dir) if self._project_dir else None
+        except Exception:  # noqa: BLE001
+            _ws_id = None
         try:
             self.store.create(uid, assignee=assignee, device_id=device_id,
-                              project_name=self._project_name)
+                              project_name=self._project_name,
+                              workspace_id=_ws_id, project_id=self._project_id)
         except ValueError as exc:
             self.conflict_detected.emit(uid)
             return False, str(exc)
@@ -1974,6 +2004,32 @@ class CollabService(QObject):
         import threading
         threading.Thread(target=_send, daemon=True, name="collab-spec-push").start()
 
+    def _sync_tombstones_from_peer(self, peer: PeerInfo) -> None:
+        """Claude Code 修改 2026-07-15 — 拉对方的删除墓碑并应用(离线重连不复活)。
+
+        best-effort: 老版本 peer 没这个端点 -> 异常/非200 时当空, 不影响其它同步。
+        团队码即可(任务是团队级)。低频调用(~30s), 删除很少不需 5s 传播。
+        """
+        if not self._task_sync_allowed(peer):
+            return
+        try:
+            httpx = get_httpx()
+            resp = httpx.get(
+                f"{peer.base_url}/api/collab/tombstones",
+                params={"groupCode": self._group_code},
+                timeout=4.0,
+            )
+            if resp.status_code != 200:
+                return
+            payload = resp.json()
+            if not isinstance(payload, list) or not payload:
+                return
+            changed = self.store.merge_from_peer([], remote_tombstones=payload)
+            if changed:
+                self.tasks_changed.emit()
+        except Exception as exc:  # noqa: BLE001 — 老 peer 无此端点 / 网络错, 忽略
+            logger.debug("collab: tombstone sync from %s failed: %s", peer.base_url, exc)
+
     def _sync_specimens_from_peer(self, peer: PeerInfo) -> int:
         """Pull all specimens from one peer and merge into local DB.
 
@@ -2304,6 +2360,22 @@ class CollabService(QObject):
 
         return resolve_project_relative(self._project_dir, relative_path)
 
+    def fetch_peer_photo_preview(
+        self, peer: PeerInfo, relative_path: str,
+        *, max_dim: int = 1600, quality: int = 85,
+    ) -> Optional[bytes]:
+        """Claude Code 修改 2026-07-15 — 浏览对方工作区照片: 向 peer 要一张 maxDim
+        有界的预览 JPEG(小), 不整份拉原图/母 TIF。项目码不配对 / 未信任 -> None。
+        UI 层拿到字节后走本地预览缓存显示; 想要原图/TIF 再用现有 download。
+        """
+        if peer is None or not self._data_sync_allowed(peer):
+            return None
+        from app.services.collab_file_sync import fetch_peer_preview
+        return fetch_peer_preview(
+            peer.base_url, self._group_code, self._project_id, relative_path,
+            max_dim=max_dim, quality=quality,
+        )
+
     def local_address(self) -> str:
         """Return "ip:port" string for display in the debug drawer."""
         ip = _get_local_ip()
@@ -2381,8 +2453,16 @@ class CollabService(QObject):
         peer so the UID becomes claimable again by anyone.  This deliberately
         bypasses the VOID terminal-state rule — a release is a delete, not a
         status transition.
+
+        Claude Code 修改 2026-07-15 — 删除现在留持久墓碑(操作人 + 工作区), 离线队友
+        重连也删、旧记录推回来不复活(codex 复现的 bug)。
         """
-        self.store.delete(uid)
+        try:
+            from app.services.collab_specimen_sync import workspace_sync_id
+            _ws = workspace_sync_id(self._project_dir) if self._project_dir else None
+        except Exception:  # noqa: BLE001
+            _ws = None
+        self.store.delete(uid, deleted_by=self._operator_name, workspace_id=_ws)
 
         with self._peers_lock:
             peers_snapshot = [p for p in self._peers.values() if self._task_sync_allowed(p)]

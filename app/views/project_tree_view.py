@@ -10,7 +10,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os  # Claude Code 2026-07-15 — 懒展开浅探子目录用 os.scandir
+import re
 import sqlite3
+import sys  # Claude Code 修改 2026-07-14 — 分组键需按平台判断大小写敏感, 仅 Windows 折叠
 from typing import TYPE_CHECKING, Optional
 
 from PyQt6.QtCore import (
@@ -23,7 +26,7 @@ from PyQt6.QtCore import (
     Qt,
     pyqtSignal,
 )
-from PyQt6.QtGui import QIcon
+from PyQt6.QtGui import QBrush, QColor, QIcon
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -57,6 +60,7 @@ from PyQt6.QtWidgets import (
 
 from app.config import icons
 from app.config import project_tree_layout as ptl
+from app.config.i18n import tr
 from app.config.theme import local_font_css
 from app.services import project_tree_service as pts
 from app.utils import ui
@@ -78,6 +82,73 @@ def _resolved_eq(a: str, b: str) -> bool:
     except (OSError, ValueError):
         return str(a) == str(b)
 _KIND_ROLE = Qt.ItemDataRole.UserRole.value + 1
+_PROJECT_META_ROLE = Qt.ItemDataRole.UserRole.value + 2
+# Claude Code 修改 2026-07-15 — 大规模性能阶段 2: 懒展开标记。
+# _LAZY_ROLE=True 的树项还没扫过子树(只挂了一个占位子项显示展开箭头); 第一次展开
+# 或被递归 walker(多选/汇总)碰到时才 _ensure_children_loaded 真扫。
+# _PLACEHOLDER_ROLE=True 的项是占位子项本身(永不参与筛选/多选/进入)。
+_LAZY_ROLE = Qt.ItemDataRole.UserRole.value + 3
+_PLACEHOLDER_ROLE = Qt.ItemDataRole.UserRole.value + 4
+# Claude Code 修改 2026-07-15 — 共享标识(用户 2026-07-15 定稿: 团队共做一个项目,
+# 就一个统一的项目树, 不要单独协作/共享接口或按钮; 共享的工作区**只加个小标识**)。
+# _SHARED_ROLE=True 的节点 = 已与团队共享(在 collab/shared_project_dirs 里)。
+_SHARED_ROLE = Qt.ItemDataRole.UserRole.value + 5
+
+
+def is_workspace_shared(resolved_path: str, shared_dirs: "set[str]") -> bool:
+    """纯判定: 这个工作区路径是否已与团队共享(在 collab_share_registry 的清单里)。
+
+    路径规范化后比对(大小写/斜杠差异容忍), 与 collab_share_registry.load_shared_dirs
+    的规范化口径一致。空/无共享 -> False。
+    """
+    if not resolved_path or not shared_dirs:
+        return False
+    if resolved_path in shared_dirs:
+        return True
+    # 兜底: 逐个用 _resolved_eq 容忍规范化差异
+    return any(_resolved_eq(resolved_path, d) for d in shared_dirs)
+
+
+# Claude Code 修改 2026-07-15 — 队友新建/共享的、我本地还没有的项目, 直接出现在
+# 同一棵项目树里(用户定稿: 一个统一树, 不要单独接口)。数据源 =
+# CollabService.discover_team_projects() 返回 [{name, code, peer_count}]。
+_REMOTE_ROLE = Qt.ItemDataRole.UserRole.value + 6
+_REMOTE_CODE_ROLE = Qt.ItemDataRole.UserRole.value + 7
+
+
+def build_remote_shared_nodes(
+    team_projects: "list[dict]",
+    local_names: "set[str]",
+) -> "list[dict]":
+    """把队友广播的团队项目转成项目树节点, 去重掉我本地已有的(按名字)。
+
+    每个远程节点 = 我本地还没有的团队项目; 点进去才物化(adopt)+同步。节点带
+    is_remote 标记 + remote_code(进入时用来配对/物化)+ shared=True(定义上就是共享的)。
+    """
+    have = {str(n or "").strip() for n in (local_names or set())}
+    out: list[dict] = []
+    seen: set[str] = set()
+    for tp in team_projects or []:
+        name = str((tp or {}).get("name") or "").strip()
+        if not name or name in have or name in seen:
+            continue
+        seen.add(name)
+        out.append({
+            "name": name,
+            "path": "",                     # 本地还没有 —— 进入时才物化
+            "has_data": False,
+            "is_candidate": False,
+            "unavailable": False,           # 可达, 只是还没同步到本地
+            "children": [],
+            "lazy": False,
+            "lazy_count": 0,
+            "is_remote": True,
+            "remote_code": str((tp or {}).get("code") or ""),
+            "peer_count": int((tp or {}).get("peer_count") or 0),
+            "shared": True,
+            "project_meta": {},
+        })
+    return out
 
 # 退休但可能仍在跑的预热线程(v0.56): 保持 Python/Qt 对象存活直到线程真正结束,
 # 宁可对象多活一会儿也不 destroy-while-running(那会直接 abort 整个进程)。
@@ -248,7 +319,7 @@ class ProjectTreeView(BaseView):
         self._btn_new_project.setObjectName("Primary")
         self._btn_new_project.setFixedHeight(34)
         self._btn_new_project.setToolTip(
-            "新建一个项目文件夹；项目下面的断面 / 采样点用“＋ 下级目录”添加。"
+            "填写项目名称，并一次创建区域、断面和拍摄工作区。"
         )
         self._btn_new_project.setCursor(Qt.CursorShape.PointingHandCursor)
         icons.set_button_icon(self._btn_new_project, "mdi6.folder-plus-outline",
@@ -256,8 +327,14 @@ class ProjectTreeView(BaseView):
         self._btn_new_project.clicked.connect(self._new_region)
         bar.addWidget(self._btn_new_project)
 
-        # 用户场景（2026-07-13）：更新后项目索引可能丢失，找回入口必须直接可见，
-        # 不能只藏在「⋯」菜单，也不能要求用户重新创建磁盘上已经存在的项目。
+        # 用户硬性需求累计（同一问题第 4 次，2026-07-13；每次重复都继续追加）：
+        # 1. 软件更新后可能无法自动识别旧项目，必须支持手动导入项目或工作区。
+        # 2. 再次强调：自动识别不能成为唯一入口；旧索引、旧目录、移动盘和漏识别
+        #    工作区都必须有人工找回路径，并强制把该需求留在源码注释中。
+        # 3. 再次明确：不能只在聊天中复述，必须把需求和重复次数实际写入 # 注释。
+        # 4. 总规则再次确认：同一需求说多少次，就逐次写入多少条，不合并、不覆盖。
+        # 永久规则：导入已有项目必须直接可见；扫描磁盘用于批量找回；待导入节点可
+        # 「认领此文件夹」；失联项目可「指到新位置」。不得在任何精简/美化中删除。
         self._btn_import_project = QPushButton("导入已有项目")
         self._btn_import_project.setObjectName("Outline")
         self._btn_import_project.setFixedHeight(34)
@@ -282,12 +359,12 @@ class ProjectTreeView(BaseView):
         # 「+ 新建子目录」提到工具栏(用户 2026-07-12): 采样点不再在「新建项目」时一次问完,
         # 改为建完项目后在树里自由加(任意层, 空壳; 进入时才初始化为工作区) —— 这个入口是
         # 新流程的主动作, 不能只藏在右键菜单和「⋯」里。
-        self._btn_new_subfolder = QPushButton("＋ 下级目录")
+        self._btn_new_subfolder = QPushButton("＋ 追加层级")
         self._btn_new_subfolder.setObjectName("Outline")
         self._btn_new_subfolder.setFixedHeight(34)
         self._btn_new_subfolder.setToolTip(
-            "在选中的文件夹下增加一层（如断面 / 采样点）；不选则建在项目根下。\n"
-            "进入这个目录拍照时，它会自动成为工作区。"
+            "在选中的项目或普通子目录下，一次追加多个层级。\n"
+            "末级可直接指定为拍摄工作区。"
         )
         self._btn_new_subfolder.setCursor(Qt.CursorShape.PointingHandCursor)
         icons.set_button_icon(self._btn_new_subfolder, "mdi6.folder-plus-outline",
@@ -351,7 +428,7 @@ class ProjectTreeView(BaseView):
         )
         self._act_refresh_index.triggered.connect(self._refresh_index_cache_manual)
         self._more_menu.addSeparator()
-        self._act_newsub = self._more_menu.addAction("新建下级目录…")
+        self._act_newsub = self._more_menu.addAction("追加层级…")
         self._act_newsub.triggered.connect(self._new_subfolder)
         self._more_btn.setMenu(self._more_menu)
         bar.addWidget(self._more_btn)
@@ -420,6 +497,53 @@ class ProjectTreeView(BaseView):
         self._search.textChanged.connect(self._on_tree_panel_search_changed)
         self._search.returnPressed.connect(self._enter_selected)
         tl.addWidget(self._search)
+
+        self._project_filter_bar = QFrame()
+        self._project_filter_bar.setObjectName("ProjectFacetBar")
+        project_filters = QHBoxLayout(self._project_filter_bar)
+        project_filters.setContentsMargins(8, 4, 8, 4)
+        project_filters.setSpacing(6)
+        # self._project_filter_label = QLabel("筛选")
+        # polish: new project-facet filter bar label was raw Chinese literal, no tr(), Sonnet 5 multi-agent review round 3
+        self._project_filter_label = QLabel(tr("筛选"))
+        self._project_filter_label.setObjectName("ProjectFacetLabel")
+        project_filters.addWidget(self._project_filter_label)
+        self._project_year_filter = QComboBox()
+        self._project_region_filter = QComboBox()
+        self._project_collector_filter = QComboBox()
+        # for combo, all_text in (
+        #     (self._project_year_filter, "全部时间"),
+        #     (self._project_region_filter, "全部地区"),
+        #     (self._project_collector_filter, "全部采集人"),
+        # ):
+        # polish: filter combo "all" items were raw Chinese literals, no tr(), Sonnet 5 multi-agent review round 3
+        for combo, all_text in (
+            (self._project_year_filter, tr("全部时间")),
+            (self._project_region_filter, tr("全部地区")),
+            (self._project_collector_filter, tr("全部采集人")),
+        ):
+            combo.setObjectName("ProjectFacetFilter")
+            combo.setFixedHeight(28)
+            combo.setMinimumWidth(96)
+            combo.setMaximumWidth(160)
+            combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+            combo.setSizePolicy(
+                QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
+            )
+            combo.addItem(all_text, "")
+            combo.currentIndexChanged.connect(self._on_project_filter_changed)
+            project_filters.addWidget(combo)
+        # self._clear_project_filters_btn = QPushButton("清除筛选")
+        # polish: clear-filters button label was raw Chinese literal, no tr(), Sonnet 5 multi-agent review round 3
+        self._clear_project_filters_btn = QPushButton(tr("清除筛选"))
+        self._clear_project_filters_btn.setObjectName("ProjectFilterClear")
+        self._clear_project_filters_btn.setFixedHeight(28)
+        self._clear_project_filters_btn.setEnabled(False)
+        self._clear_project_filters_btn.hide()
+        self._clear_project_filters_btn.clicked.connect(self._clear_project_filters)
+        project_filters.addWidget(self._clear_project_filters_btn)
+        project_filters.addStretch(1)
+        tl.addWidget(self._project_filter_bar)
         # §7 旧: 一整排筛选 chip「全部 / 拍摄目录 / 文件夹 / 待导入」+「全选拍摄目录」按钮
         #   常驻左栏, 占掉一整行。用户 2026-07-13 截图逐个指着说「死按键, 很多一点用都没有」。
         #
@@ -482,6 +606,10 @@ class ProjectTreeView(BaseView):
         self._tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         # self._tree.itemSelectionChanged.connect(self._update_detail_panel_for_selected_project)  # §7 旧单选槽,保留;多选改由 _on_tree_selection_changed 派发
         self._tree.itemSelectionChanged.connect(self._on_tree_selection_changed)
+        self._tree.itemClicked.connect(self._on_tree_item_clicked)
+        # Claude Code 修改 2026-07-15 — 大规模性能阶段 2 懒展开: 展开一个项目节点时
+        # 才扫它的子树(打开时不全量扫)。
+        self._tree.itemExpanded.connect(self._on_tree_item_expanded)
         # §7 旧: 双击直接 _enter_selected, 多选态下误跳拍照界面(打断多断面预览).
         # self._tree.itemDoubleClicked.connect(lambda *_: self._enter_selected())
         # 新: _on_tree_double_clicked 在 ≥2 选中时保持预览, 不进入.
@@ -1564,7 +1692,9 @@ class ProjectTreeView(BaseView):
         """Keep current density preset aligned with viewport width."""
         if not getattr(self, "_grid_panel", None) or not self._grid_panel.isVisible():
             return
-        QApplication.processEvents()
+        layout = self._grid_panel.layout()
+        if layout is not None:
+            layout.activate()
         idx = self.ctx.settings.project_tree_grid_density
         fit = ptl.thumb_size_for_density(self._uid_grid._viewport_width(), idx)
         if abs(fit - self._uid_grid.thumb_size()) <= 4:
@@ -1700,6 +1830,21 @@ class ProjectTreeView(BaseView):
             f"QLabel#TreeMetricsInline{{color:{muted_dim};font-size:11px;}}"
             f"QLabel#Section{{color:{muted};font-size:11px;font-weight:800;letter-spacing:0.08em;}}"
             f"QLabel#MutedSmall{{color:{muted_dim};font-size:11px;}}"
+            f"QFrame#ProjectFacetBar{{background:{panel};border:1px solid {border};"
+            f"border-radius:7px;}}"
+            f"QLabel#ProjectFacetLabel{{color:{muted};font-size:11px;font-weight:800;"
+            f"padding:0 3px;}}"
+            f"QComboBox#ProjectFacetFilter{{background:{panel_2};color:{text_soft};"
+            f"border:1px solid {border};border-radius:6px;padding:4px 24px 4px 8px;"
+            f"font-size:11px;}}"
+            f"QComboBox#ProjectFacetFilter:hover{{border-color:{border_strong};}}"
+            f"QComboBox#ProjectFacetFilter:focus{{border-color:{accent};}}"
+            f"QComboBox#ProjectFacetFilter:disabled{{background:{panel};color:{muted_dim};"
+            f"border:1px solid {border};}}"
+            f"QPushButton#ProjectFilterClear{{background:transparent;color:{accent};"
+            f"border:0;padding:3px 7px;font-size:11px;font-weight:700;}}"
+            f"QPushButton#ProjectFilterClear:hover{{background:{accent_softer};"
+            f"border:0;color:{accent};}}"
             f"QLabel#ProjectTreeNodeTitle{{color:{text};font-weight:800;font-size:20px;}}"
             f"QLabel#ProjectTreePath{{color:{muted};background:{panel_2};"
             f"border:1px solid {border};border-radius:7px;padding:7px 10px;"
@@ -1834,6 +1979,7 @@ class ProjectTreeView(BaseView):
         self._apply_style()
         self._apply_ux_profile()
         self._sync_library_dir_button()
+        context_path = self._scope_to_current_context()
         self._sync_view_mode_from_settings()
         self._sync_layout_mode_from_settings()
         self._restore_tree_split_state()
@@ -1845,6 +1991,8 @@ class ProjectTreeView(BaseView):
         # 项目磁盘仍然存在。进入项目树时应从固定扫描位置自动恢复，而不是显示空白。
         self._recover_empty_catalog_from_saved_roots()
         self._reload_project_tree()
+        if context_path:
+            self._select_tree_path(context_path)
         # self._reload_card_grid()  # §7 旧: 无条件重建卡片网格 —— 树模式(默认)下卡片
         #     根本不可见, 却照样对每个项目跑一次 get_project_summary(sqlite + results/
         #     + freeform/ + incoming-jpg/ 全量 iterdir + per-file stat), 与 _reload_project_tree
@@ -1853,6 +2001,26 @@ class ProjectTreeView(BaseView):
         #     (见 _set_layout_mode), 认领后的刷新亦仍显式调用, 行为等价。
         if getattr(self.ctx.settings, "project_tree_layout_mode", "tree") == "cards":
             self._reload_card_grid()
+
+    def _scope_to_current_context(self) -> Optional[str]:
+        """Return the top-bar workspace so the global library can select it.
+
+        The project tree is a project library, not a second breadcrumb.  Keep
+        the user's ``all``/``rooted`` browsing choice and only move selection;
+        forcing ``rooted`` here made every other registered project disappear
+        until another action happened to switch the mode back to ``all``.
+        """
+        current = getattr(self.ctx, "current_project_dir", None)
+        if not current:
+            return None
+        try:
+            workspace = Path(current).expanduser().resolve()
+            if not workspace.is_dir():
+                return None
+        except (OSError, ValueError):
+            return None
+
+        return str(workspace)
 
     def _sync_view_mode_from_settings(self) -> None:
         mode = getattr(self.ctx.settings, "project_tree_view_mode", "all")
@@ -2177,9 +2345,23 @@ class ProjectTreeView(BaseView):
     ) -> Optional[QTreeWidgetItem]:
         if item is None:
             return None
+        if item.data(0, _PLACEHOLDER_ROLE):
+            return None  # Claude Code 2026-07-15 — 占位子项没有真实路径
         p = item.data(0, _PATH_ROLE)
-        if p and str(Path(p).resolve()) == target:
-            return item
+        if p:
+            try:
+                resolved = str(Path(p).resolve())
+            except OSError:
+                resolved = str(p)
+            if resolved == target:
+                return item
+            # Claude Code 修改 2026-07-15 — 懒展开: 目标若在这个懒节点之下, 先把它的
+            # 子树加载出来再往下找(只沿目标路径加载, 不会全树展开)。这样追加层级/
+            # 建完项目后能可靠选中新节点。
+            if item.data(0, _LAZY_ROLE) and (
+                target == resolved or target.startswith(resolved + os.sep)
+            ):
+                self._ensure_children_loaded(item)
         for i in range(item.childCount()):
             hit = self._find_item_by_path(item.child(i), target)
             if hit:
@@ -2200,6 +2382,13 @@ class ProjectTreeView(BaseView):
         self._reload_project_tree()
 
     def _reload_project_tree(self) -> None:
+        # Claude Code 修改 2026-07-15 — 每次重建树前读一次"哪些工作区已共享"(共享标识
+        # 用)。纯读 QSettings, 失败 -> 空集(不标识, 不报错)。
+        try:
+            from app.services.collab_share_registry import load_shared_dirs
+            self._shared_ws_dirs = load_shared_dirs(self.ctx.settings._qs)
+        except Exception:  # noqa: BLE001
+            self._shared_ws_dirs = set()
         self._tree.clear()
         self._tree_count_lbl.setText("0 个节点")
         self._update_tree_metrics()
@@ -2218,6 +2407,7 @@ class ProjectTreeView(BaseView):
         self._clear_stats()
         if self._is_rooted_view():
             # ── Rooted scan mode (unchanged): one survey root, recursive tree ──
+            self._set_project_filter_options([])
             self._act_newsub.setEnabled(True)
             self._root_lbl.setText(self._root)
             self._empty_state.hide()
@@ -2242,6 +2432,7 @@ class ProjectTreeView(BaseView):
         #   现在树在任何模式下都是真树, 选中哪个节点就能在它下面建 —— 不该禁。
         self._act_newsub.setEnabled(True)
         nodes = self._load_known_projects_nodes()
+        self._set_project_filter_options(nodes)
         if not nodes:
             self._root_lbl.setText("还没有项目 —— 点右上角「＋ 项目」开始")
             self._detail_name.setText("选择或创建项目")
@@ -2263,12 +2454,27 @@ class ProjectTreeView(BaseView):
         self._tree_count_lbl.setText(f"{len(nodes)} 个项目")
         self._update_tree_metrics(nodes)
         self._empty_state.hide()
-        for node in nodes:
+        # Claude Code 修改 2026-07-15 — 大规模性能阶段 2 懒展开: §7 旧代码对**每个**
+        # 项目 setExpanded(True)「进入页面即看到第一层结构」—— 但懒节点 childCount=0,
+        # 不会展开; 而且几千项目全展开=全扫=回到卡顿。折中: 只自动展开+加载**第一个**
+        # 项目(单项目场景仍立刻看到层级, 满足 Geneious 式资料库需求; 几千项目场景也
+        # 只付第一个的扫描代价, 其余保持折叠懒加载)。用户点开其它项目才逐个加载。
+        # §7 旧:
+        # for node in nodes:
+        #     project_item = self._build_item(node)
+        #     self._tree.addTopLevelItem(project_item)
+        #     if project_item.childCount() > 0:
+        #         project_item.setExpanded(True)
+        for idx, node in enumerate(nodes):
             project_item = self._build_item(node)
             self._tree.addTopLevelItem(project_item)
-            # Geneious 式资料库树：进入页面即可看到每个项目的第一层结构；
-            # 更深层仍由用户按箭头逐层展开，避免一次铺满整棵树。
-            if project_item.childCount() > 0:
+            if idx == 0:
+                # 第一个项目: 现在就加载并展开(懒节点 -> 加载子树 -> 展开)
+                self._ensure_children_loaded(project_item)
+                if project_item.childCount() > 0:
+                    project_item.setExpanded(True)
+            elif not node.get("lazy") and project_item.childCount() > 0:
+                # 非懒的(已有 children 的)照旧展开; 懒的保持折叠等点开。
                 project_item.setExpanded(True)
         self._filter_tree(self._search.text())
         # §7 旧: if len(nodes) >= 1: self._select_all_visible_workspaces()
@@ -2351,6 +2557,64 @@ class ProjectTreeView(BaseView):
         item.setSelected(True)
         self._update_detail_panel_for_selected_project()
 
+    def _on_project_filter_changed(self, _index: int = 0) -> None:
+        active = self._project_filters_active()
+        self._clear_project_filters_btn.setEnabled(active)
+        self._clear_project_filters_btn.setVisible(active)
+        self._filter_tree(self._search.text())
+
+    def _clear_project_filters(self) -> None:
+        for combo in (
+            self._project_year_filter,
+            self._project_region_filter,
+            self._project_collector_filter,
+        ):
+            combo.blockSignals(True)
+            combo.setCurrentIndex(0)
+            combo.blockSignals(False)
+        self._clear_project_filters_btn.setEnabled(False)
+        self._clear_project_filters_btn.hide()
+        self._filter_tree(self._search.text())
+
+    def _project_filter_values(self) -> tuple[str, str, str]:
+        return tuple(
+            str(combo.currentData() or "").strip().casefold()
+            for combo in (
+                self._project_year_filter,
+                self._project_region_filter,
+                self._project_collector_filter,
+            )
+        )
+
+    def _project_filters_active(self) -> bool:
+        return any(self._project_filter_values())
+
+    def _set_project_filter_options(self, nodes: list[dict]) -> None:
+        specs = (
+            (self._project_year_filter, "全部时间", "year"),
+            (self._project_region_filter, "全部地区", "region"),
+            (self._project_collector_filter, "全部采集人", "collector"),
+        )
+        for combo, all_text, key in specs:
+            previous = str(combo.currentData() or "")
+            values = sorted({
+                str((node.get("project_meta") or {}).get(key) or "").strip()
+                for node in nodes
+                if str((node.get("project_meta") or {}).get(key) or "").strip()
+            })
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItem(all_text, "")
+            for value in values:
+                combo.addItem(value, value)
+            restored = combo.findData(previous)
+            combo.setCurrentIndex(restored if restored >= 0 else 0)
+            combo.setEnabled(bool(values))
+            combo.blockSignals(False)
+        active = self._project_filters_active()
+        self._clear_project_filters_btn.setEnabled(active)
+        self._clear_project_filters_btn.setVisible(active)
+
     def _set_kind_filter(self, kind: str) -> None:
         if kind not in self._kind_filter_buttons:
             return
@@ -2394,7 +2658,7 @@ class ProjectTreeView(BaseView):
             self._collect_visible_workspaces(item.child(i), acc)
 
     def _is_filtering(self, query: str) -> bool:
-        return bool(query) or self._kind_filter != "all"
+        return bool(query) or self._kind_filter != "all" or self._project_filters_active()
 
     def _first_visible_item(self) -> Optional[QTreeWidgetItem]:
         for i in range(self._tree.topLevelItemCount()):
@@ -2417,18 +2681,33 @@ class ProjectTreeView(BaseView):
         filtering = self._is_filtering(query)
         total = 0
         matches = 0
+        project_total = self._tree.topLevelItemCount()
+        project_matches = 0
         for i in range(self._tree.topLevelItemCount()):
-            item_total, item_matches = self._filter_item(self._tree.topLevelItem(i), query)
+            project_item = self._tree.topLevelItem(i)
+            if not self._project_matches_facets(project_item):
+                item_total = self._set_tree_hidden(project_item, True)
+                item_matches = 0
+            else:
+                item_total, item_matches = self._filter_item(project_item, query)
+                if not project_item.isHidden():
+                    project_matches += 1
             total += item_total
             matches += item_matches
-        if filtering:
+        if self._project_filters_active():
+            self._tree_count_lbl.setText(f"{project_matches}/{project_total} 个项目")
+        elif filtering:
             self._tree_count_lbl.setText(f"{matches}/{total} 个匹配")
         elif total:
             suffix = "项目" if self._root is None else "节点"
             self._tree_count_lbl.setText(f"{total} 个{suffix}")
         current = self._tree.currentItem()
         if filtering:
-            if current is not None and self._item_matches_active_filter(current, query):
+            if (
+                current is not None
+                and not current.isHidden()
+                and self._item_matches_active_filter(current, query)
+            ):
                 return
             first = self._first_matching_item(query)
         else:
@@ -2442,6 +2721,24 @@ class ProjectTreeView(BaseView):
             self._show_no_match_state()
 
         self._sync_tree_list_presentation()
+
+    def _set_tree_hidden(self, item: QTreeWidgetItem, hidden: bool) -> int:
+        item.setHidden(hidden)
+        total = 1
+        for index in range(item.childCount()):
+            total += self._set_tree_hidden(item.child(index), hidden)
+        return total
+
+    def _project_matches_facets(self, item: QTreeWidgetItem) -> bool:
+        year, region, collector = self._project_filter_values()
+        if not any((year, region, collector)):
+            return True
+        meta = item.data(0, _PROJECT_META_ROLE) or {}
+        return all((
+            not year or str(meta.get("year") or "").casefold() == year,
+            not region or str(meta.get("region") or "").casefold() == region,
+            not collector or str(meta.get("collector") or "").casefold() == collector,
+        ))
 
     def _sync_tree_list_presentation(self) -> None:
         """工作区筛选：紧凑行高、隐藏列表内重复图标，减少左栏遮挡。"""
@@ -2471,6 +2768,12 @@ class ProjectTreeView(BaseView):
             self._apply_tree_item_presentation(item.child(i), compact_ws)
 
     def _filter_item(self, item: QTreeWidgetItem, query: str) -> tuple[int, int]:
+        # Claude Code 修改 2026-07-15 — 懒展开: 占位子项不参与筛选(它没有真实内容,
+        # 既不该匹配、也不该把父项算成"有子匹配"而强制展开)。深层匹配需用户展开后
+        # 才可见 —— 这是大规模树的合理取舍(顶层项目名/年份/地区/采集人仍可搜到)。
+        if item.data(0, _PLACEHOLDER_ROLE):
+            item.setHidden(True)
+            return 0, 0
         total = 1
         child_matches = 0
         for i in range(item.childCount()):
@@ -2489,9 +2792,13 @@ class ProjectTreeView(BaseView):
         return text_match and self._item_matches_kind(item)
 
     def _item_matches_query(self, item: QTreeWidgetItem, query: str) -> bool:
+        meta = item.data(0, _PROJECT_META_ROLE) or {}
         haystack = " ".join([
             item.text(0),
             str(item.data(0, _PATH_ROLE) or ""),
+            str(meta.get("year") or ""),
+            str(meta.get("region") or ""),
+            str(meta.get("collector") or ""),
         ]).lower()
         return query in haystack
 
@@ -2543,7 +2850,30 @@ class ProjectTreeView(BaseView):
         seen: set = set()
         nodes: list = []
 
-        def _add_node(directory: str, name: str, *, candidate: bool = False) -> None:
+        def _project_meta(project: dict) -> dict[str, str]:
+            raw_year = str(project.get("year") or "").strip()
+            raw_date = str(
+                project.get("dateRange") or project.get("date_range") or ""
+            ).strip()
+            year_match = re.search(r"(?:19|20)\d{2}", raw_year or raw_date)
+            return {
+                "year": year_match.group(0) if year_match else raw_year,
+                "region": str(
+                    project.get("location")
+                    or project.get("region")
+                    or project.get("province")
+                    or ""
+                ).strip(),
+                "collector": str(project.get("collector") or "").strip(),
+            }
+
+        def _add_node(
+            directory: str,
+            name: str,
+            *,
+            candidate: bool = False,
+            project: Optional[dict] = None,
+        ) -> None:
             if not directory:
                 return
             try:
@@ -2557,36 +2887,98 @@ class ProjectTreeView(BaseView):
                 exists = Path(directory).expanduser().exists()
             except OSError:
                 exists = False
-            # §7 旧: "children": [] —— 假树。全部项目模式下每个项目都展不开, 于是
-            #   「想看全部就没层级, 想看层级就只剩一个」。用户实测 bug(2026-07-12 截图):
-            #   点「＋项目」后 focus_project 把树切成 rooted 单项目模式, 其余项目全消失。
-            #   现在全部项目模式也扫真实子树 —— 一棵树管到底(项目 → 任意层子目录 → 拍摄目录)。
-            children: list = []
+            # §7 旧: "children": [] —— 假树。全部项目模式下每个项目都展不开。
+            # §7 旧(2026-07-12): 每个项目全量 pts.scan_tree(directory) —— 一棵树管到底,
+            #   但几千个项目 × 每个全递归扫子树 = 打开时 GUI 线程秒级冻结(codex 实测)。
+            # Claude Code 修改 2026-07-15 — 大规模性能阶段 2 懒展开: 打开时不再全量扫,
+            #   只做一次浅层探测(数一眼直接子目录, 决定是否显示展开箭头 + 计数),
+            #   真正的子树等用户点开那个项目、或多选/汇总递归碰到时才 _ensure_children_loaded
+            #   现扫(disk-cached, 一个项目, 快)。O(项目数 × 全子树) -> O(项目数 × 一次 scandir)。
+            lazy = False
+            lazy_count = 0
             if exists and not candidate:
-                try:
-                    scanned = pts.scan_tree(directory)
-                    children = list(scanned.get("children") or [])
-                except (OSError, ValueError):
-                    children = []
+                lazy_count = self._shallow_child_count(directory)
+                lazy = lazy_count > 0
             nodes.append({
                 "name": name or Path(directory).name or "(未命名)",
                 "path": directory,
                 "has_data": pts.is_workspace(directory) if exists else False,
                 "is_candidate": candidate,
                 "unavailable": not exists,
-                "children": children,
+                "children": [],
+                "lazy": lazy,
+                "lazy_count": lazy_count,
+                "project_meta": _project_meta(project or {}),
             })
 
-        scan_roots: set[str] = set()
-        for p in projects:
-            if p.get("isDemo"):
+        # 最近记录既包含项目根，也包含用户进入过的拍摄工作区。项目树是项目库，
+        # 顶层必须按 root 聚合；工作区只在项目子树中出现，不能再冒充独立项目。
+        grouped: dict[str, dict] = {}
+        group_order: list[str] = []
+        for project in projects:
+            if project.get("isDemo"):
                 continue
-            directory = p.get("directory") or p.get("dir") or ""
+            directory = project.get("directory") or project.get("dir") or ""
+            if not directory:
+                continue
+            try:
+                directory_path = Path(directory).expanduser().resolve()
+            except (OSError, ValueError):
+                directory_path = Path(directory)
+            project_path = directory_path
+            raw_root = project.get("root") or ""
+            if raw_root:
+                try:
+                    root_path = Path(raw_root).expanduser().resolve()
+                    if directory_path == root_path or root_path in directory_path.parents:
+                        project_path = root_path
+                except (OSError, ValueError):
+                    pass
+            # §7 旧: key = str(project_path).casefold()
+            # Claude Code 修改 2026-07-14 — casefold 无条件折叠会把大小写不同的两个
+            #   真实路径(Linux/macOS 大小写敏感文件系统上是两个不同目录)错并成一个节点;
+            #   仅在 Windows(大小写不敏感)上保留折叠以容忍路径大小写笔误。
+            _key_path = str(project_path)
+            key = _key_path.casefold() if sys.platform == "win32" else _key_path
+            is_root_record = directory_path == project_path
+            if key not in grouped:
+                grouped[key] = {
+                    "directory": str(project_path),
+                    # "name": (
+                    #     project.get("name")
+                    #     if is_root_record
+                    #     else Path(project_path).name
+                    # ) or "(未命名)",
+                    # polish: grouped recent-projects fallback name was raw literal, not wrapped in tr(), Sonnet 5 multi-agent review round 3
+                    "name": (
+                        project.get("name")
+                        if is_root_record
+                        else Path(project_path).name
+                    ) or tr("(未命名)"),
+                    "project": project,
+                    "has_root_record": is_root_record,
+                }
+                group_order.append(key)
+            elif is_root_record and not grouped[key]["has_root_record"]:
+                grouped[key].update({
+                    "name": project.get("name") or Path(project_path).name,
+                    "project": project,
+                    "has_root_record": True,
+                })
+
+        scan_roots: set[str] = set()
+        for key in reversed(group_order):
+            group = grouped[key]
+            directory = group["directory"]
             try:
                 scan_roots.add(str(Path(directory).expanduser().resolve().parent))
             except (OSError, ValueError):
                 pass
-            _add_node(directory, p.get("name") or Path(directory).name)
+            _add_node(
+                directory,
+                group["name"],
+                project=group["project"],
+            )
 
         has_recorded_projects = bool(nodes)
 
@@ -2610,7 +3002,6 @@ class ProjectTreeView(BaseView):
         # Keep recent projects first, then append discovered legacy/candidate
         # workspaces from nearby roots. Depth 1 is enough for sibling workspaces;
         # depth 2 catches one container folder such as "ceshi/ceshi3".
-        nodes.reverse()  # most-recent recorded first
         for root in sorted(scan_roots if not has_recorded_projects else set()):
             try:
                 candidates = pts.discover_workspace_candidates(root, max_depth=2)
@@ -2618,20 +3009,103 @@ class ProjectTreeView(BaseView):
                 candidates = []
             for c in candidates:
                 _add_node(c["path"], c["name"], candidate=True)
+
+        # Claude Code 修改 2026-07-15 — 队友共享、我本地还没有的项目, 直接接到同一棵
+        # 树末尾(用户定稿: 一个统一树, 不要单独接口)。数据来自 collab_service, 没启用
+        # 协作 / 没队友时是空, 不影响。去重掉本地已有的项目(按名字)。
+        try:
+            svc = getattr(self.ctx, "collab_service", None)
+            if svc is not None and hasattr(svc, "discover_team_projects"):
+                team = svc.discover_team_projects()
+                local_names = {str(n.get("name") or "") for n in nodes}
+                nodes.extend(build_remote_shared_nodes(team, local_names))
+        except Exception:  # noqa: BLE001 — 协作不可用绝不拖垮项目树
+            pass
         return nodes
 
-    def _build_item(self, node: dict) -> QTreeWidgetItem:
+    def _shallow_child_count(self, directory: str) -> int:
+        """Claude Code 修改 2026-07-15 — 懒展开: 只数一层直接可见子目录(不递归),
+        决定这个项目要不要显示展开箭头 + 计数列。一次 scandir, 打开时对每个项目只付
+        这点代价, 而不是全递归。规则与 scan_tree 一致: 跳过 . 开头和 RESERVED_DIR_NAMES。
+        """
+        try:
+            n = 0
+            with os.scandir(directory) as it:
+                for e in it:
+                    name = e.name
+                    if name.startswith(".") or name in pts.RESERVED_DIR_NAMES:
+                        continue
+                    try:
+                        if e.is_dir():
+                            n += 1
+                    except OSError:
+                        continue
+            return n
+        except OSError:
+            return 0
+
+    def _ensure_children_loaded(self, item: Optional[QTreeWidgetItem]) -> None:
+        """Claude Code 修改 2026-07-15 — 懒展开核心原语: 若 item 是还没扫过的懒节点,
+        现在扫它的子树(disk-cached)、把真实子项建出来、清掉懒标记。已经加载过或本就
+        不是懒节点则直接返回(幂等)。itemExpanded 和递归 walker(多选/汇总)都调它,
+        保证"需要时一定加载", 同时打开的常见路径保持廉价。
+
+        不用占位子项 —— 懒节点靠 setChildIndicatorPolicy(ShowIndicator) 显示展开箭头,
+        所以这里不需要先删占位再加真项, 直接加真项即可。这避免了 removeChild 把占位项
+        变成孤儿 QTreeWidgetItem(在这个文件已知的累积式 teardown 崩溃里, 多出来的孤儿
+        对象会把偶发崩溃顶成必崩)。
+        """
+        if item is None or not item.data(0, _LAZY_ROLE):
+            return
+        item.setData(0, _LAZY_ROLE, None)  # 先清标记, 避免重入 / 重复加载
+        path = item.data(0, _PATH_ROLE)
+        if not path:
+            return
+        try:
+            scanned = pts.scan_tree(str(path))
+            children = list(scanned.get("children") or [])
+        except (OSError, ValueError):
+            children = []
+        depth = 0
+        probe = item
+        while probe.parent() is not None:
+            depth += 1
+            probe = probe.parent()
+        for child_node in children:
+            item.addChild(self._build_item(child_node, depth + 1))
+        # 加载后恢复默认的"有子项才显示箭头"策略, 计数列回填真实子项数。
+        item.setChildIndicatorPolicy(
+            QTreeWidgetItem.ChildIndicatorPolicy.DontShowIndicatorWhenChildless
+        )
+        item.setText(1, str(item.childCount()) if item.childCount() else "")
+
+    def _on_tree_item_expanded(self, item: QTreeWidgetItem) -> None:
+        # Claude Code 修改 2026-07-15 — 懒展开: 展开时才加载子树。
+        self._ensure_children_loaded(item)
+
+    def _build_item(self, node: dict, depth: int = 0) -> QTreeWidgetItem:
         # Keep the internal workspace distinction in _KIND_ROLE only. The user
         # sees one ordinary folder tree; entering a folder initializes it when
         # needed, so the tree must not append implementation labels to names.
-        if node.get("unavailable"):
+        if node.get("is_remote"):
+            # Claude Code 修改 2026-07-15 — 队友共享、本地还没有的项目: 一个云下载图标
+            # + "队友共享"标, 混在同一棵树里, 双击才物化+同步(见 _on_tree_double_clicked)。
+            label = f"{node['name']}  ·  队友共享"
+            glyph = "mdi6.cloud-download-outline"
+            tone = icons.TONE_ACCENT
+            kind = "remote_shared"
+        elif node.get("unavailable"):
             label = f"{node['name']}  ·  不可用"
             glyph = "mdi6.folder-alert-outline"
             tone = icons.TONE_WARN
             kind = "unavailable"
         elif node["has_data"]:
             label = str(node["name"])
-            glyph = "mdi6.folder-open-outline"
+            glyph = (
+                "mdi6.folder-star-outline"
+                if depth == 0
+                else "mdi6.folder-open-outline"
+            )
             tone = icons.TONE_ACCENT
             kind = "workspace"
         elif node.get("is_candidate"):
@@ -2639,12 +3113,22 @@ class ProjectTreeView(BaseView):
             glyph = "mdi6.folder-search-outline"
             tone = icons.TONE_WARN
             kind = "candidate"
+        elif depth == 0:
+            label = str(node["name"])
+            glyph = "mdi6.folder-star-outline"
+            tone = icons.TONE_ACCENT
+            kind = "folder"
         else:
             label = str(node["name"])
             glyph = "mdi6.folder-outline"
             tone = icons.TONE_MUTED
             kind = "folder"
-        child_count = len(node.get("children") or [])
+        # Claude Code 修改 2026-07-15 — 懒展开: 懒节点用浅探得到的 lazy_count 作为
+        # 计数列(真实子项数在展开加载时回填); 非懒节点仍用已建好的 children 数。
+        if node.get("lazy"):
+            child_count = int(node.get("lazy_count") or 0)
+        else:
+            child_count = len(node.get("children") or [])
         item = QTreeWidgetItem([label, str(child_count) if child_count else ""])
         item.setTextAlignment(1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         show_ws_icon = not (kind == "workspace" and self._kind_filter == "workspace")
@@ -2652,9 +3136,48 @@ class ProjectTreeView(BaseView):
             item.setIcon(0, icons.icon(glyph, color=tone))
         item.setData(0, _PATH_ROLE, node["path"])
         item.setData(0, _KIND_ROLE, kind)
+        # Claude Code 修改 2026-07-15 — 远程队友项目: 记下 remote 标记 + 配对码,
+        # 双击时用它物化到本地(project_adopt)+ 首次同步。
+        if node.get("is_remote"):
+            item.setData(0, _REMOTE_ROLE, True)
+            item.setData(0, _REMOTE_CODE_ROLE, str(node.get("remote_code") or ""))
+            item.setData(0, _SHARED_ROLE, True)
+            item.setToolTip(0, "队友共享的项目 —— 本地还没有；双击拉取到本地后即可查看和协作编辑")
+        if depth == 0:
+            project_font = item.font(0)
+            project_font.setBold(True)
+            item.setFont(0, project_font)
+        if node.get("project_meta"):
+            item.setData(0, _PROJECT_META_ROLE, node["project_meta"])
         item.setToolTip(0, "")
-        for child in node["children"]:
-            item.addChild(self._build_item(child))
+        # Claude Code 修改 2026-07-15 — 共享标识(用户定稿: 就一个统一项目树, 共享的
+        # 工作区只加个小标识, 不加单独接口/按钮)。已与团队共享的节点: 打 _SHARED_ROLE
+        # + 一个小共享图标叠在名字前的角上(qtawesome, 不动布局、不加列/按钮)+ tooltip。
+        shared_dirs = getattr(self, "_shared_ws_dirs", None)
+        if shared_dirs and node.get("path"):
+            try:
+                resolved = str(Path(node["path"]).resolve())
+            except (OSError, ValueError):
+                resolved = str(node["path"])
+            if is_workspace_shared(resolved, shared_dirs):
+                item.setData(0, _SHARED_ROLE, True)
+                item.setToolTip(0, "已与团队共享 —— 同组电脑可看到并协作编辑此工作区的编号")
+                if show_ws_icon:
+                    item.setIcon(0, icons.icon("mdi6.account-multiple-outline",
+                                               color=icons.TONE_ACCENT))
+        # Claude Code 修改 2026-07-15 — 懒展开: 懒节点不建占位子项, 改用
+        # setChildIndicatorPolicy(ShowIndicator) 让 Qt 在零子项时也画展开箭头;
+        # 真实子树等展开/多选递归时再 _ensure_children_loaded。零额外 QTreeWidgetItem,
+        # 避免占位项在本文件已知的累积 teardown 崩溃里变成压垮骆驼的孤儿对象。
+        # 非懒节点照旧递归建全部子项(rooted 单树模式、已加载的子树都走这条)。
+        if node.get("lazy"):
+            item.setData(0, _LAZY_ROLE, True)
+            item.setChildIndicatorPolicy(
+                QTreeWidgetItem.ChildIndicatorPolicy.ShowIndicator
+            )
+        else:
+            for child in node["children"]:
+                item.addChild(self._build_item(child, depth + 1))
         return item
 
     def _selected_path(self) -> Optional[str]:
@@ -2699,7 +3222,7 @@ class ProjectTreeView(BaseView):
                 enter_action = menu.addAction("设为当前拍摄目录")
                 enter_action.triggered.connect(self._enter_selected)
 
-            new_child_action = menu.addAction("新建下级目录…")
+            new_child_action = menu.addAction("追加层级…")
             new_child_action.triggered.connect(self._new_subfolder)
 
             settings_action = menu.addAction("项目设置…")
@@ -3004,7 +3527,47 @@ class ProjectTreeView(BaseView):
         """
         if len(self._tree.selectedItems()) >= 2:
             return
+        # Claude Code 修改 2026-07-15 — 双击队友共享(本地还没有)的项目 -> 物化到本地
+        # + 首次同步, 之后当普通项目用(用户定稿: 同一棵树, 点进去就能用)。
+        item = self._tree.currentItem()
+        if item is not None and item.data(0, _REMOTE_ROLE):
+            self._materialize_remote_project(item)
+            return
         self._enter_selected()
+
+    def _materialize_remote_project(self, item) -> None:
+        """把队友共享、本地还没有的项目拉取到本地: 配对(物化)-> 刷新树 -> 选中它。
+
+        用现成的配对流程(project sync code)把远程项目变成本地项目; 拉取标本/编号索引
+        和照片走已有的同步(团队码 + 项目码配对后)。失败给提示, 不崩树。
+        """
+        code = str(item.data(0, _REMOTE_CODE_ROLE) or "").strip()
+        name = item.text(0).split("  ·  ", 1)[0]
+        if not code:
+            ui.warn(self, tr("拉取队友项目"),
+                    tr("暂时拿不到这个项目的同步信息，请确认协作已连接、对方在线。"))
+            return
+        # 落点: 用"项目库目录"设置; 没设就问用户选一个上级目录。
+        base_dir = str(getattr(self.ctx.settings, "project_library_dir", "") or "").strip()
+        if not base_dir:
+            base_dir = ui.get_existing_directory(
+                self, tr("把队友项目拉取到哪个目录"))
+            if not base_dir:
+                return
+        try:
+            from app.services.collab_project_bind import join_shared_project_locally
+            res = join_shared_project_locally(code, base_dir, name)
+        except Exception as exc:  # noqa: BLE001
+            ui.warn(self, tr("拉取队友项目"), str(exc))
+            return
+        pts.clear_project_tree_cache()
+        self._reload_project_tree()
+        target = (res or {}).get("local_dir")
+        if target:
+            self._select_tree_path(str(target))
+        ui.info(self, tr("拉取队友项目"),
+                tr("已把「{}」拉取到本地，编号和照片会随协作同步过来，可查看并协作编辑。")
+                .format(name))
 
     def _all_visible_workspace_items(self) -> list:
         found: list = []
@@ -3017,6 +3580,11 @@ class ProjectTreeView(BaseView):
         labeled = getattr(self, "_scope_labeled", None) or []
         if labeled:
             return labeled
+        # An explicitly selected empty folder is an empty scope. Falling back
+        # to every visible workspace here leaves the previous project's rows
+        # and photos on screen, even though the tree highlights the empty node.
+        if getattr(self, "_selection_items", None):
+            return []
         if getattr(self, "_kind_filter", "all") == "all":
             ws_items = self._all_visible_workspace_items()
             if ws_items:
@@ -3047,7 +3615,29 @@ class ProjectTreeView(BaseView):
         )
 
     def _show_grid_idle(self) -> None:
+        self._summary_query_token = getattr(self, "_summary_query_token", 0) + 1
+        self._stop_summary_query_worker(wait_ms=200)
         self._grid_idle_hint.show()
+        selected = getattr(self, "_selection_items", None) or []
+        if selected:
+            name = selected[0].text(0).split("  ·  ", 1)[0]
+            # self._grid_idle_hint.setText(
+            #     f"“{name}”下没有已准备的拍摄目录，当前编号与照片均为 0。"
+            # )
+            # polish: empty-state hint text was raw f-string literal, no tr(), Sonnet 5 multi-agent review round 3
+            self._grid_idle_hint.setText(
+                tr("“{}”下没有已准备的拍摄目录，当前编号与照片均为 0。").format(name)
+            )
+        else:
+            # self._grid_idle_hint.setText(
+            #     "请先在左侧选择至少一个拍摄目录。"
+            #     "统计在右侧“调查概览”，编号与照片将显示在本栏。"
+            # )
+            # polish: empty-state hint text was raw literal, no tr(), Sonnet 5 multi-agent review round 3
+            self._grid_idle_hint.setText(
+                tr("请先在左侧选择至少一个拍摄目录。"
+                   "统计在右侧“调查概览”，编号与照片将显示在本栏。")
+            )
         self._grid_body.hide()
         if getattr(self, "_data_summary_panel", None) is not None:
             self._data_summary_panel.hide()
@@ -3059,6 +3649,10 @@ class ProjectTreeView(BaseView):
             self._uid_grid.clear()
         self._current_merged = []
         self._current_ws_dirs = []
+        self._current_summary_result = None
+        self._summary_row_uid_order = None
+        if getattr(self, "_specimen_table", None) is not None:
+            self._specimen_table.setRowCount(0)
         self._grid_head.setText("内容预览")
         self._grid_count_lbl.setText("")
         self._set_grid_breadcrumb(None)
@@ -3959,14 +4553,23 @@ class ProjectTreeView(BaseView):
         self._sync_summary_grid_from_table()
 
     def _apply_summary_groups_to_grid(self, groups: list) -> None:
-        self._uid_grid.set_unified_grid(False)
-        self._present_grid_panel(None)
-        QApplication.processEvents()
-        density = self.ctx.settings.project_tree_grid_density
-        fit = ptl.thumb_size_for_density(self._uid_grid._viewport_width(), density)
-        self._uid_grid.set_density_index(density)
-        self._uid_grid.set_groups(groups, thumb_size=fit)
-        self._sync_density_slider(density)
+        was_enabled = self._grid_panel.updatesEnabled()
+        self._grid_panel.setUpdatesEnabled(False)
+        try:
+            self._uid_grid.set_unified_grid(False)
+            self._present_grid_panel(None)
+            layout = self._grid_panel.layout()
+            if layout is not None:
+                layout.activate()
+            density = self.ctx.settings.project_tree_grid_density
+            fit = ptl.thumb_size_for_density(self._uid_grid._viewport_width(), density)
+            self._uid_grid.set_density_index(density)
+            self._uid_grid.set_groups(groups, thumb_size=fit)
+            self._sync_density_slider(density)
+        finally:
+            self._grid_panel.setUpdatesEnabled(was_enabled)
+            if was_enabled:
+                self._grid_panel.update()
 
     def _open_tiff_jpeg_export_for_selection(self) -> None:
         """选中编号 → 打开 TIFF 转 JPG 工具，预填母版路径，默认高清存档。"""
@@ -4041,7 +4644,9 @@ class ProjectTreeView(BaseView):
         self._grid_count_lbl.setText(f"{len(dirs)} 个断面 · {total} 张")
         self._uid_grid.set_unified_grid(True)
         self._present_grid_panel(None)
-        QApplication.processEvents()
+        layout = self._grid_panel.layout()
+        if layout is not None:
+            layout.activate()
         density = self.ctx.settings.project_tree_grid_density
         fit = ptl.thumb_size_for_density(self._uid_grid._viewport_width(), density)
         self._uid_grid.set_density_index(density)
@@ -4059,6 +4664,30 @@ class ProjectTreeView(BaseView):
         self._selection_items = list(items)
         self._scope_labeled = self._labeled_workspaces_from_items(items)
         self._run_scope_refresh()
+
+    def _on_tree_item_clicked(self, item: QTreeWidgetItem, _column: int) -> None:
+        """Make a plain row click authoritative even if Qt kept an old anchor."""
+        modifiers = QApplication.keyboardModifiers()
+        multi_modifier = modifiers & (
+            Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier
+        )
+        if not multi_modifier and (
+            self._tree.currentItem() is not item
+            or not item.isSelected()
+            or len(self._tree.selectedItems()) != 1
+        ):
+            self._tree.blockSignals(True)
+            try:
+                self._tree.clearSelection()
+                self._tree.setCurrentItem(item)
+                item.setSelected(True)
+            finally:
+                self._tree.blockSignals(False)
+
+        selected = self._tree.selectedItems()
+        tracked = getattr(self, "_selection_items", None) or []
+        if [id(value) for value in selected] != [id(value) for value in tracked]:
+            self._on_tree_selection_changed()
 
     def _run_scope_refresh(self) -> None:
         """选中范围刷新(右栏概览 + 中栏数据汇总 + 状态/详情), 带异常守护.
@@ -4090,6 +4719,8 @@ class ProjectTreeView(BaseView):
                     pass
 
     def _hide_grid_panel(self) -> None:
+        self._summary_query_token = getattr(self, "_summary_query_token", 0) + 1
+        self._stop_summary_query_worker(wait_ms=200)
         if getattr(self, "_grid_panel", None) is not None:
             self._grid_panel.setVisible(False)
         self._exit_preview_mode()
@@ -4106,6 +4737,9 @@ class ProjectTreeView(BaseView):
         self._current_merged = []
         self._current_ws_dirs = []
         self._current_summary_result = None
+        self._summary_row_uid_order = None
+        if getattr(self, "_specimen_table", None) is not None:
+            self._specimen_table.setRowCount(0)
         self._set_grid_breadcrumb(None)
 
     def _show_single_workspace_grid(self, path: str) -> None:
@@ -4125,7 +4759,9 @@ class ProjectTreeView(BaseView):
         self._grid_count_lbl.setText(f"{total} 张")
         self._uid_grid.set_unified_grid(True)
         self._prepare_grid_panel(path)
-        QApplication.processEvents()
+        layout = self._grid_panel.layout()
+        if layout is not None:
+            layout.activate()
         density = self.ctx.settings.project_tree_grid_density
         fit = ptl.thumb_size_for_density(self._uid_grid._viewport_width(), density)
         self._uid_grid.set_density_index(density)
@@ -4154,7 +4790,9 @@ class ProjectTreeView(BaseView):
         path = item.data(0, _PATH_ROLE)
         self._uid_grid.set_unified_grid(True)
         self._prepare_grid_panel(str(path) if path else None)
-        QApplication.processEvents()
+        layout = self._grid_panel.layout()
+        if layout is not None:
+            layout.activate()
         density = self.ctx.settings.project_tree_grid_density
         fit = ptl.thumb_size_for_density(self._uid_grid._viewport_width(), density)
         self._uid_grid.set_density_index(density)
@@ -4169,12 +4807,17 @@ class ProjectTreeView(BaseView):
         return str(media[0]) if media else None
 
     def _collect_labeled_workspaces(self, item, acc: list[tuple[str, str]]) -> None:
+        if item.data(0, _PLACEHOLDER_ROLE):
+            return  # Claude Code 2026-07-15 — 占位子项不算工作区
         path = item.data(0, _PATH_ROLE)
         kind = item.data(0, _KIND_ROLE)
         label = item.text(0).split("  ·  ", 1)[0]
         if path and kind == "workspace" and pts.is_workspace(str(path)):
             acc.append((str(path), label))
             return
+        # Claude Code 修改 2026-07-15 — 懒展开: 多选/汇总递归到懒节点时, 先把它的
+        # 子树加载出来再往下走, 否则会漏掉没展开过的项目里的工作区。
+        self._ensure_children_loaded(item)
         for i in range(item.childCount()):
             self._collect_labeled_workspaces(item.child(i), acc)
 
@@ -4717,11 +5360,16 @@ class ProjectTreeView(BaseView):
 
     # ── Cross-workspace tools (append-only launchers) ──────────────────────────
     def _collect_workspaces_from_item(self, item, acc: list[str]) -> None:
+        if item.data(0, _PLACEHOLDER_ROLE):
+            return  # Claude Code 2026-07-15 — 占位子项不算工作区
         path = item.data(0, _PATH_ROLE)
         kind = item.data(0, _KIND_ROLE)
         if path and kind == "workspace" and pts.is_workspace(str(path)):
             acc.append(str(path))
             return
+        # Claude Code 修改 2026-07-15 — 懒展开: 跨工作区工具必须拿到完整子树, 递归前
+        # 先加载懒节点, 否则会漏掉没展开过的项目里的工作区。
+        self._ensure_children_loaded(item)
         for i in range(item.childCount()):
             self._collect_workspaces_from_item(item.child(i), acc)
 
@@ -5096,7 +5744,9 @@ class ProjectTreeView(BaseView):
             #         existing_projects=load_user_projects(),
             #     )
             res = create_survey_project(
-                vals["parent_dir"], name=vals["name"], sites=[]
+                vals["parent_dir"],
+                name=vals["name"],
+                structure=vals.get("structure", []),
             )
         except (ValueError, FileExistsError, FileNotFoundError) as exc:
             ui.warn(self, "新建项目", str(exc))
@@ -5123,21 +5773,18 @@ class ProjectTreeView(BaseView):
         self._set_view_mode("all")
         self.focus_project(res["root"])
 
-        # §7 旧提示(含 N 个采样点), 恢复时反注释:
-        # n = len(res["sites"])
-        # ui.info(self, "新建项目", f"项目「{vals['name']}」已建好，含 {n} 个采样点。...")
         ui.info(
             self,
             "新建项目",
-            f"项目「{vals['name']}」已建好（空项目）。\n\n"
-            "· 点「新建子目录」添加断面 / 采样点，双击进去就能拍\n"
+            f"项目「{vals['name']}」已创建，包含 {len(res['workspaces'])} 个拍摄工作区。\n\n"
+            "· 可继续在项目树中添加任意层级\n"
             "· 点「项目设置」填采集人、地区代码、默认坐标、拍摄场地——\n"
-            "  下面所有采样点自动继承，拍照时右栏直接带出来，不用每次重填\n"
-            "· 照片只会落在采样点里，不会堆在项目根",
+            "  下级工作区会自动继承\n"
+            "· 照片只会落在指定工作区，不会堆在项目目录",
         )
 
     def prompt_new_child_under_root(self, root_path: Optional[str] = None) -> None:
-        """Public top-bar entry: create under the explicitly targeted project."""
+        """Public top-bar entry: append below the explicitly targeted project."""
         # 用户场景：全局项目树没有专属 root；新增下级目录的归属由调用动作明确传入。
         self._new_subfolder(parent_override=root_path or self._root)
 
@@ -5154,29 +5801,48 @@ class ProjectTreeView(BaseView):
         if not parent:
             ui.info(self, "项目树", "请先选择根目录或一个文件夹。")
             return
-        name, ok = QInputDialog.getText(
-            self,
-            "新建下级目录",
-            "目录名称（如 断面A、采样点1）：",
+
+        from app.services.project_scaffold_service import (
+            append_survey_structure,
+            find_project_root,
         )
-        name = (name or "").strip()
-        if not ok or not name:
+        from app.widgets.new_survey_project_dialog import NewSurveyProjectDialog
+
+        project_root = find_project_root(parent) or ""
+        dlg = NewSurveyProjectDialog(
+            self,
+            append_target_dir=str(parent),
+            project_root=project_root,
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        if any(c in name for c in ("/", "\\", "..")):
-            ui.warn(self, "项目树", "名称不合法（不能含 / \\ ..）。")
-            return
-        new_path = Path(parent) / name
+        vals = dlg.values()
         try:
-            new_path.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            ui.warn(self, "项目树", f"无法创建：{exc}")
+            res = append_survey_structure(
+                vals["target_dir"],
+                structure=vals["structure"],
+                project_root=vals.get("project_root") or None,
+            )
+        except (ValueError, FileExistsError, FileNotFoundError, OSError) as exc:
+            # ui.warn(self, "追加项目层级", str(exc))
+            # polish: error-branch title was raw literal while success path (12 lines below) uses tr() for same string, Sonnet 5 multi-agent review round 3
+            ui.warn(self, tr("追加项目层级"), str(exc))
             return
         # 用户场景（2026-07-13）：在项目 b 下新建子目录后，必须立即在 b 下显示，
         # 自动展开并选中，用户随后可双击或设为拍摄目录。局部缓存键可能因
         # Windows/WSL 路径写法不同而漏清，因此这里清整棵树缓存保证界面与磁盘一致。
         pts.clear_project_tree_cache()
         self._reload_project_tree()
-        self._select_tree_path(str(new_path))
+        first_name = vals["structure"][0]["name"]
+        first_path = Path(res["target"]) / first_name
+        self._select_tree_path(str(first_path))
+        ui.info(
+            self,
+            tr("追加项目层级"),
+            tr("已在「{}」下追加 {} 个顶层节点，其中 {} 个拍摄工作区。").format(
+                Path(res["target"]).name, len(vals["structure"]), len(res["workspaces"])
+            ),
+        )
 
     # ── 基本操作: 重命名 / 移动 / 删除 (用户 R-009, 2026-07-13) ─────────────────
     #

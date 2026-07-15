@@ -109,6 +109,18 @@ def _build_fastapi_app(store: TaskStore, node_info_fn: Callable[[], dict],
         _require_group(groupCode)
         return [t.to_dict() for t in store.list_tasks()]
 
+    # Claude Code 修改 2026-07-15 — 删除墓碑端点(codex 复现的离线复活修复)。
+    # 单独一个端点(不塞进 /tasks 列表), 老版本 peer 不会调它 -> 向后兼容: 老 peer
+    # 收不到墓碑(和今天一样), 新 peer 之间墓碑正常传播、离线重连不复活。
+    @app.get("/api/collab/tombstones")
+    async def list_tombstones(request: Request, groupCode: str = "") -> list:
+        _require_lan(request)
+        _require_group(groupCode)
+        try:
+            return store.list_tombstones()
+        except AttributeError:
+            return []
+
     @app.post("/api/collab/tasks/create")
     async def create_task(request: Request) -> JSONResponse:
         _require_lan(request)
@@ -263,6 +275,31 @@ def _build_fastapi_app(store: TaskStore, node_info_fn: Callable[[], dict],
         if not resolved.is_file():
             raise HTTPException(status_code=404, detail="file not found")
         return FileResponse(str(resolved), filename=resolved.name)
+
+    # Claude Code 修改 2026-07-15 — 分辨率可选预览端点(协作流式 spec 阶段 2)。
+    # 浏览对方工作区照片时先要预览(小), 不传整份原图/母 TIF: serving peer 现生成一张
+    # maxDim 有界的 JPEG 传回。同 download 端点走 _require_group_project(项目码隔离
+    # 红线不动), 复用同一 file_path_fn 解析项目相对路径。绝不改原文件(只读解码)。
+    @app.get("/api/collab/files/preview")
+    async def preview_file(request: Request, path: str = "", groupCode: str = "",
+                           projectId: str = "", maxDim: int = 1600,
+                           quality: int = 85) -> Any:
+        _require_lan(request)
+        _require_group_project(groupCode, projectId)
+        if file_path_fn is None:
+            raise HTTPException(status_code=404, detail="file sync unavailable")
+        try:
+            resolved = file_path_fn(path)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        if not resolved.is_file():
+            raise HTTPException(status_code=404, detail="file not found")
+        from app.services.collab_preview_service import build_file_preview
+        data = build_file_preview(str(resolved), max_dim=int(maxDim), quality=int(quality))
+        if not data:
+            raise HTTPException(status_code=415, detail="no preview for this file")
+        from fastapi.responses import Response as _Resp
+        return _Resp(content=data, media_type="image/jpeg")
 
     @app.post("/api/collab/specimens/push")
     async def receive_specimen_push(request: Request) -> dict:

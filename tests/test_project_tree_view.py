@@ -318,6 +318,96 @@ def test_rooted_tree_auto_selects_first_item(qtbot, tmp_path, ctx):
     assert view._detail_path.text() == str(root)
 
 
+def test_selecting_empty_child_clears_parent_workspace_data(qtbot, tmp_path, ctx, monkeypatch):
+    """有数据工作区 -> 空子目录时，旧编号和照片不能继续留在中栏。"""
+    from app.db.db_manager import open_project_db_private
+
+    root = tmp_path / "ceshi10"
+    empty_child = root / "bb"
+    empty_child.mkdir(parents=True)
+    db = open_project_db_private(str(root), create=True)
+    try:
+        db.execute("INSERT INTO specimens (uid) VALUES (?)", ("PARENT-001",))
+        db.commit()
+    finally:
+        db.close()
+    ctx.settings.project_tree_root = str(root)
+
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    monkeypatch.setattr(view, "_refresh_survey_overview", lambda *_a, **_k: None)
+    view.on_activate()
+
+    qtbot.waitUntil(
+        lambda: (
+            getattr(view, "_current_summary_result", None) is not None
+            and view._specimen_table.rowCount() == 1
+        ),
+        timeout=8000,
+    )
+    assert view._current_ws_dirs == [str(root)]
+
+    top = view._tree.topLevelItem(0)
+    child = next(
+        top.child(i) for i in range(top.childCount())
+        if top.child(i).text(0) == "bb"
+    )
+    view.show()
+    qtbot.waitExposed(view)
+    view._tree.scrollToItem(child)
+    qtbot.mouseClick(
+        view._tree.viewport(),
+        Qt.MouseButton.LeftButton,
+        pos=view._tree.visualItemRect(child).center(),
+    )
+
+    assert view._tree.currentItem() is child
+    assert child.isSelected()
+    assert view._effective_scope_labeled() == []
+    assert view._current_ws_dirs == []
+    assert view._current_summary_result is None
+    assert view._specimen_table.rowCount() == 0
+    assert not view._grid_idle_hint.isHidden()
+    assert "bb" in view._grid_idle_hint.text()
+    view._stop_summary_query_worker(wait_ms=2000)
+
+
+def test_plain_item_click_recovers_when_qt_keeps_old_tree_anchor(qtbot, tmp_path, ctx):
+    root = tmp_path / "ceshi10"
+    child_path = root / "bb"
+    child_path.mkdir(parents=True)
+    _make_workspace(root)
+    ctx.settings.project_tree_root = str(root)
+
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    view.on_activate()
+    top = view._tree.topLevelItem(0)
+    child = next(
+        top.child(i) for i in range(top.childCount())
+        if top.child(i).text(0) == "bb"
+    )
+
+    view._tree.blockSignals(True)
+    try:
+        view._tree.clearSelection()
+        view._tree.setCurrentItem(top)
+        top.setSelected(True)
+    finally:
+        view._tree.blockSignals(False)
+    view._selection_items = [top]
+    view._scope_labeled = view._labeled_workspaces_from_items([top])
+
+    view._on_tree_item_clicked(child, 0)
+
+    assert view._tree.currentItem() is child
+    assert child.isSelected()
+    assert not top.isSelected()
+    assert view._effective_scope_labeled() == []
+    assert view._current_ws_dirs == []
+    assert view._specimen_table.rowCount() == 0
+
+
 def _seed_projects_json(path: Path, projects: list) -> None:
     """Write a user_projects.json with the given project list."""
     import json
@@ -401,6 +491,206 @@ def test_no_root_flat_lists_known_projects(qtbot, tmp_path, ctx, monkeypatch):
     # 乙 (the later entry) comes first
     assert "乙" in labels[0]
     assert "甲" in labels[1]
+
+
+def test_distinct_case_paths_not_grouped_on_case_sensitive_fs(
+    qtbot, tmp_path, ctx, monkeypatch
+):
+    # BUG: grouping key used casefold() unconditionally, so two genuinely
+    # distinct paths differing only in case were merged into one tree node on
+    # a case-sensitive filesystem (Linux/macOS). They must stay separate there.
+    app_dir = tmp_path / "isolated-app"
+    app_dir.mkdir()
+    monkeypatch.chdir(app_dir)
+    recent_json = _patch_recent_json(monkeypatch, tmp_path)
+
+    lower = tmp_path / "ceshi"
+    upper = tmp_path / "CESHI"
+    lower.mkdir()
+    # Claude Code 修改 2026-07-14 — codex 在 Windows 批跑发现此测试报错(非预期的
+    # skip): 大小写不敏感文件系统上 "CESHI" 和已存在的 "ceshi" 是同一路径,
+    # upper.mkdir() 会直接抛 FileExistsError, 原代码在 mkdir 之后才判断是否该
+    # skip, 根本走不到那一行。改成 try/except, 撞到就地判 skip。
+    try:
+        upper.mkdir()
+    except FileExistsError:
+        pytest.skip("filesystem is case-insensitive; grouping-by-case is moot")
+    # Only meaningful where the filesystem actually keeps the two distinct.
+    if lower.resolve() == upper.resolve() or not upper.exists():
+        pytest.skip("filesystem is case-insensitive; grouping-by-case is moot")
+
+    projects = [
+        {"id": "1", "name": "小写", "directory": str(lower)},
+        {"id": "2", "name": "大写", "directory": str(upper)},
+    ]
+    _seed_projects_json(recent_json, projects)
+
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    view.on_activate()
+
+    assert view._tree.topLevelItemCount() == 2
+    labels = {view._tree.topLevelItem(i).text(0) for i in range(2)}
+    assert labels == {"小写", "大写"}
+
+
+def test_project_facets_filter_registered_metadata(qtbot, tmp_path, ctx, monkeypatch):
+    recent_json = _patch_recent_json(monkeypatch, tmp_path)
+    projects = []
+    for name, year, region, collector in (
+        ("项目A", "2026", "广东", "李明"),
+        ("项目B", "2025", "广东", "张华"),
+        ("项目C", "2026", "海南", "李明"),
+    ):
+        directory = tmp_path / name
+        directory.mkdir()
+        projects.append({
+            "name": name,
+            "directory": str(directory),
+            "year": year,
+            "location": region,
+            "collector": collector,
+        })
+    _seed_projects_json(recent_json, projects)
+    ctx.settings.project_tree_view_mode = "all"
+
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    view.on_activate()
+
+    view._project_region_filter.setCurrentIndex(
+        view._project_region_filter.findData("广东")
+    )
+    assert sum(
+        not view._tree.topLevelItem(i).isHidden()
+        for i in range(view._tree.topLevelItemCount())
+    ) == 2
+
+    view._project_collector_filter.setCurrentIndex(
+        view._project_collector_filter.findData("李明")
+    )
+    view._project_year_filter.setCurrentIndex(
+        view._project_year_filter.findData("2026")
+    )
+    assert view._tree_count_lbl.text() == "1/3 个项目"
+    visible = [
+        view._tree.topLevelItem(i).text(0)
+        for i in range(view._tree.topLevelItemCount())
+        if not view._tree.topLevelItem(i).isHidden()
+    ]
+    assert visible == ["项目A"]
+
+    view._clear_project_filters()
+    assert all(
+        not view._tree.topLevelItem(i).isHidden()
+        for i in range(view._tree.topLevelItemCount())
+    )
+
+
+def test_project_facets_use_compact_toolbar_with_contextual_reset(
+    qtbot, tmp_path, ctx, monkeypatch
+):
+    recent_json = _patch_recent_json(monkeypatch, tmp_path)
+    project = tmp_path / "项目A"
+    project.mkdir()
+    _seed_projects_json(recent_json, [{
+        "name": "项目A",
+        "directory": str(project),
+        "year": "2026",
+        "location": "广西",
+        "collector": "李明",
+    }])
+    ctx.settings.project_tree_view_mode = "all"
+
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    view.on_activate()
+
+    assert view._project_filter_label.text() == "筛选"
+    assert view._project_year_filter.itemText(0) == "全部时间"
+    assert view._project_region_filter.itemText(0) == "全部地区"
+    assert view._project_collector_filter.itemText(0) == "全部采集人"
+    assert view._project_year_filter.maximumWidth() <= 160
+    assert view._clear_project_filters_btn.isHidden()
+
+    view._project_region_filter.setCurrentIndex(
+        view._project_region_filter.findData("广西")
+    )
+    assert not view._clear_project_filters_btn.isHidden()
+    assert view._clear_project_filters_btn.text() == "清除筛选"
+
+    view._clear_project_filters()
+    assert view._clear_project_filters_btn.isHidden()
+
+
+def test_recent_workspace_under_registered_root_is_not_a_duplicate_project(
+    qtbot, tmp_path, ctx, monkeypatch
+):
+    recent_json = _patch_recent_json(monkeypatch, tmp_path)
+    root = tmp_path / "广西"
+    workspace = root / "区域1" / "断面1"
+    workspace.mkdir(parents=True)
+    _make_workspace(workspace)
+    _seed_projects_json(recent_json, [
+        {
+            "name": "广西",
+            "directory": str(root),
+            "root": str(root),
+            "year": "2026",
+            "location": "广西",
+        },
+        {
+            "name": "广西 / 区域1 / 断面1",
+            "directory": str(workspace),
+            "root": str(root),
+            "lastOpenedAt": 2,
+        },
+    ])
+    ctx.settings.project_tree_view_mode = "all"
+
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    view.on_activate()
+
+    assert view._tree.topLevelItemCount() == 1
+    project_item = view._tree.topLevelItem(0)
+    assert project_item.text(0) == "广西"
+    region_item = next(
+        project_item.child(i)
+        for i in range(project_item.childCount())
+        if project_item.child(i).text(0) == "区域1"
+    )
+    assert any(
+        region_item.child(i).text(0) == "断面1"
+        for i in range(region_item.childCount())
+    )
+
+
+def test_current_workspace_is_selected_without_hiding_other_projects(
+    qtbot, tmp_path, ctx, monkeypatch
+):
+    from app.views.project_tree_view import _PATH_ROLE
+
+    recent_json = _patch_recent_json(monkeypatch, tmp_path)
+    project_a = tmp_path / "项目A"
+    project_b = tmp_path / "项目B"
+    project_a.mkdir()
+    project_b.mkdir()
+    _seed_projects_json(recent_json, [
+        {"name": "项目A", "directory": str(project_a)},
+        {"name": "项目B", "directory": str(project_b)},
+    ])
+    ctx.settings.project_tree_view_mode = "all"
+    ctx.current_project_dir = str(project_b)
+    ctx.current_project_root = str(project_b)
+
+    view = ProjectTreeView(ctx)
+    qtbot.addWidget(view)
+    view.on_activate()
+
+    assert view._tree.topLevelItemCount() == 2
+    assert ctx.settings.project_tree_view_mode == "all"
+    assert Path(view._tree.currentItem().data(0, _PATH_ROLE)).resolve() == project_b.resolve()
 
 
 def test_flat_list_enter_workspace_with_root_none(qtbot, tmp_path, ctx, monkeypatch):
@@ -1646,7 +1936,44 @@ def test_new_subfolder_button_exists_in_toolbar(qtbot, tmp_path, ctx):
     assert view._btn_new_subfolder.isVisible() or not view._btn_new_subfolder.isHidden()
     assert hasattr(view, "_btn_new_project")
     assert view._btn_new_project.isVisible() or not view._btn_new_project.isHidden()
-    assert "下级目录" in view._btn_new_subfolder.text()
+    assert "追加层级" in view._btn_new_subfolder.text()
+
+
+def _patch_append_dialog(
+    monkeypatch,
+    *,
+    name: str,
+    is_workspace: bool = False,
+    captured: dict | None = None,
+):
+    class _FakeAppendDialog:
+        def __init__(self, *args, **kwargs):
+            self.target = kwargs["append_target_dir"]
+            self.root = kwargs.get("project_root", "")
+            if captured is not None:
+                captured.update(kwargs)
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+        def values(self):
+            return {
+                "mode": "append",
+                "target_dir": self.target,
+                "project_root": self.root,
+                "structure": [{
+                    "name": name,
+                    "type": "断面",
+                    "is_workspace": is_workspace,
+                    "children": [],
+                }],
+            }
+
+    monkeypatch.setattr(
+        "app.widgets.new_survey_project_dialog.NewSurveyProjectDialog",
+        _FakeAppendDialog,
+    )
+    monkeypatch.setattr("app.utils.ui.info", lambda *args, **kwargs: None)
 
 
 def test_new_subfolder_button_creates_plain_dir_not_workspace(
@@ -1660,17 +1987,15 @@ def test_new_subfolder_button_creates_plain_dir_not_workspace(
     from app.services import project_tree_service as pts
 
     root = tmp_path / "survey"
-    _make_workspace(root)
+    (root / "_data").mkdir(parents=True)
+    (root / "_data" / "region.json").write_text("{}", encoding="utf-8")
     ctx.settings.project_tree_root = str(root)
 
     view = ProjectTreeView(ctx)
     qtbot.addWidget(view)
     view.on_activate()
 
-    monkeypatch.setattr(
-        "app.views.project_tree_view.QInputDialog.getText",
-        lambda *a, **kw: ("断面A", True),
-    )
+    _patch_append_dialog(monkeypatch, name="断面A", is_workspace=False)
     view._new_subfolder()
 
     child = root / "断面A"
@@ -1695,10 +2020,7 @@ def test_new_child_appears_under_project_and_is_selected_in_all_projects(
     ])
     ctx.settings.project_tree_view_mode = "all"
     ctx.settings.project_tree_root = None
-    monkeypatch.setattr(
-        "app.views.project_tree_view.QInputDialog.getText",
-        lambda *args, **kwargs: ("子目录1", True),
-    )
+    _patch_append_dialog(monkeypatch, name="子目录1", is_workspace=False)
 
     view = ProjectTreeView(ctx)
     qtbot.addWidget(view)
@@ -1882,12 +2204,15 @@ def test_new_subfolder_never_builds_outside_current_root(qtbot, tmp_path, ctx, m
 
     # 伪造一个「选中了别的项目」的状态
     monkeypatch.setattr(view, "_selected_path", lambda: str(outsider))
-    monkeypatch.setattr(
-        "app.views.project_tree_view.QInputDialog.getText",
-        staticmethod(lambda *a, **kw: ("断面A", True)),
-        raising=False,
+    captured = {}
+    _patch_append_dialog(
+        monkeypatch,
+        name="断面A",
+        is_workspace=False,
+        captured=captured,
     )
     view._new_subfolder()
 
+    assert captured["append_target_dir"] == str(root)
     assert (root / "断面A").is_dir()            # 退回当前根
     assert not (outsider / "断面A").exists()    # 绝不建到别人家

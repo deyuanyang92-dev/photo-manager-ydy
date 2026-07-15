@@ -213,9 +213,16 @@ def _file_mtime_iso(full_path: str) -> str:
     return datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat()
 
 
-def _build_file_entry(full_path: str, name: str, kind: str, detail: str = "") -> FileEntry:
-    """Build a FileEntry from a real file."""
-    st = os.stat(full_path)
+def _build_file_entry(full_path: str, name: str, kind: str, detail: str = "",
+                      st: "os.stat_result | None" = None) -> FileEntry:
+    """Build a FileEntry from a real file.
+
+    Claude Code 修改 2026-07-15 — 大规模性能优化: 允许传入已经拿到的 stat 结果
+    (os.scandir 的 DirEntry.stat() 是从目录读取里缓存出来的, 不触发额外 syscall),
+    避免每个文件重复 os.stat。不传 st 时行为与旧版完全一致(自己 stat)。
+    """
+    if st is None:
+        st = os.stat(full_path)
     return FileEntry(
         name=name,
         path=full_path,
@@ -239,20 +246,36 @@ def _list_pending_jpg_entries(
     result = []
     if not os.path.isdir(jpg_dir):
         return result
-    for name in os.listdir(jpg_dir):
-        if not include_hidden and name.startswith("."):
-            continue
-        if not re.search(r"\.jpe?g$", name, re.IGNORECASE):
-            continue
-        if name in archived_set:
-            continue
-        full = os.path.join(jpg_dir, name)
-        try:
-            if os.path.isfile(full):
-                e = _build_file_entry(full, name, "jpg", detail_prefix + " · 未关联原片")
-                result.append(e)
-        except OSError:
-            pass
+    # Claude Code 修改 2026-07-15 — 大规模性能优化(codex 实测 1万文件 12.47s):
+    # 旧版每文件 2 次 stat syscall —— os.path.isfile(full)(1 次) + _build_file_entry
+    # 里 os.stat(又 1 次)。改 os.scandir: de.is_file() 用 readdir 带回的 d_type(不
+    # 触发 syscall), de.stat() 只 stat 一次 —— 每文件 2 次 stat 压到 1 次。用户真实
+    # 环境是 WSL2 访问 /mnt/n 的 drvfs, 每次 stat 都跨 WSL/Windows 边界、极慢, 2→1
+    # 的收益在那里接近 2x(本机 ext4 约 1.2x)。输出的 FileEntry 列表逐字段不变
+    # (test_monitor_scan_scandir 对拍锁死)。
+    # §7 旧: for name in os.listdir(jpg_dir): ... os.path.isfile(full) ... _build_file_entry(full, ...)
+    try:
+        scan_it = os.scandir(jpg_dir)
+    except OSError:
+        return result
+    with scan_it:
+        for de in scan_it:
+            name = de.name
+            if not include_hidden and name.startswith("."):
+                continue
+            if not re.search(r"\.jpe?g$", name, re.IGNORECASE):
+                continue
+            if name in archived_set:
+                continue
+            try:
+                if de.is_file():
+                    e = _build_file_entry(
+                        de.path, name, "jpg", detail_prefix + " · 未关联原片",
+                        st=de.stat(),
+                    )
+                    result.append(e)
+            except OSError:
+                pass
     return result
 
 
@@ -271,28 +294,40 @@ def _list_tiff_entries(
     result = []
     if not os.path.isdir(tiff_dir):
         return result
-    for name in os.listdir(tiff_dir):
-        if not include_hidden and name.startswith("."):
-            continue
-        if not re.search(r"\.tiff?$", name, re.IGNORECASE):
-            continue
-        base = Path(name).stem
-        if skip_processed and base in processed_set:
-            continue
-        if skip_if_zip:
-            zip_path = os.path.join(tiff_dir, base + ".zip")
-            if os.path.isfile(zip_path):
+    # Claude Code 修改 2026-07-15 — 大规模性能优化: 同 _list_pending_jpg_entries,
+    # os.listdir + 逐文件 os.stat 改 os.scandir(缓存 stat)。输出逐字段不变
+    # (test_monitor_scan_scandir 对拍锁死)。这里的同名 zip 判断仍走 os.path.isfile
+    # (zip 不在本次 scandir 的过滤结果里, 但它就在同目录, 用一次 stat 判断即可;
+    # 若要进一步省, 可预先把本目录的 .zip 名收进 set —— 留到需要时再优化)。
+    # §7 旧: for name in os.listdir(tiff_dir): ... os.path.isfile(full) ... _build_file_entry(full, ...)
+    try:
+        scan_it = os.scandir(tiff_dir)
+    except OSError:
+        return result
+    with scan_it:
+        for de in scan_it:
+            name = de.name
+            if not include_hidden and name.startswith("."):
                 continue
-        full = os.path.join(tiff_dir, name)
-        try:
-            if os.path.isfile(full):
-                e = _build_file_entry(full, name, "tiff", detail_prefix + " · TIFF")
-                e.basename = base
-                # Check co-located zip
-                e.has_zip = os.path.isfile(os.path.join(tiff_dir, base + ".zip"))
-                result.append(e)
-        except OSError:
-            pass
+            if not re.search(r"\.tiff?$", name, re.IGNORECASE):
+                continue
+            base = Path(name).stem
+            if skip_processed and base in processed_set:
+                continue
+            if skip_if_zip:
+                if os.path.isfile(os.path.join(tiff_dir, base + ".zip")):
+                    continue
+            try:
+                if de.is_file():
+                    e = _build_file_entry(
+                        de.path, name, "tiff", detail_prefix + " · TIFF", st=de.stat(),
+                    )
+                    e.basename = base
+                    # Check co-located zip
+                    e.has_zip = os.path.isfile(os.path.join(tiff_dir, base + ".zip"))
+                    result.append(e)
+            except OSError:
+                pass
     return result
 
 

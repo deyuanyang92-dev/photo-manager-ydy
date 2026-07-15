@@ -852,6 +852,17 @@ class WorkbenchOrganiseWorkflowMixin:
             except Exception:
                 pass
 
+            # Claude Code 修改 2026-07-14 — 用户裁定(2026-07-14): 手动"整理"入口
+            # 必须先确认, 点"否"不得产生副作用(codex 回归 + 用户 grill-me 拍板)。
+            # silent_batch(合成+整理一条龙)不受影响——用户明确要求批量流程保持
+            # 零弹框, 这条确认只挡手动单次整理这一条路径。
+            if not silent_batch:
+                confirm_msg = f"确认整理第 {group_index + 1} 组吗？\n\n将把 JPG 归档为 ZIP"
+                confirm_msg += "，并在验证归档完整后删除原 JPG。" if delete_jpg else "。"
+                reply_confirm = ui.question(dlg_parent, "整理确认", confirm_msg)
+                if reply_confirm != QMessageBox.StandardButton.Yes:
+                    return False
+
             if group.jpg_paths:
                 from app.services.organize_workflow_service import resolve_group_jpg_paths
 

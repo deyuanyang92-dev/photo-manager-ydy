@@ -129,8 +129,15 @@ _THUMB_SIZE = DEFAULT_THUMB_SIZE  # legacy alias for tests / cache keys
 #     防止单个 worker 被上千条过期请求塞死。
 #   * 滚动用 debounce 定时器合并；解码回来的单元格用 ~16ms 定时器攒批刷新。
 _PREFETCH_BUDGET = 96
+# Claude Code 修改 2026-07-14 — codex 回归发现: BUG1 修复(严格可见行无视预算)在
+# 小缩略图/大视口下单次调用可能一口气派发数百个解码请求, 全堆给单一 worker 线程的
+# 消息队列。严格可见格子仍然必须"最终全部被请求"(否则回到 BUG1 那个 bug), 但
+# 单次调用里只应该发这么多个, 剩下的下一轮 tick 接着发, 分批排空而不是一次性爆发。
+_VISIBLE_PREFETCH_BUDGET = 128
+_PREFETCH_CONTINUATION_MS = 30
 _PREFETCH_SCROLL_DEBOUNCE_MS = 80
 _DIRTY_FLUSH_MS = 16
+_INITIAL_COVER_TIMEOUT_MS = 5000
 
 # QPixmapCache 全局上限（KB）。main.py 只设 8MB(性能模式 4MB)，按「一屏 30 格 ×
 # 每格 ~0.25MB」根本装不下一屏，导致 paint 永远未命中 → 反复解码 → 抖动。
@@ -574,6 +581,12 @@ class UidGroupedGrid(QFrame):
         # 解码回填的脏格子：section_idx -> {row}，由 _dirty_timer 攒批刷新，
         # 避免上千次单格 dataChanged 自身构成信号风暴。
         self._dirty_cells: dict[int, set[int]] = {}
+        self._loading_cover_active = False
+        self._loading_cover_pending: set[str] = set()
+        self._loading_cover_timer = QTimer(self)
+        self._loading_cover_timer.setSingleShot(True)
+        self._loading_cover_timer.setInterval(_INITIAL_COVER_TIMEOUT_MS)
+        self._loading_cover_timer.timeout.connect(self._on_loading_cover_timeout)
 
         # QPixmapCache 上限（只升不降），否则一屏都缓存不下，命中率恒为 0。
         _ensure_pixmap_cache_limit()
@@ -643,6 +656,14 @@ class UidGroupedGrid(QFrame):
         cl.addStretch(1)  # sections inserted before this stretch
         self._scroll.setWidget(self._container)
         outer.addWidget(self._scroll, 1)
+
+        # polish: wrap in tr() for i18n consistency with sibling loading-state labels (Sonnet 5 multi-agent review)
+        # self._loading_cover = QLabel("正在静默准备首屏照片…", self._scroll.viewport())
+        self._loading_cover = QLabel(tr("正在静默准备首屏照片…"), self._scroll.viewport())
+        self._loading_cover.setObjectName("EmptyState")
+        self._loading_cover.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._loading_cover.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self._loading_cover.hide()
 
         # 滚动 → debounce → 只补预取新进入可见带的格子（新增预取的唯一入口）。
         # 定时器归主线程所有，且 _setup_ui 只在 __init__ 调一次，不会重复连接。
@@ -735,6 +756,10 @@ class UidGroupedGrid(QFrame):
         rebuild from auto-fit after the grid is already populated).
         """
         self._last_groups = merge_groups_by_catalog_key(list(groups or []))
+        if any(g.get("items") for g in self._last_groups):
+            self._show_loading_cover()
+        else:
+            self._hide_loading_cover()
         if thumb_size is not None:
             self._thumb_size = clamp_thumb_size(thumb_size)
         self._failed_paths.clear()
@@ -1045,12 +1070,46 @@ class UidGroupedGrid(QFrame):
     #             continue
     #         self._request_decode(sec_idx, row, path)
 
-    def _visible_row_span(self, sec: "_Section") -> Optional[tuple[int, int]]:
+    # Claude Code 修改 2026-07-15 — codex 回归实测复现: offscreen QPA 插件不支持
+    # propagateSizeHints(), _container 的 QVBoxLayout 收不到各 section 的尺寸,
+    # 40 个 section 全挤在 y=0 附近, 导致 _visible_row_span 把老远的 section 也
+    # 判成可见。每个 section 的 list_view 高度是显式 setFixedHeight 定的(可靠),
+    # 这里直接用这些显式高度手算 _container 应有的总高度并 resize+activate,
+    # 不依赖会在这个 QPA 插件上失效的自动尺寸传播。
+    def _settle_container_geometry(self) -> None:
+        try:
+            layout = self._container.layout()
+            if layout is None or not self._sections:
+                return
+            total = 0
+            for sec in self._sections:
+                lv = sec.list_view
+                if lv is None:
+                    continue
+                total += _HEADER_H + 4 + lv.height()  # 4 = wrapper QVBoxLayout spacing
+            spacing = layout.spacing()
+            if spacing > 0:
+                total += spacing * max(0, len(self._sections) - 1)
+            margins = layout.contentsMargins()
+            total += margins.top() + margins.bottom()
+            if self._container.height() < total:
+                self._container.resize(self._container.width(), total)
+            layout.activate()
+        except Exception:
+            pass
+
+    # Claude Code 修改 2026-07-14 — BUG1: 加 prefetch 开关, 使调用方能单独取「严格可见视口」跨距, 严格可见行必须无视预算全部请求
+    def _visible_row_span(
+        self, sec: "_Section", prefetch: bool = True
+    ) -> Optional[tuple[int, int]]:
         """Rows of *sec* intersecting the visible band (外层 QScrollArea 视口 ±1 屏).
 
         每个 section 的 QListView 被 ``_apply_section_height`` 撑成「全部行的总高」,
         滚动的是外层 QScrollArea —— 所以 ``lv.viewport().rect()`` 覆盖该 section 的
         全部行, ``indexAt`` 会把所有行都算成可见。必须以外层视口为基准做映射。
+
+        ``prefetch=True`` 返回视口 ±1 屏的预取带; ``prefetch=False`` 只返回严格
+        落在视口内的行 —— 首屏 loading 罩必须保证这些行全部被请求。
         """
         lv = sec.list_view
         model = sec.model
@@ -1061,7 +1120,12 @@ class UidGroupedGrid(QFrame):
             return None
         try:
             vp = self._scroll.viewport()
-            band = vp.rect().adjusted(0, -vp.height(), 0, vp.height())
+            # §7 旧: band = vp.rect().adjusted(0, -vp.height(), 0, vp.height())
+            # Claude Code 修改 2026-07-14 — BUG1: prefetch 时才向上下各扩一屏, 严格可见只取视口本身
+            if prefetch:
+                band = vp.rect().adjusted(0, -vp.height(), 0, vp.height())
+            else:
+                band = vp.rect()
             lvp = lv.viewport()
             top_left = lvp.mapFrom(vp, band.topLeft())
             r = QRect(top_left, band.size()).intersected(lvp.rect())
@@ -1086,24 +1150,98 @@ class UidGroupedGrid(QFrame):
         ``decode_image_data(use_cache=True)`` 负责（它本来就先查内存缓存再查磁盘
         缓存），把它从 GUI 线程删掉是零功能损失。
         """
+        # Claude Code 修改 2026-07-15 — codex 回归实测复现的真根因: set_groups()
+        # 之后立刻(singleShot(0))触发的第一轮预取, 此时 QVBoxLayout 还没跑完真正
+        # 的布局计算, 各 section 的 list_view 在 _container 里的位置全部挤在
+        # y=0 附近的陈旧/默认值(哪怕它们各自已经 setFixedHeight 撑到几千像素高)。
+        # 根因进一步实测确认: offscreen QPA 插件明确打印
+        # "This plugin does not support propagateSizeHints()" —— 子控件的
+        # sizeHint 传不到 _container 这层, layout().activate() 单独调没用
+        # (container 自己的尺寸没被撑开, 40 个 section 全挤在同一块窄区域里
+        # 重叠, mapTo/mapFrom 算出来的坐标因此把老远的 section 也判成可见)。
+        # 每个 section 自己的 list_view 高度是用 setFixedHeight 显式定的(可靠,
+        # 不依赖 sizeHint 传播), 这里改成直接用这些显式高度手算 _container 应有
+        # 的总高度并 resize 上去, 再 activate 布局——不靠"迟早会跑到"的传播。
+        self._settle_container_geometry()
         ts = self._thumb_size
         budget = _PREFETCH_BUDGET
+        # Claude Code 修改 2026-07-14 — codex 回归: 严格可见行也要设一个"本轮"上限,
+        # 防止小缩略图+大视口时单次调用派发几百个请求; 超额部分留到下一轮 tick,
+        # 不是放弃(BUG1 不能复发), 是分批。
+        visible_budget = _VISIBLE_PREFETCH_BUDGET
+        saw_visible_span = False
+        visible_rows_remaining = False
         for sec_idx, sec in enumerate(self._sections):
-            span = self._visible_row_span(sec)
-            if span is None:
+            # §7 旧: span = self._visible_row_span(sec)  # 只取 ±1 屏预取带
+            # Claude Code 修改 2026-07-14 — BUG1: 分别取预取带与严格可见跨距, 前者受预算约束, 后者永远请求
+            band = self._visible_row_span(sec)
+            if band is None:
                 continue
-            first, last = span
+            saw_visible_span = True
+            b_first, b_last = band
+            strict = self._visible_row_span(sec, prefetch=False)
+            s_first, s_last = strict if strict is not None else (None, None)
             model = sec.model
-            for row in range(first, last + 1):
-                if budget <= 0:
-                    return
+            # §7 旧: 预算耗尽即 ``return`` —— 会连后续 section 一起吞掉, 且首屏可见格可能没请求罩就先撤了
+            # Claude Code 修改 2026-07-14 — BUG1: 预算 cutoff 只作用于预取带(非严格可见)行, 严格可见行无条件请求
+            for row in range(b_first, b_last + 1):
+                in_view = strict is not None and s_first <= row <= s_last
+                if not in_view and budget <= 0:
+                    continue  # 预取带超预算 —— 跳过本行但不放弃其余严格可见行/后续 section
+                if in_view and visible_budget <= 0:
+                    # Claude Code 修改 2026-07-14 — 本轮严格可见预算也用完: 不放弃这一格
+                    # (否则又是 BUG1), 标记"还有剩的", 留给下一轮 tick 继续请求。
+                    visible_rows_remaining = True
+                    continue
                 path = model.data(model.index(row), UidSectionModel.PATH_ROLE) or ""
                 if not path or path in self._failed_paths or path in self._pending_paths:
                     continue
                 if QPixmapCache.find(_cache_key_for(ts, path)) is not None:
                     continue
                 self._request_decode(sec_idx, row, path)
-                budget -= 1
+                if not in_view:
+                    budget -= 1  # 只有预取带的请求消耗预算
+                else:
+                    visible_budget -= 1
+        if visible_rows_remaining:
+            # Claude Code 修改 2026-07-14 — 排空剩余严格可见行: 短延时后自己再跑一轮,
+            # 而不是等下一次滚动/重建事件(那样可能永远不来, 格子会一直空着)。
+            QTimer.singleShot(_PREFETCH_CONTINUATION_MS, self._prefetch_visible_thumbnails)
+        if (
+            saw_visible_span
+            and not visible_rows_remaining
+            and self._loading_cover_active
+            and not self._loading_cover_pending
+        ):
+            self._hide_loading_cover()
+
+    def _show_loading_cover(self) -> None:
+        self._loading_cover_active = True
+        self._loading_cover_pending.clear()
+        self._loading_cover.setGeometry(self._scroll.viewport().rect())
+        self._loading_cover.show()
+        self._loading_cover.raise_()
+        self._loading_cover_timer.start()
+
+    def _on_loading_cover_timeout(self) -> None:
+        # Slow cold decodes must not expose a half-painted first viewport.
+        if self._loading_cover_active and self._loading_cover_pending:
+            self._loading_cover.raise_()
+            self._loading_cover_timer.start()
+            return
+        self._hide_loading_cover()
+
+    def _hide_loading_cover(self) -> None:
+        if not hasattr(self, "_loading_cover"):
+            return
+        self._loading_cover_timer.stop()
+        self._loading_cover_active = False
+        self._loading_cover_pending.clear()
+        if self._dirty_cells:
+            self._dirty_timer.stop()
+            self._flush_dirty_cells()
+        self._loading_cover.hide()
+        self._scroll.viewport().update()
 
     def _store_decoded_pixmap(
         self,
@@ -1260,6 +1398,8 @@ class UidGroupedGrid(QFrame):
         # Drop all in-flight requests: any reply that lands now is stale.
         self._pending.clear()
         self._pending_paths.clear()
+        # Claude Code 修改 2026-07-14 — BUG2: 被丢弃的在途请求其回复会 stale-drop, 永不 discard; 不同步清空会让罩的 pending 永久非空、再也无法隐藏
+        self._loading_cover_pending.clear()
         # 陈旧的脏格子指向已销毁的 section, 一并丢弃。
         self._dirty_cells.clear()
         # NOTE: ``_failed_paths`` is intentionally NOT cleared here — a path
@@ -1358,6 +1498,8 @@ class UidGroupedGrid(QFrame):
 
     def resizeEvent(self, event) -> None:  # noqa: D401 - Qt override
         super().resizeEvent(event)
+        if hasattr(self, "_loading_cover"):
+            self._loading_cover.setGeometry(self._scroll.viewport().rect())
         if self._density_index is not None:
             size = thumb_size_for_density(self._viewport_width(), self._density_index)
             if size != self._thumb_size and self._last_groups:
@@ -1375,6 +1517,7 @@ class UidGroupedGrid(QFrame):
             self._reflow_unified_height()
         else:
             self._reflow_section_heights()
+        self._schedule_visible_repaint()
 
     def _on_cell_clicked(self, section_idx: int, index: QModelIndex) -> None:
         if not index.isValid() or not (0 <= section_idx < len(self._sections)):
@@ -1674,6 +1817,8 @@ class UidGroupedGrid(QFrame):
         req_id = self._req_counter
         self._pending[req_id] = (section_idx, row, path)
         self._pending_paths.add(path)
+        if self._loading_cover_active:
+            self._loading_cover_pending.add(path)
         QMetaObject.invokeMethod(
             self._worker,
             "decode",
@@ -1700,8 +1845,14 @@ class UidGroupedGrid(QFrame):
         if pixmap is None or pixmap.isNull():
             # Negative cache — don't keep asking for a file that won't decode.
             self._failed_paths.add(path)
+            self._loading_cover_pending.discard(path)
+            if self._loading_cover_active and not self._loading_cover_pending:
+                self._hide_loading_cover()
             return
         self._store_decoded_pixmap(section_idx, row, path, image)
+        self._loading_cover_pending.discard(path)
+        if self._loading_cover_active and not self._loading_cover_pending:
+            self._hide_loading_cover()
 
 
 # ── Module-level helpers ──────────────────────────────────────────────────────

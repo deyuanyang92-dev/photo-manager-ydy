@@ -666,8 +666,14 @@ class TestRegistry:
     def test_nav_order(self) -> None:
         from app.views.registry import ALL_VIEWS
         titles = [v.nav_title for v in ALL_VIEWS]
+        # Claude Code 修改 2026-07-15 — codex 回归指出导航名称契约不一致: 这条测试
+        # 期望的"照片工作区"是旧名字, 实际注册表(registry.py:61)和视图本身
+        # (workbench_view.py:139 nav_title)一直是"照片工作台"(仓库里全部一致,
+        # 10 处引用), "工作区"只在别处的说明性文案里出现(collab_status.py 等,
+        # 指的是概念上的"回到工作台那边", 不是这个 tab 的标题)。测试没跟上改名,
+        # 这里同步。
         assert titles == [
-            "照片工作区", "协作", "最近使用", "项目树", "标签打印",
+            "照片工作台", "协作", "最近使用", "项目树", "标签打印",
             "WoRMS 分类库", "内置分类库", "坐标工具",
             "TIFF 转 JPG", "项目汇总", "采集记录", "采集地图", "配置",
         ]

@@ -139,47 +139,57 @@ def refresh_workspace_index(
 
     stats = compute_workspace_index_stats(ws)
     ts = _utc_now_iso()
-    conn = open_project_db(root, create=True)
-    conn.execute(
-        """
-        INSERT INTO workspace_index_cache (
-          workspace_id, specimen_count, station_count, event_count,
-          photo_count, unassigned_photo_count, result_count,
-          missing_coord_count, taxonomy_incomplete_count, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(workspace_id) DO UPDATE SET
-          specimen_count=excluded.specimen_count,
-          station_count=excluded.station_count,
-          event_count=excluded.event_count,
-          photo_count=excluded.photo_count,
-          unassigned_photo_count=excluded.unassigned_photo_count,
-          result_count=excluded.result_count,
-          missing_coord_count=excluded.missing_coord_count,
-          taxonomy_incomplete_count=excluded.taxonomy_incomplete_count,
-          updated_at=excluded.updated_at
-        """,
-        (
-            wid,
-            stats["specimen_count"],
-            stats["station_count"],
-            stats["event_count"],
-            stats["photo_count"],
-            stats["unassigned_photo_count"],
-            stats["result_count"],
-            stats["missing_coord_count"],
-            stats["taxonomy_incomplete_count"],
-            ts,
-        ),
-    )
-    # 同步 workspaces.last_indexed_at（若已登记）
+    from app.db.db_manager import open_project_db_private
+
+    # Claude Code 修改 2026-07-15 — codex 实测 WinError 32: 这条也是从
+    # register_workspace 调过来的写根库路径, 用缓存连接就会把项目根目录锁到进程
+    # 退出(移不动/删不掉), 也让新建项目失败时的回滚删不干净。同
+    # project_catalog_service 里那两处一起改成私有连接 + finally 关闭。
+    # §7 旧: conn = open_project_db(root, create=True)  # 缓存连接, 锁泄漏
+    conn = open_project_db_private(root, create=True)
     try:
         conn.execute(
-            "UPDATE workspaces SET last_indexed_at=? WHERE workspace_id=?",
-            (ts, wid),
+            """
+            INSERT INTO workspace_index_cache (
+              workspace_id, specimen_count, station_count, event_count,
+              photo_count, unassigned_photo_count, result_count,
+              missing_coord_count, taxonomy_incomplete_count, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(workspace_id) DO UPDATE SET
+              specimen_count=excluded.specimen_count,
+              station_count=excluded.station_count,
+              event_count=excluded.event_count,
+              photo_count=excluded.photo_count,
+              unassigned_photo_count=excluded.unassigned_photo_count,
+              result_count=excluded.result_count,
+              missing_coord_count=excluded.missing_coord_count,
+              taxonomy_incomplete_count=excluded.taxonomy_incomplete_count,
+              updated_at=excluded.updated_at
+            """,
+            (
+                wid,
+                stats["specimen_count"],
+                stats["station_count"],
+                stats["event_count"],
+                stats["photo_count"],
+                stats["unassigned_photo_count"],
+                stats["result_count"],
+                stats["missing_coord_count"],
+                stats["taxonomy_incomplete_count"],
+                ts,
+            ),
         )
-    except sqlite3.Error:
-        pass
-    conn.commit()
+        # 同步 workspaces.last_indexed_at（若已登记）
+        try:
+            conn.execute(
+                "UPDATE workspaces SET last_indexed_at=? WHERE workspace_id=?",
+                (ts, wid),
+            )
+        except sqlite3.Error:
+            pass
+        conn.commit()
+    finally:
+        conn.close()  # 写完立刻放锁(Windows: 不放锁 -> 项目文件夹删不掉/移不动)
     row = dict(stats)
     row["workspace_id"] = wid
     row["updated_at"] = ts

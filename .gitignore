@@ -1,6 +1,9 @@
 __pycache__/
 *.py[cod]
 data/cache/
+# Claude Code 2026-07-15 — 协作任务清单是每机器/团队的运行时状态, 不入库
+data/collab_tasks.json
+data/collab_tasks.*.tmp
 .venv/
 venv/
 .pytest_cache/

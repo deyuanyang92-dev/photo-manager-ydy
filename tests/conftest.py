@@ -18,6 +18,24 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
+def _isolate_app_qsettings(tmp_path, monkeypatch):
+    """Never let a test workspace become the user's next startup project."""
+    from PyQt6.QtCore import QSettings
+
+    from app.config.settings import AppSettings
+
+    settings_path = tmp_path / "app_settings.ini"
+
+    def _init(self) -> None:
+        self._qs = QSettings(str(settings_path), QSettings.Format.IniFormat)
+        self._migrate_delete_jpg_default()
+        self._migrate_archive_mode_default()
+
+    monkeypatch.setattr(AppSettings, "__init__", _init)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _no_real_geocode_network():
     try:
         from app.services import geocode_service
@@ -88,4 +106,24 @@ def _isolate_collab_peer_trust_qs(tmp_path, monkeypatch):
         self._qs = qs if qs_arg is None else qs_arg
 
     monkeypatch.setattr(CollabPeerTrustStore, "__init__", _init)
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _isolate_collab_tasks_persist(tmp_path, monkeypatch):
+    """Claude Code 2026-07-15 — 协作任务清单落盘路径隔离到 tmp。
+
+    CollabService 现在把团队任务持久化到 data/collab_tasks.json(重启后不丢)。
+    测试若用真路径, 会互相泄漏任务状态并污染真文件。同 user_projects.json 的隔离
+    做法: 把路径函数指到本测试的 tmp。
+    """
+    try:
+        import app.services.collab_service as _cs
+    except Exception:
+        yield
+        return
+    monkeypatch.setattr(
+        _cs, "_default_tasks_persist_path",
+        lambda: str(tmp_path / "collab_tasks.json"),
+    )
     yield

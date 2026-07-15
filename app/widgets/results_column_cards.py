@@ -379,7 +379,7 @@ class _ArchiveCard(_ResultCardBase):
     _ICON_TINT = "#c9981f"  # Windows zip-folder amber
 
     def __init__(self, info: dict, open_fn=None, restore_fn=None,
-                 link_fn=None, paired_tiff: str = "",
+                 link_fn=None, delete_fn=None, paired_tiff: str = "",
                  select_fn=None, selected: bool = False,
                  thumb_size: int = _DEFAULT_THUMB,
                  result_view_mode: str = "list",
@@ -387,6 +387,8 @@ class _ArchiveCard(_ResultCardBase):
         self._open_fn = open_fn
         self._restore_fn = restore_fn
         self._link_fn = link_fn
+        # Claude Code 修改 2026-07-15 — 手动删除 ZIP 入口新增(用户 2026-07-12 裁定)
+        self._delete_fn = delete_fn
         self._paired_tiff = paired_tiff
         super().__init__(info, thumb_provider=None,
                          select_fn=select_fn, selected=selected,
@@ -455,6 +457,13 @@ class _ArchiveCard(_ResultCardBase):
         link_action = menu.addAction("关联到右侧编号")
         link_action.setEnabled(bool(self._link_fn and path))
         link_action.triggered.connect(lambda: self._link_fn(self._paired_tiff, path))
+        menu.addSeparator()
+        # Claude Code 修改 2026-07-15 — 手动删除 ZIP 入口新增(用户 2026-07-12 裁定:
+        # 断电残留的孤儿 ZIP 之前删不掉, 菜单没有这一项)。仍挂在组上的 ZIP 会在
+        # _on_delete_result_zip_path 里拒绝裸删并引导走"还原原片", 这里只管入口。
+        delete_action = menu.addAction("删除 ZIP")
+        delete_action.setEnabled(bool(self._delete_fn and path))
+        delete_action.triggered.connect(lambda: self._delete_fn(path))
         menu.exec(global_pos)
 
 

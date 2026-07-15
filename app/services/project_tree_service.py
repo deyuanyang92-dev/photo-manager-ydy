@@ -17,6 +17,7 @@ from pathlib import Path
 # 这些子目录是工作区内部结构，不当作"断面/子项目"节点展示。
 RESERVED_DIR_NAMES: frozenset[str] = frozenset({
     "_data", "incoming-jpg", "新拍JPG", "results", "freeform", "archive",
+    "_retired-zip",
     "_retired-tiff",  # 撤销合成/重合成退役的 TIF（工作区内部，不当树节点）
 })
 
@@ -35,6 +36,21 @@ _TREE_CACHE_TTL_SECONDS = 2.0
 _SCAN_TREE_CACHE: dict[tuple, tuple[float, dict]] = {}
 _CANDIDATE_CACHE: dict[tuple, tuple[float, list[dict]]] = {}
 
+# Claude Code 修改 2026-07-15 — 大规模性能: 磁盘缓存 TTL(秒)。0 = 关磁盘缓存(每次
+# 都重扫)。默认 0 保持"未接线时行为完全不变"; AppContext 启动时从设置
+# (project_scan_cache_ttl_seconds, 默认 300)调 set_scan_disk_cache_ttl() 打开它。
+# 用模块级变量而非 import 设置, 让本服务保持 Qt-free / ctx-free。
+_SCAN_DISK_CACHE_TTL_SECONDS = 0
+
+
+def set_scan_disk_cache_ttl(seconds: int) -> None:
+    """由 AppContext 在启动时用用户设置调一次, 打开/调整磁盘扫描缓存的 TTL。"""
+    global _SCAN_DISK_CACHE_TTL_SECONDS
+    try:
+        _SCAN_DISK_CACHE_TTL_SECONDS = max(0, int(seconds))
+    except (TypeError, ValueError):
+        _SCAN_DISK_CACHE_TTL_SECONDS = 0
+
 
 def clear_project_tree_cache(root: str | None = None) -> None:
     """Clear cached folder scans.
@@ -43,9 +59,19 @@ def clear_project_tree_cache(root: str | None = None) -> None:
     that resolved root only; UI actions call this after creating folders or
     changing project state so the next refresh is immediate and correct.
     """
+    # Claude Code 修改 2026-07-15 — 大规模性能: 内存缓存清掉的同时也清磁盘缓存,
+    # 否则建完目录/改完项目后, 内存清了但磁盘还留着旧扫描 -> 界面与磁盘不一致。
+    def _clear_disk(target: str | None) -> None:
+        try:
+            from app.utils import project_scan_disk_cache as _disk
+            _disk.clear(target)
+        except Exception:  # noqa: BLE001
+            pass
+
     if root is None:
         _SCAN_TREE_CACHE.clear()
         _CANDIDATE_CACHE.clear()
+        _clear_disk(None)
         return
     try:
         resolved = str(Path(root).resolve())
@@ -55,6 +81,7 @@ def clear_project_tree_cache(root: str | None = None) -> None:
         for key in list(cache):
             if key and key[0] == resolved:
                 cache.pop(key, None)
+    _clear_disk(resolved)
 
 
 def _root_fingerprint(root: Path) -> tuple:
@@ -168,6 +195,18 @@ def scan_tree(root: str, max_depth: int = 6, *, use_cache: bool = True) -> dict:
         cached = _cache_get(_SCAN_TREE_CACHE, key)
         if cached is not None:
             return cached
+        # Claude Code 修改 2026-07-15 — 大规模性能: 内存缓存(2s, 会话内合并)没命中,
+        # 再查磁盘缓存(跨重启, TTL=用户设置)。命中就顺手回填内存缓存, 之后本会话内
+        # 的重复调用走内存快路径。磁盘缓存指纹会在目录动过时自动失效(见 disk_cache)。
+        if _SCAN_DISK_CACHE_TTL_SECONDS > 0:
+            try:
+                from app.utils import project_scan_disk_cache as _disk
+                disk_hit = _disk.get(root, max_depth, _SCAN_DISK_CACHE_TTL_SECONDS)
+            except Exception:  # noqa: BLE001 — 缓存故障绝不能拖垮扫描
+                disk_hit = None
+            if disk_hit is not None:
+                _cache_put(_SCAN_TREE_CACHE, key, disk_hit)
+                return copy.deepcopy(disk_hit)
 
     def build_workspace_tree_node(p: Path, depth: int) -> dict:
         children: list[dict] = []
@@ -196,6 +235,13 @@ def scan_tree(root: str, max_depth: int = 6, *, use_cache: bool = True) -> dict:
     tree = build_workspace_tree_node(root_path, 0)
     if use_cache:
         _cache_put(_SCAN_TREE_CACHE, key, tree)
+        # Claude Code 修改 2026-07-15 — 大规模性能: 顺手落盘, 关软件重开也认。
+        if _SCAN_DISK_CACHE_TTL_SECONDS > 0:
+            try:
+                from app.utils import project_scan_disk_cache as _disk
+                _disk.put(root, max_depth, tree)
+            except Exception:  # noqa: BLE001
+                pass
     return tree
 
 

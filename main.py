@@ -311,52 +311,97 @@ def _window_on_any_screen(win, screens) -> bool:
     return False
 
 
-def _place_main_window(win, target) -> None:
-    """Put the main window on *target* with a single maximized transition.
+def _adaptive_window_geometry(available, minimum):
+    """Return the centered first-start rect for one screen's available area."""
+    from PyQt6.QtCore import QRect
+    from app.config.window_layout import FIRST_START_WORK_AREA_FRACTION
 
-    Calling ``showNormal()``, resizing to the full screen, and then maximizing
-    produced two separately composited full-window frames.  That is especially
-    visible (and occasionally corrupt) through virtual-display drivers.
-    """
-    from PyQt6.QtCore import Qt
+    width = min(
+        available.width(),
+        max(minimum.width(), round(available.width() * FIRST_START_WORK_AREA_FRACTION)),
+    )
+    height = min(
+        available.height(),
+        max(minimum.height(), round(available.height() * FIRST_START_WORK_AREA_FRACTION)),
+    )
+    left = available.x() + (available.width() - width) // 2
+    top = available.y() + (available.height() - height) // 2
+    return QRect(left, top, width, height)
+
+
+def _place_main_window(win, target) -> None:
+    """Show a first-run/off-screen window once, centered at 80% work area."""
+    from PyQt6.QtCore import QSize, Qt
 
     if target is not None:
         avail = target.availableGeometry()
-        win.setGeometry(avail)
+        minimum = win.minimumSize() if hasattr(win, "minimumSize") else QSize(1, 1)
+        win.setGeometry(_adaptive_window_geometry(avail, minimum))
     win.setWindowState(
-        (win.windowState() & ~Qt.WindowState.WindowMinimized)
-        | Qt.WindowState.WindowMaximized
+        win.windowState()
+        & ~Qt.WindowState.WindowMinimized
+        & ~Qt.WindowState.WindowMaximized
         | Qt.WindowState.WindowActive
     )
-    win.showMaximized()
+    win.showNormal()
     win.raise_()
     win.activateWindow()
 
 
-def _show_main_window_at_startup(win, app, target) -> str:
-    """Show the main window without destroying a valid restored position."""
+def _show_main_window_at_startup(
+    win, app, target, *, has_saved_geometry: bool = False
+) -> str:
+    """Show restored user geometry, or use the adaptive first-start policy."""
     from PyQt6.QtCore import Qt
 
-    # Native Windows reliably places maximized top-level windows. Avoid reading
-    # restored frame geometry and avoid raise/activate calls: through virtual
-    # display drivers those operations synchronously negotiate with DWM and can
-    # cost hundreds of milliseconds or flash the whole desktop.
-    if sys.platform == "win32" and not _is_wsl:
-        win.showMaximized()
-        return "native-maximized"
-
-    if _window_on_any_screen(win, app.screens()):
+    if has_saved_geometry and _window_on_any_screen(win, app.screens()):
+        restored_state = win.windowState()
+        was_maximized = bool(restored_state & Qt.WindowState.WindowMaximized)
         win.setWindowState(
-            (win.windowState() & ~Qt.WindowState.WindowMinimized)
-            | Qt.WindowState.WindowMaximized
+            (restored_state & ~Qt.WindowState.WindowMinimized)
             | Qt.WindowState.WindowActive
         )
-        win.showMaximized()
+        if was_maximized:
+            win.showMaximized()
+            placement = "restored-maximized"
+        else:
+            win.showNormal()
+            placement = "restored-normal"
         win.raise_()
         win.activateWindow()
-        return "restored"
+        return placement
     _place_main_window(win, target)
-    return "fallback"
+    return "adaptive-first-start"
+
+
+def _stabilize_main_window_after_show(
+    win, target, *, use_adaptive_geometry: bool
+) -> bool:
+    """Undo a native startup minimize after the first Windows event-loop turn."""
+    from PyQt6.QtCore import QSize, Qt
+
+    minimized = bool(win.isMinimized())
+    # Claude Code 修改 2026-07-14 — 稳定器只该撤销原生启动最小化;窗口未最小化时无论有无存档几何都提前返回,避免首启后回抢用户焦点
+    # if not minimized and not use_adaptive_geometry:
+    if not minimized:
+        return False
+
+    state = win.windowState() & ~Qt.WindowState.WindowMinimized
+    if use_adaptive_geometry:
+        state &= ~Qt.WindowState.WindowMaximized
+        if target is not None:
+            minimum = win.minimumSize() if hasattr(win, "minimumSize") else QSize(1, 1)
+            win.setGeometry(
+                _adaptive_window_geometry(target.availableGeometry(), minimum)
+            )
+    win.setWindowState(state | Qt.WindowState.WindowActive)
+    if state & Qt.WindowState.WindowMaximized:
+        win.showMaximized()
+    else:
+        win.showNormal()
+    win.raise_()
+    win.activateWindow()
+    return True
 
 
 def _ensure_main_window_visible(win, app, target) -> None:
@@ -881,13 +926,24 @@ def main() -> int:
     # 启动自动恢复上次项目——免得每次重启都回到 "(未选)" 空项目,用户得重选。
     _restore_last_project(ctx, win)
 
-    # Restore geometry/state, but do not rebuild the previous page before the
-    # first paint. Heavy pages such as collaboration/project tree can scan local
-    # workspaces and open SQLite databases; doing that here made Windows
-    # launches feel frozen.
+    # Always paint the lightweight shell first. Building a heavy view while the
+    # native Windows window was hidden avoided one flash, but blocked the GUI
+    # thread long enough to show a system-wide busy cursor and feel like the
+    # desktop had frozen. The stable placeholder is preferable to a blocked PC.
+    # 用户同一需求累计（本线程 6 次，2026-07-13）：
+    # 1. 启动窗口明显过大；2. 要求遵循现代软件通用设计且不要散落硬编码；
+    # 3. 明确默认窗口应为屏幕可用区域 80%；4. 确认只在首次启动使用 80%，
+    #    以后恢复用户手动调整的尺寸；5. 实机核对发现启动后仅 160×28 且被最小化；
+    # 6. 只修启动窗口，不得连带修改其它页面或业务。不得改回无条件最大化。
     win.restore_state(
         activate_last_view=False,
-        restore_window_layout=not (sys.platform == "win32" and not _is_wsl),
+        restore_window_layout=True,
+        defer_initial_view=True,
+    )
+    # A non-empty QByteArray is not proof that Qt accepted it. Corrupt or stale
+    # geometry must fall back to the same centered first-start placement.
+    has_saved_geometry = bool(
+        getattr(win, "_window_geometry_restored", False)
     )
     startup_mark("state-restored")
     # WSLg multi-monitor ordering is unstable across boots and Windows display
@@ -897,7 +953,9 @@ def main() -> int:
     target = _startup_target_screen(app)
     if not _HEADLESS_SMOKE:
         _safe_stderr_print(f"启动窗口目标屏幕: {_screen_label(target)}")
-    placement = _show_main_window_at_startup(win, app, target)
+    placement = _show_main_window_at_startup(
+        win, app, target, has_saved_geometry=has_saved_geometry
+    )
     startup_mark("window-shown")
     if not _HEADLESS_SMOKE:
         _safe_stderr_print(f"启动窗口放置策略: {placement}")
@@ -912,6 +970,20 @@ def main() -> int:
         app.processEvents()
         _safe_stderr_print("offscreen 启动冒烟通过：主窗口已构造完成。")
         return 0
+
+    # Windows can apply the process startup show-command after Qt's synchronous
+    # showNormal(), putting a correctly placed window back into SW_SHOWMINIMIZED.
+    # Re-check once after the native event loop starts. This is scoped strictly
+    # to window placement and does not rebuild or activate any page.
+    if sys.platform == "win32" and not _is_wsl:
+        QTimer.singleShot(
+            250,
+            lambda: _stabilize_main_window_after_show(
+                win,
+                target,
+                use_adaptive_geometry=not has_saved_geometry,
+            ),
+        )
 
     # 对标 VS Code/Cursor：启动后延迟做一次后台静默检查更新（发现未跳过的新版本才提示）。
     try:

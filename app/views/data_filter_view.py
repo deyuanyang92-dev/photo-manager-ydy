@@ -638,7 +638,19 @@ class DataFilterView(BaseView):
         if not ok2 or not actor.strip():
             ui.warn(self, "需填姓名", "请填写修改人姓名(写入审计)。")
             return
-        if edit_lock_service.unlock(self.ctx, actor.strip(), pwd):
+        # Claude Code 修改 2026-07-14 — fail-closed: 配置损坏时 unlock() 会抛
+        # EditLockConfigError, 必须单独截住给出明确提示, 不能和"密码错误"混在一起
+        # 让人误以为随便试试密码就能进(codex 回归指出的 fail-open 风险)。
+        try:
+            unlocked = edit_lock_service.unlock(self.ctx, actor.strip(), pwd)
+        except edit_lock_service.EditLockConfigError:
+            ui.warn(
+                self, "编辑锁配置损坏",
+                "编辑锁配置文件已损坏或无法读取，为安全起见已拒绝解锁（仍为只读）。"
+                "请联系管理员检查或重置 data/app_config.json。",
+            )
+            return
+        if unlocked:
             self._refresh_edit_state()
         else:
             ui.warn(self, "密码错误", "管理密码不正确, 仍为只读。")

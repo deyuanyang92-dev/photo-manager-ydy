@@ -43,6 +43,15 @@ class AppContext:
 
     def __init__(self) -> None:
         self.settings = AppSettings()
+        # Claude Code 修改 2026-07-15 — 大规模性能: 启动时把用户设置的项目扫描缓存
+        # TTL 灌进 project_tree_service(它保持 Qt-free / ctx-free, 靠这个模块级
+        # setter 拿到配置)。默认 300s -> 扫过一次的项目树 5 分钟内不重扫、且跨重启
+        # 从磁盘缓存读取; 用户可在设置里改(0 = 关缓存每次重扫)。
+        try:
+            from app.services import project_tree_service as _pts
+            _pts.set_scan_disk_cache_ttl(self.settings.project_scan_cache_ttl_seconds)
+        except Exception:  # noqa: BLE001 — 配置读取失败不该拖垮启动
+            pass
         self._project_dir: Optional[str] = None
         self._project_root: Optional[str] = None
         self.last_db_error: Optional[Exception] = None

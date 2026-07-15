@@ -106,6 +106,12 @@ class TaskRecord:
     assignee: Optional[str] = None          # operator name
     device_id: Optional[str] = None
     project_name: Optional[str] = None
+    # Claude Code 修改 2026-07-15 — codex 验证指出 TaskRecord 只有 project_name
+    # (显示名) + 工作区路径, 没有稳定 id, 两个都叫"断面1"的工作区会混。加稳定
+    # workspace_id / project_id: 创建时由 CollabService 从工作区 meta / ctx 填入,
+    # 同步/持久化带上。向后兼容: 旧 peer 不发这俩字段, from_dict 默认 None, 不报错。
+    workspace_id: Optional[str] = None
+    project_id: Optional[str] = None
     created_at: str = field(default_factory=lambda: _now_iso())
     updated_at: str = field(default_factory=lambda: _now_iso())
 
@@ -116,6 +122,8 @@ class TaskRecord:
             "assignee":    self.assignee,
             "deviceId":    self.device_id,
             "projectName": self.project_name,
+            "workspaceId": self.workspace_id,
+            "projectId":   self.project_id,
             "createdAt":   self.created_at,
             "updatedAt":   self.updated_at,
         }
@@ -128,6 +136,8 @@ class TaskRecord:
             assignee=d.get("assignee"),
             device_id=d.get("deviceId"),
             project_name=d.get("projectName"),
+            workspace_id=d.get("workspaceId"),
+            project_id=d.get("projectId"),
             created_at=d.get("createdAt", _now_iso()),
             updated_at=d.get("updatedAt", _now_iso()),
         )

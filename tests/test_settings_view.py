@@ -1070,3 +1070,29 @@ class TestHeliconButtonFlash:
         )
         view._detect_helicon()
         assert view._refresh_btn.text() == "重新探测"
+
+
+# ── Claude Code 修改 2026-07-15 — 大规模性能: 项目树扫描/缓存三个设置控件 ────
+class TestScanCacheSettings:
+    def test_controls_load_current_settings(self, ctx):
+        ctx.settings.project_scan_cache_ttl_seconds = 600
+        ctx.settings.project_scan_max_depth = 4
+        ctx.settings.project_tree_auto_scan_enabled = False
+        v = SettingsView(ctx)
+        v.on_activate()
+        assert v._scan_cache_ttl_spin.value() == 600
+        assert v._scan_max_depth_spin.value() == 4
+        assert v._auto_scan_chk.isChecked() is False
+
+    def test_changing_controls_persists(self, view, ctx):
+        view._scan_cache_ttl_spin.setValue(120)
+        view._scan_max_depth_spin.setValue(8)
+        view._auto_scan_chk.setChecked(False)
+        assert ctx.settings.project_scan_cache_ttl_seconds == 120
+        assert ctx.settings.project_scan_max_depth == 8
+        assert ctx.settings.project_tree_auto_scan_enabled is False
+
+    def test_ttl_change_pushes_into_service(self, view, ctx):
+        from app.services import project_tree_service as pts
+        view._scan_cache_ttl_spin.setValue(777)
+        assert pts._SCAN_DISK_CACHE_TTL_SECONDS == 777

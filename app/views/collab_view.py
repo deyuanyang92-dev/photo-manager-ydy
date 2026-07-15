@@ -23,6 +23,7 @@ from typing import Optional
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, pyqtSlot
 from PyQt6.QtWidgets import (
     QApplication,
+    QBoxLayout,
     QButtonGroup,
     QComboBox,
     QDialog,
@@ -33,6 +34,7 @@ from PyQt6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QLayout,
     QMenu,
     QPushButton,
     QScrollArea,
@@ -44,6 +46,9 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+# polish: i18n — file had no tr() import/usage at all; wrap new team-code
+# edit/cancel literals per the app-wide tr() convention (Sonnet 5 multi-agent review)
+from app.config.i18n import tr
 from app.config import icons
 from app.services.collab_offline_queue import StatusRetryQueue
 from app.services.collab_status import build_collab_status, peer_display_name
@@ -287,12 +292,16 @@ class CollabView(BaseView):
     nav_title = "协作"
     nav_icon  = "👥"
 
+    _COMPACT_LAYOUT_BREAKPOINT = 1080
+
     def __init__(self, ctx: "AppContext") -> None:
         # Service is optional — the view degrades gracefully when absent
         self._service: Optional["CollabService"] = getattr(ctx, "collab_service", None)
         self._connected_service: Optional["CollabService"] = None
         self._project_filter = ""
         self._active_method = ""
+        self._team_editing = False
+        self._team_saved_values = ("", "")
         super().__init__(ctx)
         self._offline_queue = StatusRetryQueue(ctx.settings._qs)
         self._retry_timer = QTimer(self)
@@ -303,15 +312,42 @@ class CollabView(BaseView):
     # ── BaseView contract ─────────────────────────────────────────────────
 
     def _setup_ui(self) -> None:
-        root = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        self._page_scroll = QScrollArea(self)
+        self._page_scroll.setObjectName("CollabPageScroll")
+        self._page_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._page_scroll.setWidgetResizable(True)
+        self._page_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self._page_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+
+        self._page_content = QWidget()
+        self._page_content.setObjectName("CollabPageContent")
+        self._page_content.setMinimumWidth(0)
+        self._page_content.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Minimum,
+        )
+        root = QVBoxLayout(self._page_content)
+        root.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
         root.setContentsMargins(20, 16, 20, 16)
         root.setSpacing(14)
+        self._page_layout = root
+        self._page_scroll.setWidget(self._page_content)
+        outer.addWidget(self._page_scroll)
 
         # ── Header ───────────────────────────────────────────────────────
         header_frame = QFrame()
         header_frame.setObjectName("CollabHeader")
         _elevate_card(header_frame)
         header_layout = QHBoxLayout(header_frame)
+        self._header_layout = header_layout
         header_layout.setContentsMargins(14, 10, 14, 10)
         header_layout.setSpacing(12)
 
@@ -376,7 +412,8 @@ class CollabView(BaseView):
         self._setup_btn = QPushButton("设置永久码")
         self._setup_btn.setObjectName("Primary")
         self._setup_btn.setMinimumHeight(32)
-        self._setup_btn.clicked.connect(self._on_setup_wizard)
+        self._setup_btn.setFocusPolicy(Qt.FocusPolicy.TabFocus)
+        self._setup_btn.clicked.connect(self._begin_team_edit)
 
         self._share_btn = QPushButton("复制局域网连接码")
         self._share_btn.setObjectName("Outline")
@@ -495,6 +532,7 @@ class CollabView(BaseView):
         self._guide_pulse_on = False
 
         method_row = QHBoxLayout()
+        self._method_layout = method_row
         method_row.setContentsMargins(0, 0, 0, 0)
         method_row.setSpacing(10)
         self._method_team_btn = self._make_method_selector_card(
@@ -702,6 +740,27 @@ class CollabView(BaseView):
             self._refresh_summary([], [])
         self._select_collab_method("team")
         self._refresh_remote_connection_state()
+        self._apply_responsive_layout(self.width())
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt override
+        super().resizeEvent(event)
+        self._apply_responsive_layout(event.size().width())
+
+    def _apply_responsive_layout(self, width: int) -> None:
+        compact = width < self._COMPACT_LAYOUT_BREAKPOINT
+        if getattr(self, "_responsive_compact", None) is compact:
+            return
+        self._responsive_compact = compact
+        direction = (
+            QBoxLayout.Direction.TopToBottom
+            if compact
+            else QBoxLayout.Direction.LeftToRight
+        )
+        self._header_layout.setDirection(direction)
+        self._method_layout.setDirection(direction)
+        margin = 12 if compact else 20
+        self._page_layout.setContentsMargins(margin, 12 if compact else 16, margin, 16)
+        self._page_content.updateGeometry()
 
     def _make_method_selector_card(
         self,
@@ -943,25 +1002,36 @@ class CollabView(BaseView):
             state=self._team_setup_status,
         )
 
+        self._team_edit_form = QWidget()
+        team_edit_layout = QVBoxLayout(self._team_edit_form)
+        team_edit_layout.setContentsMargins(0, 0, 0, 0)
+        team_edit_layout.setSpacing(10)
+
         self._team_code_edit = _style_collab_field(
             QLineEdit(),
             placeholder="输入队友给你的码，或随机生成",
             code=True,
         )
-        gen_btn = QPushButton("随机生成")
-        gen_btn.setObjectName("Outline")
-        icons.set_button_icon(gen_btn, "mdi6.dice-multiple-outline", size=16)
-        gen_btn.clicked.connect(self._generate_team_code_inline)
-        copy_team_btn = QPushButton("复制永久码")
-        copy_team_btn.setObjectName("Outline")
-        icons.set_button_icon(copy_team_btn, "mdi6.content-copy", size=16)
-        copy_team_btn.clicked.connect(self._copy_team_code_inline)
+        self._team_generate_btn = QPushButton("随机生成")
+        self._team_generate_btn.setObjectName("Outline")
+        icons.set_button_icon(
+            self._team_generate_btn, "mdi6.dice-multiple-outline", size=16
+        )
+        self._team_generate_btn.clicked.connect(self._generate_team_code_inline)
+        # self._team_copy_code_btn = QPushButton("复制永久码")
+        # polish: i18n — wrap raw literal with tr(), Sonnet 5 multi-agent review round 3
+        self._team_copy_code_btn = QPushButton(tr("复制永久码"))
+        self._team_copy_code_btn.setObjectName("Outline")
+        icons.set_button_icon(
+            self._team_copy_code_btn, "mdi6.content-copy", size=16
+        )
+        self._team_copy_code_btn.clicked.connect(self._copy_team_code_inline)
         _collab_form_block(
-            entry_body,
+            team_edit_layout,
             "永久码",
             self._team_code_edit,
-            gen_btn,
-            copy_team_btn,
+            self._team_generate_btn,
+            self._team_copy_code_btn,
             action_below=False,
             framed=False,
         )
@@ -980,21 +1050,58 @@ class CollabView(BaseView):
             QLineEdit(),
             placeholder="例如 小王",
         )
-        _collab_form_block(name_col, "我的名字", self._team_operator_edit, framed=False)
+        # _collab_form_block(name_col, "我的名字", self._team_operator_edit, framed=False)
+        # polish: i18n — wrap raw literal with tr() (Sonnet 5 multi-agent review)
+        _collab_form_block(name_col, tr("我的名字"), self._team_operator_edit, framed=False)
 
         self._team_pairing_input = _style_collab_field(
             QLineEdit(),
             placeholder="可选：粘贴队友发来的连接码",
         )
-        _collab_form_block(pair_col, "备用连接码", self._team_pairing_input, framed=False)
+        # _collab_form_block(pair_col, "备用连接码", self._team_pairing_input, framed=False)
+        # polish: i18n — wrap raw literal with tr() (Sonnet 5 multi-agent review)
+        _collab_form_block(pair_col, tr("备用连接码"), self._team_pairing_input, framed=False)
         pair_row.addLayout(name_col, 1)
         pair_row.addLayout(pair_col, 1)
-        entry_body.addLayout(pair_row)
+        team_edit_layout.addLayout(pair_row)
+        entry_body.addWidget(self._team_edit_form)
+
+        self._team_saved_summary = QFrame()
+        self._team_saved_summary.setObjectName("CollabStatsBar")
+        saved_summary_layout = QHBoxLayout(self._team_saved_summary)
+        saved_summary_layout.setContentsMargins(10, 7, 10, 7)
+        saved_summary_layout.setSpacing(8)
+        # self._team_saved_code = QLabel("永久码 —")
+        # polish: i18n — wrap raw literal with tr() (Sonnet 5 multi-agent review)
+        self._team_saved_code = QLabel(tr("永久码 —"))
+        self._team_saved_code.setObjectName("CollabMetric")
+        # self._team_saved_operator = QLabel("操作者 —")
+        # polish: i18n — wrap raw literal with tr() (Sonnet 5 multi-agent review)
+        self._team_saved_operator = QLabel(tr("操作者 —"))
+        self._team_saved_operator.setObjectName("CollabMetric")
+        # self._team_saved_copy_btn = QPushButton("复制永久码")
+        # polish: i18n — wrap raw literal with tr() (Sonnet 5 multi-agent review)
+        self._team_saved_copy_btn = QPushButton(tr("复制永久码"))
+        self._team_saved_copy_btn.setObjectName("Outline")
+        self._team_saved_copy_btn.setFocusPolicy(Qt.FocusPolicy.TabFocus)
+        icons.set_button_icon(
+            self._team_saved_copy_btn, "mdi6.content-copy", size=16
+        )
+        self._team_saved_copy_btn.clicked.connect(self._copy_team_code_inline)
+        for widget in (
+            self._team_saved_code,
+            self._team_saved_operator,
+        ):
+            saved_summary_layout.addWidget(widget)
+        saved_summary_layout.addStretch()
+        saved_summary_layout.addWidget(self._team_saved_copy_btn)
+        entry_body.addWidget(self._team_saved_summary)
 
         self._team_save_btn = QPushButton("保存并启动协作")
         self._team_save_btn.setObjectName("CollabPrimaryAction")
         self._team_save_btn.setMinimumHeight(32)
         self._team_save_btn.setMaximumWidth(220)
+        self._team_save_btn.setFocusPolicy(Qt.FocusPolicy.TabFocus)
         self._team_save_btn.clicked.connect(self._save_team_setup_inline)
         entry_actions.addWidget(self._team_save_btn)
         # v0.56 修复: 「设置/修改永久码」向导按钮此前创建后从未挂进任何布局
@@ -1002,11 +1109,24 @@ class CollabView(BaseView):
         # 降为 Outline 避免双主按钮打架。
         self._setup_btn.setObjectName("Outline")
         entry_actions.addWidget(self._setup_btn)
+        # self._team_cancel_btn = QPushButton("取消修改")
+        # polish: i18n — wrap raw literal with tr() (Sonnet 5 multi-agent review)
+        self._team_cancel_btn = QPushButton(tr("取消修改"))
+        self._team_cancel_btn.setObjectName("Outline")
+        self._team_cancel_btn.setMinimumHeight(32)
+        self._team_cancel_btn.setFocusPolicy(Qt.FocusPolicy.TabFocus)
+        self._team_cancel_btn.clicked.connect(self._cancel_team_edit)
+        entry_actions.addWidget(self._team_cancel_btn)
         entry_actions.addStretch()
         layout.addWidget(step_entry)
 
+        # self._team_post_save_frame, share_body, _share_actions = _collab_step_panel(
+        #     "分享给队友",
+        #     "保存后可复制局域网地址或连接码，发给队友粘贴即可。",
+        # )
+        # polish: i18n — wrap raw literal with tr() (Sonnet 5 multi-agent review)
         self._team_post_save_frame, share_body, _share_actions = _collab_step_panel(
-            "分享给队友",
+            tr("分享给队友"),
             "保存后可复制局域网地址或连接码，发给队友粘贴即可。",
         )
 
@@ -1016,13 +1136,23 @@ class CollabView(BaseView):
             placeholder="保存并启动后显示",
             code=True,
         )
-        copy_addr_btn = QPushButton("复制地址")
+        # copy_addr_btn = QPushButton("复制地址")
+        # polish: i18n — wrap raw literal with tr() (Sonnet 5 multi-agent review)
+        copy_addr_btn = QPushButton(tr("复制地址"))
         copy_addr_btn.setObjectName("Outline")
         icons.set_button_icon(copy_addr_btn, "mdi6.content-copy", size=16)
         copy_addr_btn.clicked.connect(self._copy_team_addr_inline)
+        # _collab_form_block(
+        #     share_body,
+        #     "局域网地址",
+        #     self._team_addr_display,
+        #     copy_addr_btn,
+        #     framed=False,
+        # )
+        # polish: i18n — wrap raw literal with tr() (Sonnet 5 multi-agent review)
         _collab_form_block(
             share_body,
-            "局域网地址",
+            tr("局域网地址"),
             self._team_addr_display,
             copy_addr_btn,
             framed=False,
@@ -1034,13 +1164,23 @@ class CollabView(BaseView):
             placeholder="保存并启动后生成",
             code=True,
         )
-        copy_pairing_btn = QPushButton("复制连接码")
+        # copy_pairing_btn = QPushButton("复制连接码")
+        # polish: i18n — wrap raw literal with tr() (Sonnet 5 multi-agent review)
+        copy_pairing_btn = QPushButton(tr("复制连接码"))
         copy_pairing_btn.setObjectName("Outline")
         icons.set_button_icon(copy_pairing_btn, "mdi6.content-copy", size=16)
         copy_pairing_btn.clicked.connect(self._copy_team_pairing_inline)
+        # _collab_form_block(
+        #     share_body,
+        #     "连接码",
+        #     self._team_pairing_display,
+        #     copy_pairing_btn,
+        #     framed=False,
+        # )
+        # polish: i18n — wrap raw literal with tr() (Sonnet 5 multi-agent review)
         _collab_form_block(
             share_body,
-            "连接码",
+            tr("连接码"),
             self._team_pairing_display,
             copy_pairing_btn,
             framed=False,
@@ -1066,31 +1206,155 @@ class CollabView(BaseView):
         self._team_setup_status.setText(msg)
         self._team_setup_status.setVisible(bool(msg))
 
+    @staticmethod
+    def _plain_text(value: object) -> str:
+        return value.strip() if isinstance(value, str) else ""
+
+    def _saved_team_values(self) -> tuple[str, str]:
+        settings = getattr(self.ctx, "settings", None)
+        svc = self._service or getattr(self.ctx, "collab_service", None)
+        code = self._plain_text(getattr(settings, "team_code", ""))
+        if not code:
+            code = self._plain_text(getattr(svc, "group_code", ""))
+        if not code:
+            code = self._settings_value("collab/team_code", "").strip()
+        operator = self._plain_text(getattr(settings, "operator_name", ""))
+        if not operator:
+            operator = self._settings_value("user/current_user", "").strip()
+        return code, operator
+
+    def _team_service_running(self) -> bool:
+        svc = self._service or getattr(self.ctx, "collab_service", None)
+        if svc is None:
+            return False
+        try:
+            return bool(svc.is_running())
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _sync_team_setup_state(
+        self,
+        *,
+        saved_code: str | None = None,
+        running: bool | None = None,
+    ) -> None:
+        # 用户同一问题反馈累计（本线程可核对：3 次，2026-07-13）：
+        # 1. 保存后按钮文字像乱码，且“保存修改/修改永久码”同时出现。
+        # 2. 再次要求记录反馈次数，且只优化原流程，不擅自增加业务语义。
+        # 3. “启动协作”只是动作，不能在没有真实连接依据时当作完成状态展示。
+        # 这里是唯一状态出口；以后改团队码界面必须区分查看态与修改态，
+        # 并保证修改时同时存在“保存修改”和“取消修改”。
+        if not hasattr(self, "_team_save_btn"):
+            return
+        if saved_code is None:
+            saved_code = self._saved_team_values()[0]
+        if running is None:
+            running = self._team_service_running()
+        has_saved = bool(saved_code)
+        locked = has_saved and not self._team_editing
+
+        self._team_edit_form.setVisible(not locked)
+        self._team_saved_summary.setVisible(locked)
+        # self._team_saved_code.setText(f"永久码 {saved_code or '—'}")
+        # polish: i18n — wrap raw f-string with tr().format(), Sonnet 5 multi-agent review round 3
+        self._team_saved_code.setText(tr("永久码 {}").format(saved_code or "—"))
+        operator = (
+            self._team_saved_values[1]
+            or self._saved_team_values()[1]
+            or self._team_operator_edit.text().strip()
+        )
+        # self._team_saved_operator.setText(f"操作者 {operator or '未填写'}")
+        # polish: i18n — wrap raw f-string with tr().format(), Sonnet 5 multi-agent review round 3
+        self._team_saved_operator.setText(tr("操作者 {}").format(operator or tr("未填写")))
+        self._team_code_edit.setReadOnly(locked)
+        self._team_operator_edit.setReadOnly(locked)
+        self._team_pairing_input.setEnabled(not locked)
+        self._team_generate_btn.setVisible(not locked)
+        self._team_copy_code_btn.setVisible(bool(self._team_code_edit.text().strip()))
+
+        if self._team_editing:
+            # self._team_save_btn.setText("保存修改")
+            # polish: i18n — wrap raw literal with tr(), Sonnet 5 multi-agent review round 3
+            self._team_save_btn.setText(tr("保存修改"))
+            self._team_save_btn.show()
+            self._setup_btn.hide()
+            self._team_cancel_btn.show()
+        elif has_saved and running:
+            self._team_save_btn.hide()
+            # self._setup_btn.setText("修改永久码")
+            # polish: i18n — wrap raw literal with tr(), Sonnet 5 multi-agent review round 3
+            self._setup_btn.setText(tr("修改永久码"))
+            # self._setup_btn.setToolTip("修改永久码或操作者；可保存或取消")
+            # polish: i18n — wrap raw literal with tr(), Sonnet 5 multi-agent review round 3
+            self._setup_btn.setToolTip(tr("修改永久码或操作者；可保存或取消"))
+            self._setup_btn.show()
+            self._team_cancel_btn.hide()
+        elif has_saved:
+            # self._team_save_btn.setText("保存并启动协作")
+            # polish: i18n — wrap raw literal with tr(), Sonnet 5 multi-agent review round 3
+            self._team_save_btn.setText(tr("保存并启动协作"))
+            self._team_save_btn.show()
+            # self._setup_btn.setText("修改永久码")
+            # polish: i18n — wrap raw literal with tr(), Sonnet 5 multi-agent review round 3
+            self._setup_btn.setText(tr("修改永久码"))
+            # self._setup_btn.setToolTip("修改永久码或操作者；可保存或取消")
+            # polish: i18n — wrap raw literal with tr(), Sonnet 5 multi-agent review round 3
+            self._setup_btn.setToolTip(tr("修改永久码或操作者；可保存或取消"))
+            self._setup_btn.show()
+            self._team_cancel_btn.hide()
+        else:
+            # self._team_save_btn.setText("保存并启动协作")
+            # polish: i18n — wrap raw literal with tr(), Sonnet 5 multi-agent review round 3
+            self._team_save_btn.setText(tr("保存并启动协作"))
+            self._team_save_btn.show()
+            # self._setup_btn.setText("设置永久码")
+            # polish: i18n — wrap raw literal with tr(), Sonnet 5 multi-agent review round 3
+            self._setup_btn.setText(tr("设置永久码"))
+            self._setup_btn.hide()
+            self._team_cancel_btn.hide()
+
     def _update_team_post_save_visibility(self) -> None:
         if not hasattr(self, "_team_post_save_frame"):
             return
-        svc = self._service or getattr(self.ctx, "collab_service", None)
-        running = False
-        if svc is not None:
-            try:
-                running = bool(svc.is_running())
-            except Exception:  # noqa: BLE001
-                running = False
-        has_saved = bool(self._team_code_edit.text().strip()) and running
-        self._team_post_save_frame.setVisible(has_saved)
+        saved_code = self._saved_team_values()[0]
+        running = self._team_service_running()
+        ready = bool(saved_code) and running
+        self._team_post_save_frame.setVisible(ready)
         # §7 旧: self._team_setup_status.setVisible(not has_saved) —— 会强行显示
         # 空反馈标签占位。反馈显隐现由 _flash_team_status 按内容管理, 这里不再碰。
         if hasattr(self, "_team_example_label"):
-            self._team_example_label.setVisible(not has_saved)
+            self._team_example_label.setVisible(not ready)
         if hasattr(self, "_share_btn"):
-            self._share_btn.setVisible(not has_saved)
-        if hasattr(self, "_team_save_btn"):
-            self._team_save_btn.setText(
-                "保存修改" if has_saved else "保存并启动协作"
-            )
+            self._share_btn.setVisible(not ready)
+        self._sync_team_setup_state(saved_code=saved_code, running=running)
         if hasattr(self, "_team_setup_panel"):
             self._team_setup_panel.updateGeometry()
-            self._team_setup_panel.adjustSize()
+
+    def _begin_team_edit(self) -> None:
+        saved = self._saved_team_values()
+        if not saved[0]:
+            self._team_code_edit.setFocus(Qt.FocusReason.OtherFocusReason)
+            return
+        self._team_saved_values = saved
+        self._team_editing = True
+        self._sync_team_setup_state(saved_code=saved[0])
+        # self._flash_team_status("正在修改；保存后生效，也可以取消并恢复原值。")
+        # polish: i18n — wrap raw literal with tr(), Sonnet 5 multi-agent review round 3
+        self._flash_team_status(tr("正在修改；保存后生效，也可以取消并恢复原值。"))
+        self._team_code_edit.setFocus(Qt.FocusReason.OtherFocusReason)
+        self._team_code_edit.selectAll()
+
+    def _cancel_team_edit(self) -> None:
+        code, operator = self._team_saved_values or self._saved_team_values()
+        self._team_code_edit.setText(code)
+        self._team_operator_edit.setText(operator)
+        self._team_pairing_input.clear()
+        self._team_editing = False
+        self._sync_team_setup_state(saved_code=code)
+        self._team_cancel_btn.clearFocus()
+        # self._flash_team_status("已取消修改，未保存任何更改。")
+        # polish: i18n — wrap raw literal with tr(), Sonnet 5 multi-agent review round 3
+        self._flash_team_status(tr("已取消修改，未保存任何更改。"))
 
     def _show_team_setup_panel(self) -> None:
         self._select_collab_method("team")
@@ -1102,7 +1366,8 @@ class CollabView(BaseView):
         settings = getattr(self.ctx, "settings", None)
         qs = getattr(settings, "_qs", settings)
         try:
-            return str(qs.value(key, default, type=str))
+            value = qs.value(key, default, type=str)
+            return value if isinstance(value, str) else default
         except Exception:  # noqa: BLE001
             return default
 
@@ -1118,18 +1383,26 @@ class CollabView(BaseView):
         svc = self._service or getattr(self.ctx, "collab_service", None)
         settings = getattr(self.ctx, "settings", None)
         group = (
-            str(getattr(svc, "group_code", "") or "")
-            or str(getattr(settings, "team_code", "") or "")
+            self._plain_text(getattr(svc, "group_code", ""))
+            or self._plain_text(getattr(settings, "team_code", ""))
             or self._settings_value("collab/team_code", "")
         )
-        if group:
-            self._team_code_edit.setText(group)
         operator = (
-            str(getattr(settings, "operator_name", "") or "")
+            self._plain_text(getattr(settings, "operator_name", ""))
             or self._settings_value("user/current_user", "")
         )
-        if operator and not self._team_operator_edit.text().strip():
+        # Claude Code 修改 2026-07-14 — 修复：后台刷新会覆盖用户正在编辑中的团队码/名字，
+        # 冲掉尚未保存的输入。仅在非编辑态(_team_editing=False)才用已保存值回填，编辑态跳过。
+        # §7 旧(无编辑态判定，编辑时被后台刷新冲掉用户输入):
+        #   if group:
+        #       self._team_code_edit.setText(group)
+        #   ...
+        #   if operator and not self._team_operator_edit.text().strip():
+        #       self._team_operator_edit.setText(operator)
+        if not self._team_editing:
+            self._team_code_edit.setText(group)
             self._team_operator_edit.setText(operator)
+            self._team_saved_values = (group, operator)
         self._refresh_team_share_fields()
         self._update_team_post_save_visibility()
 
@@ -1151,6 +1424,7 @@ class CollabView(BaseView):
         self._flash_team_status("团队永久码已复制。")
 
     def _save_team_setup_inline(self) -> None:
+        was_editing = self._team_editing
         pending_pair_info = None
         pairing_text = self._team_pairing_input.text().strip()
         if pairing_text:
@@ -1188,6 +1462,10 @@ class CollabView(BaseView):
 
         svc = self.ctx.ensure_collab_service()
         if svc is None:
+            self._team_saved_values = (group_code, operator)
+            self._team_editing = False
+            self._update_team_post_save_visibility()
+            self._team_save_btn.clearFocus()
             self._flash_team_status("永久码已保存；协作服务未启动。")
             self._refresh_devices()
             return
@@ -1244,10 +1522,17 @@ class CollabView(BaseView):
                 pass
 
         self._connect_service_signals()
+        self._team_saved_values = (group_code, operator)
+        self._team_editing = False
+        self._team_pairing_input.clear()
         self._refresh_team_share_fields()
         self._refresh_devices()
         self._refresh_tasks()
         self._update_team_post_save_visibility()
+        self._team_save_btn.clearFocus()
+        # self._flash_team_status("修改已保存。" if was_editing else "永久码已保存。")
+        # polish: i18n — wrap raw literal with tr(), Sonnet 5 multi-agent review round 3
+        self._flash_team_status(tr("修改已保存。") if was_editing else tr("永久码已保存。"))
 
     def _refresh_team_share_fields(self) -> None:
         if not hasattr(self, "_team_addr_display"):
@@ -1320,11 +1605,16 @@ class CollabView(BaseView):
         return panel
 
     def on_activate(self) -> None:
-        """Refresh devices + tasks from the service."""
+        """Refresh the page without starting collaboration as a nav side effect."""
         self._service = getattr(self.ctx, "collab_service", self._service)
         if self._service is not None:
-            self._service.ensure_running(self.ctx)
+            # 用户同一需求累计（本线程 2 次，2026-07-13）：
+            # 1. 点击“协作”不应突然弹出窗口，应像普通翻页一样直接显示；
+            # 2. 再次要求协作入口纯页面切换，且拖动窗口时内容自适应。
+            # 页面进入只刷新显示，不得隐式启动网络服务；启动必须来自明确操作。
             self._connect_service_signals()
+        if hasattr(self, "_team_setup_panel"):
+            self._refresh_team_setup_panel()
         self._refresh_devices()
         self._refresh_tasks()
         if self._service:
@@ -1946,8 +2236,12 @@ class CollabView(BaseView):
             f"{msg}{peer}"
         )
 
-    def _on_setup_wizard(self) -> None:
-        self._select_collab_method("team")
+    # Claude Code 修改 2026-07-14 — 死代码下线：设置/修改永久码按钮已改为直接 connect
+    # 到 _begin_team_edit（见 _setup_btn.clicked.connect），全仓 grep 确认本类内
+    # 再无任何调用点，故按“保留旧代码注释”约定整体注释掉，不删。
+    # def _on_setup_wizard(self) -> None:
+    #     self._select_collab_method("team")
+    #     self._begin_team_edit()
 
     def _on_setup_wizard_done(self, group_code: str, operator: str) -> None:
         self._service = getattr(self.ctx, "collab_service", self._service)

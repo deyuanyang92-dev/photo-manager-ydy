@@ -158,6 +158,16 @@ class WorkbenchMonitorWorkflowMixin:
         QTimer.singleShot(0, self._refresh_monitor)
 
     def _apply_monitor_scan_result(self, result) -> None:
+        from app.services.tiff_naming_service import annotate_tiff_entries
+
+        try:
+            components = self._load_naming_components()
+        except Exception:
+            components = None
+        annotate_tiff_entries(
+            list(getattr(result, "tiff_files", []) or []),
+            naming_components=components,
+        )
         self._last_scan_result = result
         self._monitor.load_scan(self._monitor_display_scan_result(result))
         self._refresh_workflow_dashboard()
@@ -478,6 +488,52 @@ class WorkbenchMonitorWorkflowMixin:
             return
 
         self._start_import_media_paths(paths, source="添加照片")
+
+    def _on_monitor_tiff_recognition(self) -> None:
+        """Recognize selected monitor TIFFs, or let the user choose TIFF files."""
+        try:
+            paths = list(self._monitor.selected_tiff_paths())
+        except Exception:
+            paths = []
+        if not paths:
+            from PyQt6.QtWidgets import QFileDialog
+
+            paths, _ = QFileDialog.getOpenFileNames(
+                self,
+                "选择需要识别编号的 TIF",
+                filter="TIFF 成片 (*.tif *.tiff *.TIF *.TIFF)",
+            )
+        if paths:
+            # 需求：手动选择 TIF 是独立入口，不要求先打开或创建分组。
+            self._run_tiff_naming_check(paths=list(paths))
+
+    def _on_incoming_tiff_recognition(self) -> None:
+        """Recognize TIFFs already discovered by the incoming monitor scan."""
+        scan = getattr(self, "_last_scan_result", None)
+        incoming_dir = str(getattr(scan, "incoming_jpg_dir", "") or "")
+        if not scan or not incoming_dir:
+            ui.info(self, "识别 incoming TIF", "当前 incoming 中没有可识别的 TIF。")
+            return
+
+        try:
+            incoming_root = Path(incoming_dir).resolve()
+        except OSError:
+            incoming_root = Path(incoming_dir)
+        paths: list[str] = []
+        for entry in list(getattr(scan, "tiff_files", []) or []):
+            path = str(getattr(entry, "path", "") or "")
+            if not path:
+                continue
+            try:
+                if Path(path).resolve().parent == incoming_root:
+                    paths.append(path)
+            except OSError:
+                if Path(path).parent == incoming_root:
+                    paths.append(path)
+        if not paths:
+            ui.info(self, "识别 incoming TIF", "当前 incoming 中没有可识别的 TIF。")
+            return
+        self._run_tiff_naming_check(paths=paths)
 
     def _on_external_jpgs_dropped(self, paths: list[str]) -> None:
         """Import JPG/TIFF dropped from Explorer/Finder/file managers."""
@@ -1129,8 +1185,22 @@ class WorkbenchMonitorWorkflowMixin:
             ui.info(self, "TIF 命名检查", message)
             return
 
+        valid_items = [item for item in audit.items if item.valid and item.uid]
+        auto_applied_path = None
+        if audit.total == 1 and len(valid_items) == 1:
+            auto_applied_path = valid_items[0].path
+            # 需求：识别只预填右侧空字段；规范编号也可继续修改，且绝不自动改名原 TIF。
+            self._apply_tiff_filename_recognition(auto_applied_path, overwrite=False)
+
         from app.widgets.tiff_naming_audit_dialog import TiffNamingAuditDialog
-        TiffNamingAuditDialog(audit, parent=self).exec()
+        dialog = TiffNamingAuditDialog(audit, parent=self)
+        if auto_applied_path and hasattr(dialog, "mark_auto_applied"):
+            dialog.mark_auto_applied(auto_applied_path)
+        result = dialog.exec()
+        if result == QDialog.DialogCode.Accepted:
+            selected_path = dialog.selected_tiff_path()
+            if selected_path:
+                self._apply_tiff_filename_recognition(selected_path, overwrite=False)
 
     def _on_tiff_naming_check(self) -> None:
         """Run the independent, read-only TIFF filename audit."""
@@ -1250,3 +1320,95 @@ class WorkbenchMonitorWorkflowMixin:
         else:
             self._on_show_current_results()
         self._status_message("TIF 已删除。", 4000)
+
+    def _on_delete_result_zip_path(self, path: str) -> None:
+        """手动删除成果区的 ZIP —— 省空间用(2026-07-12 用户裁定)。
+
+        断电断在"写完库、还没删 ZIP"那一刻会留下孤儿 ZIP(数据库已无登记，界面却
+        删不掉)。红线(archive_service 不变式 2): JPG 归档消费后 ZIP 是原片唯一
+        副本——孤儿 ZIP 允许删(带确认框)；仍挂在某个组上的 ZIP 拒绝裸删，引导
+        走「还原原片」（那条会先复原 JPG 并校验 SHA-256，成功后才删 ZIP）。
+        """
+        path = str(path or "").strip()
+        if not path:
+            return
+        # Claude Code 修改 2026-07-15 — 手动删除 ZIP 功能新增(codex 回归指出
+        # tests/test_zip_manual_delete.py 引用的方法根本不存在)。用一个纯 DB
+        # 查询判断这个 ZIP 是否还挂在某个组的 archive_zip 上——挂着就是那批原片
+        # 的唯一副本, 不许裸删。就地内联查询而不是另开 self. 方法, 因为最小测试
+        # 宿主(_Harness)只装配了这一个方法, 调 self.其它方法会 AttributeError。
+        #
+        # Claude Code 修改 2026-07-15 — codex 回归实测复现的 P0 数据丢失漏洞:
+        # 原版查询异常(库损坏/被锁/schema 问题)时 `except Exception: rows = []`,
+        # 把"查不出登记信息"悄悄当成"没有登记"放行删除——这跟 fail-open 是同一类
+        # 错误, 而且这次删的是可能唯一的原片副本, 后果更重。现在但凡拿不到确定
+        # 结论(数据库不可用 / 查询失败), 一律 fail-closed: 拒绝删除、明确告知
+        # "无法确认, 已拒绝", 而不是猜一个"应该没关系"。
+        try:
+            from app.services.grouping_service import result_path_key as _path_key
+        except Exception:
+            def _path_key(value):
+                return str(value or "").casefold()
+        target_key = _path_key(path)
+        db_for_lookup = self.ctx.get_db()
+        if db_for_lookup is None:
+            ui.warn(
+                self, "删除 ZIP",
+                "无法连接项目数据库，无法确认这个 ZIP 是否仍被某个标本组引用，"
+                "为避免误删原片唯一副本，已拒绝删除。",
+            )
+            return
+        try:
+            rows = db_for_lookup.execute(
+                """
+                SELECT uid, group_index, archive_zip
+                FROM grouping
+                WHERE archive_zip IS NOT NULL
+                  AND archive_zip != ''
+                """
+            ).fetchall()
+        except Exception as exc:
+            ui.warn(
+                self, "删除 ZIP",
+                "查询数据库失败，无法确认这个 ZIP 是否仍被某个标本组引用，"
+                f"为避免误删原片唯一副本，已拒绝删除。\n\n{exc}",
+            )
+            return
+        registered = None
+        for row in rows:
+            row_uid = row["uid"] if hasattr(row, "keys") else row[0]
+            group_index = row["group_index"] if hasattr(row, "keys") else row[1]
+            zip_path = row["archive_zip"] if hasattr(row, "keys") else row[2]
+            try:
+                if target_key and _path_key(zip_path) == target_key:
+                    registered = (str(row_uid or ""), int(group_index))
+                    break
+            except Exception:
+                continue
+        if registered is not None:
+            ui.warn(
+                self, "删除 ZIP",
+                "这个 ZIP 仍挂在某个标本组上，是那批原片的唯一副本，不能直接删除。\n\n"
+                "如需释放空间，请先「还原原片」——把 JPG 复原并校验完整后，再删除 ZIP。",
+            )
+            return
+        if not os.path.isfile(path):
+            ui.warn(self, "删除 ZIP", f"文件不存在：\n{path}")
+            return
+        reply = QMessageBox.question(
+            self, "删除 ZIP",
+            f"确认删除这个 ZIP 吗？\n\n{path}\n\n"
+            "这个 ZIP 目前是孤儿归档(未挂在任何标本组上)，删除后无法恢复。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            os.remove(path)
+        except OSError as exc:
+            ui.warn(self, "删除失败", str(exc))
+            return
+        self._refresh_monitor()
+        self._on_show_current_results()
+        self._status_message("ZIP 已删除。", 4000)

@@ -677,8 +677,14 @@ class TestContextMenuUnassign:
         assert "取消归属" in actions_seen, \
             f"Expected '取消归属' in context menu, got: {actions_seen}"
 
-    def test_context_menu_unassign(self, qtbot, ctx_with_db, db, tmp_path):
+    def test_context_menu_unassign(self, qtbot, ctx_with_db, db, tmp_path, monkeypatch):
         """取消归属: removes jpg_path from whatever group it belongs to."""
+        # Claude Code 修改 2026-07-14 — _on_ctx_unassign 现在会先弹确认框(用户
+        # grill-me 拍板), 这里模拟用户点"是", 走通原有断言。
+        from PyQt6.QtWidgets import QMessageBox
+        monkeypatch.setattr(
+            "app.utils.ui.question", lambda *a, **k: QMessageBox.StandardButton.Yes
+        )
         jpg = tmp_path / "photo.jpg"
         jpg.write_bytes(b"\xff\xd8" * 10)
         jpg_path = str(jpg)
@@ -709,8 +715,13 @@ class TestContextMenuUnassign:
         assert jpg_path not in all_paths, \
             f"{jpg_path} should be removed after 取消归属, got {all_paths}"
 
-    def test_unassign_adds_to_blacklist(self, qtbot, ctx_with_db, db, tmp_path):
+    def test_unassign_adds_to_blacklist(self, qtbot, ctx_with_db, db, tmp_path, monkeypatch):
         """取消归属 = 加入 P0 黑名单(变无主)，连拍摄期自动归属的照片也能取消。"""
+        from PyQt6.QtWidgets import QMessageBox
+        # Claude Code 修改 2026-07-14 — 同上: 模拟确认框点"是"
+        monkeypatch.setattr(
+            "app.utils.ui.question", lambda *a, **k: QMessageBox.StandardButton.Yes
+        )
         from app.services.grouping_service import get_explicit_unassigns
         p = str(tmp_path / "auto.jpg")
         panel = MonitorPanel(ctx_with_db)
@@ -718,8 +729,13 @@ class TestContextMenuUnassign:
         panel._on_ctx_unassign(p)
         assert any(s.endswith("auto.jpg") for s in get_explicit_unassigns(db))
 
-    def test_unassign_still_removes_from_group(self, qtbot, ctx_with_db, db, tmp_path):
+    def test_unassign_still_removes_from_group(self, qtbot, ctx_with_db, db, tmp_path, monkeypatch):
         """变无主同时踢出合成组(用户选定行为)。"""
+        from PyQt6.QtWidgets import QMessageBox
+        # Claude Code 修改 2026-07-14 — 同上: 模拟确认框点"是"
+        monkeypatch.setattr(
+            "app.utils.ui.question", lambda *a, **k: QMessageBox.StandardButton.Yes
+        )
         from app.services.grouping_service import (
             Group, save_grouping, load_grouping, get_explicit_unassigns,
         )

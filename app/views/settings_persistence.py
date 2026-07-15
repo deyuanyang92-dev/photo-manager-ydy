@@ -146,6 +146,24 @@ class SettingsPersistenceMixin:
         )
         self._project_tree_ux_v2_chk.blockSignals(False)
 
+        # Claude Code 修改 2026-07-15 — 大规模性能: 载入项目树扫描/缓存三个参数
+        if hasattr(self, "_scan_cache_ttl_spin"):
+            self._scan_cache_ttl_spin.blockSignals(True)
+            self._scan_cache_ttl_spin.setValue(
+                int(getattr(self.ctx.settings, "project_scan_cache_ttl_seconds", 300))
+            )
+            self._scan_cache_ttl_spin.blockSignals(False)
+            self._scan_max_depth_spin.blockSignals(True)
+            self._scan_max_depth_spin.setValue(
+                int(getattr(self.ctx.settings, "project_scan_max_depth", 6))
+            )
+            self._scan_max_depth_spin.blockSignals(False)
+            self._auto_scan_chk.blockSignals(True)
+            self._auto_scan_chk.setChecked(
+                bool(getattr(self.ctx.settings, "project_tree_auto_scan_enabled", True))
+            )
+            self._auto_scan_chk.blockSignals(False)
+
         try:
             font_scale = float(qs.value(_sv._K_UI_FONT_SCALE, 1.0))
         except (TypeError, ValueError):
@@ -200,6 +218,20 @@ class SettingsPersistenceMixin:
         self.ctx.settings.flush_to_disk()
         from app.utils import ui
         ui.info(self, "性能模式", "已保存。重启软件后生效。")
+
+    def _on_scan_cache_settings_changed(self) -> None:
+        # Claude Code 修改 2026-07-15 — 大规模性能: 保存三个扫描/缓存参数并立即生效
+        # (把新的 TTL 灌进 project_tree_service, 不用重启)。
+        s = self.ctx.settings
+        s.project_scan_cache_ttl_seconds = self._scan_cache_ttl_spin.value()
+        s.project_scan_max_depth = self._scan_max_depth_spin.value()
+        s.project_tree_auto_scan_enabled = self._auto_scan_chk.isChecked()
+        s.flush_to_disk()
+        try:
+            from app.services import project_tree_service as pts
+            pts.set_scan_disk_cache_ttl(s.project_scan_cache_ttl_seconds)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _on_project_tree_ux_v2_changed(self) -> None:
         self.ctx.settings.project_tree_ux_v2 = self._project_tree_ux_v2_chk.isChecked()

@@ -57,8 +57,14 @@ class TestMetadataApplyAutofill:
     def test_current_values_keys(self, qapp, ctx):
         panel = MetadataPanel(ctx)
         vals = panel.current_values()
+        # Claude Code 修改 2026-07-14 — codex 回归发现契约测试过期: 2026-07-12
+        # 「拍摄场地」需求给 current_values()/_AUTOFILL_MAP_ATTRS 加了 photo_location
+        # (metadata_panel.py:325-336),但这条测试的期望集合没有同步更新。核实过
+        # 下游 3 处调用(workbench_view.py/workbench_specimen_identity.py)全是
+        # 泛化 dict.items()/.get() 遍历,没有硬编码字段集,加这个键不会破坏调用方 ——
+        # 是测试没跟上接口,不是接口本身有 bug。
         assert set(vals) == {"collector", "photographer", "identifier",
-                             "lon", "lat", "geo_area"}
+                             "lon", "lat", "geo_area", "photo_location"}
 
 
 # ── NamingPanel ───────────────────────────────────────────────────────────────
@@ -76,7 +82,7 @@ class TestNamingKeys:
 # ── WorkbenchView end-to-end ──────────────────────────────────────────────────
 
 class TestWorkbenchAutofill:
-    def test_autofill_from_record(self, qapp, ctx):
+    def test_autofill_from_record(self, qapp, ctx, qtbot):
         db = ctx.get_db()
         crs.upsert_record(db, {
             "province": "ZJ", "site": "SMW", "station": "B2",
@@ -87,6 +93,7 @@ class TestWorkbenchAutofill:
         })
         from app.views.workbench_view import WorkbenchView
         wb = WorkbenchView(ctx)
+        qtbot.addWidget(wb)
 
         # User picks / types the 4 keys → triggers auto-fill.
         wb._naming.set_location_keys("ZJ", "SMW", "B2", "20260518")
@@ -96,7 +103,7 @@ class TestWorkbenchAutofill:
         assert wb._metadata._lon.text() == "121.764"
         assert wb._metadata._geo_area.text() == "三门湾"
 
-    def test_autofill_does_not_overwrite_user_value(self, qapp, ctx):
+    def test_autofill_does_not_overwrite_user_value(self, qapp, ctx, qtbot):
         db = ctx.get_db()
         crs.upsert_record(db, {
             "province": "FJ", "site": "XM", "station": "H1",
@@ -104,13 +111,15 @@ class TestWorkbenchAutofill:
         })
         from app.views.workbench_view import WorkbenchView
         wb = WorkbenchView(ctx)
+        qtbot.addWidget(wb)
         wb._metadata._collector.setText("我手填的")
         wb._naming.set_location_keys("FJ", "XM", "H1", "20260601")
         assert wb._metadata._collector.text() == "我手填的"
 
-    def test_no_match_is_noop(self, qapp, ctx):
+    def test_no_match_is_noop(self, qapp, ctx, qtbot):
         from app.views.workbench_view import WorkbenchView
         wb = WorkbenchView(ctx)
+        qtbot.addWidget(wb)
         wb._naming.set_location_keys("XX", "YY", "ZZ", "20990101")  # no record
         assert wb._metadata._collector.text() == ""
 
@@ -157,17 +166,18 @@ class TestProjectDefaultCoordsPrefill:
         pss.save_setting(db, "capture_defaults",
                          {"lon": lon, "lat": lat, "geoArea": geo})
 
-    def test_new_specimen_inherits_project_default_coords(self, qapp, ctx):
+    def test_new_specimen_inherits_project_default_coords(self, qapp, ctx, qtbot):
         db = ctx.get_db()
         self._set_capture_defaults(db, "110.0", "20.0", "项目默认湾")
         from app.views.workbench_view import WorkbenchView
         wb = WorkbenchView(ctx)
+        qtbot.addWidget(wb)
         wb._on_new_specimen()
         assert wb._metadata._lon.text() == "110.0"
         assert wb._metadata._lat.text() == "20.0"
         assert wb._metadata._geo_area.text() == "项目默认湾"
 
-    def test_station_record_overrides_project_default(self, qapp, ctx):
+    def test_station_record_overrides_project_default(self, qapp, ctx, qtbot):
         db = ctx.get_db()
         self._set_capture_defaults(db, "110.0", "20.0", "项目默认湾")
         crs.upsert_record(db, {
@@ -177,13 +187,14 @@ class TestProjectDefaultCoordsPrefill:
         })
         from app.views.workbench_view import WorkbenchView
         wb = WorkbenchView(ctx)
+        qtbot.addWidget(wb)
         wb._on_new_specimen()                                   # 带项目默认坐标
         assert wb._metadata._lon.text() == "110.0"
         wb._naming.set_location_keys("ZJ", "SMW", "B2", "20260518")  # 选站位
         assert wb._metadata._lon.text() == "121.764"            # 被站位记录覆盖
         assert wb._metadata._geo_area.text() == "三门湾"
 
-    def test_manual_coords_survive_station_pick(self, qapp, ctx):
+    def test_manual_coords_survive_station_pick(self, qapp, ctx, qtbot):
         db = ctx.get_db()
         self._set_capture_defaults(db, "110.0", "20.0", "项目默认湾")
         crs.upsert_record(db, {
@@ -192,6 +203,7 @@ class TestProjectDefaultCoordsPrefill:
         })
         from app.views.workbench_view import WorkbenchView
         wb = WorkbenchView(ctx)
+        qtbot.addWidget(wb)
         wb._on_new_specimen()
         wb._metadata._lon.setText("66.6"); wb._metadata._on_field_edited("lon", "66.6")
         wb._naming.set_location_keys("ZJ", "SMW", "B2", "20260518")
@@ -199,7 +211,7 @@ class TestProjectDefaultCoordsPrefill:
 
 
 class TestPersonnelDefaultPrecedence:
-    def test_new_specimen_uses_project_people_not_previous_specimen(self, qapp, ctx):
+    def test_new_specimen_uses_project_people_not_previous_specimen(self, qapp, ctx, qtbot):
         from app.services import project_settings_service as pss
         pss.save_setting(ctx.get_db(), "personnel", {
             "collector": "项目采集人", "photographer": "项目拍摄人",
@@ -207,6 +219,7 @@ class TestPersonnelDefaultPrecedence:
         })
         from app.views.workbench_view import WorkbenchView
         wb = WorkbenchView(ctx)
+        qtbot.addWidget(wb)
         wb._metadata._collector.setText("上一标本采集人")
         wb._metadata._photographer.setText("上一标本拍摄人")
 
@@ -215,7 +228,7 @@ class TestPersonnelDefaultPrecedence:
         assert wb._metadata._collector.text() == "项目采集人"
         assert wb._metadata._photographer.text() == "项目拍摄人"
 
-    def test_station_record_overrides_project_people(self, qapp, ctx):
+    def test_station_record_overrides_project_people(self, qapp, ctx, qtbot):
         from app.services import project_settings_service as pss
         pss.save_setting(ctx.get_db(), "personnel", {
             "collector": "项目采集人", "photographer": "项目拍摄人",
@@ -228,23 +241,26 @@ class TestPersonnelDefaultPrecedence:
         })
         from app.views.workbench_view import WorkbenchView
         wb = WorkbenchView(ctx)
+        qtbot.addWidget(wb)
         wb._on_new_specimen()
         wb._naming.set_location_keys("FJ", "XM", "B2", "20260602")
 
         assert wb._metadata._collector.text() == "B2采集人"
         assert wb._metadata._photographer.text() == "B2拍摄人"
 
-    def test_draft_manual_edit_updates_uid_summary(self, qapp, ctx):
+    def test_draft_manual_edit_updates_uid_summary(self, qapp, ctx, qtbot):
         from app.views.workbench_view import WorkbenchView
         wb = WorkbenchView(ctx)
+        qtbot.addWidget(wb)
         wb._on_new_specimen()
         wb._metadata._collector.setText("现场采集人")
         wb._metadata._on_field_edited("collector", "现场采集人")
         assert "采集：现场采集人" in wb._naming._display_people.text()
 
-    def test_settings_change_updates_auto_draft_but_preserves_manual_override(self, qapp, ctx):
+    def test_settings_change_updates_auto_draft_but_preserves_manual_override(self, qapp, ctx, qtbot):
         from app.views.workbench_view import WorkbenchView
         wb = WorkbenchView(ctx)
+        qtbot.addWidget(wb)
         wb._on_new_specimen()
         wb._on_project_personnel_changed({
             "collector": "新项目默认", "photographer": "新拍摄默认"
@@ -255,7 +271,7 @@ class TestPersonnelDefaultPrecedence:
         wb._on_project_personnel_changed({"collector": "又一个默认"})
         assert wb._metadata._collector.text() == "手动覆盖"
 
-    def test_settings_change_backfills_empty_saved_specimen(self, qapp, ctx):
+    def test_settings_change_backfills_empty_saved_specimen(self, qapp, ctx, qtbot):
         """旧标本（如 ceshi7）采集人/拍摄人为空时，改项目人员设置也应立即回填。"""
         from app.services import project_settings_service as pss
         from app.views.workbench_view import WorkbenchView
@@ -276,6 +292,7 @@ class TestPersonnelDefaultPrecedence:
         db.commit()
 
         wb = WorkbenchView(ctx)
+        qtbot.addWidget(wb)
         wb._load_specimen(uid)
         assert wb._metadata._collector.text() == ""
 
@@ -285,15 +302,16 @@ class TestPersonnelDefaultPrecedence:
         assert wb._metadata._collector.text() == "yang et al"
         assert wb._metadata._photographer.text() == "yang"
 
-    def test_settings_change_never_overwrites_saved_specimen(self, qapp, ctx):
+    def test_settings_change_never_overwrites_saved_specimen(self, qapp, ctx, qtbot):
         from app.views.workbench_view import WorkbenchView
         wb = WorkbenchView(ctx)
+        qtbot.addWidget(wb)
         wb._current_uid = "SAVED-UID"
         wb._metadata._collector.setText("该标本实际采集人")
         wb._on_project_personnel_changed({"collector": "项目新默认"})
         assert wb._metadata._collector.text() == "该标本实际采集人"
 
-    def test_on_activate_prefills_project_personnel_on_draft(self, qapp, ctx):
+    def test_on_activate_prefills_project_personnel_on_draft(self, qapp, ctx, qtbot):
         """进入拍摄界面（无激活标本）时，右栏应自动带入项目人员默认，不必手填。"""
         from app.services import project_settings_service as pss
         pss.save_setting(ctx.get_db(), "personnel", {
@@ -302,6 +320,7 @@ class TestPersonnelDefaultPrecedence:
         })
         from app.views.workbench_view import WorkbenchView
         wb = WorkbenchView(ctx)
+        qtbot.addWidget(wb)
         wb.on_activate()
         assert wb._metadata._collector.text() == "yang et al"
         assert wb._metadata._photographer.text() == "yang"
@@ -318,7 +337,7 @@ class TestLoadExistingSpecimenTriggersAutofill:
     已填的采集记录在拍摄界面右栏不显示。
     """
 
-    def test_load_specimen_fills_personnel_from_record(self, qapp, ctx):
+    def test_load_specimen_fills_personnel_from_record(self, qapp, ctx, qtbot):
         import json
         db = ctx.get_db()
         # 采集记录：带 采集人/拍摄人
@@ -349,6 +368,7 @@ class TestLoadExistingSpecimenTriggersAutofill:
 
         from app.views.workbench_view import WorkbenchView
         wb = WorkbenchView(ctx)
+        qtbot.addWidget(wb)
         wb._load_specimen(uid)
 
         assert wb._metadata._collector.text() == "记录采集人"
@@ -381,7 +401,7 @@ class TestLoadExistingSpecimenBackfillsPersonnel:
         )
         db.commit()
 
-    def test_load_specimen_backfills_empty_personnel_from_project(self, qapp, ctx):
+    def test_load_specimen_backfills_empty_personnel_from_project(self, qapp, ctx, qtbot):
         from app.services import project_settings_service as pss
         pss.save_setting(ctx.get_db(), "personnel", {
             "collector": "yang et al", "photographer": "yang",
@@ -392,12 +412,13 @@ class TestLoadExistingSpecimenBackfillsPersonnel:
 
         from app.views.workbench_view import WorkbenchView
         wb = WorkbenchView(ctx)
+        qtbot.addWidget(wb)
         wb._load_specimen("ZJ-SMW-B2-DLC005-T95E-20260518")
 
         assert wb._metadata._collector.text() == "yang et al"
         assert wb._metadata._photographer.text() == "yang"
 
-    def test_load_specimen_keeps_existing_personnel(self, qapp, ctx):
+    def test_load_specimen_keeps_existing_personnel(self, qapp, ctx, qtbot):
         """已存（非空）collector 不被 personnel 默认值覆盖。"""
         from app.services import project_settings_service as pss
         pss.save_setting(ctx.get_db(), "personnel", {
@@ -410,6 +431,7 @@ class TestLoadExistingSpecimenBackfillsPersonnel:
 
         from app.views.workbench_view import WorkbenchView
         wb = WorkbenchView(ctx)
+        qtbot.addWidget(wb)
         wb._load_specimen("ZJ-SMW-B2-DLC007-T95E-20260518")
 
         assert wb._metadata._collector.text() == "该标本实际采集人"

@@ -16,6 +16,13 @@ CREATE TABLE IF NOT EXISTS specimens (
   pinned INTEGER DEFAULT 0,
   owner_project_dir TEXT,
   collab_updated_at TEXT,  -- 协作同步 LWW 时间戳（本地保存/推送时写入）
+  -- Claude Code 修改 2026-07-15 — 团队共享工作区多主同步(阶段 1d): 本地单调
+  -- 递增序号。每次本地写(用户编辑 / 合并真的改了一行)给该行一个新的更大的 rev;
+  -- 对方拉取时带 since_rev, 只回 collab_rev > since_rev 的行 = 增量, 几十万工作区
+  -- 不再每轮全表传。是**本地**计数(每台机器各自一套), 不跨机器、不进同步白名单
+  -- SPEC_SYNC_COLS —— 跨机器仍靠 collab_updated_at 做 LWW。列缺失自动 ALTER 补(见
+  -- db_manager._migrate_add_missing_columns), 老库无缝。
+  collab_rev INTEGER DEFAULT 0,
   raw_json TEXT            -- 完整原始 specimen 对象（兜底，零字段丢失）
   -- 注意：无 species/species_cn 列；中文名在 scientific_name_cn；俗名在 raw_json
 );

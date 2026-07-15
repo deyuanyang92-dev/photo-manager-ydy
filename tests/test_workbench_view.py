@@ -862,9 +862,11 @@ class TestOnActivate:
         assert w._debounce_timer.isActive()
         db.close()
 
-    def test_fs_watcher_stops_on_deactivate(self, tmp_path):
-        """on_deactivate must stop timers and clear watcher paths."""
+    def test_fs_watcher_stops_on_deactivate(self, tmp_path, monkeypatch):
+        """Deactivate stops watchers without discarding reusable thumbnails."""
         from app.views.workbench_view import WorkbenchView
+        from app.utils import image_thumbnail
+        from app.widgets import monitor_panel
         project_dir = str(tmp_path / "proj2")
         Path(project_dir).mkdir(parents=True)
         (Path(project_dir) / "incoming-jpg").mkdir()
@@ -874,6 +876,16 @@ class TestOnActivate:
         db = _make_db(db_path)
         ctx = _make_ctx(project_dir=project_dir, db=db)
         w = WorkbenchView(ctx)
+        monkeypatch.setattr(
+            image_thumbnail,
+            "clear_thumbnail_cache",
+            lambda *_a, **_k: pytest.fail("navigation cleared the thumbnail cache"),
+        )
+        monkeypatch.setattr(
+            monitor_panel,
+            "clear_file_thumb_cache",
+            lambda *_a, **_k: pytest.fail("navigation cleared the card cache"),
+        )
         w.on_activate()
         w.on_deactivate()
         assert not w._debounce_timer.isActive()
@@ -1629,7 +1641,13 @@ class TestNamingPanel:
         w._storage.setText("RD75E")
         w._update_preview()
         assert w._rna_warning.isHidden()
-        assert "RNAlater" in w._storage_combo.toolTip()
+        # Claude Code 修改 2026-07-14 — codex 回归发现测试内容过期: naming_panel.py
+        # 的 tooltip 文案已从含"RNAlater"改成更具体的"需要额外生成组织管标签"
+        # (naming_panel.py:1445-1448);"RNAlater"字样现在只在 _pres_detail 灰字里
+        # (line 1441)。核实这不是功能回归——R前缀提示本身仍然存在, 只是文案更新了,
+        # 测试没跟上, 更新断言匹配现状。
+        assert "组织管标签" in w._storage_combo.toolTip()
+        assert "RNAlater" in w._pres_detail.text()
 
     def test_rna_warning_hidden_for_non_r_prefix(self):
         from app.widgets.naming_panel import NamingPanel
@@ -6488,6 +6506,11 @@ class TestOrganiseUsesPanelMemory:
         w._grouping.load_grouping(self.UID, grouping)
 
         monkeypatch.setattr(w, "_maybe_rename_tiff_before_organize", lambda *a, **k: None)
+        # Claude Code 修改 2026-07-14 — 手动整理入口现在会先弹确认框(用户
+        # grill-me 拍板), 这里模拟用户点"是", 走通原有断言。
+        monkeypatch.setattr(
+            "app.utils.ui.question", lambda *a, **k: QMessageBox.StandardButton.Yes
+        )
         with patch(
             "app.services.organize_service._check_organize_gate",
             return_value=None,

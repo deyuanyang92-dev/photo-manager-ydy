@@ -22,6 +22,11 @@ logger = logging.getLogger(__name__)
 DEFAULT_PASSWORD = "123"
 
 
+class EditLockConfigError(Exception):
+    """配置文件存在但读不出有效密码(损坏/被篡改) —— 必须 fail-closed, 不得静默
+    回落默认密码。区别于"文件还没建"的正常首跑(那种才允许默认密码通行)。"""
+
+
 def _default_config_path() -> str:
     """app-local ``data/app_config.json``(与 user_projects.json 同目录)。"""
     return str(Path(__file__).resolve().parents[3] / "data" / "app_config.json")
@@ -32,21 +37,32 @@ def _hash(plain: str) -> str:
 
 
 def load_config(config_path: Optional[str] = None) -> dict[str, Any]:
-    """读 config; 缺省/损坏 → 返默认密码 hash(默认 ``123``)。"""
+    """读 config。
+
+    文件不存在 = 正常首跑(还没设过密码), 默认密码 ``123`` 通行。
+    文件存在但读不出有效密码 = 配置损坏/被篡改, **fail-closed**: 抛
+    :class:`EditLockConfigError`, 不回落默认密码放行——静默放行等于给被篡改的
+    配置开后门(codex 2026-07-14 回归审查指出的 fail-open 风险)。
+    """
     p = Path(config_path) if config_path else Path(_default_config_path())
     if not p.exists():
         return {"edit_password": _hash(DEFAULT_PASSWORD)}
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
         if not isinstance(data, dict) or "edit_password" not in data:
-            # 文件存在但结构不对 = 配置损坏/被篡改 —— 回落默认密码属 fail-open,
-            # 必须留痕(区别于「文件还没建」的正常首跑, 那种静默即可)。
-            logger.warning("编辑锁配置结构异常, 回落默认密码: %s", p)
-            return {"edit_password": _hash(DEFAULT_PASSWORD)}
+            # Claude Code 修改 2026-07-14 — fail-open 改 fail-closed: 结构异常不
+            # 再回落默认密码, 抛出让调用方锁死+明确提示, 不能悄悄放行。
+            logger.error("编辑锁配置结构异常, 拒绝解锁(fail-closed): %s", p)
+            raise EditLockConfigError(f"编辑锁配置结构异常: {p}")
         return data
-    except (json.JSONDecodeError, OSError) as exc:
-        logger.warning("编辑锁配置读取失败(%s), 回落默认密码: %s", exc, p)
-        return {"edit_password": _hash(DEFAULT_PASSWORD)}
+    except json.JSONDecodeError as exc:
+        # Claude Code 修改 2026-07-14 — 同上: JSON 解析失败不回落默认密码
+        logger.error("编辑锁配置解析失败(%s), 拒绝解锁(fail-closed): %s", exc, p)
+        raise EditLockConfigError(f"编辑锁配置解析失败: {p}") from exc
+    except OSError as exc:
+        # Claude Code 修改 2026-07-14 — 同上: 读取失败(权限/IO错误)不回落默认密码
+        logger.error("编辑锁配置读取失败(%s), 拒绝解锁(fail-closed): %s", exc, p)
+        raise EditLockConfigError(f"编辑锁配置读取失败: {p}") from exc
 
 
 def save_config(cfg: dict[str, Any], config_path: Optional[str] = None) -> None:

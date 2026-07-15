@@ -29,24 +29,47 @@ SPEC_SYNC_COLS = (
 )
 
 
-def get_local_specimens(project_dir: str, uid: Optional[str] = None) -> list[dict]:
-    """Read specimen records from a project DB (used by the FastAPI endpoint)."""
+# Claude Code 修改 2026-07-15 — 团队共享工作区多主同步(阶段 1d): collab_rev 是
+# 本地单调序号, 单独处理, 不进 SPEC_SYNC_COLS(那是跨机器同步的列白名单)。
+def _next_rev(db) -> int:
+    """该工作区下一个本地 rev = 当前最大 rev + 1(每写一行 bump 一次, 保证单调)。"""
+    row = db.execute("SELECT COALESCE(MAX(collab_rev), 0) FROM specimens").fetchone()
+    return int((row[0] if row else 0) or 0) + 1
+
+
+def get_local_specimens(
+    project_dir: str,
+    uid: Optional[str] = None,
+    since_rev: Optional[int] = None,
+) -> list[dict]:
+    """Read specimen records from a project DB (used by the FastAPI endpoint).
+
+    Claude Code 修改 2026-07-15 — 返回值多带一个 ``collab_rev``(本地序号), 供对方
+    追踪增量游标; ``since_rev`` 给定时只回 ``collab_rev > since_rev`` 的行(增量拉取)。
+    ``collab_rev`` 是**本地**元数据, 对方不会把它写进自己的行(合并时各自分配)。
+    """
     if not project_dir:
         return []
     try:
         from app.db.db_manager import open_project_db_private
         db = open_project_db_private(project_dir)
-        cols = ", ".join(SPEC_SYNC_COLS)
+        # 读取列 = 同步白名单 + 本地 collab_rev(附加返回, 不参与远端合并)
+        read_cols = (*SPEC_SYNC_COLS, "collab_rev")
+        cols = ", ".join(read_cols)
         try:
+            where = []
+            params: list = []
             if uid:
-                rows = db.execute(
-                    f"SELECT {cols} FROM specimens WHERE uid=?", (uid,)
-                ).fetchall()
-            else:
-                rows = db.execute(
-                    f"SELECT {cols} FROM specimens"
-                ).fetchall()
-            return [dict(zip(SPEC_SYNC_COLS, row)) for row in rows]
+                where.append("uid=?")
+                params.append(uid)
+            if since_rev is not None:
+                where.append("collab_rev > ?")
+                params.append(int(since_rev))
+            sql = f"SELECT {cols} FROM specimens"
+            if where:
+                sql += " WHERE " + " AND ".join(where)
+            rows = db.execute(sql, tuple(params)).fetchall()
+            return [dict(zip(read_cols, row)) for row in rows]
         finally:
             db.close()
     except Exception as exc:
@@ -107,11 +130,16 @@ def write_specimens_to_local_db(
                 ).fetchone()
 
                 if row is None:
-                    placeholders = ", ".join(f":{c}" for c in cols)
-                    col_str = ", ".join(cols)
+                    # Claude Code 修改 2026-07-15 — 新行分配一个本地 rev(bump), 让它
+                    # 进增量; payload 里若带了对方的 collab_rev 一律忽略(用本地的)。
+                    insert_payload = dict(payload)
+                    insert_payload["collab_rev"] = _next_rev(db)
+                    insert_cols = [*cols, "collab_rev"]
+                    placeholders = ", ".join(f":{c}" for c in insert_cols)
+                    col_str = ", ".join(insert_cols)
                     db.execute(
                         f"INSERT INTO specimens ({col_str}) VALUES ({placeholders})",
-                        payload,
+                        insert_payload,
                     )
                     written += 1
                     continue
@@ -150,8 +178,13 @@ def write_specimens_to_local_db(
                     # 会假装比实际更新)。两种情况都跳过。
                     continue
 
-                set_clause = ", ".join(f"{c}=:{c}" for c in update_cols)
+                # Claude Code 修改 2026-07-15 — 真的改了一行 -> bump 本地 rev, 让它进
+                # 增量(对方下次 since_rev 拉取能看到)。未被 LWW 放行的行不到这里,
+                # rev 保持不变(见上面 continue 分支), 所以"没真改的行不进增量"。
+                set_cols = [*update_cols, "collab_rev"]
+                set_clause = ", ".join(f"{c}=:{c}" for c in set_cols)
                 update_payload = {c: payload[c] for c in update_cols}
+                update_payload["collab_rev"] = _next_rev(db)
                 update_payload["uid"] = uid
                 db.execute(
                     f"UPDATE specimens SET {set_clause} WHERE uid=:uid",
@@ -172,6 +205,82 @@ def _norm(value) -> str:
     if value is None:
         return ""
     return str(value)
+
+
+# ── 多工作区同步核心(阶段 1 a/c) ──────────────────────────────────────────────
+# Claude Code 2026-07-15 — 团队共享工作区多主同步 spec 阶段 1: 把"只同步当前打开
+# 的 1 个工作区"解耦成"遍历一组共享工作区目录"。底层 read/write helper 已按
+# project_dir 参数化, 这里只加"遍历共享集合 + 稳定 workspace_id + 按 id 追踪增量
+# 游标"。跨库读一律走 helper 里的私有连接+finally close(守 Windows 锁红线),
+# 单个坏库(盘没挂/损坏/锁)跳过、绝不整批炸。
+
+
+def workspace_sync_id(workspace_dir: str) -> str:
+    """稳定 workspace 标识: 优先取工作区自己的 workspace_meta.workspace_id;
+    legacy 库(无 meta 表)回退到解析后的绝对路径 —— 保证"两个都叫断面1"也不混淆。
+    纯读, 不建库/不迁移(守跨库只读红线)。
+    """
+    try:
+        from app.services.project_catalog_service import read_workspace_meta
+        meta = read_workspace_meta(workspace_dir)
+        wid = str((meta or {}).get("workspace_id") or "").strip()
+        if wid:
+            return wid
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("collab: workspace_sync_id meta read failed: %s", exc)
+    try:
+        from pathlib import Path
+        return str(Path(workspace_dir).resolve())
+    except OSError:
+        return str(workspace_dir)
+
+
+def iter_shared_workspace_specimens(
+    shared_dirs: "list[str]",
+    since_rev_by_id: "Optional[dict]" = None,
+) -> "list[dict]":
+    """遍历一组共享工作区目录, 逐个读出(增量)标本索引。
+
+    返回每个可读工作区一个 dict::
+
+        {"workspace_id": <稳定 id>, "dir": <目录>,
+         "specimens": [<该库自 since_rev 后的标本行, 各带 collab_rev>],
+         "max_rev": <该库当前最大 rev, 作为对方下次的游标>}
+
+    ``since_rev_by_id`` = {workspace_id: 上次拉到的 max_rev}; 缺则全量。
+    单个工作区读失败(盘没挂/损坏/锁)静默跳过, 不影响其余(跨库读容忍红线)。
+    """
+    cursors = since_rev_by_id or {}
+    out: list[dict] = []
+    for ws_dir in shared_dirs or []:
+        try:
+            wid = workspace_sync_id(ws_dir)
+            since = cursors.get(wid)
+            specimens = get_local_specimens(ws_dir, since_rev=since)
+            # get_local_specimens 对不存在的库返回 [] 而不抛; 用是否真有库区分
+            # "空库" vs "库不可读": 探一下 project.db 是否在。
+            from pathlib import Path
+            if not (Path(ws_dir) / "_data" / "project.db").is_file():
+                continue  # 目录不是工作区 / 盘没挂 -> 跳过, 不当成"空共享工作区"
+            max_rev = 0
+            for s in specimens:
+                r = int(s.get("collab_rev") or 0)
+                if r > max_rev:
+                    max_rev = r
+            # since 拉的是增量, max_rev 需反映"整库"最大, 不只是增量里的 ->
+            # 增量为空时用 since 兜底(游标不倒退)。
+            if since is not None and max_rev < int(since):
+                max_rev = int(since)
+            out.append({
+                "workspace_id": wid,
+                "dir": ws_dir,
+                "specimens": specimens,
+                "max_rev": max_rev,
+            })
+        except Exception as exc:  # noqa: BLE001 — 一个坏库不拖垮整批
+            logger.debug("collab: iter_shared skip %s: %s", ws_dir, exc)
+            continue
+    return out
 
 
 def stamp_specimen(project_dir: str, uid: str) -> None:

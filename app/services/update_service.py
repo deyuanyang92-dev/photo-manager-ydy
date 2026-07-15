@@ -47,7 +47,12 @@ APP_EXE_NAME = "SpecimenPhotoWorkbench.exe"
 # ``scripts/gen_update_keys.py`` and paste the public key here (and sign each
 # release with the matching private key), verification becomes mandatory.
 # Can also be overridden at runtime via SPECIMEN_UPDATE_PUBKEY for staged rollout.
-UPDATE_PUBLIC_KEY_B64 = ""
+# Claude Code 修改 2026-07-14 — 用户裁定(2026-07-14, grill-me): 按通用软件更新
+# 做法开启签名强制校验。密钥对由 scripts/gen_update_keys.py 生成于本机
+# secrets/(已 gitignore, 不入库); 私钥只在发布者手里, 每次发布用
+# scripts/sign_release.py 签。丢了这把私钥, 以后发布只能换新密钥对(旧包仍可用
+# 环境变量 SPECIMEN_UPDATE_PUBKEY 覆盖校验, 不影响回滚)。
+UPDATE_PUBLIC_KEY_B64 = "ec0g/+K6MMU/XfLstdIGiOIc0uI9XYrtU75xqqUsL74="
 _PUBKEY_ENV = "SPECIMEN_UPDATE_PUBKEY"
 PACKAGED_ERROR_RE = re.compile(r"Traceback|PermissionError|ModuleNotFoundError|ImportError", re.I)
 DEFAULT_NETWORK_ATTEMPTS = 3

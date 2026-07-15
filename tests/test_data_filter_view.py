@@ -113,6 +113,28 @@ def test_unlock_wrong_password_keeps_locked(qtbot, qapp, monkeypatch) -> None:
     assert not edit_lock_service.is_unlocked(ctx), "错密不应解锁"
 
 
+# Claude Code 修改 2026-07-14 — fail-closed 回归测试(codex 审查): 配置损坏时
+# _on_unlock 必须截住 EditLockConfigError, 停在只读, 而不是让异常裸抛或误当密码错。
+def test_unlock_config_corrupt_stays_locked_with_distinct_warning(
+    qtbot, qapp, tmp_path, monkeypatch
+) -> None:
+    from app.utils import ui as _ui
+
+    warnings = []
+    monkeypatch.setattr(_ui, "warn", lambda parent, title, msg: warnings.append((title, msg)))
+    cfg = tmp_path / "c.json"
+    cfg.write_text("{not valid json", encoding="utf-8")
+    monkeypatch.setattr(edit_lock_service, "_default_config_path", lambda: str(cfg))
+    ctx = _Ctx()
+    v = DataFilterView(ctx)
+    qtbot.addWidget(v)
+    answers = iter([("123", True), ("张三", True)])
+    monkeypatch.setattr(QInputDialog, "getText", lambda *a, **k: next(answers))
+    v._on_unlock()
+    assert not edit_lock_service.is_unlocked(ctx), "配置损坏必须 fail-closed, 不能解锁"
+    assert warnings and "损坏" in warnings[0][0], "必须给出区别于'密码错误'的明确提示"
+
+
 def test_unlock_correct_password_sets_actor(qtbot, qapp, tmp_path, monkeypatch) -> None:
     ctx = _Ctx()
     v = DataFilterView(ctx)

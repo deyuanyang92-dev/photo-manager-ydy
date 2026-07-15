@@ -934,6 +934,40 @@ class SettingsTabsMixin:
         tree_ux_note.setWordWrap(True)
         theme_form.addRow("", tree_ux_note)
 
+        # Claude Code 修改 2026-07-15 — 大规模性能: 项目树扫描/缓存三个可调参数
+        # (用户 2026-07-14 grill-me 拍板)。控件 create+wire 照抄本文件既有 spin/checkbox
+        # 与 _concurrency_spin 的 pattern; 标签走 tr()。
+        self._scan_cache_ttl_spin = QSpinBox()
+        self._scan_cache_ttl_spin.setRange(0, 86400)
+        self._scan_cache_ttl_spin.setSingleStep(60)
+        self._scan_cache_ttl_spin.setSuffix(tr(" 秒"))
+        self._scan_cache_ttl_spin.setToolTip(
+            tr("项目树扫描结果缓存多久内不重扫（跨重启也认）。0 = 每次都重新扫描。")
+        )
+        self._scan_cache_ttl_spin.valueChanged.connect(self._on_scan_cache_settings_changed)
+        theme_form.addRow(tr("扫描缓存有效期"), self._scan_cache_ttl_spin)
+
+        self._scan_max_depth_spin = QSpinBox()
+        self._scan_max_depth_spin.setRange(1, 12)
+        self._scan_max_depth_spin.setToolTip(
+            tr("扫描项目/磁盘时最多往下钻几层目录。层数越大越慢，默认 6 层。")
+        )
+        self._scan_max_depth_spin.valueChanged.connect(self._on_scan_cache_settings_changed)
+        theme_form.addRow(tr("扫描深度"), self._scan_max_depth_spin)
+
+        self._auto_scan_chk = QCheckBox(tr("打开软件时自动扫描找回项目"))
+        self._auto_scan_chk.setToolTip(
+            tr("关闭后打开软件不自动扫描磁盘，只用「导入已有项目」「扫描项目位置」手动找回，"
+               "适合项目极多、想彻底避免开机卡顿的场景。")
+        )
+        self._auto_scan_chk.stateChanged.connect(self._on_scan_cache_settings_changed)
+        theme_form.addRow(tr("自动扫描"), self._auto_scan_chk)
+
+        scan_note = QLabel(tr("项目很多时：调大缓存有效期、关掉自动扫描，可显著加快软件打开速度；改动立即生效。"))
+        scan_note.setObjectName("MutedSmall")
+        scan_note.setWordWrap(True)
+        theme_form.addRow("", scan_note)
+
         tab.body.addWidget(theme_box)
         tab.body.addSpacing(12)
 

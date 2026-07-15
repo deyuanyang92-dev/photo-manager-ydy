@@ -37,56 +37,66 @@ def ensure_survey_project(
     raw: Optional[dict] = None,
 ) -> dict:
     """Ensure the survey root has a catalog row and return it as a dict."""
+    from app.db.db_manager import open_project_db_private
+
     root = Path(normalize_path(root_dir))
-    conn = open_project_db(str(root), create=True)
-    row = _fetch_one_row(conn, "SELECT * FROM survey_project LIMIT 1")
-    ts = _utc_now_iso()
-    if row is None:
-        project_id = str(uuid.uuid4())
-        conn.execute(
-            """
-            INSERT INTO survey_project (
-              project_id, name, code, root_relative_path, location, date_range,
-              created_at, updated_at, raw_json
-            ) VALUES (?, ?, ?, '.', ?, ?, ?, ?, ?)
-            """,
-            (
-                project_id,
-                name or root.name,
-                code,
-                location,
-                date_range,
-                ts,
-                ts,
-                json.dumps(raw or {}, ensure_ascii=False),
-            ),
-        )
-        conn.commit()
-        row = _fetch_one_row(conn, "SELECT * FROM survey_project WHERE project_id=?", (project_id,))
-    else:
-        updates = {
-            "name": name,
-            "code": code,
-            "location": location,
-            "date_range": date_range,
-        }
-        non_empty = {k: v for k, v in updates.items() if v}
-        if non_empty or raw:
-            sets = [f"{k}=?" for k in non_empty]
-            vals = list(non_empty.values())
-            if raw:
-                sets.append("raw_json=?")
-                vals.append(json.dumps(raw, ensure_ascii=False))
-            sets.append("updated_at=?")
-            vals.append(ts)
-            vals.append(row["project_id"])
+    # Claude Code 修改 2026-07-15 — codex 实测 WinError 32 复现: 这里用缓存连接
+    # (open_project_db)写根库, 连接一直不放, Windows 上根目录就被锁住 —— 移不动、
+    # 删不掉, 直到进程退出; 新建项目失败要回滚时也删不干净。这跟 ensure_workspace_meta
+    # 早就修过的锁泄漏(见本文件 §7 旧注释)是同一个坑, 只是漏了这两处写入路径。
+    # §7 旧: conn = open_project_db(str(root), create=True)  # 缓存连接, 锁泄漏
+    conn = open_project_db_private(str(root), create=True)
+    try:
+        row = _fetch_one_row(conn, "SELECT * FROM survey_project LIMIT 1")
+        ts = _utc_now_iso()
+        if row is None:
+            project_id = str(uuid.uuid4())
             conn.execute(
-                f"UPDATE survey_project SET {', '.join(sets)} WHERE project_id=?",
-                tuple(vals),
+                """
+                INSERT INTO survey_project (
+                  project_id, name, code, root_relative_path, location, date_range,
+                  created_at, updated_at, raw_json
+                ) VALUES (?, ?, ?, '.', ?, ?, ?, ?, ?)
+                """,
+                (
+                    project_id,
+                    name or root.name,
+                    code,
+                    location,
+                    date_range,
+                    ts,
+                    ts,
+                    json.dumps(raw or {}, ensure_ascii=False),
+                ),
             )
             conn.commit()
-            row = _fetch_one_row(conn, "SELECT * FROM survey_project WHERE project_id=?", (row["project_id"],))
-    return dict(row)
+            row = _fetch_one_row(conn, "SELECT * FROM survey_project WHERE project_id=?", (project_id,))
+        else:
+            updates = {
+                "name": name,
+                "code": code,
+                "location": location,
+                "date_range": date_range,
+            }
+            non_empty = {k: v for k, v in updates.items() if v}
+            if non_empty or raw:
+                sets = [f"{k}=?" for k in non_empty]
+                vals = list(non_empty.values())
+                if raw:
+                    sets.append("raw_json=?")
+                    vals.append(json.dumps(raw, ensure_ascii=False))
+                sets.append("updated_at=?")
+                vals.append(ts)
+                vals.append(row["project_id"])
+                conn.execute(
+                    f"UPDATE survey_project SET {', '.join(sets)} WHERE project_id=?",
+                    tuple(vals),
+                )
+                conn.commit()
+                row = _fetch_one_row(conn, "SELECT * FROM survey_project WHERE project_id=?", (row["project_id"],))
+        return dict(row)
+    finally:
+        conn.close()  # 写完立刻放锁(Windows: 不放锁 -> 项目文件夹删不掉/移不动)
 
 
 def ensure_workspace_meta(
@@ -257,34 +267,43 @@ def register_workspace(
     except ValueError:
         rel = workspace.name
     ts = _utc_now_iso()
-    conn = open_project_db(str(root), create=True)
-    conn.execute(
-        """
-        INSERT INTO workspaces (
-          workspace_id, project_id, parent_workspace_id, role, name,
-          relative_path, active, last_seen_at, raw_json
-        ) VALUES (?, ?, NULL, ?, ?, ?, 1, ?, ?)
-        ON CONFLICT(workspace_id) DO UPDATE SET
-          project_id=excluded.project_id,
-          role=excluded.role,
-          name=excluded.name,
-          relative_path=excluded.relative_path,
-          active=1,
-          last_seen_at=excluded.last_seen_at,
-          raw_json=excluded.raw_json
-        """,
-        (
-            meta["workspace_id"],
-            project["project_id"],
-            role,
-            name or workspace.name,
-            rel,
-            ts,
-            json.dumps(raw or {}, ensure_ascii=False),
-        ),
-    )
-    conn.commit()
-    row = _fetch_one_row(conn, "SELECT * FROM workspaces WHERE workspace_id=?", (meta["workspace_id"],))
+    from app.db.db_manager import open_project_db_private
+
+    # Claude Code 修改 2026-07-15 — 同 ensure_survey_project: 缓存连接写根库会在
+    # Windows 上把项目根目录锁住(codex 实测 WinError 32), 并让新建项目失败时的
+    # 回滚删不干净。改私有连接 + finally 关闭。
+    # §7 旧: conn = open_project_db(str(root), create=True)  # 缓存连接, 锁泄漏
+    conn = open_project_db_private(str(root), create=True)
+    try:
+        conn.execute(
+            """
+            INSERT INTO workspaces (
+              workspace_id, project_id, parent_workspace_id, role, name,
+              relative_path, active, last_seen_at, raw_json
+            ) VALUES (?, ?, NULL, ?, ?, ?, 1, ?, ?)
+            ON CONFLICT(workspace_id) DO UPDATE SET
+              project_id=excluded.project_id,
+              role=excluded.role,
+              name=excluded.name,
+              relative_path=excluded.relative_path,
+              active=1,
+              last_seen_at=excluded.last_seen_at,
+              raw_json=excluded.raw_json
+            """,
+            (
+                meta["workspace_id"],
+                project["project_id"],
+                role,
+                name or workspace.name,
+                rel,
+                ts,
+                json.dumps(raw or {}, ensure_ascii=False),
+            ),
+        )
+        conn.commit()
+        row = _fetch_one_row(conn, "SELECT * FROM workspaces WHERE workspace_id=?", (meta["workspace_id"],))
+    finally:
+        conn.close()  # 写完立刻放锁(Windows: 不放锁 -> 项目文件夹删不掉/移不动)
     result = {"project": project, "workspace": dict(row), "workspace_meta": meta}
     # 登记后刷新根库索引缓存（失败不阻断进入工作区）
     try:

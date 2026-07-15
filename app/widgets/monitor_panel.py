@@ -64,6 +64,7 @@ from PyQt6.QtWidgets import (
 )
 
 from app.config import icons
+from app.config.i18n import tr  # polish: i18n-wrap loading-cover text, Sonnet 5 multi-agent review
 from app.config.theme import TOKENS
 from app.services import grouping_service, activation_service
 from app.services.photo_import_service import is_media_path
@@ -96,6 +97,8 @@ _FILE_THUMB_MIN_SIZE = 56
 _FILE_THUMB_MAX_SIZE = 180
 _FILE_THUMB_STEP = 16
 _FILE_THUMB_CACHE_LIMIT = 512
+_INITIAL_THUMB_REVEAL_LIMIT = 32
+_INITIAL_THUMB_REVEAL_TIMEOUT_MS = 5000
 _FILE_THUMB_CACHE: "OrderedDict[tuple[str, int, int], Optional[QPixmap]]" = OrderedDict()
 _FILE_THUMB_ICON_CACHE: dict[str, QPixmap] = {}
 
@@ -384,7 +387,10 @@ class _FileCard(QFrame):
                 attr_lbl = QLabel("未归属")
                 attr_lbl.setObjectName("FileUidMissing")
         else:
-            attr_lbl = QLabel(uid or "只读")
+            naming_ok = getattr(self._entry, "naming_ok", None)
+            attr_lbl = QLabel(
+                uid or ("待补充编号" if naming_ok is False else "未识别编号")
+            )
             attr_lbl.setObjectName("FileUidMuted")
         attr_lbl.setToolTip("")
         attr_lbl.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
@@ -542,6 +548,14 @@ class _FileCard(QFrame):
 
         if kind in ("jpg", "tiff"):
             menu.addSeparator()
+            if kind == "tiff":
+                recognize_action = menu.addAction("识别编号并填入右侧")
+                if self._on_workflow_action is not None:
+                    recognize_action.triggered.connect(
+                        lambda: self._on_workflow_action("recognize", path)
+                    )
+                else:
+                    recognize_action.setEnabled(False)
             compose_action = menu.addAction("合成")
             organise_action = menu.addAction("整理")
             compose_organise_action = menu.addAction("合成+整理")
@@ -630,6 +644,8 @@ class MonitorPanel(QWidget):
     unassign_requested = pyqtSignal(str)
     refresh_requested = pyqtSignal()
     add_jpg_requested = pyqtSignal()   # emitted when user clicks "添加照片"
+    tiff_recognition_requested = pyqtSignal()  # selected TIFFs, otherwise picker
+    incoming_tiff_recognition_requested = pyqtSignal()  # current incoming scan
     grouping_requested = pyqtSignal()  # emitted when user clicks "分组工具" (opens popup)
     legacy_organize_requested = pyqtSignal()  # "旧照片批量整理" from the compact menu
     compose_implicit_requested = pyqtSignal()  # 主界面[合成]
@@ -665,6 +681,13 @@ class MonitorPanel(QWidget):
         self._thumb_pending: dict[int, str] = {}
         self._thumb_pending_paths: set[str] = set()  # 同路径去重, 不重复派发
         self._thumb_worker: Optional[GridThumbnailWorker] = None  # 首次派发时接线
+        self._silent_thumb_batch: set[str] = set()
+        self._silent_thumb_pending: set[str] = set()
+        self._silent_thumb_ready: set[str] = set()
+        self._silent_thumb_timer = QTimer(self)
+        self._silent_thumb_timer.setSingleShot(True)
+        self._silent_thumb_timer.setInterval(_INITIAL_THUMB_REVEAL_TIMEOUT_MS)
+        self._silent_thumb_timer.timeout.connect(self._on_silent_thumbnail_timeout)
 
         # Incremental rebuild: reuse card widgets across scans keyed by file
         # path, so a single new photo builds one card instead of rebuilding all.
@@ -1045,6 +1068,17 @@ class MonitorPanel(QWidget):
         scroll.setWidget(self._grid_widget)
         sec.addWidget(scroll, stretch=1)
 
+        # Keep the first viewport visually stable while its bounded thumbnail
+        # batch decodes. The cover is local and motionless; ready cards are
+        # committed together instead of appearing one at a time.
+        self._thumb_loading_cover = QLabel(tr("正在静默准备首屏照片…"), scroll.viewport())
+        self._thumb_loading_cover.setObjectName("EmptyState")
+        self._thumb_loading_cover.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._thumb_loading_cover.setAttribute(
+            Qt.WidgetAttribute.WA_StyledBackground, True
+        )
+        self._thumb_loading_cover.hide()
+
         # ── Empty state ──
         self._empty_label = QLabel(
             "等待目录中新照片\n已处理文件不再留在未整理区；TIFF 出现前不会关联原片。"
@@ -1086,6 +1120,7 @@ class MonitorPanel(QWidget):
             and hasattr(self, "_stream_scroll")
             and watched is self._stream_scroll.viewport()
         ):
+            self._resize_thumbnail_loading_cover()
             self._reflow_cards_for_viewport()
         if watched in self._drop_targets:
             if event.type() in (
@@ -1458,6 +1493,7 @@ class MonitorPanel(QWidget):
             getattr(entry, "mtime", ""),
             getattr(entry, "size", 0),
             uid,
+            getattr(entry, "naming_ok", None),
             bool(uid) and uid == self._active_uid,
             getattr(entry, "composed_tiff", None),
             getattr(entry, "archived", None),
@@ -1554,12 +1590,21 @@ class MonitorPanel(QWidget):
         batch = max(1, int(MONITOR_THUMB_BATCH_SIZE))
         while self._thumb_queue and dispatched < batch:
             card = self._thumb_queue.popleft()
+            # Claude Code 修改 2026-07-14 — 先取 path(纯 Python 属性访问),
+            # 回收/析构分支才拿得到路径去清 silent pending。
+            card_path = str(getattr(getattr(card, "_entry", None), "path", "") or "")
             try:
                 if card.parent() is None:
+                    # §7 旧: continue  —— 只跳过, 但 path 仍滞留 _silent_thumb_pending,
+                    # 该路径永不派发/回包 ⇒ pending 永不空 ⇒ 加载遮罩挂死遮住网格。
+                    # Claude Code 修改 2026-07-14 — 回收卡片必须清出 silent 待办, 让 pending 能归零。
+                    self._drop_silent_thumbnail(card_path)
                     continue  # 卡片已被回收
                 if self._dispatch_thumbnail(card):
                     dispatched += 1
             except RuntimeError:
+                # Claude Code 修改 2026-07-14 — C++ 已析构的卡片同样要清出 silent 待办。
+                self._drop_silent_thumbnail(card_path)
                 continue  # 底层 C++ 对象已析构
         if not self._thumb_queue:
             self._thumb_timer.stop()
@@ -1589,8 +1634,11 @@ class MonitorPanel(QWidget):
 
         hit, _pm = _file_thumb_cache_get(path)
         if hit:
-            # 内存缓存命中(含负缓存): load_thumbnail_now 内部走缓存, 零解码。
-            card.load_thumbnail_now()
+            if path in self._silent_thumb_batch:
+                self._mark_silent_thumbnail_ready(path)
+            else:
+                # 内存缓存命中(含负缓存): load_thumbnail_now 内部走缓存, 零解码。
+                card.load_thumbnail_now()
             return False
 
         if path in self._thumb_pending_paths:
@@ -1598,6 +1646,8 @@ class MonitorPanel(QWidget):
 
         worker = self._ensure_thumb_worker()
         if worker is None:
+            if path in self._silent_thumb_batch:
+                self._mark_silent_thumbnail_ready(path)
             return False  # 无 QApplication(纯逻辑测试): 保持占位图, 不解码
 
         req_id = _next_thumb_req_id()
@@ -1630,6 +1680,10 @@ class MonitorPanel(QWidget):
         # 写内存缓存(含 None 负缓存, 键含 mtime/size ⇒ 文件改动自动失效)。
         _file_thumb_cache_put(path, pm)
 
+        if path in self._silent_thumb_batch:
+            self._mark_silent_thumbnail_ready(path)
+            return
+
         card = self._card_by_key.get(path)
         if card is None:
             return  # 文件已消失 / 卡片已重建, 结果留在缓存里给下次用
@@ -1651,6 +1705,8 @@ class MonitorPanel(QWidget):
         try:
             cols = self._grid_column_count()
             desired = {getattr(f, "path", ""): f for f in all_files}
+            old_keys = set(self._card_by_key)
+            new_image_paths: list[str] = []
 
             # Drop cards for files that vanished.
             for key in list(self._card_by_key):
@@ -1681,10 +1737,86 @@ class MonitorPanel(QWidget):
                     self._card_sig_by_key[key] = sig
                     # 新建卡片才排队解码(签名未变的复用卡片已带图, 不重复解码)
                     self._queue_thumbnail(card)
+                    if getattr(card, "_thumbnail_kind", "") in {"jpg", "tiff"}:
+                        new_image_paths.append(key)
                 self._cards.append(card)
             self._layout_cards(cols)
+            if new_image_paths and not (old_keys & set(desired)):
+                self._begin_silent_thumbnail_load(new_image_paths)
         finally:
             self._grid_widget.setUpdatesEnabled(was_enabled)
+
+    def _resize_thumbnail_loading_cover(self) -> None:
+        cover = getattr(self, "_thumb_loading_cover", None)
+        scroll = getattr(self, "_stream_scroll", None)
+        if cover is None or scroll is None:
+            return
+        cover.setGeometry(scroll.viewport().rect())
+
+    def _begin_silent_thumbnail_load(self, paths: list[str]) -> None:
+        batch = [path for path in paths if path][:_INITIAL_THUMB_REVEAL_LIMIT]
+        if not batch:
+            return
+        self._silent_thumb_batch = set(batch)
+        self._silent_thumb_pending = set(batch)
+        self._silent_thumb_ready = set()
+        self._resize_thumbnail_loading_cover()
+        self._thumb_loading_cover.show()
+        self._thumb_loading_cover.raise_()
+        self._silent_thumb_timer.start()
+
+    def _mark_silent_thumbnail_ready(self, path: str) -> None:
+        if path not in self._silent_thumb_batch:
+            return
+        self._silent_thumb_ready.add(path)
+        self._silent_thumb_pending.discard(path)
+        if not self._silent_thumb_pending:
+            QTimer.singleShot(0, self._finish_silent_thumbnail_load)
+
+    # Claude Code 修改 2026-07-14 — 卡片被回收/析构后, 把它从 silent 批次里清出,
+    # 让 pending 能真正归零(否则加载遮罩挂死)。故意**不**动 _silent_thumb_batch:
+    # 它是 _finish_silent_thumbnail_load 的守卫, 清空会让 finish 提前 return 不隐藏遮罩。
+    def _drop_silent_thumbnail(self, path: str) -> None:
+        if not path or path not in self._silent_thumb_batch:
+            return
+        self._silent_thumb_pending.discard(path)
+        self._silent_thumb_ready.discard(path)
+        if self._silent_thumb_batch and not self._silent_thumb_pending:
+            QTimer.singleShot(0, self._finish_silent_thumbnail_load)
+
+    def _on_silent_thumbnail_timeout(self) -> None:
+        # Keep the stable cover on slow machines instead of revealing a partial
+        # batch. Decode failures still complete normally through the worker.
+        if self._silent_thumb_batch and self._silent_thumb_pending:
+            self._thumb_loading_cover.raise_()
+            self._silent_thumb_timer.start()
+            return
+        self._finish_silent_thumbnail_load()
+
+    def _finish_silent_thumbnail_load(self) -> None:
+        if not self._silent_thumb_batch:
+            return
+        self._silent_thumb_timer.stop()
+        was_enabled = self._grid_widget.updatesEnabled()
+        self._grid_widget.setUpdatesEnabled(False)
+        try:
+            # A timeout applies ready cache entries only. It must not fall back
+            # to synchronous decoding for a slow or corrupt file.
+            for path in self._silent_thumb_ready:
+                card = self._card_by_key.get(path)
+                if card is not None:
+                    try:
+                        card.load_thumbnail_now()
+                    except RuntimeError:
+                        pass
+        finally:
+            self._grid_widget.setUpdatesEnabled(was_enabled)
+        self._silent_thumb_batch.clear()
+        self._silent_thumb_pending.clear()
+        self._silent_thumb_ready.clear()
+        self._thumb_loading_cover.hide()
+        if was_enabled:
+            self._grid_widget.update()
 
     def _grid_column_count(self) -> int:
         if self._view_mode == "list":
@@ -1716,6 +1848,12 @@ class MonitorPanel(QWidget):
     def _clear_grid(self) -> None:
         self._thumb_queue.clear()
         self._thumb_timer.stop()  # QTimer 只在主线程 stop —— 本方法恒在主线程
+        self._silent_thumb_timer.stop()
+        self._silent_thumb_batch.clear()
+        self._silent_thumb_pending.clear()
+        self._silent_thumb_ready.clear()
+        if hasattr(self, "_thumb_loading_cover"):
+            self._thumb_loading_cover.hide()
         # 在途的 decode 回包全部作废(卡片马上就没了)。worker 仍会把结果发回来,
         # 但 _on_thumb_decoded 在 _thumb_pending 里查不到 req_id ⇒ 直接丢弃。
         self._thumb_pending.clear()
@@ -2115,6 +2253,17 @@ class MonitorPanel(QWidget):
         db = self.ctx.get_db()
         if db is None:
             return
+        # Claude Code 修改 2026-07-14 — 用户裁定(2026-07-14): 手动"取消归属"入口
+        # 必须先确认, 点"否"不得产生副作用(codex 回归 + 用户 grill-me 拍板)。
+        # 不影响批量流程 —— 这个动作本来就没有 silent_batch 的批量路径。
+        from app.utils import ui
+        reply = ui.question(
+            self, "取消归属",
+            f"确认取消这张照片的归属？\n\n{Path(jpg_path).name}\n\n"
+            "取消后该照片会变为无主状态，不再计入任何分组。",
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
         # P0：加入黑名单（打败 P1 分组 / P2 手动 / P3 激活时间窗）
         grouping_service.add_explicit_unassign(db, jpg_path)
         grouping_service.remove_jpg_from_all_groups(db, jpg_path)
@@ -2131,6 +2280,8 @@ class MonitorPanel(QWidget):
             self.organise_selected_requested.emit()
         elif action == "compose_organise":
             self.compose_implicit_organise_requested.emit()
+        elif action == "recognize":
+            self.tiff_recognition_requested.emit()
 
     # ── Slots ─────────────────────────────────────────────────────────────────
 
@@ -2178,6 +2329,18 @@ class MonitorPanel(QWidget):
         grouping_action = menu.addAction("分组工具")
         grouping_action.setToolTip("打开分组 / 合成工具")
         grouping_action.triggered.connect(self.grouping_requested.emit)
+
+        menu.addSeparator()
+
+        choose_tiff_action = menu.addAction("选择 TIF 并识别…")
+        choose_tiff_action.setToolTip("选择一个或多个外部 TIF，识别编号并填入右侧")
+        choose_tiff_action.triggered.connect(self.tiff_recognition_requested.emit)
+
+        recognize_incoming_action = menu.addAction("识别 incoming 中的 TIF…")
+        recognize_incoming_action.setToolTip("检查当前待处理目录中的全部 TIF，并提取编号")
+        recognize_incoming_action.triggered.connect(
+            self.incoming_tiff_recognition_requested.emit
+        )
 
         menu.addSeparator()
 

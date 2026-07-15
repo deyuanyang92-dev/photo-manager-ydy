@@ -179,3 +179,59 @@ def describe_project_sync_state(service: Any, peers: Iterable[Any] | None = None
         return f"项目码：{share_line} · 可选 {len(options)} 个队友项目"
 
     return f"项目码：{share_line} · 「{local_name}」尚未与队友配对"
+
+
+# Claude Code 修改 2026-07-15 — 物化队友共享、本地还没有的项目(用户定稿: 同一棵
+# 项目树里双击队友项目 -> 拉取到本地)。用真实原语: parse_project_sync_code(拿
+# 共享 project_id) + ensure_project_dirs(建本地空项目) + set_project_identity(绑
+# 到共享 id)。绑定后走已有同步(团队码 + 项目码配对)把编号/照片拉进来。
+def _unique_local_dir(base: "Path", name: str) -> "Path":
+    """在 base 下给项目起一个不撞名的本地目录(同名不同项目不覆盖)。"""
+    safe = str(name or "shared-project").strip() or "shared-project"
+    for bad in ("/", "\\", ".."):
+        safe = safe.replace(bad, "_")
+    target = base / safe
+    if not target.exists():
+        return target
+    for i in range(2, 1000):
+        cand = base / f"{safe} ({i})"
+        if not cand.exists():
+            return cand
+    import uuid as _uuid
+    return base / f"{safe}-{_uuid.uuid4().hex[:8]}"
+
+
+def join_shared_project_locally(code: str, base_dir: str, name: str) -> dict:
+    """在 base_dir 下建一个本地空项目并绑定到共享 project_id, 返回 {local_dir, project_id}。
+
+    绑定后照片/编号靠已有同步(团队码 + 项目码配对)拉进来 —— 这个函数只负责"从无到
+    有把本地容器建好并认领共享身份", 不下载文件(那走同步周期 / 用户点同步)。
+    """
+    from pathlib import Path
+
+    from app.db.db_manager import open_project_db_private
+    from app.services.project_identity_service import (
+        parse_project_sync_code,
+        set_project_identity,
+    )
+    from app.services.project_service import ensure_project_dirs
+
+    parsed = parse_project_sync_code(code)  # 空/非法码 -> ValueError
+    project_id = parsed["projectId"]
+    remote_name = parsed.get("projectName") or name
+
+    base = Path(base_dir).expanduser()
+    base.mkdir(parents=True, exist_ok=True)
+    local_dir = _unique_local_dir(base, name or remote_name)
+    local_dir.mkdir(parents=True, exist_ok=True)
+    ensure_project_dirs(str(local_dir), create_root=True)
+
+    db = open_project_db_private(str(local_dir), create=True)
+    try:
+        bound = set_project_identity(
+            db, project_id, project_name=remote_name or local_dir.name,
+        )
+    finally:
+        db.close()  # 跨工作区写完立刻放锁(Windows)
+
+    return {"local_dir": str(local_dir), "project_id": bound}

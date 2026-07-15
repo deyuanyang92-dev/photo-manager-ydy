@@ -109,7 +109,8 @@ class MainWindow(QMainWindow):
         self._prefetch_queue: list[str] = []
 
         self.setWindowTitle(tr("标本影像"))
-        self.resize(1440, 900)
+        # Startup size is screen-relative and centralized in window_layout.py.
+        # Do not restore a fixed default here; main.py places the first window.
         # Minimum width must stay below common small/remote-desktop screens
         # (e.g. 1024×768). At 1040 the window can't shrink to fit a 1024-wide
         # screen, so its right edge — the screenshot/settings/Helicon cluster —
@@ -328,6 +329,9 @@ class MainWindow(QMainWindow):
         self._project_switcher.new_survey_project_requested.connect(
             self._on_new_survey_project)
         self._project_switcher.open_workspace_requested.connect(self._on_open_workspace)
+        self._project_switcher.project_search_requested.connect(
+            self._on_project_location_search
+        )
         lay.addWidget(self._project_switcher)
 
         self._btn_compress = QAction(tr("归档"), self)
@@ -1038,30 +1042,32 @@ class MainWindow(QMainWindow):
         app = QApplication.instance()
         if app is not None:
             app.processEvents()
-        with ui.busy_cursor():
-            view = self._ensure_view(view_cls)
-            if view:
-                # 项目树是全局项目总览，不属于当前拍摄目录。每次从主导航进入
-                # 都先恢复「全部项目」范围；当前 B2 只保留在顶栏作为拍摄上下文。
-                if self._view_ref_id(view_cls) == "project_tree":
-                    self.ctx.settings.project_tree_view_mode = "all"
-                    if hasattr(view, "_root"):
-                        view._root = None
-                self._hide_startup_placeholder()
-                # 生命周期对称: 切页前先让旧页 on_deactivate(停定时器/watcher/
-                # 预热线程, 策略=「暂停+回来重扫」)。守护调用 —— 清理失败绝不
-                # 阻断导航。(2026-07-10 前该钩子从未被壳层调用, 死 seam:
-                # 切走 workbench 后 fs watcher/QTimer 继续跑。)
-                prev = self._stack.currentWidget()
-                if prev is not None and prev is not view:
-                    deactivate = getattr(prev, "on_deactivate", None)
-                    if callable(deactivate):
-                        try:
-                            deactivate()
-                        except Exception:
-                            pass  # 清理失败不阻断导航; 钩子自身负责留痕
-                self._stack.setCurrentWidget(view)
-                view.on_activate()
+        # Do not use QApplication's global wait cursor here. Some views perform
+        # bounded background refreshes after activation; a global override made
+        # the whole desktop feel blocked even though only this page was loading.
+        view = self._ensure_view(view_cls)
+        if view:
+            # 项目树是全局项目库，不是顶栏当前工作区的局部目录树。由主导航
+            # 进入此页时恢复全部项目范围；当前工作区只用于定位选中项。
+            if self._view_ref_id(view_cls) == "project_tree":
+                self.ctx.settings.project_tree_view_mode = "all"
+                if hasattr(view, "_root"):
+                    view._root = None
+            self._hide_startup_placeholder()
+            # 生命周期对称: 切页前先让旧页 on_deactivate(停定时器/watcher/
+            # 预热线程, 策略=「暂停+回来重扫」)。守护调用 —— 清理失败绝不
+            # 阻断导航。(2026-07-10 前该钩子从未被壳层调用, 死 seam:
+            # 切走 workbench 后 fs watcher/QTimer 继续跑。)
+            prev = self._stack.currentWidget()
+            if prev is not None and prev is not view:
+                deactivate = getattr(prev, "on_deactivate", None)
+                if callable(deactivate):
+                    try:
+                        deactivate()
+                    except Exception:
+                        pass  # 清理失败不阻断导航; 钩子自身负责留痕
+            self._stack.setCurrentWidget(view)
+            view.on_activate()
         if persist:
             self.ctx.settings.last_nav_index = idx
         self.refresh_context_bar()
@@ -1075,8 +1081,7 @@ class MainWindow(QMainWindow):
         view = self._stack.currentWidget()
         if view is not None and hasattr(view, "on_activate"):
             try:
-                with ui.busy_cursor():
-                    view.on_activate()
+                view.on_activate()
             except Exception as exc:  # noqa: BLE001
                 ui.exception(
                     self,
@@ -1144,17 +1149,17 @@ class MainWindow(QMainWindow):
         """Folder menu: create a photo workspace."""
         self._open_project_dialog(mode="new")
 
+    def _on_project_location_search(self, query: str) -> None:
+        """Open the single global project tree and apply a bounded text query."""
+        self.navigate_to("project_tree")
+        tree = self._stack.currentWidget()
+        search = getattr(tree, "_search", None)
+        if search is not None:
+            search.setText(str(query or ""))
+            search.setFocus()
+
     def _on_new_survey_project(self) -> None:
-        """顶栏「选择工作区 ▾」→「新建项目…」: 只建**一个空项目目录**(容器)。
-
-        场景(用户 2026-07-12): "只建立一个项目目录, 后续点击这个目录, 也可以建立子目录"。
-          项目根是容器(只汇总, 不放照片), 断面/采样点建完项目后在项目树里用「新建子目录」
-          自由加(任意层)。与项目树用**同一个**对话框和同一个服务, 不另造一套。
-          项目根不是工作区 -> 进不去工作台 -> 建完落到**项目树**, 在那里加断面、填项目设置。
-
-        §7 旧行为(2026-07-12 上午, 同日被否): 对话框一次问完 6 个字段 + 采样点列表,
-          建完直接 enter_workspace(第一个采样点) → 跳工作台。恢复时反注释下面两段。
-        """
+        """Create a project hierarchy and enter its first designated workspace."""
         from app.widgets.new_survey_project_dialog import NewSurveyProjectDialog
         from app.services.project_scaffold_service import create_survey_project
         from app.utils import ui
@@ -1174,35 +1179,18 @@ class MainWindow(QMainWindow):
             return
         vals = dlg.values()
         try:
-            # §7 旧调用(恢复时反注释): 一次建好项目 + N 个采样点, 每个点登记进最近项目
-            # from app.services.project_service import (
-            #     default_user_projects_json_path, load_user_projects,
-            #     save_project_descriptor,
-            # )
-            # res = create_survey_project(
-            #     vals["parent_dir"], name=vals["name"], sites=vals["sites"],
-            #     meta=vals["meta"], collector=vals["collector"],
-            #     province=vals["province"],
-            # )
-            # for site_dir in res["sites"]:
-            #     save_project_descriptor(
-            #         default_user_projects_json_path(),
-            #         {
-            #             "name": Path(site_dir).name, "directory": site_dir,
-            #             "location": vals["meta"].get("location", ""),
-            #             "year": vals["meta"].get("year", ""),
-            #             "collector": vals["collector"],
-            #         },
-            #         existing_projects=load_user_projects(),
-            #     )
             res = create_survey_project(
-                vals["parent_dir"], name=vals["name"], sites=[]
+                vals["parent_dir"],
+                name=vals["name"],
+                structure=vals.get("structure", []),
             )
         except (ValueError, FileExistsError, FileNotFoundError) as exc:
             ui.warn(self, tr("新建项目"), str(exc))
             return
         except Exception as exc:  # pragma: no cover - defensive
-            ui.warn(self, tr("新建项目"), f"创建失败：{exc}")
+            # § polish: 用 tr().format() 替代裸 f-string, 与本文件既有 i18n 模式一致 (Sonnet 5 multi-agent review)
+            # 旧: ui.warn(self, tr("新建项目"), f"创建失败：{exc}")
+            ui.warn(self, tr("新建项目"), tr("创建失败：{}").format(exc))
             return
 
         # §7 旧: self.ctx.settings.project_tree_root = res["root"]
@@ -1218,16 +1206,38 @@ class MainWindow(QMainWindow):
             register_project_root(res["root"], name=vals["name"])
         except Exception:  # noqa: BLE001 —— 登记失败不该让「项目已建好」变成报错
             pass
-        # §7 旧落点(恢复时反注释): 有采样点则直接进第一个 → 工作台
-        # if res["sites"]:
-        #     from app.services.project_service import enter_workspace
-        #     try:
-        #         enter_workspace(self.ctx, res["sites"][0],
-        #                         projects_json_path=default_user_projects_json_path())
-        #         self.navigate_to("workbench")
-        #         self.refresh_context_bar()
-        #     except Exception as exc:  # noqa: BLE001
-        #         ui.warn(self, tr("新建项目"), f"项目已建好，但进入采样点失败：{exc}")
+        if res["workspaces"]:
+            from app.services.project_service import (
+                default_user_projects_json_path,
+                enter_workspace,
+            )
+
+            try:
+                enter_workspace(
+                    self.ctx,
+                    res["workspaces"][0],
+                    root=res["root"],
+                    projects_json_path=default_user_projects_json_path(),
+                )
+                self.navigate_to("workbench")
+                self.refresh_context_bar()
+                # § polish: 用 tr().format() 替代裸 f-string, 与本文件既有 i18n 模式一致 (Sonnet 5 multi-agent review)
+                # 旧:
+                #   f"项目「{vals['name']}」已创建，包含 {len(res['workspaces'])} 个拍摄工作区。\n"
+                #   f"已进入：{Path(res['workspaces'][0]).name}",
+                ui.info(
+                    self,
+                    tr("新建项目"),
+                    tr("项目「{}」已创建，包含 {} 个拍摄工作区。\n已进入：{}").format(
+                        vals["name"], len(res["workspaces"]), Path(res["workspaces"][0]).name
+                    ),
+                )
+                return
+            except Exception as exc:  # noqa: BLE001
+                # § polish: 用 tr().format() 替代裸 f-string 同上 (Sonnet 5 multi-agent review)
+                # 旧: ui.warn(self, tr("新建项目"), f"项目已创建，但进入首个工作区失败：{exc}")
+                ui.warn(self, tr("新建项目"), tr("项目已创建，但进入首个工作区失败：{}").format(exc))
+
         self.navigate_to("project_tree")
         # 把树焦点钉到新项目(切「按根目录」+ 选中它)。不做的话树可能停在「全部项目」模式、
         # 选中的还是上一个项目 —— 用户接着点「新建子目录」, 目录就静默建到别的项目下面
@@ -1241,18 +1251,27 @@ class MainWindow(QMainWindow):
             except Exception:  # noqa: BLE001 —— 聚焦失败不该让「项目已建好」变成报错
                 pass
         self.refresh_context_bar()
+        # § polish: 用 tr().format() 替代裸 f-string, 与本文件既有 i18n 模式一致 (Sonnet 5 multi-agent review)
+        # 旧:
+        #   f"项目「{vals['name']}」已创建。\n\n"
+        #   "· 当前没有指定拍摄工作区，可在项目树中继续添加或认领\n"
+        #   "· 点「项目设置」填采集人、地区代码、默认坐标、拍摄场地——\n"
+        #   "  下级工作区会自动继承\n"
+        #   "· 照片只会落在指定工作区，不会堆在项目目录",
         ui.info(
             self,
             tr("新建项目"),
-            f"项目「{vals['name']}」已建好（空项目）。\n\n"
-            "· 点「新建子目录」添加断面 / 采样点，双击进去就能拍\n"
-            "· 点「项目设置」填采集人、地区代码、默认坐标、拍摄场地——\n"
-            "  下面所有采样点自动继承，拍照时右栏直接带出来，不用每次重填\n"
-            "· 照片只会落在采样点里，不会堆在项目根",
+            tr(
+                "项目「{}」已创建。\n\n"
+                "· 当前没有指定拍摄工作区，可在项目树中继续添加或认领\n"
+                "· 点「项目设置」填采集人、地区代码、默认坐标、拍摄场地——\n"
+                "  下级工作区会自动继承\n"
+                "· 照片只会落在指定工作区，不会堆在项目目录"
+            ).format(vals["name"]),
         )
 
     def _on_new_project_child(self) -> None:
-        """Top bar: add a child directory to the current project container.
+        """Append a hierarchy below the current project container.
 
         This is deliberately separate from ``_on_new_project`` (a standalone
         workspace) and ``_on_new_survey_project`` (a new project container).
@@ -1264,7 +1283,7 @@ class MainWindow(QMainWindow):
             or getattr(self.ctx.settings, "project_tree_root", None)
         )
         if not root:
-            ui.info(self, tr("新建下级目录"),
+            ui.info(self, tr("追加层级"),
                     tr("请先新建或选择一个项目。"))
             return
         self.navigate_to("project_tree")
@@ -1392,12 +1411,26 @@ class MainWindow(QMainWindow):
         # if str(opt_in_migrated).lower() != "true":
         #     qs.setValue(_K_SCREENSHOT_OPT_IN_MIGRATED, "true")
         #     qs.setValue(_K_SCREENSHOT_TOOL_ENABLED, "false")
+        # §7 旧(2026-07-12 版本, 同样有问题): 上面这段被删after改成"把已存在的
+        # false 值当成旧迁移的产物, 一次性 remove 恢复默认" —— 但这个假设无法验证:
+        # 一个全新安装、用户刚手动关掉截图工具, 和一个被 v0.51 旧迁移强制关掉的老
+        # 安装, 在 QSettings 里存的都是同一个 "false", 完全无法区分, remove 会把
+        # 用户刚做的手动选择也当成"旧迁移产物"一起抹掉。
+        # opt_in_migrated = qs.value(_K_SCREENSHOT_OPT_IN_MIGRATED, "", type=str)
+        # if str(opt_in_migrated).lower() != "true":
+        #     qs.setValue(_K_SCREENSHOT_OPT_IN_MIGRATED, "true")
+        #     if str(qs.value(_K_SCREENSHOT_TOOL_ENABLED, "")).lower() == "false":
+        #         qs.remove(_K_SCREENSHOT_TOOL_ENABLED)
+        # Claude Code 修改 2026-07-15 — codex 回归指出上面这段会把用户刚关闭的
+        # 截图工具重新打开(确定性 bug)。正确做法是只保留"标记迁移已跑过"这个
+        # 幂等记账动作, 去掉"猜测性恢复默认"的反向迁移: screenshot_tool_enabled()
+        # 本身在键完全不存在时已经默认返回 "true"(见下方), 全新安装天然满足
+        # "顶栏必须可见"的用户裁定, 不需要再靠这段迁移去"修正"任何已经存在的
+        # false 值——已存在的 false, 不管来自旧 bug 还是用户手动关闭, 一律原样
+        # 保留, 不再猜测、不再覆盖。
         opt_in_migrated = qs.value(_K_SCREENSHOT_OPT_IN_MIGRATED, "", type=str)
         if str(opt_in_migrated).lower() != "true":
             qs.setValue(_K_SCREENSHOT_OPT_IN_MIGRATED, "true")
-            # 之前被那段迁移强行关掉的用户 -> 恢复默认显示(用户裁定)
-            if str(qs.value(_K_SCREENSHOT_TOOL_ENABLED, "")).lower() == "false":
-                qs.remove(_K_SCREENSHOT_TOOL_ENABLED)
 
     def screenshot_tool_enabled(self) -> bool:
         """Whether the screenshot menu and hotkey are enabled. Default: **on**.
@@ -1518,16 +1551,18 @@ class MainWindow(QMainWindow):
         *,
         activate_last_view: bool = True,
         restore_window_layout: bool = True,
+        defer_initial_view: bool = True,
     ) -> None:
         """Restore window geometry and a startup page from QSettings.
 
         Startup uses ``activate_last_view=False`` so a previous heavy page
         (collab/project tree/map) cannot block the first window paint.
         """
+        self._window_geometry_restored = False
         if restore_window_layout:
             geom = self.ctx.settings.restore_geometry()
             if geom:
-                self.restoreGeometry(geom)
+                self._window_geometry_restored = bool(self.restoreGeometry(geom))
             state = self.ctx.settings.restore_window_state()
             if state:
                 self.restoreState(state)
@@ -1543,6 +1578,11 @@ class MainWindow(QMainWindow):
         # 2 GB Windows machines blocked the GUI thread long enough that Windows
         # reported "not responding" before any error dialog could appear.
         self._select_nav_index(0)
+        if not defer_initial_view:
+            # Native Windows paints a maximized placeholder as a full-window
+            # flash. Build while hidden so the first visible frame is complete.
+            self._activate_index(0, persist=False)
+            return
         try:
             from app.config.memory_profile import is_low_memory_machine
             low_mem = is_low_memory_machine()

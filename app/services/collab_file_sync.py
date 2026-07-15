@@ -21,9 +21,24 @@ from typing import Callable, Iterable, Optional
 from app.services.collab_types import get_httpx
 from app.services.project_paths import require_project_root
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 MEDIA_EXTS = {".jpg", ".jpeg", ".tif", ".tiff", ".zip"}
 DEFAULT_MAX_WORKERS = 4
+
+# Claude Code 修改 2026-07-15 — 大文件按需闸(协作流式 spec 阶段 4): 超这个大小的
+# 文件(主要是 TIF 母片, 也含大 ZIP)默认标 on_demand, "同步整个项目"不自动拉,
+# 用户显式要才拉完整原文件。几百万照片量级不会被大 TIF 拖爆。小文件(JPG)照常自动。
+# 32 MB: 常规 JPG 远低于此; 母 TIF / 大 ZIP 通常远高于此。
+LARGE_FILE_THRESHOLD_BYTES = 32 * 1024 * 1024
+
+
+def _is_on_demand(kind: str, size_bytes: int) -> bool:
+    """大文件(主要 TIF, 也含大 ZIP)超阈值 -> 按需, 默认不自动拉。"""
+    return int(size_bytes or 0) > LARGE_FILE_THRESHOLD_BYTES
 
 
 def _now_stamp() -> str:
@@ -84,6 +99,11 @@ class FileManifestEntry:
     device_id: str = ""
     source: str = "scan"
 
+    @property
+    def is_on_demand(self) -> bool:
+        # Claude Code 修改 2026-07-15 — 大文件(TIF/大ZIP)按需, 默认不自动拉。
+        return _is_on_demand(self.kind, self.size_bytes)
+
     def to_dict(self) -> dict:
         return {
             "uid": self.uid,
@@ -94,6 +114,7 @@ class FileManifestEntry:
             "sha256": self.sha256,
             "deviceId": self.device_id,
             "source": self.source,
+            "onDemand": self.is_on_demand,
         }
 
     @staticmethod
@@ -108,6 +129,24 @@ class FileManifestEntry:
             device_id=str(data.get("deviceId") or ""),
             source=str(data.get("source") or "remote"),
         )
+
+
+def plan_downloads(
+    remote_entries: "list[FileManifestEntry]",
+    *,
+    include_on_demand: bool = False,
+) -> "list[FileManifestEntry]":
+    """Claude Code 修改 2026-07-15 — 从远端清单里挑出"这次要拉"的文件。
+
+    默认(include_on_demand=False)跳过大文件(TIF/大ZIP), 只自动同步小文件(JPG/预览);
+    用户显式点"连原文件一起同步"时 include_on_demand=True, 大 TIF 也进计划。
+    """
+    out: list[FileManifestEntry] = []
+    for e in remote_entries or []:
+        if e.is_on_demand and not include_on_demand:
+            continue
+        out.append(e)
+    return out
 
 
 @dataclass
@@ -411,6 +450,45 @@ def _download_one(
         except OSError:
             pass
         return "failed", 0, remote.relative_path
+
+
+def fetch_peer_preview(
+    peer_base_url: str,
+    group_code: str,
+    project_id: str,
+    relative_path: str,
+    *,
+    max_dim: int = 1600,
+    quality: int = 85,
+) -> Optional[bytes]:
+    """Claude Code 修改 2026-07-15 — 向对方要一张 maxDim 有界的预览 JPEG(协作流式)。
+
+    浏览对方工作区照片时用这个: 只取小预览、不整份拉原图/母 TIF。失败(老 peer 无此
+    端点 / 非图像 / 网络错)返回 None, 调用方回退(比如显示占位或改取原文件)。
+    """
+    if not relative_path:
+        return None
+    try:
+        httpx = get_httpx()
+        resp = httpx.get(
+            f"{peer_base_url}/api/collab/files/preview",
+            params={
+                "path": relative_path,
+                "groupCode": group_code,
+                "projectId": project_id,
+                "maxDim": int(max_dim),
+                "quality": int(quality),
+            },
+            timeout=30.0,
+            trust_env=False,
+        )
+        if resp.status_code != 200:
+            return None
+        data = resp.content
+        return bytes(data) if data else None
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("collab: fetch_peer_preview failed %s: %s", relative_path, exc)
+        return None
 
 
 def fetch_peer_manifest(

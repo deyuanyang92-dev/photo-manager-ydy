@@ -64,3 +64,42 @@ def test_require_unlock_reflects_state() -> None:
     assert el.require_unlock(ctx) is False
     ctx.edit_unlocked = True
     assert el.require_unlock(ctx) is True
+
+
+# ── Claude Code 修改 2026-07-14 — fail-closed on corrupt config (codex 回归) ──
+# 缺省(文件不存在) = 正常首跑, 默认密码 123 照常通行(见 test_default_password_is_123)。
+# 但文件已存在却读不出有效密码(结构损坏/JSON 解析失败/IO 错误), 绝不能悄悄回落
+# 默认密码放行 —— 必须 fail-closed, 抛 EditLockConfigError 让调用方锁死+提示。
+
+def test_corrupt_json_fails_closed_not_default_password(tmp_path) -> None:
+    cfg = tmp_path / "app_config.json"
+    cfg.write_text("{not valid json", encoding="utf-8")
+    import pytest
+    with pytest.raises(el.EditLockConfigError):
+        el.verify_password("123", str(cfg))
+
+
+def test_missing_password_key_fails_closed_not_default_password(tmp_path) -> None:
+    cfg = tmp_path / "app_config.json"
+    cfg.write_text('{"something_else": true}', encoding="utf-8")
+    import pytest
+    with pytest.raises(el.EditLockConfigError):
+        el.verify_password("123", str(cfg))
+
+
+def test_unlock_propagates_config_error_and_stays_locked(tmp_path) -> None:
+    cfg = tmp_path / "app_config.json"
+    cfg.write_text("{not valid json", encoding="utf-8")
+    ctx = _Ctx()
+    import pytest
+    with pytest.raises(el.EditLockConfigError):
+        el.unlock(ctx, "张三", "123", str(cfg))
+    assert el.is_unlocked(ctx) is False
+
+
+def test_missing_config_file_still_allows_default_password(tmp_path) -> None:
+    """首跑(文件从未建过)不是"损坏", 默认密码必须照常能用 —— 这条不能被
+    fail-closed 误伤。"""
+    cfg = tmp_path / "app_config.json"
+    assert not cfg.exists()
+    assert el.verify_password("123", str(cfg)) is True
