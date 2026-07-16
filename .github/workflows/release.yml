@@ -44,6 +44,10 @@ jobs:
           }
 
       - name: Run release tests
+        # Claude Code 2026-07-16 — 用户裁定「仅发布流程跳测试步」(v0.61)。
+        # 保留步骤以留测试日志, 但设为不阻断: 2 个预存红(collab 计时 flaky + 架构边界
+        # lint, 均非本次改动、不影响 exe)不再挡发布。main 的 CI 合并门照旧严格, 不动。
+        continue-on-error: true
         shell: pwsh
         run: powershell -ExecutionPolicy Bypass -File .\scripts\run_tests_batched.ps1 -IncludePackaging
 
@@ -58,14 +62,23 @@ jobs:
         env:
           SPECIMEN_UPDATE_PRIVATE_KEY_CONTENT: ${{ secrets.UPDATE_SIGNING_PRIVATE_KEY }}
         run: |
+          # Claude Code 2026-07-16 — 用户裁定「临时松开签名门, 发无签名包」(v0.61)。
+          # §7 旧: 密钥缺失则 throw 阻断发布(见下方注释)。现: 有密钥→签名; 无密钥→
+          # 警告并产出无签名包。⚠️ 应用端一旦内置公钥会拒装无签名包, 这是临时放行,
+          # 后续应把 UPDATE_SIGNING_PRIVATE_KEY 配为仓库 Secret 恢复签名。
+          # if ([string]::IsNullOrWhiteSpace($env:SPECIMEN_UPDATE_PRIVATE_KEY_CONTENT)) {
+          #   throw "Secret UPDATE_SIGNING_PRIVATE_KEY is not configured. A tagged release must be signed ..."
+          # }
           if ([string]::IsNullOrWhiteSpace($env:SPECIMEN_UPDATE_PRIVATE_KEY_CONTENT)) {
-            throw "Secret UPDATE_SIGNING_PRIVATE_KEY is not configured. A tagged release must be signed — add the private key PEM (secrets/update_private_key.pem) as a repository secret named UPDATE_SIGNING_PRIVATE_KEY before releasing."
+            Write-Warning "UPDATE_SIGNING_PRIVATE_KEY 未配置 — 产出无签名包(临时放行, 用户 2026-07-16)。"
+            powershell -ExecutionPolicy Bypass -File .\scripts\build_windows.ps1
+          } else {
+            $keyPath = Join-Path $env:RUNNER_TEMP "update_private_key.pem"
+            Set-Content -Path $keyPath -Value $env:SPECIMEN_UPDATE_PRIVATE_KEY_CONTENT -NoNewline
+            $env:SPECIMEN_UPDATE_PRIVATE_KEY = $keyPath
+            powershell -ExecutionPolicy Bypass -File .\scripts\build_windows.ps1
+            Remove-Item -Path $keyPath -Force -ErrorAction SilentlyContinue
           }
-          $keyPath = Join-Path $env:RUNNER_TEMP "update_private_key.pem"
-          Set-Content -Path $keyPath -Value $env:SPECIMEN_UPDATE_PRIVATE_KEY_CONTENT -NoNewline
-          $env:SPECIMEN_UPDATE_PRIVATE_KEY = $keyPath
-          powershell -ExecutionPolicy Bypass -File .\scripts\build_windows.ps1
-          Remove-Item -Path $keyPath -Force -ErrorAction SilentlyContinue
 
       - name: Resolve package path
         id: package
@@ -74,15 +87,20 @@ jobs:
           $zip = Get-ChildItem dist -Filter 'SpecimenPhotoWorkbench-*-win64.zip' | Select-Object -First 1
           if (-not $zip) { throw 'Windows ZIP was not produced' }
           $sig = "$($zip.FullName).sig"
-          # Claude Code 修改 2026-07-15 — 正式发布硬性要求 .sig 必须产出, 否则宁可
-          # 让本次发布失败, 也不能放一个应用端会拒绝安装的未签名包出去。
-          if (-not (Test-Path -LiteralPath $sig)) {
-            throw "Release ZIP was built but not signed (.sig missing) — refusing to publish an unsigned official release."
-          }
+          # Claude Code 2026-07-16 — 用户裁定「临时松开签名门, 发无签名包」(v0.61)。
+          # §7 旧: .sig 缺失则 throw 拒发(见下方注释)。现: 缺失则标记 signed=false,
+          # 不阻断; 有 .sig 才输出 sig/signame, 供后续步骤按需附带。
+          # if (-not (Test-Path -LiteralPath $sig)) {
+          #   throw "Release ZIP was built but not signed (.sig missing) — refusing to publish an unsigned official release."
+          # }
+          $signed = Test-Path -LiteralPath $sig
           "zip=$($zip.FullName)" >> $env:GITHUB_OUTPUT
           "name=$($zip.Name)" >> $env:GITHUB_OUTPUT
-          "sig=$sig" >> $env:GITHUB_OUTPUT
-          "signame=$($zip.Name).sig" >> $env:GITHUB_OUTPUT
+          "signed=$($signed.ToString().ToLower())" >> $env:GITHUB_OUTPUT
+          if ($signed) {
+            "sig=$sig" >> $env:GITHUB_OUTPUT
+            "signame=$($zip.Name).sig" >> $env:GITHUB_OUTPUT
+          }
 
       - name: Upload package artifact
         uses: actions/upload-artifact@v4
@@ -92,6 +110,8 @@ jobs:
           if-no-files-found: error
 
       - name: Upload signature artifact
+        # Claude Code 2026-07-16 — 无签名包时跳过(临时放行 v0.61)。
+        if: steps.package.outputs.signed == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.package.outputs.signame }}
@@ -106,8 +126,16 @@ jobs:
           ZIP_PATH: ${{ steps.package.outputs.zip }}
           SIG_PATH: ${{ steps.package.outputs.sig }}
         run: |
-          if (gh release view $env:RELEASE_TAG 2>$null) {
-            gh release upload $env:RELEASE_TAG $env:ZIP_PATH $env:SIG_PATH --clobber
+          # Claude Code 2026-07-16 — 有签名才附带 .sig; 无签名只发 zip(临时放行 v0.61)。
+          $assets = @($env:ZIP_PATH)
+          $note = "Automated Windows portable build."
+          if (-not [string]::IsNullOrWhiteSpace($env:SIG_PATH)) {
+            $assets += $env:SIG_PATH
           } else {
-            gh release create $env:RELEASE_TAG $env:ZIP_PATH $env:SIG_PATH --title $env:RELEASE_TAG --notes "Automated Windows portable build."
+            $note = "Automated Windows portable build (UNSIGNED — 临时放行, 内置更新器可能拒装)."
+          }
+          if (gh release view $env:RELEASE_TAG 2>$null) {
+            gh release upload $env:RELEASE_TAG @assets --clobber
+          } else {
+            gh release create $env:RELEASE_TAG @assets --title $env:RELEASE_TAG --notes $note
           }
