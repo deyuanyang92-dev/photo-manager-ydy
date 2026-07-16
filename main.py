@@ -759,6 +759,31 @@ def _acquire_single_instance_lock() -> bool:
         return True
 
 
+def _finalize_and_exit(win, exit_code) -> None:
+    """关窗后强制结束进程, 绕过对第三方非守护库线程的 join。
+
+    背景(用户 2026-07-16 报): Windows exe 关窗后仍在后台驻留、不真正退出。根因不是
+    我们自己的线程(裸线程全 daemon=True、线程池全 with-scoped), 而是内嵌库线程 ——
+    uvicorn 的 asyncio 默认线程池、zeroconf 内部线程 —— 均非守护, 我们的 daemon 标记
+    管不到; 解释器正常退出会 join 它们, 任一卡住就让进程在窗口关闭后仍活着。
+
+    优雅 teardown 仍先跑(它 checkpoint+释放 SQLite WAL 锁, 是「关→再开→须重启」修复的
+    关键, 不能省), 之后再 os._exit 硬退保证进程真正结束 —— 这是内嵌服务器的现代桌面
+    应用标准收尾。抽成独立函数便于测试(monkeypatch os._exit)。win._teardown 幂等,
+    这里作兜底再调一次。(Opus 2026-07-16)
+    """
+    try:
+        win._teardown()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:  # noqa: BLE001
+        pass
+    os._exit(int(exit_code) if isinstance(exit_code, int) else 0)
+
+
 def main() -> int:
     startup_t0 = time.perf_counter()
 
@@ -991,7 +1016,11 @@ def main() -> int:
     except Exception:  # noqa: BLE001
         pass
 
-    return app.exec()
+    # §7 旧: return app.exec()  —— 解释器随后 join 非守护库线程, 卡住则进程不退。
+    # 关窗=真退出(当代桌面软件标准): 事件循环结束后强制硬退, 见 _finalize_and_exit。
+    exit_code = app.exec()
+    _finalize_and_exit(win, exit_code)   # 不返回(os._exit)
+    return exit_code                     # 理论不可达; 保留以明确类型
 
 
 if __name__ == "__main__":
