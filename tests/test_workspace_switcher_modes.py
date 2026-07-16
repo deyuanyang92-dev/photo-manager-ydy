@@ -35,6 +35,8 @@ MODE_MARKERS = {
     "scenes": "WorkspaceSceneNewProject",
     "instrument": "WorkspaceInstrumentPanel",
     "locator": "WorkspaceLocatorSwitcher",
+    # 第 12 版 智能指挥台：单按钮 → 自适应浮层 (Opus 2026-07-16)
+    "command": "WorkspaceCommandLocation",
 }
 
 
@@ -230,3 +232,45 @@ def test_triple_mode_has_exactly_three_user_functions(project_paths) -> None:
     workspace_button.click()
 
     assert got == ["project", "workspace"]
+
+
+# ── 第 12 版 command 智能指挥台 (Opus 2026-07-16) ────────────────────────
+def test_command_mode_is_registered_last() -> None:
+    from app.config.settings import _WORKSPACE_SWITCHER_MODES
+    from app.widgets.workspace_breadcrumb import (
+        _SWITCHER_MODES,
+        _SWITCHER_MODE_VALUES,
+    )
+
+    assert "command" in _WORKSPACE_SWITCHER_MODES
+    assert "command" in _SWITCHER_MODE_VALUES
+    assert _SWITCHER_MODES[-1][0] == "command"          # 第 12 个，排最后
+    assert _SWITCHER_MODES[-1][1].startswith("12")
+
+
+def test_pinned_workspaces_setting_roundtrip() -> None:
+    settings = AppSettings()
+    settings._qs.clear()
+
+    assert settings.switcher_pinned_workspaces == []
+    settings.switcher_pinned_workspaces = ["/p/盐城2026/月亮湾"]
+    settings.flush_to_disk()
+    assert AppSettings().switcher_pinned_workspaces == ["/p/盐城2026/月亮湾"]
+
+
+def test_command_mode_builds_button_and_opens_popup(project_paths) -> None:
+    from app.widgets.workspace_command_popup import WorkspaceCommandPopup
+
+    root, workspace = project_paths
+    settings = AppSettings()
+    settings._qs.clear()
+    settings.workspace_switcher_mode = "command"
+    widget = WorkspaceBreadcrumb(_Ctx(workspace, root, settings))
+
+    button = widget.findChild(QToolButton, "WorkspaceCommandLocation")
+    assert button is not None
+    assert widget.property("switcherMode") == "command"
+
+    popup = widget._open_command_popup()               # 不传 button → 不 show，仅取实例
+    assert isinstance(popup, WorkspaceCommandPopup)
+    assert isinstance(popup.visible_rows(), list)      # 数据已注入，渲染成列表

@@ -32,6 +32,8 @@ from PyQt6.QtWidgets import (
 from app.config import icons
 from app.config.i18n import tr
 from app.services.project_tree_service import RESERVED_DIR_NAMES
+# 第 12 版 command 智能指挥台浮层 + 行类型 (Opus 2026-07-16)
+from app.widgets.workspace_command_popup import SwitchRow, WorkspaceCommandPopup
 
 # >3 级时折叠中间层为 「…」，保持顶栏一行放得下：根 / … / 父 / 叶
 _MAX_SEGMENTS = 3
@@ -51,6 +53,8 @@ _SWITCHER_MODES = (
     ("scenes", "09  三场景启动器"),
     ("instrument", "10  双层仪器面板"),
     ("locator", "11  定位台"),
+    # 第 12 版：上下文自适应智能指挥台（回上次/同项目切点/新建即进/搜索 一处全干）
+    ("command", "12  智能指挥台"),   # (Opus 2026-07-16)
 )
 _SWITCHER_MODE_VALUES = {key for key, _label in _SWITCHER_MODES}
 
@@ -475,11 +479,214 @@ class WorkspaceBreadcrumb(QWidget):
         else:
             self.new_workspace_requested.emit()
 
+    # ── 第 12 版 command 智能指挥台 (Opus 2026-07-16) ─────────────────────
+    def _build_command_variant(self, chain: List[Tuple[str, str]]) -> None:
+        """顶栏单按钮；点击弹出上下文自适应浮层 WorkspaceCommandPopup。"""
+        compact = self._compact_chain_text(chain) if chain else tr("新建或打开项目")
+        button = self._variant_location_button(
+            text=compact,
+            object_name="WorkspaceCommandLocation",
+            icon_name="mdi6.compass-outline",
+            compatibility_alias=False,
+        )
+        # _variant_location_button 默认挂 InstantPopup 懒菜单；command 改成点击开自绘浮层
+        button.setMenu(None)
+        button.setPopupMode(QToolButton.ToolButtonPopupMode.DelayedPopup)
+        button.clicked.connect(
+            lambda _c=False, b=button: self._open_command_popup(b)
+        )
+        self._lay.addWidget(button, 1)
+        self._leaf_btn = button
+
+    def _open_command_popup(self, button: Optional[QToolButton] = None) -> "WorkspaceCommandPopup":
+        pop = WorkspaceCommandPopup(self)
+        root = self._project_root_for_child()
+        root_r = str(Path(root).resolve()) if root else None
+        pop.set_data(
+            current_root=root_r,
+            stations=self.command_current_project_rows(),
+            recents=self.command_recent_rows(),
+            all_projects=self.command_all_project_rows(),
+        )
+        pop.entered.connect(self._switch_to_recent)
+        pop.new_project.connect(lambda: self.new_survey_project_requested.emit())
+        pop.new_station.connect(lambda _r=None: self._emit_workspace_creation())
+        pop.browse_all.connect(lambda: self.open_workspace_requested.emit())
+        pop.relocate.connect(self._relocate_dead_path)
+        pop.toggle_pin.connect(self._toggle_pin)
+        if button is not None:
+            pop.move(button.mapToGlobal(button.rect().bottomLeft()))
+            pop.show()
+            pop.setFocus()
+        return pop
+
+    def _relocate_dead_path(self, _path: str) -> None:
+        # 最小实现：复用「打开已有项目/工作区」入口让用户重指目录。
+        self.open_workspace_requested.emit()
+
+    def _toggle_pin(self, path: str) -> None:
+        settings = getattr(self._ctx, "settings", None)
+        if settings is None:
+            return
+        pins = list(getattr(settings, "switcher_pinned_workspaces", []) or [])
+        try:
+            resolved = str(Path(path).resolve())
+        except OSError:
+            resolved = path
+        if resolved in pins:
+            pins.remove(resolved)
+        else:
+            pins.insert(0, resolved)
+        try:
+            settings.switcher_pinned_workspaces = pins
+            flush = getattr(settings, "flush_to_disk", None)
+            if callable(flush):
+                flush()
+        except Exception:
+            pass
+
+    def _pinned_paths(self) -> set:
+        settings = getattr(self._ctx, "settings", None)
+        raw = getattr(settings, "switcher_pinned_workspaces", None) if settings else None
+        return set(raw or [])
+
+    def _command_full_label(self, root: Optional[str], path: str, leaf: str) -> str:
+        if not root:
+            return leaf
+        try:
+            rel = Path(path).resolve().relative_to(Path(root).resolve())
+            parts = [Path(root).name, *rel.parts] if rel.parts else [Path(root).name]
+            return " › ".join(parts)
+        except ValueError:
+            return leaf
+
+    def _specimen_count(self, directory: str) -> Optional[int]:
+        """缓存/实时标本数；**只读**：db 不存在则不触碰、返回 None（守红线）。"""
+        try:
+            db = Path(directory) / "_data" / "project.db"
+            if not db.exists():
+                return None
+            from app.services import workspace_index_service
+            stats = workspace_index_service.compute_workspace_index_stats(directory)
+            n = stats.get("specimen_count") if stats else None
+            return int(n) if n is not None else None
+        except Exception:
+            return None
+
+    def command_current_project_rows(self) -> List["SwitchRow"]:
+        """当前项目根下的采样点/工作区（态1 主区）。root 为空→空列表（态2）。"""
+        from app.services import project_tree_service
+        root = self._project_root_for_child()
+        if not root:
+            return []
+        root_r = str(Path(root).resolve())
+        current = str(Path(getattr(self._ctx, "current_project_dir", "") or "").resolve())
+        pins = self._pinned_paths()
+        rows: List[SwitchRow] = []
+        try:
+            found = project_tree_service.discover_workspaces(root_r)
+        except Exception:
+            found = []
+        for item in found:
+            path = str(item.get("path") or "")
+            if not path:
+                continue
+            resolved = str(Path(path).resolve())
+            name = str(item.get("name") or Path(resolved).name)
+            rows.append(SwitchRow(
+                kind="station", label=name,
+                full_label=self._command_full_label(root_r, resolved, name),
+                path=resolved, root=root_r,
+                is_current=(resolved == current), exists=Path(resolved).exists(),
+                specimen_count=self._specimen_count(resolved),
+                last_opened=None, pinned=resolved in pins,
+            ))
+        return rows
+
+    def command_recent_rows(self, limit: int = 5) -> List["SwitchRow"]:
+        """最近去过的工作区（态1/2）；含死路径（不过滤，仅标灰）。"""
+        from app.services import project_service
+        projects = project_service.list_projects(
+            project_service.default_user_projects_json_path()
+        )
+        current = str(Path(getattr(self._ctx, "current_project_dir", "") or "").resolve())
+        pins = self._pinned_paths()
+        ordered = sorted(
+            reversed(projects),
+            key=lambda p: p.get("lastOpenedAt") or 0,
+            reverse=True,
+        )
+        out: List[SwitchRow] = []
+        seen: set = set()
+        for item in ordered:
+            if item.get("isProjectRoot"):
+                continue
+            path = str(item.get("directory") or item.get("dir") or "")
+            if not path:
+                continue
+            try:
+                resolved = str(Path(path).resolve())
+            except OSError:
+                resolved = path
+            if resolved == current or resolved in seen:
+                continue
+            seen.add(resolved)
+            root = item.get("root")
+            root_r = str(Path(str(root)).resolve()) if root else None
+            name = str(item.get("name") or Path(resolved).name)
+            out.append(SwitchRow(
+                kind="station", label=name,
+                full_label=self._command_full_label(root_r, resolved, name),
+                path=resolved, root=root_r, is_current=False,
+                exists=Path(resolved).exists(),
+                specimen_count=self._specimen_count(resolved),
+                last_opened=item.get("lastOpenedAt"), pinned=resolved in pins,
+            ))
+            if len(out) >= limit:
+                break
+        return out
+
+    def command_all_project_rows(self) -> List["SwitchRow"]:
+        """全部项目（态2 最近项目段 + 搜索源）。"""
+        from app.services import project_service
+        projects = project_service.list_projects(
+            project_service.default_user_projects_json_path()
+        )
+        pins = self._pinned_paths()
+        rows: List[SwitchRow] = []
+        seen: set = set()
+        for item in projects:
+            if not item.get("isProjectRoot"):
+                continue
+            path = str(item.get("directory") or item.get("dir") or "")
+            if not path:
+                continue
+            try:
+                resolved = str(Path(path).resolve())
+            except OSError:
+                resolved = path
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            name = str(item.get("name") or Path(resolved).name)
+            rows.append(SwitchRow(
+                kind="project", label=name, full_label=name,
+                path=resolved, root=resolved, is_current=False,
+                exists=Path(resolved).exists(), specimen_count=None,
+                last_opened=item.get("lastOpenedAt"), pinned=resolved in pins,
+            ))
+        return rows
+
     def _build_mode_variant(
         self, mode: str, chain: List[Tuple[str, str]]
     ) -> None:
         project, location = self._variant_values(chain)
         compact = self._compact_chain_text(chain) if chain else tr("选择已有")
+
+        # 第 12 版 智能指挥台：单按钮 → 点击弹出自适应浮层 (Opus 2026-07-16)
+        if mode == "command":
+            self._build_command_variant(chain)
+            return
 
         if mode == "triple":
             location_btn = self._variant_location_button(

@@ -23,6 +23,8 @@ _WORKSPACE_SWITCHER_MODES = {
     "classic", "navigator", "triple", "om_capture", "dual",
     "breadcrumb", "omnibox", "history", "scenes", "instrument",
     "locator",
+    # 第 12 版 智能指挥台：上下文自适应入口 (Opus 2026-07-16)
+    "command",
 }
 
 class AppSettings:
@@ -96,6 +98,18 @@ class AppSettings:
             self._qs.setValue("project/tree_root", path)
         else:
             self._qs.remove("project/tree_root")
+
+    # 第 12 版 command 智能指挥台：★收藏置顶的工作区路径 (Opus 2026-07-16)
+    @property
+    def switcher_pinned_workspaces(self) -> list:
+        raw = self._qs.value("ui/switcher_pinned_workspaces", [])
+        if isinstance(raw, str):
+            raw = [raw] if raw else []
+        return [str(x) for x in (raw or [])]
+
+    @switcher_pinned_workspaces.setter
+    def switcher_pinned_workspaces(self, value) -> None:
+        self._qs.setValue("ui/switcher_pinned_workspaces", list(value or []))
 
     @property
     def project_tree_view_mode(self) -> str:
